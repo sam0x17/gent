@@ -15,6 +15,10 @@ This repository is in the planning stage. No runnable implementation is availabl
 
 The initial integration targets are Codex and Claude Code on two machines, including relay from either provider, followed by hosted ChatGPT and Claude conversations. Every supported chat surface will use the same relay operations; mobile and voice are applications of that shared capability.
 
+## Visual identity
+
+Gent's icon and logo will use a top hat motif. The exact design, colors, and typography remain open.
+
 ## Future native applications
 
 Native Gent desktop and mobile apps are deferred beyond the first implementation pass. Planned capabilities include Kokoro-based real-time voice communication with authorized chats, display of conversation context and history, attachment support, and image and artifact support, including images generated through Codex. Their design and schedule remain open.
