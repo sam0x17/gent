@@ -26,4 +26,6 @@ Gent's icon and logo will use a top hat motif. The exact design, colors, and typ
 
 Native Gent desktop and mobile apps are deferred beyond the first implementation pass. Planned capabilities include Kokoro-based real-time voice communication with authorized agents, display of their conversation context and history, native file-transfer controls, and rich image and artifact display, including images generated through Codex. These apps will reuse the file transfer provided by the initial MCP and connector integrations. Their design and schedule remain open.
 
+A Steam-style game overlay is also planned as an optional desktop app feature for PC and Mac. It will aim to show agent notifications and offer a quick chat window without leaving the game, with voice support to follow. The overlay is outside the first pass; compatibility and implementation details remain to be established.
+
 A public distribution license will be selected before publication.
