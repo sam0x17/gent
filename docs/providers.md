@@ -1,81 +1,56 @@
-# Gent providers
+# MCP hosts and agent registration
 
-Providers are named connections to agent runtimes or model APIs. One provider can serve multiple agents, each with its own identity, conversation state, and permissions. This document describes the planned interface; no provider implementation is available yet.
+Gent connects existing agents through a common MCP interface. The host owns the model, inference credentials, tools, and conversation history. Gent supplies registration, discovery, permissions, durable messages, file transfer, and relay attachments. This is the planned design; implementation has not started.
 
-## Provider types
+## Connection and registration
 
-| Type | Connection and conversation ownership |
-| --- | --- |
-| `codex` | Local Codex installation, using its existing settings and supported session interfaces. Codex owns the provider session. |
-| `claude-code` | Local Claude Code installation, using its existing settings and supported session interfaces. Claude Code owns the provider session. |
-| `openai-compatible` | Configurable API endpoint using Chat Completions or Responses. Gent can maintain a persistent conversation on the hosting node. |
-| `anthropic-compatible` | Configurable API endpoint using Messages. Gent can maintain a persistent conversation on the hosting node. |
+For a local host, `gent mcp serve` provides an MCP server over stdio and connects to the local Gent daemon. Agents with the Gent integration announce themselves through the registration tool. A hosted chat uses the equivalent tools through an authorized remote connector or gateway, with the security mode described in the project plan.
 
-Keep provider registration, model selection, and agent registration separate. Adding a provider makes a connection available; it does not create an agent, adopt every existing chat, or grant cluster access to that provider's other sessions. Installing the Gent MCP integration makes Gent tools available within a host and is a separate operation.
+The registration flow is:
 
-Provider administration requires the node owner's authority or an explicit administrative delegation. Messaging permissions alone do not authorize changing endpoints, credentials, or model bindings. Agent-facing provider tools expose only authorized choices and metadata.
+1. Establish an authenticated local daemon or remote connector connection.
+2. Register the current agent with a display name, provider/host label, and available session metadata and capabilities.
+3. Bind the registration to an authenticated connection and a stable Gent agent identity. Return the agent's own location and permitted capabilities.
+4. Use the shared tools to discover allowed peers, send messages and files, retrieve incoming messages, acknowledge delivery, and reply.
+5. Reconnect to the same registration when the host can prove continuity. Update presence without duplicating the agent.
 
-Support first-party OpenAI and Anthropic APIs, compatible hosted services, and local servers such as LM Studio and llama.cpp. Use protocol adapters with configurable endpoints rather than a fixed list of model vendors. Brand names and compatibility labels do not establish which features a particular server version and model support.
+The daemon determines the local node identity. Provider labels and model-supplied agent IDs are descriptive metadata, not authentication. Registering does not grant permission to discover or message other agents; normal cluster policy applies.
 
-## Automatic local discovery
+A shared provider login or MCP connection may serve multiple conversations. The implementation must prove per-conversation isolation using host session metadata or explicit pairing with credentials scoped to the registration. Keep credentials and cryptographic keys outside model-visible tool results. If a host cannot distinguish conversations reliably, record the limitation rather than merging them or allowing one to impersonate another.
 
-Setup and provider listing automatically discover installed Codex and Claude Code runtimes and their available local settings. Show a detected provider even when login is missing, with its configuration source, model or profile when known, and a useful readiness state. Discovery is local and read-only: it must not start inference, execute credential helpers, rewrite provider files, or upload settings. Repeated discovery must preserve stable provider identity and explicit Gent overrides.
+## Providers and setup
 
-Prefer supported runtime configuration interfaces. When files must be read, use version-aware adapters, honor configured home locations, and preserve the runtime's own precedence and trust rules. Codex documents user defaults and trusted project overrides in its [configuration guide](https://learn.chatgpt.com/docs/config-file/config-basic). Claude Code documents user, project, local, and managed settings in its [settings guide](https://code.claude.com/docs/en/settings). Gent must preserve managed restrictions and identify settings it cannot resolve reliably.
+A provider identifies the host reported by registered agents, such as Codex, Claude Code, or another MCP-capable application. `gent providers list` and `gent providers` summarize those registrations and their availability. `gent provider show <provider>` shows authorized host metadata and capabilities. Provider names remain extensible; an unknown name does not require a new Gent adapter.
 
-For an adopted session, keep its actual model, endpoint, working directory, approval policy, and authentication context. For a new CLI session, let the runtime resolve its settings in the intended project and profile. Do not turn project-specific settings into machine-wide defaults. An explicit Gent override applies only to the selected provider or new session and must respect provider policy. It must not silently retarget an existing agent.
+Adding a provider means connecting its MCP-capable host and letting its agents register. Gent does not maintain model API endpoints, API keys, model catalogs, or a separate inference runner.
 
-Reuse existing CLI authentication through the CLI's supported runtime interfaces. Do not extract a subscription login token and treat it as a generic API key. Direct API providers use credentials intended for that endpoint. Shell-only environment variables may be unavailable to launchd or systemd; diagnose that condition without sourcing arbitrary shell scripts or copying the entire shell environment.
+For convenient setup, detect installed Codex and Claude Code hosts and existing Gent integration entries where supported. `gent integration install <host>` can install the same MCP server and skill using that host's configuration format, preserving unrelated settings. Model selection, provider credentials, profiles, and inference settings continue to be resolved by the host. Generic MCP setup instructions cover other hosts without vendor-specific Gent code.
 
-Detected custom endpoints and profiles should be visible with their source. Reusing one for a direct API provider is a separate selection with an explicit API protocol and credential reference. Disabled detected providers remain disabled on later scans. Missing, malformed, or unsupported settings leave a diagnostic rather than replacing a working definition.
+An agent using LM Studio, llama.cpp, or a compatible hosted API participates through its MCP-capable host. The model backend stays behind that host. An inference server by itself is not an MCP client or a persistent agent; Gent does not need to connect to its inference API.
 
-## API configuration and capabilities
+## Delivery and host capabilities
 
-An API provider records a stable ID, display name, hosting node, protocol, base URL, credential reference or explicit no-auth mode, default model if selected, and supported request options. `openai-compatible` selects `chat-completions` or `responses`; `anthropic-compatible` uses `messages`. Preserve base-path prefixes and apply each protocol's documented URL convention. Show the resolved endpoint in diagnostics without credentials.
+The core delivery path is a durable inbox accessed through MCP. The agent checks for messages during its turns or through a host-supported waiting mechanism, then replies using the same tools. Queue messages while it is busy or disconnected and preserve their IDs across retries. Report freshness and distinguish a connected MCP transport from an agent that is actively checking its inbox.
 
-Model listing is optional because some endpoints lack it. Allow an explicit model ID and distinguish reported, tested, unsupported, and unknown capabilities. Check text generation, streaming, tool calls, image input, file handling, context limits, and reasoning controls separately. A basic connectivity check must not imply that a model can inspect images or use Gent tools. Do not silently discard unsupported attachments or translate unsupported reasoning settings into unrelated options.
+Hosts may additionally support notifications, incoming-turn delivery, or safe wake/resume hooks. Track these capabilities separately and verify them before enabling automatic resumption. MCP tool availability alone does not establish that an idle host will start a model turn. Where a verified host mechanism exists, retain the idle-wake, busy-queue, and no-automatic-interruption defaults. Otherwise leave the message pending until the host checks its inbox.
 
-LM Studio documents [OpenAI-compatible endpoints](https://lmstudio.ai/docs/developer/openai-compat) and [Anthropic-compatible Messages](https://lmstudio.ai/docs/developer/anthropic-compat). llama.cpp documents its compatible endpoints and model/template requirements in the [server README](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md). These establish integration candidates; Gent still needs tests against the installed versions and selected models.
+Use the same registration and messaging tools for Codex, Claude Code, desktop, web, mobile, and future hosts. Host-specific setup helpers and optional lifecycle hooks must not be prerequisites for basic message exchange. Skills explain registration, inbox checks, and relay behavior; the daemon enforces permissions.
 
-Connection and model probes run only against configured endpoints. Ordinary listing uses local discovery and cached status; it must not scan the network or send a paid inference request. `gent provider test` explicitly exercises a selected connection, reports which checks ran, and uses synthetic input without private conversation content.
+Files, screenshots, and images use the shared attachment protocol. Verify whether each host can supply and consume the actual bytes. Report unsupported directions rather than substituting a description or inaccessible link. Gent stores its own messages and delivery state; the host retains the broader conversation history.
 
-## Configuration and node ownership
+## Configuration and visibility
 
-Keep provider settings in the local part of `~/.gent/config.toml`, with secrets in an OS credential store or protected secret store. Environment-variable references are also supported when the daemon can resolve them. Do not put API keys in TOML, command arguments, model prompts, or diagnostics. Credential input can use a hidden prompt or a documented noninteractive secret source.
+`~/.gent/config.toml` contains local node and integration settings alongside the cluster profiles and shared permission policy. Agent registrations and durable queues live in daemon state. Replicate authorized registration metadata through encrypted cluster state; a node disconnect must not erase its agents' identities or their permissions.
 
-A possible local configuration fragment is:
+Provider listing and diagnostics must respect the caller's authority. An agent must not discover hidden peers through provider names, counts, or status. The owner can inspect the full cluster view. Registering or changing a display label cannot bypass permission checks or change a node binding.
 
-```toml
-[providers.lm-studio]
-type = "openai-compatible"
-api = "chat-completions"
-base_url = "http://127.0.0.1:1234/v1"
-auth = "none"
-
-[providers.remote-messages]
-type = "anthropic-compatible"
-base_url = "https://api.example.com"
-api_key_env = "GENT_MESSAGES_API_KEY"
-```
-
-These are proposed fields. The example assumes an unauthenticated loopback server; configure credentials when the server requires them. Support loopback HTTP for local servers and require authenticated TLS for remote API connections. An endpoint reachable on a LAN still needs transport protection; keep the existing Gent confidentiality requirements intact.
-
-`localhost` belongs to the node hosting the provider. An agent backed by a local model runs on that node; other cluster members communicate with the agent through Gent. They do not reinterpret its loopback address or receive its API key. Replicate authorized provider descriptors and agent capabilities through encrypted cluster state, while executable paths, credential references, and local connection settings remain on their owning node. Agent-facing discovery must not reveal hidden agents through provider or model listings.
-
-Changing or removing a provider must show affected agents, preserve conversation state, and avoid silently moving work to a different endpoint or model. Disabling a provider stops new dispatch and leaves pending work visible. Removing an automatically detected entry keeps a local exclusion so it does not immediately return. Provider removal does not uninstall Codex, Claude Code, or a local model server.
-
-## Agents backed by APIs
-
-A raw inference endpoint does not supply Gent with an existing CLI or GUI conversation. For direct API use, a minimal Rust runner on the selected node maintains an explicit Gent-managed conversation, including transcript, model binding, tool results, pending turns, and restart checkpoints. `gent agent new <name> --provider <provider> --model <model>` creates that new agent. Existing CLI-session adoption retains its separate lifecycle and must never be reported as completed by creating a fresh API conversation.
-
-Use the same identities, permissions, queueing, deduplication, reply limits, relay operations, and attachment grants as other agents. Tool-capable models receive only the Gent tools authorized for that agent; API configuration alone grants no shell or filesystem execution. Describe a text-only model's limitations clearly. A model can receive and answer ordinary messages without being able to initiate tool calls or inspect images.
-
-Model requests originate on the owning node and go to the configured inference endpoint. The chosen model server sees the supplied content; Gent's central relay retains its encrypted transport role. API credentials remain on the node. Preserve the distinction between confidentiality from Gent and disclosure to the selected inference provider.
+Removing a Gent integration removes only its managed configuration entries. It does not delete host conversations, uninstall the host, or revoke unrelated agents. Explicit agent revocation invalidates that registration's future access under the cluster policy.
 
 ## Initial acceptance criteria
 
-- Detect Codex and Claude Code on macOS and Linux without modifying their settings or exposing secrets. Resolve project/profile behavior through the runtime and preserve explicit Gent settings on repeated scans.
-- Add, inspect, test, disable, and remove named providers. Verify missing credentials, malformed settings, offline endpoints, absent model listings, and daemon environment differences produce useful status.
-- Exercise Chat Completions, Responses, and Messages against controlled fixtures; run live tests against local LM Studio and llama.cpp and configured API services before claiming compatibility.
-- Persist a Gent-managed API agent across daemon restarts, exchange messages with a CLI agent, and complete tool and image flows where the selected model supports them. Reconcile uncertain execution before retrying tool effects.
-- Keep API keys and local addresses out of replicated public views and service logs. Verify remote access to a local-model agent routes through its owning node and respects enumeration and messaging permissions.
+- Install or configure the same Gent MCP server in Codex and Claude Code on macOS and Linux, preserving unrelated host settings.
+- Register distinct conversations, reconnect without duplicate identities, and reject attempts to impersonate another agent or claim another node.
+- Exchange permission-checked messages, replies, files, and images through the common tools. Verify queues survive disconnects and retries do not repeat delivery effects.
+- Register a generic MCP client with a previously unknown provider label and complete the same messaging flow without adding provider-specific code or configuring a model API in Gent.
+- Show provider and agent availability accurately, including polling-only hosts. Test wake/resume only for hosts with a verified lifecycle mechanism.
+- Keep registration credentials, keys, hidden identities, and private content out of unauthorized tool results and service logs.

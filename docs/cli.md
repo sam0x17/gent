@@ -85,9 +85,10 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent auth` / `gent auth status` | Show the signed-in account and session state without printing credentials. |
 | `gent auth login` | Sign in with GitHub through a browser, with a device-code flow for headless machines. |
 | `gent auth logout` | Revoke the applicable local service sessions and stop using them, preserving encryption identity and local data. |
-| `gent integrations` | List supported provider integrations, setup state, and verified connection security mode. |
-| `gent integration install <provider>` | Install or guide the supported MCP, skill, and provider-hook setup, disclosing any web bridge that can read content. |
-| `gent integration uninstall <provider>` | Remove Gent-managed integration entries while preserving unrelated provider configuration. |
+| `gent integrations` | List detected host integrations, setup state, and verified connection security mode. |
+| `gent integration install <host>` | Configure the common Gent MCP server and skill, with optional supported lifecycle hooks and disclosure of any web bridge that can read content. |
+| `gent integration uninstall <host>` | Remove Gent-managed integration entries while preserving unrelated host configuration. |
+| `gent mcp serve` | Serve the shared MCP interface over stdio, connecting the host's registered agents to the local daemon. |
 
 Service login establishes an account session. Cluster enrollment establishes permission to receive cluster keys and participate as a trusted endpoint. Account login, recovery, or a changed SQL membership record alone cannot grant access to encrypted data. Keep user session and daemon credential lifetimes explicit so logout has predictable behavior.
 
@@ -97,33 +98,23 @@ A web bridge must display: "This web connection is not end-to-end encrypted. Gen
 
 ## Providers
 
-Providers are named runtime or API connections. One provider can back multiple agents. Setup and listing automatically detect local Codex and Claude Code installations and settings; adding a provider does not register their existing chats automatically. See [provider behavior and configuration](providers.md) for discovery, credentials, node ownership, and API-backed agents.
+Providers are host labels announced by registered agents. Connecting a host to Gent's MCP server allows its agents to register, without configuring inference APIs in Gent. See [MCP hosts and agent registration](providers.md) for identity, delivery, and capability behavior.
 
 | Command | Behavior |
 | --- | --- |
-| `gent providers` / `gent providers list` | List detected and configured providers on the current node, including type, configuration source, readiness, and cached model/capability information. |
-| `gent provider add [name]` | Guide creation of a named runtime or API provider; accept explicit type, endpoint, model, and credential-reference options for scripts. |
-| `gent provider show <provider>` | Show resolved non-secret settings, their sources, hosting node, dependent agents, and known capabilities. |
-| `gent provider edit <provider>` | Edit Gent's provider settings without overwriting the underlying CLI configuration. |
-| `gent provider models <provider>` | Retrieve model choices where supported; otherwise explain how to supply an explicit model ID. |
-| `gent provider test <provider> [--model <model>]` | Run explicit connectivity and capability checks, reporting unsupported features and any inference performed. |
-| `gent provider disable <provider>` | Disable new dispatch through the provider while preserving configuration and agent state. |
-| `gent provider enable <provider>` | Re-enable a configured or detected provider. |
-| `gent provider remove <provider>` | Remove the Gent definition after identifying dependencies; retain an exclusion for an automatically detected provider. Preserve agent histories and upstream software/settings. |
+| `gent providers` / `gent providers list` | List providers represented by visible agent registrations in the selected cluster, with node locations, availability, and known host capabilities. |
+| `gent provider show <provider>` | Show permitted metadata and registered agents for a host label; never imply that the label authenticates an agent. |
 
-Example API registrations:
+Example host setup and inspection:
 
 ```sh
+gent integration install codex
+gent integration install claude-code
 gent providers list
-gent provider add lm-studio --type openai-compatible --api chat-completions --base-url http://127.0.0.1:1234/v1 --auth none
-gent provider add llama-local --type openai-compatible --api chat-completions --base-url http://127.0.0.1:8080/v1 --auth none
-gent provider add remote-messages --type anthropic-compatible --base-url https://api.example.com --api-key-env GENT_MESSAGES_API_KEY
-gent provider models lm-studio
+gent agents
 ```
 
-The local examples assume servers started on those ports with authentication disabled. The remote URL is a placeholder. OpenAI-compatible providers also accept `--api responses`; Anthropic-compatible providers use Messages. A live model must be selected before generation. API keys use a credential store, hidden prompt, or environment reference; never require raw keys in command arguments. The daemon must be able to resolve the selected credential source.
-
-Provider listing is read-only, performs local configuration discovery, and does not start inference or scan the network. Provider edits must not silently retarget existing agents. `localhost` resolves on the provider's owning node; other machines reach its agents through Gent.
+For another MCP-capable host, configure `gent mcp serve` as its stdio server and use the same registration tools. Setup helpers may detect existing Codex and Claude Code integration configuration; model settings and credentials stay with those hosts. Provider listing reads Gent registrations and does not start inference or scan the network.
 
 ## Agents and diagnostics
 
@@ -132,8 +123,7 @@ Additional command families should follow the same grammar as their functionalit
 | Command | Behavior |
 | --- | --- |
 | `gent agents` | List agents the caller may discover in the selected cluster. |
-| `gent agent new <name> --provider <provider> --model <model>` | Create a persistent Gent-managed agent using a configured API provider on its hosting node. Default model selection may be guided interactively. |
-| `gent agent show <agent>` | Show permitted identity, location, availability, adapter capabilities, and connection security mode. |
+| `gent agent show <agent>` | Show permitted identity, location, availability, MCP/host capabilities, and connection security mode. |
 | `gent message send <agent> [text] [--file <path>]` | Send text, files, screenshots, or images under the caller's authority; allow repeated `--file` arguments and messages without files. |
 | `gent message reply <message-id> [text] [--file <path>]` | Reply within an authorized exchange, with optional files. |
 | `gent message status <message-id>` | Show authenticated delivery and response state available to the caller. |
@@ -142,11 +132,11 @@ Additional command families should follow the same grammar as their functionalit
 | `gent config validate` | Validate local TOML without publishing changes. |
 | `gent config edit` | Open the configured editor on the local TOML file. |
 | `gent config apply` | Validate local changes and publish authorized signed, encrypted cluster revisions, checking for conflicts. |
-| `gent doctor` | Diagnose configuration, auth, daemon, hooks, integrations, provider readiness, and connectivity; provide concrete repair commands without starting inference. |
+| `gent doctor` | Diagnose configuration, auth, daemon, hooks, MCP registration, and connectivity; provide concrete repair commands without starting inference. |
 
 Messages carry an explicit authenticated user or agent identity. Do not infer sender authority from the shell's active cluster or an agent ID passed as an argument. Relay and permission-management commands must expose their acting identity and target scope when added.
 
-Incoming delivery wakes or resumes idle agents where supported, queues for busy agents, and never interrupts automatically. Expose pending state and the reason when an adapter requires a future user turn. Bound automatic exchanges and report when a limit is reached.
+Incoming delivery wakes or resumes idle agents where the host supports it, queues for busy agents, and never interrupts automatically. Expose pending state and the reason when the host requires a future user turn or inbox check. Bound automatic exchanges and report when a limit is reached.
 
 Distinguish a mobile notification from an agent turn or user response. A notification can invite the user to return without starting a turn. Server coordinators use the ordinary wake/queue policy and can continue authorized work while the phone is unavailable.
 

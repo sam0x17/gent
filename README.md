@@ -1,8 +1,8 @@
 # Gent
 
-Gent will connect AI agents across providers and machines through a permissioned cluster. Each agent keeps its own context and tools while Gent handles discovery, messages, and replies. An agent is a registered participant backed by a persistent conversation or session, either in an existing application or in Gent's API runner.
+Gent will connect AI agents across providers and machines through a permissioned cluster. Each agent keeps its own context and tools while Gent handles discovery, messages, and replies. An agent is an existing host conversation or session that announces itself through Gent's MCP connector.
 
-The planned client includes a persistent machine daemon, a CLI, MCP tools, provider adapters, and skills. Turn-based relay mode will let the agent in any Gent-enabled chat forward messages to an authorized target agent and return its responses. CLI, desktop, web, and mobile chats can act as intermediaries, within or across providers and machines.
+The planned client includes a persistent machine daemon, a CLI, shared MCP tools, host setup helpers, and skills. Turn-based relay mode will let the agent in any Gent-enabled chat forward messages to an authorized target agent and return its responses. CLI, desktop, web, and mobile chats can act as intermediaries, within or across providers and machines.
 
 The first pass includes files, screenshots, and images in messages and replies, both directly between agents and through user relay mode. A CLI-based agent can send a visual result to another agent, receive feedback or an annotated image, and return a revision in the same exchange.
 
@@ -30,7 +30,8 @@ Commands use a consistent noun-first structure:
 gent auth
 gent auth login
 gent providers list
-gent provider add
+gent integration install codex
+gent integration install claude-code
 gent node name
 gent node name set my-node
 gent nodes
@@ -49,14 +50,14 @@ These are independent command examples. `gent hooks remove` aliases `gent hooks 
 
 Cluster configuration uses TOML at `~/.gent/config.toml`, with local node settings, an active cluster selection, and separate profiles for joined clusters. Switching clusters changes the CLI context without moving running agents or pending work. Private keys stay in an OS credential store or protected local key store, outside the TOML file. Encrypt shared configuration before replication.
 
-Gent will automatically discover local Codex and Claude Code setups and use their existing settings through the supported runtime interfaces. Named providers also support OpenAI-compatible and Anthropic-compatible APIs, including local LM Studio and llama.cpp servers. Providers can serve multiple agents; API-backed conversations persist on their hosting node. See the [provider design](docs/providers.md) for configuration and capability checks. API keys remain outside TOML, and provider discovery does not change existing chats or start inference.
+Agents register with the local daemon through the same MCP tools, or through an authorized remote connector for hosted chats. `gent providers list` summarizes the hosts announced by those agents. Setup helpers can detect Codex and Claude Code integration configuration; other MCP-capable hosts use the same server. Model settings, inference credentials, and conversation history stay with the host. Agents using LM Studio, llama.cpp, or other model backends participate through their MCP host without a dedicated Gent model integration. See [MCP hosts and agent registration](docs/providers.md).
 
 ## Development scope
 
 - Shared Rust crates for the protocol, client libraries, encryption, and permission semantics.
 - Machine daemon and command-line setup and diagnostics.
-- MCP interfaces, provider adapters, and skills.
-- Provider discovery and management, configurable model APIs, and a Rust runner for persistent API-backed agents.
+- Shared MCP registration and messaging tools, host setup helpers, and skills.
+- Provider listing from agent registrations, with optional host lifecycle hooks where supported.
 - Permissioned file, screenshot, and image transfer between agents and through relay mode.
 - Documentation and tests that can run independently of the hosted service.
 
