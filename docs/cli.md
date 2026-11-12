@@ -4,7 +4,7 @@ The Cargo package is `gent-link`; it installs the `gent` binary. These commands 
 
 ## Command conventions
 
-Use nouns to identify resources and verbs to change them. Bare status commands such as `gent`, `gent node`, `gent cluster`, `gent daemon`, `gent hooks`, and `gent auth` show the current state without modifying it. Plurals such as `gent nodes`, `gent clusters`, and `gent agents` list the corresponding resources. Explicit `status` subcommands are also available where they improve discoverability.
+Use nouns to identify resources and verbs to change them. Bare status commands such as `gent`, `gent node`, `gent cluster`, `gent daemon`, `gent hooks`, and `gent auth` show the current state without modifying it. Plurals such as `gent nodes`, `gent clusters`, `gent agents`, and `gent providers` list the corresponding resources. `gent providers list` is an explicit listing form. Explicit `status` subcommands are also available where they improve discoverability.
 
 Every command has `--help`, examples, and errors that name the next useful command. Human output should be readable in a terminal. Support `--json` for structured output and stable exit codes for scripts. A scalar getter such as `gent node name` prints only its value and a newline. Put diagnostics on stderr, keep secrets out of output, and avoid prompts when stdin is not a terminal. Commands with missing required inputs should explain what is needed and exit rather than hang.
 
@@ -95,6 +95,36 @@ Codex and Claude Code CLI setup have equal priority on macOS and Linux. Report V
 
 A web bridge must display: "This web connection is not end-to-end encrypted. Gent's hosted bridge and your AI provider can read messages and files shared through it." Record the authenticated user's choice for that connection. Setup and relay attachment must disclose the boundary, and status must retain it. Scripts must supply an explicit choice when required; absence of an interactive terminal cannot imply acceptance. Determine security mode from the verified route, not the application name or screen. A mobile connection must never silently inherit the web exception.
 
+## Providers
+
+Providers are named runtime or API connections. One provider can back multiple agents. Setup and listing automatically detect local Codex and Claude Code installations and settings; adding a provider does not register their existing chats automatically. See [provider behavior and configuration](providers.md) for discovery, credentials, node ownership, and API-backed agents.
+
+| Command | Behavior |
+| --- | --- |
+| `gent providers` / `gent providers list` | List detected and configured providers on the current node, including type, configuration source, readiness, and cached model/capability information. |
+| `gent provider add [name]` | Guide creation of a named runtime or API provider; accept explicit type, endpoint, model, and credential-reference options for scripts. |
+| `gent provider show <provider>` | Show resolved non-secret settings, their sources, hosting node, dependent agents, and known capabilities. |
+| `gent provider edit <provider>` | Edit Gent's provider settings without overwriting the underlying CLI configuration. |
+| `gent provider models <provider>` | Retrieve model choices where supported; otherwise explain how to supply an explicit model ID. |
+| `gent provider test <provider> [--model <model>]` | Run explicit connectivity and capability checks, reporting unsupported features and any inference performed. |
+| `gent provider disable <provider>` | Disable new dispatch through the provider while preserving configuration and agent state. |
+| `gent provider enable <provider>` | Re-enable a configured or detected provider. |
+| `gent provider remove <provider>` | Remove the Gent definition after identifying dependencies; retain an exclusion for an automatically detected provider. Preserve agent histories and upstream software/settings. |
+
+Example API registrations:
+
+```sh
+gent providers list
+gent provider add lm-studio --type openai-compatible --api chat-completions --base-url http://127.0.0.1:1234/v1 --auth none
+gent provider add llama-local --type openai-compatible --api chat-completions --base-url http://127.0.0.1:8080/v1 --auth none
+gent provider add remote-messages --type anthropic-compatible --base-url https://api.example.com --api-key-env GENT_MESSAGES_API_KEY
+gent provider models lm-studio
+```
+
+The local examples assume servers started on those ports with authentication disabled. The remote URL is a placeholder. OpenAI-compatible providers also accept `--api responses`; Anthropic-compatible providers use Messages. A live model must be selected before generation. API keys use a credential store, hidden prompt, or environment reference; never require raw keys in command arguments. The daemon must be able to resolve the selected credential source.
+
+Provider listing is read-only, performs local configuration discovery, and does not start inference or scan the network. Provider edits must not silently retarget existing agents. `localhost` resolves on the provider's owning node; other machines reach its agents through Gent.
+
 ## Agents and diagnostics
 
 Additional command families should follow the same grammar as their functionality is implemented:
@@ -102,6 +132,7 @@ Additional command families should follow the same grammar as their functionalit
 | Command | Behavior |
 | --- | --- |
 | `gent agents` | List agents the caller may discover in the selected cluster. |
+| `gent agent new <name> --provider <provider> --model <model>` | Create a persistent Gent-managed agent using a configured API provider on its hosting node. Default model selection may be guided interactively. |
 | `gent agent show <agent>` | Show permitted identity, location, availability, adapter capabilities, and connection security mode. |
 | `gent message send <agent> [text] [--file <path>]` | Send text, files, screenshots, or images under the caller's authority; allow repeated `--file` arguments and messages without files. |
 | `gent message reply <message-id> [text] [--file <path>]` | Reply within an authorized exchange, with optional files. |
@@ -111,7 +142,7 @@ Additional command families should follow the same grammar as their functionalit
 | `gent config validate` | Validate local TOML without publishing changes. |
 | `gent config edit` | Open the configured editor on the local TOML file. |
 | `gent config apply` | Validate local changes and publish authorized signed, encrypted cluster revisions, checking for conflicts. |
-| `gent doctor` | Diagnose configuration, auth, daemon, hooks, integrations, and connectivity; provide concrete repair commands. |
+| `gent doctor` | Diagnose configuration, auth, daemon, hooks, integrations, provider readiness, and connectivity; provide concrete repair commands without starting inference. |
 
 Messages carry an explicit authenticated user or agent identity. Do not infer sender authority from the shell's active cluster or an agent ID passed as an argument. Relay and permission-management commands must expose their acting identity and target scope when added.
 
