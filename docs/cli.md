@@ -18,7 +18,7 @@ With Rust and Cargo installed, the shortest intended setup is:
 cargo install gent-link && gent daemon install
 ```
 
-`gent daemon install` sets up and starts the service and guides any missing authentication and cluster enrollment. Offer shell-hook installation as part of that interactive setup. Each step is also available independently:
+`gent daemon install` sets up and starts the service and guides any missing GitHub login and cluster enrollment. Start with macOS launchd and Linux systemd user services. Report login/startup requirements, and diagnose systems without a supported service manager. Offer shell-hook installation as part of that interactive setup. Each step is also available independently:
 
 ```sh
 gent auth login
@@ -53,7 +53,7 @@ Setup must recover from an interrupted step and be safe to rerun. Preserve devic
 | `gent cluster invite` | Create an authorized enrollment invitation with an expiry. |
 | `gent cluster leave` | Leave the active cluster after showing the consequences for local access and pending work. |
 
-Names are display labels. Renaming a node must preserve its stable identity, keys, and policy relationships. Reject ambiguous name lookups with a list of authorized matches and their IDs. Human-readable cluster names and node names remain encrypted in the hosted service.
+Names are display labels. Renaming a node must preserve its stable identity, keys, and policy relationships. Reject ambiguous name lookups with a list of authorized matches and their IDs. Human-readable cluster names and node names remain encrypted in routing storage; a hosted web bridge may see only the labels included in its agent's authorized view.
 
 Changing the active cluster selects the default context for subsequent CLI commands. It does not move existing agents, pending messages, or relay attachments into another cluster, and it does not leave the old cluster. The daemon can maintain separate connections for joined clusters. An explicit `--cluster <id-or-name>` selects a cluster for one applicable command without changing the default. Keep identities, queues, keys, and policy isolated by cluster.
 
@@ -83,13 +83,17 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | Command | Behavior |
 | --- | --- |
 | `gent auth` / `gent auth status` | Show the signed-in account and session state without printing credentials. |
-| `gent auth login` | Start a supported browser login, with a device-code flow for headless machines. |
+| `gent auth login` | Sign in with GitHub through a browser, with a device-code flow for headless machines. |
 | `gent auth logout` | Revoke the applicable local service sessions and stop using them, preserving encryption identity and local data. |
-| `gent integrations` | List supported provider integrations and their setup state. |
-| `gent integration install <provider>` | Install or guide the supported MCP, skill, and provider-hook setup for that provider. |
+| `gent integrations` | List supported provider integrations, setup state, and verified connection security mode. |
+| `gent integration install <provider>` | Install or guide the supported MCP, skill, and provider-hook setup, disclosing any web bridge that can read content. |
 | `gent integration uninstall <provider>` | Remove Gent-managed integration entries while preserving unrelated provider configuration. |
 
 Service login establishes an account session. Cluster enrollment establishes permission to receive cluster keys and participate as a trusted endpoint. Account login, recovery, or a changed SQL membership record alone cannot grant access to encrypted data. Keep user session and daemon credential lifetimes explicit so logout has predictable behavior.
+
+Codex and Claude Code CLI setup have equal priority on macOS and Linux. Report VS Code, desktop, web, and mobile support separately; detecting a provider CLI does not establish that its GUI integration works. Both mobile providers have equal priority, starting with iOS.
+
+A web bridge must display: "This web connection is not end-to-end encrypted. Gent's hosted bridge and your AI provider can read messages and files shared through it." Record the authenticated user's choice for that connection. Setup and relay attachment must disclose the boundary, and status must retain it. Scripts must supply an explicit choice when required; absence of an interactive terminal cannot imply acceptance. Determine security mode from the verified route, not the application name or screen. A mobile connection must never silently inherit the web exception.
 
 ## Agents and diagnostics
 
@@ -98,7 +102,7 @@ Additional command families should follow the same grammar as their functionalit
 | Command | Behavior |
 | --- | --- |
 | `gent agents` | List agents the caller may discover in the selected cluster. |
-| `gent agent show <agent>` | Show permitted identity, location, availability, and adapter capabilities. |
+| `gent agent show <agent>` | Show permitted identity, location, availability, adapter capabilities, and connection security mode. |
 | `gent message send <agent> [text] [--file <path>]` | Send text, files, screenshots, or images under the caller's authority; allow repeated `--file` arguments and messages without files. |
 | `gent message reply <message-id> [text] [--file <path>]` | Reply within an authorized exchange, with optional files. |
 | `gent message status <message-id>` | Show authenticated delivery and response state available to the caller. |
@@ -110,5 +114,7 @@ Additional command families should follow the same grammar as their functionalit
 | `gent doctor` | Diagnose configuration, auth, daemon, hooks, integrations, and connectivity; provide concrete repair commands. |
 
 Messages carry an explicit authenticated user or agent identity. Do not infer sender authority from the shell's active cluster or an agent ID passed as an argument. Relay and permission-management commands must expose their acting identity and target scope when added.
+
+Incoming delivery wakes or resumes idle agents where supported, queues for busy agents, and never interrupts automatically. Expose pending state and the reason when an adapter requires a future user turn. Bound automatic exchanges and report when a limit is reached.
 
 `~/.gent/config.toml` holds local settings, the active cluster selection, and separate profiles for joined clusters. Only each cluster's shared policy and authorized metadata are replicated to its members. Keep authentication secrets and private keys in an OS credential store or protected local key store outside TOML.
