@@ -8,11 +8,13 @@ The first pass includes files, screenshots, and images in messages and replies, 
 
 Rust is the default implementation language for the protocol, encryption, daemon, CLI, MCP integrations, and shared application logic. Use other languages where platform bindings or tooling require them.
 
-Daemon and native-client exchanges use end-to-end encryption for messages, files, discovery data, and replicated configuration. Gent's centralized relay stores and forwards ciphertext without those endpoints' decryption keys. The service retains minimal account and cluster administration records, and connection and traffic metadata can still be visible. Intended agents and their model providers see the content delivered to them.
+The planned daemon and native-client transport requires end-to-end encryption for messages, files, discovery data, and replicated configuration. Gent's centralized relay will store and forward ciphertext without those endpoints' decryption keys. The service will retain minimal account and cluster administration records, and connection and traffic metadata can still be visible. Intended agents and their model providers see the content delivered to them.
 
 Web agents may use a Gent-hosted bridge with an explicit warning that Gent and the chosen provider can read messages and files shared through it. The bridge receives only its agent's authorized access; unrelated encrypted exchanges and full cluster policy remain protected. A verified user-controlled gateway or encryption-capable host may preserve confidentiality from Gent. Security status follows the actual transport path. Mobile integration still needs a separate proof and must never silently inherit a web exception.
 
-This repository is in the planning stage. No runnable implementation is available yet. Compatibility for each provider and chat surface will be established through integration tests.
+An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQLite inbox, permission evaluator, and stdio MCP server. Independent MCP clients can register, exchange text and image bytes, reply, and recover queued work after a restart. Follow the [local proof guide](docs/local-proof.md) to build and try it.
+
+This build communicates only through a local Unix socket. Remote transport, E2EE, hosted accounts, service installation, and persistent relay mode are not implemented. Tests use generic MCP clients; integration and conversation isolation inside real Codex, Claude Code, desktop, web, and mobile hosts remain to be verified.
 
 ## Planned setup
 
@@ -63,7 +65,7 @@ Agents register with the local daemon through the same MCP tools, or through an 
 
 Codex and Claude Code have equal priority on macOS and Linux, with the same acceptance criteria for their CLIs. VS Code integrations and desktop applications are also targets, with separate tests for existing-session access and lifecycle behavior. ChatGPT and Claude mobile have equal priority, starting with iOS. Every supported chat surface will use the same relay operations; mobile and voice are applications of that shared capability.
 
-Incoming messages automatically wake or resume idle agents where supported and queue while an agent is busy. Gent never interrupts automatically. Exchanges have limits to prevent runaway agent loops. The initial account model has one human owner, with separate identities and memberships to accommodate future multi-user clusters.
+The current MCP interface uses inbox polling and bounded exchanges. Automatic wake or resume will require a verified host mechanism; messages remain queued while an agent is busy or inactive. Gent must never interrupt automatically. The planned account model has one human owner, with separate identities and memberships to accommodate future multi-user clusters.
 
 Mobile primarily lets the user send requests and retrieve replies. Occasional critical notifications invite the user to return; they do not automatically start a mobile agent turn. An optional coordinator can run on an available server, handle high-priority requests from other agents, and notify the user when human input is needed. Coordination can continue within its granted authority while the phone is asleep or offline.
 

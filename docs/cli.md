@@ -1,6 +1,6 @@
 # Gent CLI design
 
-The Cargo package is `gent-link`; it installs the `gent` binary. These commands describe the planned interface. No CLI implementation or crates.io release is available yet.
+The Cargo package is `gent-link`; it installs the `gent` binary. This document describes the planned interface. A subset is implemented for local development; see the [local proof guide](local-proof.md) for the supported commands and current limits. There is no crates.io release yet.
 
 ## Command conventions
 

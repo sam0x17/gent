@@ -1,6 +1,6 @@
 # MCP hosts and agent registration
 
-Gent connects existing agents through a common MCP interface. The host owns the model, inference credentials, tools, and conversation history. Gent supplies registration, discovery, permissions, durable messages, file transfer, and relay attachments. This is the planned design; implementation has not started.
+Gent connects existing agents through a common MCP interface. The host owns the model, inference credentials, tools, and conversation history. Gent supplies registration, discovery, permissions, and durable messages with files. The [local implementation](local-proof.md) proves these operations with generic MCP clients. Real host session binding, remote connectors, and relay attachments remain planned work.
 
 ## Connection and registration
 
