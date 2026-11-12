@@ -8,7 +8,7 @@ The first pass includes files, screenshots, and images in messages and replies, 
 
 Rust is the default implementation language for the protocol, encryption, daemon, CLI, MCP integrations, and shared application logic. Use other languages where platform bindings or tooling require them.
 
-Messages, files, discovery data, and replicated configuration must be encrypted end to end. Gent's centralized relay stores and forwards ciphertext without decryption keys. Connection and traffic metadata can still be visible. Hosted connectors need an encryption-capable host or a trusted user-controlled gateway; compatibility requires proving that boundary.
+Messages, files, discovery data, and replicated configuration must be encrypted end to end. Gent's centralized relay stores and forwards ciphertext without decryption keys. The service retains minimal account and cluster administration records, and connection and traffic metadata can still be visible. Hosted connectors need an encryption-capable host or a trusted user-controlled gateway; compatibility requires proving that boundary.
 
 This repository is in the planning stage. No runnable implementation is available yet. Compatibility for each provider and chat surface will be established through integration tests.
 
@@ -17,12 +17,33 @@ This repository is in the planning stage. No runnable implementation is availabl
 Once released, the intended setup on a machine with Rust and Cargo installed is:
 
 ```sh
-cargo install gent-link && gent --install-daemon
+cargo install gent-link && gent daemon install
 ```
 
-The Cargo package will be `gent-link` and the CLI binary will be `gent`. The daemon installer will guide cluster creation or joining and will be safe to rerun. Package publication is still pending.
+The Cargo package will be `gent-link` and the CLI binary will be `gent`. The daemon installer will guide missing login and cluster enrollment, offer shell-hook installation, and be safe to rerun. Package publication is still pending.
 
-Cluster configuration uses TOML at `~/.gent/config.toml`. Keep local node settings separate from the synchronized cluster policy. Private keys stay in an OS credential store or protected local key store, outside the TOML file. Encrypt shared configuration before replication.
+Commands use a consistent noun-first structure:
+
+```sh
+gent auth
+gent auth login
+gent node name
+gent node name set my-node
+gent nodes
+gent cluster
+gent cluster new
+gent cluster join my-cluster-id
+gent cluster switch
+gent daemon status
+gent daemon install
+gent daemon uninstall
+gent hooks install
+gent hooks uninstall
+```
+
+These are independent command examples. `gent hooks remove` aliases `gent hooks uninstall`. See [the CLI design](docs/cli.md) for command behavior, guided setup, and scripting conventions.
+
+Cluster configuration uses TOML at `~/.gent/config.toml`, with local node settings, an active cluster selection, and separate profiles for joined clusters. Switching clusters changes the CLI context without moving running agents or pending work. Private keys stay in an OS credential store or protected local key store, outside the TOML file. Encrypt shared configuration before replication.
 
 ## Development scope
 
