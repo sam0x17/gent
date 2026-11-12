@@ -14,7 +14,18 @@ cargo test --workspace --locked
 python3 scripts/smoke_mcp.py target/debug/gent
 ```
 
-The smoke test starts a daemon and three independent MCP clients in a temporary directory. It checks registration, hidden peers, default-deny permissions, image bytes and MCP image content blocks, scoped replies, duplicate suppression, restart recovery, and revocation. It makes no model calls and removes its test state afterward. These checks passed on Linux x86_64 and macOS arm64. They do not establish integration with any specific host.
+The smoke test starts a daemon and three independent MCP clients in a temporary directory. It checks registration, hidden peers, default-deny permissions, image bytes and MCP image content blocks, scoped replies, duplicate suppression, restart recovery, and revocation. It makes no model calls and removes its test state afterward. These checks passed on Linux x86_64 and macOS arm64.
+
+Separate real-host tests passed for Codex and Claude Code CLIs on both OSes using explicit per-conversation binding files. Each host registered a synthetic conversation, resumed that same conversation after a daemon restart, retrieved and identified an image, and replied with identical file bytes. These tests establish that workflow only; they do not establish automatic pairing, shared host configuration isolation, or idle wake/resume.
+
+To run those tests with an already authenticated host:
+
+```sh
+python3 scripts/prove_host.py --host codex
+python3 scripts/prove_host.py --host claude-code
+```
+
+These opt-in tests consume model usage and create a synthetic conversation in the host's session store. They retain private temporary Gent state for inspection and stop their test daemons afterward. Existing host settings are not edited. Codex defaults to isolated per-run settings; add `--use-host-config` when its model access depends on a configured provider. That option requires Python 3.11 or newer and disables other configured MCP servers and plugins for the invocation. See the script's `--help` for a binary-path override.
 
 For source installation:
 
@@ -57,7 +68,7 @@ gent --home /absolute/private/state mcp serve --binding /absolute/private/state/
 
 Gent creates the binding file when absent. The owner or host must choose a different binding file for every conversation. The file is a credential; never paste its contents into a chat or tool argument. A second active MCP process cannot lock the same binding. Reusing the file after that process exits reconnects to the same agent and pending inbox. Without `--binding`, each MCP process gets a fresh ephemeral identity.
 
-A host-wide MCP configuration may be shared by multiple chats. One binding in that shared configuration does not establish per-chat isolation. Automatic binding in Codex and Claude Code is still an integration proof; use explicit, separate host configurations for experiments. Merely supplying different agent names does not create separate identities on one authenticated connection.
+A host-wide MCP configuration may be shared by multiple chats. One binding in that shared configuration does not establish per-chat isolation. Automatic binding in Codex and Claude Code is still an integration proof; use explicit, separate configurations for each conversation as in the tested workflow. Merely supplying different agent names does not create separate identities on one authenticated connection.
 
 The host invokes `gent_register` with a display `name` and arbitrary `provider` label, then calls `gent_identity` to inspect its location. The daemon supplies its node and agent IDs. Registration does not grant messaging or discovery rights. The same tools work regardless of whether the host runs a cloud model or a local model.
 
@@ -102,6 +113,6 @@ Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per ex
 
 ## Remaining integration work
 
-Actual Codex and Claude Code sessions still need equal tests for registration continuity, separate concurrent conversations, files in both directions, and reconnect behavior. The current transport is polling-only. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
+Codex and Claude Code pass explicit pairing, session continuity, and a small image round trip on both OSes. Separate concurrent conversations in normal shared host configurations, automatic binding, and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. The current transport is polling-only. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
 Cross-machine transport, encryption and enrollment, signed configuration replication, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. The [CLI design](cli.md) and [registration design](providers.md) describe those planned interfaces.

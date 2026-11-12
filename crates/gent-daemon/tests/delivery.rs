@@ -51,7 +51,7 @@ fn policy(store: &mut Store, owner: &str, policy: Policy) {
     }));
 }
 fn send(recipient: &str, request_id: &str) -> AgentOp {
-    AgentOp::Send {recipient:recipient.into(),request_id:request_id.into(),text:"review this image".into(),files:vec![FilePart {name:"pixel.png".into(),media_type:"image/png".into(),data_base64:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7q8AAAAASUVORK5CYII=".into()}]}
+    AgentOp::Send {recipient:recipient.into(),request_id:request_id.into(),text:"review this image".into(),files:vec![FilePart {name:"pixel.png".into(),media_type:"image/png".into(),data_base64:"iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGP4z/AfK2IYWhIA0ad/gXfwoGMAAAAASUVORK5CYII=".into()}]}
 }
 
 #[test]

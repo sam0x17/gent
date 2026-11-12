@@ -14,7 +14,7 @@ Web agents may use a Gent-hosted bridge with an explicit warning that Gent and t
 
 An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQLite inbox, permission evaluator, and stdio MCP server. Independent MCP clients can register, exchange text and image bytes, reply, and recover queued work after a restart. Follow the [local proof guide](docs/local-proof.md) to build and try it.
 
-This build communicates only through a local Unix socket. Remote transport, E2EE, hosted accounts, service installation, and persistent relay mode are not implemented. Tests use generic MCP clients; integration and conversation isolation inside real Codex, Claude Code, desktop, web, and mobile hosts remain to be verified.
+This build communicates only through a local Unix socket. Remote transport, E2EE, hosted accounts, service installation, and persistent relay mode are not implemented. Codex and Claude Code CLI tests pass on Linux and macOS with explicit per-conversation bindings, including session resume and an image-file round trip. Automatic chat binding, concurrent conversations in shared host configurations, and desktop/web/mobile integration remain to be verified.
 
 ## Planned setup
 
