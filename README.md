@@ -59,6 +59,8 @@ Codex and Claude Code have equal priority on macOS and Linux, with the same acce
 
 Incoming messages automatically wake or resume idle agents where supported and queue while an agent is busy. Gent never interrupts automatically. Exchanges have limits to prevent runaway agent loops. The initial account model has one human owner, with separate identities and memberships to accommodate future multi-user clusters.
 
+Mobile primarily lets the user send requests and retrieve replies. Occasional critical notifications invite the user to return; they do not automatically start a mobile agent turn. An optional coordinator can run on an available server, handle high-priority requests from other agents, and notify the user when human input is needed. Coordination can continue within its granted authority while the phone is asleep or offline.
+
 ## Visual identity
 
 Gent's icon and logo will use a top hat motif. The exact design, colors, and typography remain open.

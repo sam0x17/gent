@@ -117,4 +117,6 @@ Messages carry an explicit authenticated user or agent identity. Do not infer se
 
 Incoming delivery wakes or resumes idle agents where supported, queues for busy agents, and never interrupts automatically. Expose pending state and the reason when an adapter requires a future user turn. Bound automatic exchanges and report when a limit is reached.
 
+Distinguish a mobile notification from an agent turn or user response. A notification can invite the user to return without starting a turn. Server coordinators use the ordinary wake/queue policy and can continue authorized work while the phone is unavailable.
+
 `~/.gent/config.toml` holds local settings, the active cluster selection, and separate profiles for joined clusters. Only each cluster's shared policy and authorized metadata are replicated to its members. Keep authentication secrets and private keys in an OS credential store or protected local key store outside TOML.
