@@ -16,6 +16,8 @@ An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQL
 
 This build communicates only through a local Unix socket. Remote transport, E2EE, hosted accounts, service installation, and persistent relay mode are not implemented. Codex and Claude Code CLI tests pass on Linux and macOS with explicit per-conversation bindings, including session resume and an image-file round trip. Automatic chat binding, concurrent conversations in shared host configurations, and desktop/web/mobile integration remain to be verified.
 
+The next component, [signed enrollment and configuration authority](docs/security.md), provides owner-approved node keys, revision validation, retirement, and durable checkpoints. It is tested as a library and is not yet connected to the local CLI proof or a network transport.
+
 ## Planned setup
 
 Once released, the intended setup on a machine with Rust and Cargo installed is:

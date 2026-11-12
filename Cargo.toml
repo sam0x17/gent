@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gent-protocol", "crates/gent-daemon", "crates/gent-link"]
+members = ["crates/gent-protocol", "crates/gent-crypto", "crates/gent-daemon", "crates/gent-link"]
 resolver = "2"
 
 [workspace.package]
@@ -12,16 +12,20 @@ publish = false
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+ed25519-dalek = "3"
 fs2 = "0.4"
+getrandom = { version = "0.4", features = ["std"] }
 rmcp = { version = "3.10", features = ["transport-io"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_jcs = "0.2"
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 toml = "0.9"
 uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

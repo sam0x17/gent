@@ -1,5 +1,6 @@
 //! Native local daemon. Remote transport is intentionally absent until E2EE enrollment exists.
 pub mod config;
+pub mod replica;
 pub mod store;
 
 use anyhow::{Context, Result, ensure};

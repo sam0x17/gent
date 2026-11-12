@@ -1,0 +1,25 @@
+[package]
+name = "gent-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ed25519-dalek.workspace = true
+gent-protocol = { path = "../gent-protocol" }
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_jcs.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+uuid = { workspace = true, features = ["rng-getrandom"] }
+
+[lints]
+workspace = true
