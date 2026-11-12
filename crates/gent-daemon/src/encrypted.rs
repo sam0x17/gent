@@ -1,0 +1,751 @@
+//! Native MLS persistence proof. Not connected to RPC or remote transport.
+//!
+//! Callers are trusted daemon code, never MCP agents. Node authentication here
+//! does not grant permission to communicate as an agent. Initial authority and
+//! expected group membership must come from authenticated local state.
+use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use gent_crypto::{Checkpoint, NodeIdentity, SignedState, TrustAnchor, VerifiedState};
+use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
+use openmls::prelude::*;
+use openmls_rust_crypto::RustCrypto;
+use openmls_sqlite_storage::{Codec, SqliteStorageProvider};
+use openmls_traits::OpenMlsProvider;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use std::{
+    collections::BTreeSet,
+    fs,
+    io::ErrorKind,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::Path,
+};
+use uuid::Uuid;
+
+const SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+pub const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+pub const MAX_WIRE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_MEMBERS: usize = 16;
+const MAX_KEY_PACKAGE_BYTES: usize = 16 * 1024;
+
+#[derive(Default)]
+struct JsonCodec;
+impl Codec for JsonCodec {
+    type Error = serde_json::Error;
+    fn to_vec<T: Serialize>(value: &T) -> std::result::Result<Vec<u8>, Self::Error> {
+        serde_json::to_vec(value)
+    }
+    fn from_slice<T: serde::de::DeserializeOwned>(
+        bytes: &[u8],
+    ) -> std::result::Result<T, Self::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
+struct Provider<'a> {
+    crypto: RustCrypto,
+    storage: SqliteStorageProvider<JsonCodec, &'a Connection>,
+}
+impl<'a> Provider<'a> {
+    fn new(db: &'a Connection) -> Self {
+        Self {
+            crypto: RustCrypto::default(),
+            storage: SqliteStorageProvider::new(db),
+        }
+    }
+}
+impl<'a> OpenMlsProvider for Provider<'a> {
+    type CryptoProvider = RustCrypto;
+    type RandProvider = RustCrypto;
+    type StorageProvider = SqliteStorageProvider<JsonCodec, &'a Connection>;
+    fn crypto(&self) -> &Self::CryptoProvider {
+        &self.crypto
+    }
+    fn rand(&self) -> &Self::RandProvider {
+        &self.crypto
+    }
+    fn storage(&self) -> &Self::StorageProvider {
+        &self.storage
+    }
+}
+
+/// Ciphertext or an MLS Welcome. Public key packages are a separate, private
+/// enrollment artifact and must not be published as unencrypted metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outgoing {
+    pub id: Uuid,
+    pub group_id: Vec<u8>,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Received {
+    Application { id: Uuid, sender: String },
+    Commit,
+    Duplicate,
+}
+
+/// Plaintext in trusted local storage. Intentionally no Debug implementation.
+pub struct InboxMessage {
+    pub id: Uuid,
+    pub sender: String,
+    pub body: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Identity {
+    version: u32,
+    cluster: String,
+    node: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Envelope {
+    version: u32,
+    id: Uuid,
+    body: String,
+}
+
+pub struct EncryptedEndpoint<'a> {
+    db: Connection,
+    identity: &'a NodeIdentity,
+}
+
+impl<'a> EncryptedEndpoint<'a> {
+    pub fn open(home: &Path, identity: &'a NodeIdentity) -> Result<Self> {
+        crate::config::private_dir(home)?;
+        let path = home.join("mls.sqlite3");
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        ensure!(
+            metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.permissions().mode() & 0o077 == 0,
+            "MLS database must be a private regular file"
+        );
+        let mut db = Connection::open(path)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))?;
+        let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        ensure!(matches!(version, 0 | 1), "unsupported MLS database version");
+        db.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
+        )?;
+        SqliteStorageProvider::<JsonCodec, _>::new(&mut db).run_migrations()?;
+        db.execute_batch(
+            "
+          CREATE TABLE IF NOT EXISTS authority (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1), anchor BLOB NOT NULL,
+            checkpoint BLOB NOT NULL, state BLOB NOT NULL, node TEXT NOT NULL, key BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS key_packages (id TEXT PRIMARY KEY, bytes BLOB NOT NULL);
+          CREATE TABLE IF NOT EXISTS outbox (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+            group_id BLOB NOT NULL, request_hash BLOB NOT NULL, bytes BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS inbox (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, group_id BLOB NOT NULL,
+            sender TEXT NOT NULL, id TEXT NOT NULL, body BLOB NOT NULL,
+            UNIQUE(group_id,sender,id)
+          );
+          CREATE TABLE IF NOT EXISTS receipts (
+            wire_hash BLOB PRIMARY KEY, group_id BLOB NOT NULL
+          );
+          PRAGMA user_version=1;",
+        )?;
+        Ok(Self { db, identity })
+    }
+
+    /// One-time bootstrap from independently authenticated authority. Opening an
+    /// existing database cannot replace its pin, checkpoint, or node identity.
+    pub fn initialize(&mut self, state: &VerifiedState, now: u64) -> Result<()> {
+        state.authorize_node(self.identity.id(), &self.identity.public_key(), now)?;
+        self.db.execute(
+            "INSERT INTO authority VALUES(1,?1,?2,?3,?4,?5)",
+            params![
+                serde_json::to_vec(state.anchor())?,
+                serde_json::to_vec(state.checkpoint())?,
+                state.signed().encode()?,
+                self.identity.id(),
+                self.identity.public_key().as_slice()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Authority updates may advance through expired history. Every cryptographic
+    /// operation still requires fresh authority. Revoked nodes can save the update.
+    pub fn apply_authority(&mut self, updates: &[SignedState]) -> Result<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut state = authority(&tx, self.identity)?;
+        state.advance_history(updates)?;
+        tx.execute(
+            "UPDATE authority SET checkpoint=?1,state=?2 WHERE singleton=1",
+            params![
+                serde_json::to_vec(state.checkpoint())?,
+                state.signed().encode()?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    // Reload all MLS objects within an immediate transaction. A failed operation
+    // drops both the transaction and its in-memory ratchets; a retry must reload.
+    fn transact<T>(
+        &mut self,
+        now: u64,
+        operation: impl FnOnce(&Connection, &Provider<'_>, &VerifiedState, &NodeIdentity) -> Result<T>,
+    ) -> Result<T> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state = authority(&tx, self.identity)?;
+        state.authorize_node(self.identity.id(), &self.identity.public_key(), now)?;
+        let result = operation(&tx, &Provider::new(&tx), &state, self.identity)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Generate once and reuse the same public package on transport retries.
+    /// Consumed private key packages are deleted by OpenMLS during successful join.
+    pub fn key_package(&mut self, request: Uuid, now: u64) -> Result<Vec<u8>> {
+        ensure!(!request.is_nil(), "nil request ID");
+        self.transact(now, |db, provider, state, signer| {
+            if let Some(bytes) = db
+                .query_row(
+                    "SELECT bytes FROM key_packages WHERE id=?1",
+                    [request.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?
+            {
+                return Ok(bytes);
+            }
+            let package =
+                KeyPackage::builder().build(SUITE, provider, signer, credential(state, signer)?)?;
+            let bytes = package.key_package().tls_serialize_detached()?;
+            db.execute(
+                "INSERT INTO key_packages VALUES(?1,?2)",
+                params![request.to_string(), bytes],
+            )?;
+            Ok(bytes)
+        })
+    }
+
+    /// Create a group with an explicit set of approved nodes. The returned Welcome
+    /// and the sender's new group state are committed atomically.
+    pub fn create_group(
+        &mut self,
+        request: Uuid,
+        peers: &[(&str, &[u8])],
+        now: u64,
+    ) -> Result<Outgoing> {
+        ensure!(
+            !peers.is_empty() && peers.len() < MAX_MEMBERS,
+            "invalid peer count"
+        );
+        for (_, package) in peers {
+            ensure!(
+                package.len() <= MAX_KEY_PACKAGE_BYTES,
+                "key package too large"
+            );
+        }
+        let fingerprint = request_hash("create", &serde_json::to_vec(peers)?);
+        self.transact(now, |db, provider, state, signer| {
+            // Revalidate packages before returning a retry, including revocation.
+            let mut ids = BTreeSet::from([signer.id().to_owned()]);
+            let mut packages = Vec::new();
+            for (expected, wire) in peers {
+                ensure!(ids.insert((*expected).to_owned()), "duplicate group member");
+                let package = KeyPackageIn::tls_deserialize_exact(wire)?
+                    .validate(provider.crypto(), ProtocolVersion::Mls10)?;
+                ensure!(package.ciphersuite() == SUITE, "unsupported ciphersuite");
+                let leaf = package.leaf_node();
+                let node = authenticate(
+                    state,
+                    leaf.credential(),
+                    leaf.signature_key().as_slice(),
+                    now,
+                )?;
+                ensure!(node == *expected, "key package belongs to another node");
+                packages.push(package);
+            }
+            if let Some(packet) = retry(db, request, &fingerprint)? {
+                return Ok(packet);
+            }
+            let config = create_config();
+            let mut group = MlsGroup::new(provider, signer, &config, credential(state, signer)?)?;
+            let (_, welcome, _) = group.add_members(provider, signer, &packages)?;
+            group.merge_pending_commit(provider)?;
+            enqueue(
+                db,
+                request,
+                group.group_id(),
+                &fingerprint,
+                welcome.to_bytes()?,
+            )
+        })
+    }
+
+    /// The expected roster is a trusted local decision, never a relay assertion.
+    pub fn join(&mut self, invitation: &Outgoing, expected: &[&str], now: u64) -> Result<()> {
+        ensure!(
+            !invitation.group_id.is_empty() && invitation.group_id.len() <= 256,
+            "invalid group ID"
+        );
+        let expected = roster(expected)?;
+        let message = decode(&invitation.bytes)?;
+        self.transact(now, |db, provider, state, signer| {
+            ensure!(
+                expected.contains(signer.id()),
+                "own identity missing from expected roster"
+            );
+            if received(db, &invitation.group_id, &invitation.bytes)? {
+                let group = load_group(provider, &invitation.group_id)?;
+                ensure!(
+                    members(state, group.members(), now)? == expected,
+                    "unexpected group roster"
+                );
+                return Ok(());
+            }
+            ensure!(
+                MlsGroup::load(
+                    provider.storage(),
+                    &GroupId::from_slice(&invitation.group_id)
+                )?
+                .is_none(),
+                "group already exists"
+            );
+            let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
+                bail!("expected Welcome");
+            };
+            let staged = StagedWelcome::new_from_welcome(
+                provider,
+                create_config().join_config(),
+                welcome,
+                None,
+            )?;
+            ensure!(
+                staged.group_context().group_id().as_slice() == invitation.group_id,
+                "wrong group ID"
+            );
+            ensure!(
+                staged.group_context().ciphersuite() == SUITE,
+                "unsupported ciphersuite"
+            );
+            ensure!(
+                members(state, staged.members(), now)? == expected,
+                "unexpected group roster"
+            );
+            staged.into_group(provider)?;
+            receipt(db, &invitation.group_id, &invitation.bytes)?;
+            Ok(())
+        })
+    }
+
+    /// Idempotent encryption: retrying an ID returns the exact committed wire bytes.
+    pub fn send(&mut self, group_id: &[u8], id: Uuid, body: &[u8], now: u64) -> Result<Outgoing> {
+        ensure!(
+            !body.is_empty() && body.len() <= MAX_PAYLOAD_BYTES,
+            "invalid payload size"
+        );
+        let fingerprint = request_hash("send", &serde_json::to_vec(&(group_id, body))?);
+        self.transact(now, |db, provider, state, signer| {
+            let mut group = load_group(provider, group_id)?;
+            members(state, group.members(), now)?;
+            if let Some(packet) = retry(db, id, &fingerprint)? {
+                return Ok(packet);
+            }
+            let envelope = serde_json::to_vec(&Envelope {
+                version: 1,
+                id,
+                body: STANDARD.encode(body),
+            })?;
+            let bytes = group
+                .create_message(provider, signer, &envelope)?
+                .to_bytes()?;
+            enqueue(db, id, group.group_id(), &fingerprint, bytes)
+        })
+    }
+
+    /// Advance the epoch; no previous-epoch secrets are retained in logical state.
+    pub fn rotate(&mut self, group_id: &[u8], request: Uuid, now: u64) -> Result<Outgoing> {
+        let fingerprint = request_hash("rotate", group_id);
+        self.transact(now, |db, provider, state, signer| {
+            let mut group = load_group(provider, group_id)?;
+            members(state, group.members(), now)?;
+            if let Some(packet) = retry(db, request, &fingerprint)? {
+                return Ok(packet);
+            }
+            let (commit, _, _) = group
+                .self_update(provider, signer, LeafNodeParameters::default())?
+                .into_contents();
+            group.merge_pending_commit(provider)?;
+            enqueue(
+                db,
+                request,
+                group.group_id(),
+                &fingerprint,
+                commit.to_bytes()?,
+            )
+        })
+    }
+
+    /// Remove every credential no longer authorized by the saved owner state.
+    /// A revoked member prevents application sends until this succeeds.
+    pub fn remove_revoked(&mut self, group_id: &[u8], request: Uuid, now: u64) -> Result<Outgoing> {
+        let fingerprint = request_hash("remove", group_id);
+        self.transact(now, |db, provider, state, signer| {
+            let mut group = load_group(provider, group_id)?;
+            if let Some(packet) = retry(db, request, &fingerprint)? {
+                return Ok(packet);
+            }
+            let removed: Vec<_> = group
+                .members()
+                .filter(|member| {
+                    authenticate(state, &member.credential, &member.signature_key, now).is_err()
+                })
+                .map(|member| member.index)
+                .collect();
+            ensure!(!removed.is_empty(), "no revoked credentials to remove");
+            let (commit, _, _) = group.remove_members(provider, signer, &removed)?;
+            group.merge_pending_commit(provider)?;
+            members(state, group.members(), now)?;
+            enqueue(
+                db,
+                request,
+                group.group_id(),
+                &fingerprint,
+                commit.to_bytes()?,
+            )
+        })
+    }
+
+    /// Decrypt into the durable local inbox, committing ratchets and receipts in
+    /// the same transaction. Replays never create a second inbox entry.
+    pub fn receive(&mut self, group_id: &[u8], wire: &[u8], now: u64) -> Result<Received> {
+        let message = decode(wire)?;
+        let MlsMessageBodyIn::PrivateMessage(private) = message.extract() else {
+            bail!("expected encrypted MLS message");
+        };
+        self.transact(now, |db, provider, state, _| {
+            let mut group = load_group(provider, group_id)?;
+            if received(db, group_id, wire)? {
+                return Ok(Received::Duplicate);
+            }
+            let before = group.members().collect::<Vec<_>>();
+            let processed = group.process_message(provider, ProtocolMessage::from(private))?;
+            let Sender::Member(index) = processed.sender() else {
+                bail!("external sender is not allowed");
+            };
+            let member = before
+                .iter()
+                .find(|member| member.index == *index)
+                .context("sender missing from roster")?;
+            let sender = authenticate(state, &member.credential, &member.signature_key, now)?;
+            let result = match processed.into_content() {
+                ProcessedMessageContent::ApplicationMessage(application) => {
+                    members(state, before.into_iter(), now)?;
+                    let bytes = application.into_bytes();
+                    ensure!(
+                        bytes.len() <= MAX_WIRE_BYTES,
+                        "application envelope too large"
+                    );
+                    let envelope: Envelope = serde_json::from_slice(&bytes)?;
+                    ensure!(
+                        envelope.version == 1 && !envelope.id.is_nil(),
+                        "invalid application envelope"
+                    );
+                    let body = STANDARD.decode(envelope.body)?;
+                    ensure!(
+                        !body.is_empty() && body.len() <= MAX_PAYLOAD_BYTES,
+                        "invalid payload size"
+                    );
+                    db.execute(
+                        "INSERT INTO inbox(group_id,sender,id,body) VALUES(?1,?2,?3,?4)",
+                        params![group_id, sender, envelope.id.to_string(), body],
+                    )?;
+                    Received::Application {
+                        id: envelope.id,
+                        sender,
+                    }
+                }
+                ProcessedMessageContent::StagedCommitMessage(commit) => {
+                    // Existing-group membership additions require a separate approved
+                    // workflow. This proof accepts refreshes and owner revocations only.
+                    let expected = before
+                        .iter()
+                        .filter_map(|member| {
+                            authenticate(state, &member.credential, &member.signature_key, now).ok()
+                        })
+                        .collect::<BTreeSet<_>>();
+                    group.merge_staged_commit(provider, *commit)?;
+                    ensure!(
+                        members(state, group.members(), now)? == expected,
+                        "unapproved membership change"
+                    );
+                    Received::Commit
+                }
+                _ => bail!("standalone MLS proposals are not supported"),
+            };
+            receipt(db, group_id, wire)?;
+            Ok(result)
+        })
+    }
+
+    /// Queued opaque packets in commit order, bounded for transport polling.
+    /// Transport must apply current recipient authorization before sending.
+    pub fn outbox(&self, after: i64, limit: usize) -> Result<Vec<(i64, Outgoing)>> {
+        ensure!((1..=128).contains(&limit), "invalid outbox limit");
+        let mut statement = self.db.prepare("SELECT sequence,id,group_id,bytes FROM outbox WHERE sequence>?1 ORDER BY sequence LIMIT ?2")?;
+        let rows = statement.query_map(params![after, limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (sequence, id, group_id, bytes) = row?;
+            Ok((
+                sequence,
+                Outgoing {
+                    id: Uuid::parse_str(&id)?,
+                    group_id,
+                    bytes,
+                },
+            ))
+        })
+        .collect()
+    }
+
+    /// Trusted local inspection only. Agent policy and revocation must be checked
+    /// again before exposing a stored plaintext to an MCP conversation.
+    pub fn inbox(
+        &self,
+        group_id: &[u8],
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, InboxMessage)>> {
+        ensure!((1..=128).contains(&limit), "invalid inbox limit");
+        let mut statement = self.db.prepare("SELECT sequence,id,sender,body FROM inbox WHERE group_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3")?;
+        let rows = statement.query_map(params![group_id, after, limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (sequence, id, sender, body) = row?;
+            Ok((
+                sequence,
+                InboxMessage {
+                    id: Uuid::parse_str(&id)?,
+                    sender,
+                    body,
+                },
+            ))
+        })
+        .collect()
+    }
+}
+
+fn authority(db: &Connection, signer: &NodeIdentity) -> Result<VerifiedState> {
+    let (anchor, checkpoint, state, node, key): (Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>) = db
+        .query_row(
+        "SELECT anchor,checkpoint,state,node,key FROM authority WHERE singleton=1",
+        [],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
+    ensure!(
+        node == signer.id() && key == signer.public_key(),
+        "database belongs to another node key"
+    );
+    let anchor: TrustAnchor = serde_json::from_slice(&anchor)?;
+    let checkpoint: Checkpoint = serde_json::from_slice(&checkpoint)?;
+    VerifiedState::restore(anchor, checkpoint, SignedState::decode(&state)?)
+}
+
+fn credential(state: &VerifiedState, signer: &NodeIdentity) -> Result<CredentialWithKey> {
+    Ok(CredentialWithKey {
+        credential: BasicCredential::new(serde_json::to_vec(&Identity {
+            version: 1,
+            cluster: state.anchor().cluster_id.clone(),
+            node: signer.id().into(),
+        })?)
+        .into(),
+        signature_key: signer.public_key().to_vec().into(),
+    })
+}
+
+fn authenticate(
+    state: &VerifiedState,
+    credential: &Credential,
+    key: &[u8],
+    now: u64,
+) -> Result<String> {
+    let basic = BasicCredential::try_from(credential.clone())?;
+    ensure!(basic.identity().len() <= 256, "credential too large");
+    let identity: Identity = serde_json::from_slice(basic.identity())?;
+    ensure!(
+        identity.version == 1 && identity.cluster == state.anchor().cluster_id,
+        "wrong credential scope"
+    );
+    state.authorize_node(
+        &identity.node,
+        key.try_into().context("invalid signing key length")?,
+        now,
+    )?;
+    Ok(identity.node)
+}
+
+fn members(
+    state: &VerifiedState,
+    members: impl Iterator<Item = Member>,
+    now: u64,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    for member in members {
+        ensure!(
+            ids.len() < MAX_MEMBERS
+                && ids.insert(authenticate(
+                    state,
+                    &member.credential,
+                    &member.signature_key,
+                    now
+                )?),
+            "invalid group roster"
+        );
+    }
+    ensure!(!ids.is_empty(), "empty group");
+    Ok(ids)
+}
+
+fn roster(ids: &[&str]) -> Result<BTreeSet<String>> {
+    let expected: BTreeSet<_> = ids.iter().map(|id| (*id).to_owned()).collect();
+    ensure!(
+        (2..=MAX_MEMBERS).contains(&ids.len()) && expected.len() == ids.len(),
+        "invalid expected roster"
+    );
+    Ok(expected)
+}
+
+fn create_config() -> MlsGroupCreateConfig {
+    MlsGroupCreateConfig::builder()
+        .ciphersuite(SUITE)
+        .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+        .use_ratchet_tree_extension(true)
+        .padding_size(256)
+        .set_past_epoch_deletion_policy(PastEpochDeletionPolicy::MaxEpochs(0))
+        .number_of_resumption_psks(0)
+        .sender_ratchet_configuration(SenderRatchetConfiguration::new(32, 128))
+        .build()
+}
+
+fn load_group(provider: &Provider<'_>, id: &[u8]) -> Result<MlsGroup> {
+    ensure!(!id.is_empty() && id.len() <= 256, "invalid group ID");
+    let group =
+        MlsGroup::load(provider.storage(), &GroupId::from_slice(id))?.context("unknown group")?;
+    ensure!(group.is_active(), "inactive MLS group");
+    Ok(group)
+}
+
+fn decode(wire: &[u8]) -> Result<MlsMessageIn> {
+    ensure!(
+        !wire.is_empty() && wire.len() <= MAX_WIRE_BYTES,
+        "invalid MLS wire size"
+    );
+    Ok(MlsMessageIn::tls_deserialize_exact(wire)?)
+}
+
+fn request_hash(domain: &str, input: &[u8]) -> Vec<u8> {
+    let mut hash = Sha256::new();
+    hash.update(b"gent/mls-operation/v1\0");
+    hash.update(domain);
+    hash.update([0]);
+    hash.update(input);
+    hash.finalize().to_vec()
+}
+
+fn retry(db: &Connection, id: Uuid, fingerprint: &[u8]) -> Result<Option<Outgoing>> {
+    ensure!(!id.is_nil(), "nil request ID");
+    let saved: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = db
+        .query_row(
+            "SELECT group_id,request_hash,bytes FROM outbox WHERE id=?1",
+            [id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    saved
+        .map(|(group_id, hash, bytes)| {
+            ensure!(hash == fingerprint, "conflicting request ID");
+            Ok(Outgoing {
+                id,
+                group_id,
+                bytes,
+            })
+        })
+        .transpose()
+}
+
+fn enqueue(
+    db: &Connection,
+    id: Uuid,
+    group_id: &GroupId,
+    fingerprint: &[u8],
+    bytes: Vec<u8>,
+) -> Result<Outgoing> {
+    ensure!(
+        bytes.len() <= MAX_WIRE_BYTES,
+        "outgoing MLS message too large"
+    );
+    db.execute(
+        "INSERT INTO outbox(id,group_id,request_hash,bytes) VALUES(?1,?2,?3,?4)",
+        params![id.to_string(), group_id.as_slice(), fingerprint, bytes],
+    )?;
+    Ok(Outgoing {
+        id,
+        group_id: group_id.as_slice().to_vec(),
+        bytes,
+    })
+}
+
+fn received(db: &Connection, group_id: &[u8], wire: &[u8]) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM receipts WHERE wire_hash=?1 AND group_id=?2)",
+        params![Sha256::digest(wire).as_slice(), group_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn receipt(db: &Connection, group_id: &[u8], wire: &[u8]) -> Result<()> {
+    db.execute(
+        "INSERT INTO receipts VALUES(?1,?2)",
+        params![Sha256::digest(wire).as_slice(), group_id],
+    )?;
+    Ok(())
+}

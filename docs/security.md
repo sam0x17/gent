@@ -1,6 +1,6 @@
-# Enrollment and configuration authority
+# Security component proofs
 
-The first security component is implemented in `gent-crypto`, with durable replica storage in `gent-daemon::replica`. It verifies owner-approved node identities and signed configuration history. It is a library component; the current local CLI/RPC proof does not use it yet. Remote delivery, content encryption, and encrypted configuration distribution remain disabled or unimplemented.
+`gent-crypto` verifies owner-approved node identities and signed configuration history, with durable replica storage in `gent-daemon::replica`. `gent-daemon::encrypted` adds a native MLS messaging and persistence proof. These are library components; the local CLI/RPC proof does not use them yet. Remote delivery and encrypted configuration distribution remain unimplemented.
 
 ## Trust boundary
 
@@ -64,7 +64,7 @@ An expired state may be loaded to recover or synchronize. `advance_history` and 
 
 Under a partition or malicious relay, another endpoint may keep using its previously issued state until that state's validity ends. This implementation therefore has a revocation delay bounded by the remaining validity period, assuming a trustworthy clock. Local clock rollback and restoration of an older entire endpoint backup require additional recovery safeguards. The trial must choose an acceptable freshness interval and implement timely renewal before remote operation is enabled.
 
-Node signing-key rotation keeps the node ID and permanently retires its previous key. Node removal retires both its ID and key. Retired entries cannot disappear from later revisions, and removed identities cannot reenroll under fresh signatures. Rejoining a removed endpoint currently requires a new logical node identity and key. Removing the last node is rejected. Rotation of content-encryption epochs remains a separate, unimplemented requirement.
+Node signing-key rotation keeps the node ID and permanently retires its previous key. Node removal retires both its ID and key. Retired entries cannot disappear from later revisions, and removed identities cannot reenroll under fresh signatures. Rejoining a removed endpoint currently requires a new logical node identity and key. Removing the last node is rejected. The MLS proof below implements separate encryption-epoch changes, but orchestrating signing-key rotation across all affected groups remains unfinished.
 
 ## Durable endpoint state
 
@@ -76,26 +76,56 @@ Restoration verifies the exact state digest and revision against the saved check
 
 The database contains private configuration, but no node or owner private keys. OS-user access to endpoint files remains trusted. Integration with `~/.gent/config.toml`, encrypted network replication, key storage, and the live daemon policy transaction is still pending.
 
-## Content-encryption protocol work
+## MLS messaging proof
 
-The plan requires forward secrecy, offline delivery, durable retries, endpoint removal, and recovery. The current signature layer does not supply these properties. Static-recipient encryption alone would leave recorded ciphertext exposed to later compromise of that recipient's long-term key.
+The native proof uses [MLS, RFC 9420](https://www.rfc-editor.org/rfc/rfc9420.html), through OpenMLS 0.9.2, RustCrypto 0.6, and OpenMLS SQLite storage 0.3. The ciphersuite is `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`. Gent does not implement its own ratchet. The workspace uses rusqlite 0.37 to share the SQLite storage provider's native library version; the existing daemon and replica tests pass with that version on both OSes. No experimental MLS protocol features or secret-debug features are enabled by Gent.
 
-[MLS, RFC 9420](https://www.rfc-editor.org/rfc/rfc9420.html), is the next protocol candidate to prototype because it supports asynchronous key establishment and forward secrecy. Its credential authentication would need to bind to the approved node signing keys above. A possible layout is a configuration group for trusted daemons and separate messaging groups for the communicating endpoints. A limited hosted bridge must never join the full configuration group. Group membership does not replace per-agent policy checks.
+`EncryptedEndpoint` takes a trusted node identity and a private directory. Initialization saves independently authenticated authority once. Each later operation restores that authority against its stored checkpoint and authorizes the local node. Updates must follow the signed chain; opening the database cannot replace its anchor or node key.
 
-[Noise](https://noiseprotocol.org/noise.html) is another candidate for authenticated live sessions, but a Noise-only design would still need to prove durable asynchronous delivery across both endpoints restarting. No custom ratchet or message-encryption construction has been added while that decision remains open.
+An MLS basic credential contains the protocol version, cluster UUID, and node UUID. Its Ed25519 signing key must exactly match fresh owner-approved membership. `NodeIdentity` implements the MLS signer interface without exporting another private-key copy. A valid MLS signature under an unapproved key cannot impersonate a node. Group creation also checks the expected identity of every key package. Joining requires an explicit local roster and verifies every member against both that roster and authority. Standalone proposals, external senders, public application/commit messages, and additions to existing groups are rejected in this proof.
 
-The encryption proof must cover authenticated credentials, key-package substitution, replay and out-of-order delivery, fresh membership/policy, removed endpoints, protected file keys, erased historical secrets, and persistence of cryptographic state with the outbox/inbox. Only after that proof should the daemon acquire remote transport. Account recovery must never recreate decryption authority through a service database change.
+Key packages allow an endpoint to join asynchronously. The joining endpoint commits consumption of its private package only after the Welcome and expected roster pass validation. A failed join rolls everything back. An exact Welcome retry is recognized after restart. Allocate a new package request ID for each invitation; retrying an allocation returns its original public bytes, even after its private material has been consumed. This does not make a package reusable for another group.
+
+Current bounds are 16 members per group, 16 KiB per key package, 256 bytes per group ID, 1 MiB per decoded application payload, and 2 MiB per MLS wire message. The encrypted application envelope carries a version, UUID, and base64 payload. Payloads can contain arbitrary binary data. Independent attachment objects, file-key grants, MIME/filename handling, and agent-level file permissions still belong to the pending messaging integration. The current Worker proof accepts only 1 MiB per frame; transport sizing or chunking must be resolved before these components are connected.
+
+### Persistence and retries
+
+MLS secrets, the authority checkpoint, ciphertext outbox, plaintext endpoint inbox, and receipt hashes live in one private `mls.sqlite3` database. It uses WAL, full synchronous commits, and SQLite secure deletion. Owner and node signing secrets are not stored there. Its inbox and cryptographic state are plaintext within the trusted endpoint; this proof does not supply storage encryption or protection against a compromised OS user.
+
+Each cryptographic operation starts an immediate transaction and loads fresh MLS state through the upstream SQLite provider on that transaction's connection. A send advances the ratchet and stores its ciphertext before commit. A receive advances the ratchet, stores the plaintext, and records its receipt before commit. Welcome processing and epoch commits use the same pattern. Results are returned only after commit. Failure drops the in-memory MLS object as well as rolling back storage, so the next attempt reloads the saved ratchet.
+
+Request UUIDs bind to operation and input hashes. A send retry returns the exact committed ciphertext; conflicting reuse fails. Receipts suppress duplicate delivery, and MLS still rejects a consumed generation when Gent's receipt cache is removed in a test. Concurrent writers serialize through SQLite and reload state; they cannot independently advance from stale in-memory ratchets. Queue inspection is limited to trusted daemon code, in batches of at most 128 records. Queue acknowledgment, pruning, disk quotas, and authorization at actual agent delivery remain unfinished.
+
+### Ordering, removal, and forward secrecy
+
+The prototype retains no past epochs or resumption PSKs. It allows up to 32 skipped application generations within an epoch, with a maximum forward distance of 128. Encryption padding uses 256-byte blocks. These are proof parameters, not final operational settings.
+
+The relay must deliver earlier application messages before the commit advancing their epoch. The tests demonstrate that an undelivered old-epoch message becomes undecryptable after that commit. Offline delivery works when the receiver resumes from its saved state and receives the backlog in this order. Ordering across independent senders, concurrent epoch commits, malicious relay forks, missing messages, and recovery from lost state need a delivery protocol before remote use. A malicious relay can always withhold traffic; it must not gain decryption authority through recovery.
+
+Fresh owner authority is checked before application encryption and acceptance. An unapproved or removed credential in the group blocks application delivery. `remove_revoked` removes those credentials and commits a new epoch; surviving endpoints validate the resulting roster against their authority. A removed endpoint retaining its old authority and old keys cannot decrypt a new-epoch message. A signed revocation must reach a surviving endpoint before it can enforce it; the authority lease still bounds withholding as described above. Previously delivered plaintext and previously issued keys cannot be recalled.
+
+The tests establish deletion of consumed key packages and loss of old-epoch decryption through the current logical MLS state. They do **not** establish forensic erasure from allocator memory, SQLite WAL history, filesystem snapshots, swap, or backups. `secure_delete` alone cannot provide that guarantee. Secret-storage design, backup exclusions, key retention, and recovery need review before claiming full endpoint-compromise forward secrecy in a deployed service.
+
+### Boundaries still to implement
+
+Key packages contain identity metadata and must travel inside an authenticated, encrypted enrollment or distribution channel. They must not become a plaintext public directory. MLS Welcome messages protect their group information, while ordinary MLS headers still expose opaque group IDs, epochs, sizes, and timing. The surrounding routing protocol must account for this metadata.
+
+Node authentication does not authorize one agent to read another agent's messages. The proof has no model-facing API, and its raw inbox/outbox accessors are for trusted local code. Integration must bind authenticated agent envelopes, recheck policy at send and delivery, and atomically coordinate authority, agent permissions, and queues. The standalone `Replica` and this proof's authority checkpoint must be consolidated in that runtime path.
+
+A likely layout remains a configuration group for trusted daemons and separate messaging groups for authorized endpoints. A limited hosted bridge must never join the configuration group. Encrypted policy distribution, file-key grants, periodic epoch refresh, pairing UX, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before remote delivery is enabled.
 
 ## Verification
 
 The authority tests exercise request-key and name substitution, wrong owner/genesis pins, policy tampering, replayed/stale/future/expired enrollment, conflicting revisions, gaps, rollback, key rotation, permanent retirement, canonical wire validation, and restart checkpoints. The replica tests exercise concurrent stale writers, restart/history recovery, expired-history catch-up, file permissions, symlinks, schema-version rejection, and an injected SQLite failure after history insertion but before checkpoint update.
 
+Eleven MLS tests pass on Linux and macOS. They cover offline join/delivery and a 1 MiB binary reply, restart retries, validly signed key substitution, foreign clusters, Welcome roster mismatch, single-use join keys, malformed/tampered/cross-group messages, out-of-order delivery, MLS replay defense, concurrent writers, epoch changes, and node removal. SQLite triggers inject failures after cryptographic changes but before queue/receipt insertion, including Welcome and epoch commits, to verify rollback and retry. Expiry, authority rollback, wrong local identity, size limits, permissions, symlinks, and future schema versions are also checked. Tests reopen endpoint databases between operations; no running remote service is involved.
+
 Run from the public repository root:
 
 ```sh
-cargo test -p gent-crypto -p gent-daemon --test authority --test replica --locked
+cargo test --workspace --locked
 cargo clippy --workspace --all-targets -- -D warnings
-cargo check -p gent-crypto --target wasm32-unknown-unknown --locked
+cargo check -p gent-crypto --features mls --target wasm32-unknown-unknown --locked
 ```
 
-These tests establish the listed library and storage behavior. Independent protocol review, encrypted transport tests, real pairing UX, and recovery tests remain required before production use.
+The authority crate and its signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. The full Rust workspace has 38 passing tests on each native OS. Independent protocol review, encrypted transport tests, real pairing UX, and recovery tests remain required before production use.

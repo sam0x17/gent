@@ -5,11 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+mls = ["dep:openmls_traits"]
+
 [dependencies]
 anyhow.workspace = true
 ed25519-dalek.workspace = true
 gent-protocol = { path = "../gent-protocol" }
 getrandom.workspace = true
+openmls_traits = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_jcs.workspace = true

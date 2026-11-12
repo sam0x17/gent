@@ -29,6 +29,19 @@ pub struct NodeIdentity {
     key: SigningKey,
 }
 
+// MLS supplies its standard domain-separated signing inputs. Keep the secret
+// inside the identity instead of exporting another copy to an MLS credential.
+#[cfg(feature = "mls")]
+impl openmls_traits::signatures::Signer for NodeIdentity {
+    fn sign(&self, payload: &[u8]) -> Result<Vec<u8>, openmls_traits::signatures::SignerError> {
+        Ok(self.key.sign(payload).to_bytes().to_vec())
+    }
+
+    fn signature_scheme(&self) -> openmls_traits::types::SignatureScheme {
+        openmls_traits::types::SignatureScheme::ED25519
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NodeMember {

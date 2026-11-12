@@ -14,9 +14,9 @@ Web agents may use a Gent-hosted bridge with an explicit warning that Gent and t
 
 An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQLite inbox, permission evaluator, and stdio MCP server. Independent MCP clients can register, exchange text and image bytes, reply, and recover queued work after a restart. Follow the [local proof guide](docs/local-proof.md) to build and try it.
 
-This build communicates only through a local Unix socket. Remote transport, E2EE, hosted accounts, service installation, and persistent relay mode are not implemented. Codex and Claude Code CLI tests pass on Linux and macOS with explicit per-conversation bindings, including session resume and an image-file round trip. Automatic chat binding, concurrent conversations in shared host configurations, and desktop/web/mobile integration remain to be verified.
+This build communicates only through a local Unix socket. Remote transport, runtime E2EE, hosted accounts, service installation, and persistent relay mode are not implemented. Codex and Claude Code CLI tests pass on Linux and macOS with explicit per-conversation bindings, including session resume and an image-file round trip. Automatic chat binding, concurrent conversations in shared host configurations, and desktop/web/mobile integration remain to be verified.
 
-The next component, [signed enrollment and configuration authority](docs/security.md), provides owner-approved node keys, revision validation, retirement, and durable checkpoints. It is tested as a library and is not yet connected to the local CLI proof or a network transport.
+The [security components](docs/security.md) provide owner-approved node keys, signed configuration history, and durable checkpoints, plus an MLS encrypted messaging proof. The MLS tests cover offline delivery, restart, key substitution, replays, transactional recovery, epoch changes, and node removal. These are library components; integration with agent permissions, the local CLI, and network transport remains unfinished.
 
 ## Planned setup
 
