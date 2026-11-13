@@ -266,8 +266,7 @@ impl StoreSession<'_> {
         who: &Agent,
         attachment: &str,
         request: &str,
-        text: String,
-        files: Vec<FilePart>,
+        content: (String, Vec<FilePart>, Vec<String>),
     ) -> Result<Value> {
         let attachment = self.relay_attachment(who, attachment)?;
         let turn_id = crate::messages::message_id(&who.id, request)?;
@@ -281,11 +280,12 @@ impl StoreSession<'_> {
             who,
             &attachment.target,
             request,
-            text,
-            files,
+            content.0,
+            content.1,
             SendContext {
                 parent: None,
                 relay: Some(relay),
+                file_ids: content.2,
             },
         )?;
         result["turn_id"] = json!(turn_id);
@@ -297,7 +297,7 @@ impl StoreSession<'_> {
         who: &Agent,
         turn: &str,
         request: &str,
-        content: (String, Vec<FilePart>),
+        content: (String, Vec<FilePart>, Vec<String>),
         outcome: RelayResponseKind,
     ) -> Result<Value> {
         let root = self.relay_root(turn)?;
@@ -317,6 +317,7 @@ impl StoreSession<'_> {
             SendContext {
                 parent: Some(root),
                 relay: Some(relay),
+                file_ids: content.2,
             },
         )
     }
@@ -335,6 +336,7 @@ impl StoreSession<'_> {
             SendContext {
                 parent: Some(root),
                 relay: Some(relay),
+                file_ids: vec![],
             },
         )
     }

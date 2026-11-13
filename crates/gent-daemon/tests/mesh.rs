@@ -216,6 +216,7 @@ async fn peers_automatically_connect_and_exchange_files_without_the_owner_online
     relay.mode.store(1, std::sync::atomic::Ordering::SeqCst);
     let bytes = vec![0x6d; 1024 * 1024];
     let sent = ok(nodes[1].agent(AgentOp::Send {
+        file_ids: vec![],
         recipient: nodes[2].agent.clone(),
         request_id: Uuid::new_v4().to_string(),
         text: "private-peer-image".into(),
@@ -262,6 +263,7 @@ async fn peers_automatically_connect_and_exchange_files_without_the_owner_online
     .await;
     nodes[1].task.take();
     ok(nodes[2].agent(AgentOp::Reply {
+        file_ids: vec![],
         message_id: id,
         request_id: Uuid::new_v4().to_string(),
         text: "offline direct feedback".into(),
@@ -282,6 +284,7 @@ async fn peers_automatically_connect_and_exchange_files_without_the_owner_online
     );
     assert!(matches!(
         nodes[2].agent(AgentOp::Send {
+            file_ids: vec![],
             recipient: nodes[1].agent.clone(),
             request_id: Uuid::new_v4().to_string(),
             text: "unsolicited".into(),

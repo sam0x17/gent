@@ -27,6 +27,7 @@ impl Fixture {
         let attached = ok(self.agent(0, self.attach(target)));
         let id = attached["attachment"]["id"].as_str().unwrap().to_owned();
         let send = AgentOp::RelaySend {
+            file_ids: vec![],
             attachment_id: id.clone(),
             request_id: Uuid::new_v4().to_string(),
             text: "  exact user text\n".into(),
@@ -53,6 +54,7 @@ impl Fixture {
     }
     fn respond(turn: &str, outcome: RelayResponseKind) -> AgentOp {
         AgentOp::RelayRespond {
+            file_ids: vec![],
             turn_id: turn.into(),
             request_id: Uuid::new_v4().to_string(),
             text: "target response".into(),
@@ -175,6 +177,7 @@ fn turns_preserve_content_attribution_and_pending_work_through_switch_and_restar
         f.agent(
             1,
             AgentOp::Reply {
+                file_ids: vec![],
                 message_id: turn.clone(),
                 request_id: Uuid::new_v4().to_string(),
                 text: "bypass completion protocol".into(),
@@ -249,6 +252,7 @@ fn multiple_intermediaries_share_one_durable_target_queue_and_cancellation_is_ex
     let second = ok(f.agent(
         2,
         AgentOp::RelaySend {
+            file_ids: vec![],
             attachment_id: attach["attachment"]["id"].as_str().unwrap().into(),
             request_id: Uuid::new_v4().to_string(),
             text: "second intermediary".into(),
@@ -301,6 +305,7 @@ fn relay_turn_and_final_reply_commit_atomically_with_retry_records() {
     f.grant(1, 3600);
     let attached = ok(f.agent(0, f.attach(1)));
     let send = AgentOp::RelaySend {
+        file_ids: vec![],
         attachment_id: attached["attachment"]["id"].as_str().unwrap().into(),
         request_id: Uuid::new_v4().to_string(),
         text: "atomic turn".into(),
@@ -338,6 +343,7 @@ fn response_pages_preserve_files_and_revocation_hides_stored_content() {
         ok(f.agent(
             1,
             AgentOp::RelayRespond {
+                file_ids: vec![],
                 turn_id: turn.clone(),
                 request_id: Uuid::new_v4().to_string(),
                 text: format!("image {index}"),
@@ -387,6 +393,7 @@ fn relay_history_recovers_turn_ids_and_response_budget_reserves_completion() {
         ok(f.agent(
             0,
             AgentOp::RelaySend {
+                file_ids: vec![],
                 attachment_id: attachment.clone(),
                 request_id: Uuid::new_v4().to_string(),
                 text: "follow-up".into(),
@@ -471,6 +478,7 @@ fn temporary_permission_block_does_not_let_later_turns_overtake_the_head() {
     ok(f.agent(
         2,
         AgentOp::RelaySend {
+            file_ids: vec![],
             attachment_id: attachment,
             request_id: Uuid::new_v4().to_string(),
             text: "later".into(),
@@ -502,6 +510,7 @@ fn relay_selection_needs_both_owner_grant_and_ordinary_permissions() {
         f.agent(
             0,
             AgentOp::Send {
+                file_ids: vec![],
                 recipient: f.agents[1].clone(),
                 request_id: Uuid::new_v4().to_string(),
                 text: "grant is not permission".into(),
@@ -683,6 +692,7 @@ fn expired_grant_blocks_new_selection_and_expires_persisted_selection() {
     let sent = ok(f.agent(
         0,
         AgentOp::RelaySend {
+            file_ids: vec![],
             attachment_id: a["attachment"]["id"].as_str().unwrap().into(),
             request_id: Uuid::new_v4().to_string(),
             text: "expires with grant".into(),

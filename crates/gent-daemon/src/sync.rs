@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Notify, task::JoinHandle, time::Instant};
+mod files;
 mod notifications;
 
 const MAX_FRAME: usize = 1024 * 1024;
@@ -236,11 +237,13 @@ pub fn start(store: SharedStore) -> Result<Option<JoinHandle<()>>> {
         return Ok(None);
     };
     let relay = Relay::open(&settings, &home).context("encrypted relay setup failed")?;
-    Ok(Some(tokio::spawn(run(store, relay, wakeup))))
+    let files = files::Scheduler::new(crate::file_transport::FileRelay::open(&settings, &home)?);
+    Ok(Some(tokio::spawn(run(store, relay, wakeup, files))))
 }
 
-async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>) {
+async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>, files: files::Scheduler) {
     let push = notifications::Listener::start(relay.clone(), wakeup.clone());
+    let _files = files.start(store.clone());
     let mut retries = BTreeMap::<Vec<u8>, Retry>::new();
     let mut transferred = BTreeMap::<Vec<u8>, u64>::new();
     let mut cursor = 0usize;

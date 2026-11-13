@@ -258,7 +258,7 @@ Six runtime tests inject enqueue, fragment-cursor, and recipient-import failures
 
 ## Encrypted file objects
 
-`gent-crypto::files` and `gent-daemon::file_objects` provide the encryption and endpoint-storage components for larger attachments. `gent-daemon::file_transport::FileRelay` transfers their ciphertext through a development Worker with D1 reservations and R2 storage. These are library APIs for trusted daemon code. The live messaging tools still use inline files with a combined 1 MiB limit. Agent-scoped grants, automatic dispatch, and MCP/native file access are the next integration work.
+`gent-crypto::files` and `gent-daemon::file_objects` provide the encryption and endpoint-storage components for larger attachments. `gent-daemon::file_transport::FileRelay` transfers their ciphertext through a development Worker with D1 reservations and R2 storage. Agent messaging now uses these components through authenticated MCP file tools and a bounded background dispatcher. Inline files remain available with a combined 1 MiB limit.
 
 Each new `seal` call generates an independent UUIDv4 object ID and a random 256-bit key, including when forwarding identical bytes. RustCrypto ChaCha20-Poly1305 encrypts chunks of up to 256 KiB. Its 96-bit nonce is eight zero bytes followed by the chunk index as a big-endian 32-bit integer. The API seals an immutable object once; it does not allow callers to encrypt different plaintext under an existing key and index. Retries must reuse saved ciphertext and its grant. An empty file has one authenticated empty chunk.
 
@@ -271,18 +271,32 @@ The storage API operates within the caller's SQLite transaction so file reservat
 | Endpoint storage limit | Value |
 | --- | --- |
 | Plaintext per file | 32 MiB |
-| Chunks per file | 1–128 |
+| Chunks per file | 1-128 |
 | Ciphertext per chunk | At most 256 KiB + 16-byte tag |
 | Objects per database, including reservations | 128 |
 | Reserved ciphertext per database | 256 MiB, including tags |
 | Incomplete object lifetime | At most one hour from its local reservation |
 | Complete object retention | Caller-selected deadline, at most seven days from its local reservation |
 
-Exact retries cannot change stored keys, manifests, deadlines, or ciphertext. Expired or abandoned objects become inaccessible before cleanup runs. Explicit deletion and cleanup remove their grants and chunks together and release logical quota. These limits bound this component's live objects, not SQLite/WAL file sizes, old backups, or message history. Endpoint cleanup scheduling remains integration work; the development relay has its own durable cleanup alarm described below. Private key buffers and successful decrypted buffers are zeroized on drop; forensic erasure of all temporary copies, database pages, and backups is not established.
+Exact retries cannot change stored keys, manifests, deadlines, or ciphertext. Expired or abandoned objects become inaccessible before cleanup runs. Explicit deletion and cleanup remove their grants and chunks together and release logical quota. These limits bound this component's live objects, not SQLite/WAL file sizes, old backups, or message history. The daemon reaps expired file objects during maintenance and transfer scheduling; the development relay has its own durable cleanup alarm described below. Pending message records can contain another private grant copy, and transport/message history has separate unfinished retention work. Private key buffers and successful decrypted buffers are zeroized on drop; forensic erasure of all temporary copies, database pages, and backups is not established.
 
 Seven crypto tests and nine storage tests cover empty and maximum-size files, manifest/key/chunk substitution, malformed grants, whole-file integrity, restart recovery, upload retry, atomic rollback with an enclosing message, concurrent reservations, quotas, expiry, deletion, missing chunks, schema versions, and separation of public ciphertext metadata from private metadata. Three committed vectors also match Python `cryptography` independently, including a nonzero chunk nonce and an empty file. Reproduce them with `python3 scripts/file_object_vectors.py --check` in an environment with that package installed.
 
-The next integration must bind file IDs to authenticated agents and messages, recheck current policy for retrieval and forwarding, persist retry IDs with the chosen immutable objects, and encrypt grants before dispatch. It must derive deadlines from the original authorized transfer; deleting an object must not let a replay acquire a new lifetime. Automatic transfer/endpoint cleanup and native host file-input/output proofs remain. The transport tests use trusted fixture handoffs for keys and do not establish agent permission enforcement or host file access.
+### Agent bindings and host files
+
+`gent_file_import` reads a basename from the authenticated agent's private `outbox` folder, returned by `gent_file_paths`. Imported objects belong only to that agent and expire after seven days. A send, reply, or relay operation accepts `file_ids`, checks current source-file access and destination permissions, and seals a new object for each reference. IDs, keys, manifests, message records, and outbox events commit together. The input IDs form part of the retry fingerprint; an exact retry returns the original message without creating another object.
+
+Messages expose only `FileDescriptor` values in `attachments`. Empty attachment fields are omitted to preserve existing inline-message encodings; upgrade paired nodes before using file-object messages. An explicit private wire adapter places grants and ciphertext manifests inside the MLS message record. Import checks descriptor equality, chunk lengths/count, original message expiry, object uniqueness, sender/recipient binding, and exchange permissions. A retained digest of the private grant list rejects conflicting duplicate records even after the file object is reaped. Objects cannot be rebound to a second message.
+
+`gent_file_status`, export, and forwarding require fresh signed authority, an active local registration, and ownership of the staged object or participation in its authorized message. Current ordinary permissions, relay grants, and expiry govern every access. Guessed and unauthorized IDs share an unavailable error. Revocation prevents subsequent access through Gent; it cannot retract bytes an authorized host previously exported or copied.
+
+A separate dispatcher task reserves/uploads one chunk per object per pass, with batches of at most 16 objects and four concurrent transfers. It holds no Store mutex during HTTP, and stalled object requests cannot block configuration synchronization. Idle file discovery runs once per second; completed uploads wake message publication. It rechecks authorization before reading upload bytes and after network completion before committing progress. Message publication waits for all upload acknowledgments. Recipients can then see pending descriptors while downloading; each chunk authenticates before storage, and the complete hash verifies before export. Upload reconciliation repairs a lost relay copy with identical ciphertext and its original deadline. Retries back off from one to 30 seconds; completed uploads reconcile every 30 seconds. Missing download chunks use retry backoff. Neither relay hints nor file completion constitute an agent receipt.
+
+`gent_file_export` writes verified plaintext under this agent's private `inbox/<object-id>/` folder and returns a local path. Directory-relative opens reject symlinks; input files must be regular, owned by the node user, and have one hard link. Export publishes a fully written temporary file without overwriting an existing destination. An existing matching export is reusable; edited files fail. A crash can leave a private temporary export. Import/export paths are on the daemon machine; this is not a web upload API or a sandbox for hosts with the OS user's shell authority.
+
+Plaintext handoff files remain under user/host control and have no automatic retention or disk quota. Encrypted-object quotas include both staged and sent copies, so available capacity can limit a multi-file message below its per-file bound. Import retry records and message history also need pruning. These tools do not supply hosted attachment access, GUI file pickers, or automatic host execution.
+
+Five agent-file tests, one adversarial network test, and two automatic-dispatch tests cover access isolation, empty and multi-chunk files, retry/restart, fresh forwarding keys, corruption, conflicting grants, permission and relay revocation, link/path rejection, transactional rollback, and relay storage loss. A live Worker test passes 32 MiB agent round trips on Linux and macOS, with private grants carried through MLS and real local file import/export. A physical Linux-Mac MCP proof passes 2 MiB files, scoped forwarding, and both daemon restarts. Real-model large-file ergonomics remain a separate acceptance item.
 
 ### File-object relay protocol
 
@@ -311,7 +325,7 @@ cargo test -p gent-daemon --test file_transport --locked \
   wrangler_transports_encrypted_file_objects_with_endpoint_restart -- --ignored
 ```
 
-The development Worker also passes HTTP tests for conflicting/concurrent uploads, declared and streamed body limits, both aggregate quotas, alarm-driven expiry without HTTP traffic, abandoned uploads, interrupted deletion, and tombstones. Production account/node authorization, storage billing, and dispatch through actual agent messages remain unfinished. This proof creates only local D1/R2 state and does not deploy a messaging service.
+The development Worker also passes HTTP tests for conflicting/concurrent uploads, declared and streamed body limits, both aggregate quotas, alarm-driven expiry without HTTP traffic, abandoned uploads, interrupted deletion, and tombstones. Production account/node authorization and storage billing remain unfinished. This proof creates only local D1/R2 state and does not deploy a messaging service.
 
 ## Boundaries still to implement
 
@@ -389,4 +403,4 @@ Eight installer tests on both OSes cover ownership, unrelated-setting preservati
 
 Five shell-integration tests and real shell process proofs pass on both platforms, including macOS Bash 3.2, Zsh Tab completion, and Fish. Shell setup preserves unrelated startup-file bytes, serializes Gent writers, and refuses changed blocks, linked files, and shared write access. Shell startup only loads PATH/completion; agent identity and permissions remain with the MCP integration and daemon.
 
-The native workspace has 173 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, signer interface, and file-object crypto compile for Wasm; native SQLite storage and crypto runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.
+The native workspace has 181 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, signer interface, and file-object crypto compile for Wasm; native SQLite storage and crypto runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.

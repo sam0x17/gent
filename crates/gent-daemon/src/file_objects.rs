@@ -1,10 +1,10 @@
-//! Trusted endpoint storage for immutable encrypted files. This library component
-//! is not yet exposed through agent RPC, MCP, or the relay dispatcher.
+//! Trusted endpoint storage for immutable encrypted files. Agent bindings and
+//! permission checks live in store::files; the dispatcher moves only ciphertext.
 //!
 //! The caller must authenticate agents and check current message/file permissions
 //! before every operation. Grants here live in the protected endpoint database;
 //! only ciphertext goes to object storage. Mutations share the caller's immediate
-//! transaction so a future message and its files can commit or roll back together.
+//! transaction so a message and its files commit or roll back together.
 use anyhow::{Context, Result, ensure};
 use gent_crypto::files::{FileGrant, SealedFile};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -76,6 +76,11 @@ impl<'a> Objects<'a> {
     /// Use an immediate transaction and propagate errors before committing.
     /// This constructor deliberately cannot take an autocommit Connection.
     pub fn new(tx: &'a Transaction<'_>, now: u64) -> Result<Self> {
+        Self::in_transaction(tx, now)
+    }
+
+    pub(crate) fn in_transaction(tx: &'a Connection, now: u64) -> Result<Self> {
+        ensure!(!tx.is_autocommit(), "file storage requires a transaction");
         ensure!(
             now <= i64::MAX as u64 - MAX_RETENTION_SECONDS,
             "invalid file storage clock"

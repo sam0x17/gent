@@ -371,15 +371,28 @@ Every committed owner edit or renewal wakes publication immediately. Connected r
 
 ## Files, retries, and limits
 
-Send file contents as `{ "name": "image.png", "media_type": "image/png", "data_base64": "..." }` in a message's `files` array. Names must be basenames. The connector does not read arbitrary filesystem paths. Inbox results include the actual bytes; supported image types also produce MCP image content blocks. File data comes from the sender and should be treated as untrusted input.
+For local CLI hosts, call `gent_file_paths`, copy the actual file into the returned `import_directory`, and call `gent_file_import` with its basename, media type, and request UUID. Use the returned file ID in `file_ids` on send/reply or relay tools. Each file can be up to 32 MiB. Gent seals fresh objects for every new message or forward; identical request retries retain their original IDs and bytes.
+
+Received messages include descriptors in `attachments`. Call `gent_file_status` until ready during an authorized interaction, then `gent_file_export`. Use the returned path with the host's file or image tools. The path is local to the daemon machine. Files are verified before export; an existing file with different contents is never overwritten. Staged and exported plaintext remains until the user or an authorized host removes it. Gent checks current file/message permissions on every access.
+
+Small files can use `{ "name": "image.png", "media_type": "image/png", "data_base64": "..." }` in `files`, with a combined 1 MiB decoded limit. Supported inline images also produce MCP image blocks. Native attachment images require export before inspection. Files from agents remain untrusted input.
 
 Use a fresh UUID `request_id` for each new send or reply. Reuse it only for an identical retry; conflicting content is rejected. Repeated inbox reads retain the same message IDs until acknowledgment. Acknowledge after accepting the message; Gent cannot guarantee a host will perform requested work exactly once after a crash.
 
-Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per exchange, and a 24-hour exchange lifetime. Remote exchanges allocate 16 messages to each sender, including the initial message, so independently queued replies cannot exceed 32 when the nodes reconnect. Inbox responses are bounded; acknowledge retrieved messages before requesting the next batch. The proof has no queue pruning or disk quota yet.
+Limits are 64 KiB of text, four files across `files` and `file_ids`, 32 messages per exchange, and a 24-hour exchange lifetime. Encrypted file storage reserves at most 128 objects and 256 MiB of ciphertext per node, including staged and sent copies; the development relay has a separate shared quota. Remote exchanges allocate 16 messages to each sender, including the initial message, so independently queued replies cannot exceed 32 when the nodes reconnect. Inbox responses are bounded; acknowledge retrieved messages before requesting the next batch. Message history has no pruning or aggregate disk quota yet. Plaintext handoff folders are also outside the encrypted-object quota.
+
+Add `--file-objects` to `scripts/prove_pairing.py` to include a 2 MiB native-file round trip between physical Linux and Mac nodes, using the same authenticated MCP tools, file reads/writes, scoped reply, and both daemon restarts. The separate native large-file test uses two local nodes and actual Worker D1/R2 storage:
+
+```sh
+GENT_TEST_RELAY_URL=http://127.0.0.1:18787 \
+GENT_TEST_RELAY_TOKEN_FILE=/absolute/private/relay.key \
+cargo test -p gent-daemon --test remote --locked \
+  wrangler_dispatches_agent_attachments_with_native_files_and_restart -- --ignored
+```
 
 ## Remaining integration work
 
-Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. Actual subagent execution and practical larger-file workflows remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
+Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. Actual subagent execution and real-model larger-file workflows remain to be tested. Authenticated import/export tools now pass native and generic MCP proofs without putting large base64 payloads in model context. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
 Invite-based pairing, GitHub login, and hosted remote connectors remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, generic MCP messaging, real-model visual revision, and persistent relay turns use the local development relay. Shared agent guidance is bundled through MCP instructions. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
 

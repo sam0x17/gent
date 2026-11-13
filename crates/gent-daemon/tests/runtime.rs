@@ -108,6 +108,7 @@ impl Fixture {
             &mut self.store,
             &self.keys[0],
             AgentOp::Send {
+                file_ids: vec![],
                 recipient: self.agents[1].clone(),
                 request_id: Uuid::new_v4().to_string(),
                 text: "queued under signed policy".into(),
@@ -264,6 +265,7 @@ fn failed_message_commit_rolls_back_exchange_and_registration_activity() {
     f.db().execute_batch("CREATE TRIGGER fail_message BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT,'injected queue failure'); END;").unwrap();
     let request_id = Uuid::new_v4().to_string();
     let action = AgentOp::Send {
+        file_ids: vec![],
         recipient: f.agents[1].clone(),
         request_id,
         text: "atomic".into(),
@@ -541,6 +543,7 @@ fn legacy_local_database_preserves_agents_messages_and_identities() {
     let a = Uuid::new_v4().to_string();
     let b = Uuid::new_v4().to_string();
     let msg = Message {
+        attachments: vec![],
         relay: None,
         id: Uuid::new_v4().to_string(),
         exchange_id: Uuid::new_v4().to_string(),

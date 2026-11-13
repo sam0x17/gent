@@ -107,6 +107,7 @@ def main():
     parser.add_argument('--binary', default='target/debug/gent')
     parser.add_argument('--relay-url', default='http://127.0.0.1:18787')
     parser.add_argument('--relay-token-file', required=True)
+    parser.add_argument('--file-objects', action='store_true', help='Also prove native files through authenticated MCP and separate ciphertext storage')
     parser.add_argument('--remote-relay-port', type=int, default=18789)
     args = parser.parse_args()
     url = urlparse(args.relay_url)
@@ -236,6 +237,40 @@ def main():
 
             exercise_turns(a, b, attached['attachment']['id'], files, wait_for, restart_relay_nodes)
             print('PASS: two-machine ordered relay turns, PNG forwarding, restart recovery, cancellation, final outcomes, and exact retries')
+            if args.file_objects:
+                import hashlib
+                folders = a.call('gent_file_paths')[0]
+                source = Path(folders['import_directory']) / 'native-review.bin'
+                assert source.resolve().is_relative_to(home.resolve())
+                content = b'gent-native-mcp-private-file\0' + bytes(range(256)) * 8192
+                source.write_bytes(content)
+                imported = a.call('gent_file_import', {'name': source.name, 'media_type': 'application/octet-stream', 'request_id': str(uuid.uuid4())})[0]['file']
+                request = {'recipient': bid, 'request_id': str(uuid.uuid4()), 'text': 'native file review', 'file_ids': [imported['id']]}
+                sent_file = a.call('gent_send', request)[0]
+                restart_relay_nodes()
+                assert a.call('gent_send', request)[0]['message_id'] == sent_file['message_id']
+                def incoming(client, message_id):
+                    return next((m for m in client.call('gent_inbox')[0] if m['id'] == message_id), None)
+                wait_for(lambda: incoming(b, sent_file['message_id']))
+                received = incoming(b, sent_file['message_id'])['attachments'][0]
+                assert received['id'] != imported['id']
+                wait_for(lambda: b.call('gent_file_status', {'file_id': received['id']})[0]['state'] == 'ready')
+                exported = b.call('gent_file_export', {'file_id': received['id']})[0]
+                verify = "import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]).resolve(); assert p.is_relative_to(pathlib.Path(sys.argv[2]).resolve()); print(hashlib.sha256(p.read_bytes()).hexdigest())"
+                digest = remote(['/opt/homebrew/bin/python3', '-c', verify, exported['path'], owner_home]).stdout.strip()
+                assert digest == hashlib.sha256(content).hexdigest() == received['sha256']
+                result = b.call('gent_reply', {'message_id': sent_file['message_id'], 'request_id': str(uuid.uuid4()), 'text': 'native bytes reviewed', 'file_ids': [received['id']]})[0]
+                restart_relay_nodes()
+                wait_for(lambda: incoming(a, result['message_id']))
+                returned = incoming(a, result['message_id'])['attachments'][0]
+                assert returned['id'] not in (imported['id'], received['id'])
+                wait_for(lambda: a.call('gent_file_status', {'file_id': returned['id']})[0]['state'] == 'ready')
+                output = Path(a.call('gent_file_export', {'file_id': returned['id']})[0]['path'])
+                assert output.resolve().is_relative_to(home.resolve()) and output.read_bytes() == content
+                b.call('gent_ack', {'message_id': sent_file['message_id']})
+                a.call('gent_ack', {'message_id': result['message_id']})
+                print('PASS: two-machine native MCP files, exact 2 MiB bytes, scoped forwarding, and both daemon restarts')
+
             rename_id = str(uuid.uuid4())
             renamed = cli('--request-id', rename_id, 'node', 'name', 'set', 'joined-after-edit')
             assert renamed['state'] == 'applied'

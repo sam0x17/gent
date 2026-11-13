@@ -18,6 +18,7 @@ use std::{
 };
 use tokio::sync::Notify;
 mod configuration;
+mod files;
 mod mesh;
 mod network;
 mod pairing;
@@ -64,6 +65,7 @@ impl Store {
         configuration::schema(&db)?;
         mesh::schema(&db)?;
         relay::schema(&db)?;
+        files::schema(&mut db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -198,6 +200,7 @@ impl Store {
                 .is_some_and(|n| n.signing_key == self.identity.node.public_key()),
             "local node is no longer enrolled"
         );
+        crate::file_objects::Objects::new(&tx, timestamp)?.reap()?;
         let renew = self.identity.owner.is_some()
             && state.state().expires_at.saturating_sub(timestamp) <= 6 * 60 * 60;
         if renew {
@@ -305,6 +308,7 @@ struct StoreSession<'a> {
 struct SendContext {
     parent: Option<Message>,
     relay: Option<RelayMessage>,
+    file_ids: Vec<String>,
 }
 
 fn message_fingerprint(
@@ -313,11 +317,15 @@ fn message_fingerprint(
     files: &[FilePart],
     reply_to: &Option<String>,
     relay: &Option<RelayMessage>,
+    file_ids: &[String],
 ) -> Result<String> {
     let mut value = json!({"recipient":recipient,"text":text,"files":files,"reply_to":reply_to});
     // Preserve exact retry fingerprints for pre-relay messages.
     if let Some(relay) = relay {
         value["relay"] = json!(relay);
+    }
+    if !file_ids.is_empty() {
+        value["file_ids"] = json!(file_ids);
     }
     Ok(hash(&serde_json::to_string(&value)?))
 }
@@ -491,6 +499,14 @@ impl StoreSession<'_> {
                     .filter(|other| self.config.policy.visible(&who, other))
                     .collect::<Vec<_>>()
             )),
+            AgentOp::FilePaths => self.file_paths(&who),
+            AgentOp::FileImport {
+                request_id,
+                name,
+                media_type,
+            } => self.file_import(&who, &request_id, &name, &media_type),
+            AgentOp::FileStatus { file_id } => self.file_status(&who, &file_id),
+            AgentOp::FileExport { file_id } => self.file_export(&who, &file_id),
             AgentOp::RelayAttach { target, request_id } => {
                 self.relay_attach(&who, &target, &request_id)
             }
@@ -501,7 +517,8 @@ impl StoreSession<'_> {
                 request_id,
                 text,
                 files,
-            } => self.relay_send(&who, &attachment_id, &request_id, text, files),
+                file_ids,
+            } => self.relay_send(&who, &attachment_id, &request_id, (text, files, file_ids)),
             AgentOp::RelayTurnStatus {
                 turn_id,
                 after_message_id,
@@ -515,8 +532,15 @@ impl StoreSession<'_> {
                 request_id,
                 text,
                 files,
+                file_ids,
                 outcome,
-            } => self.relay_respond(&who, &turn_id, &request_id, (text, files), outcome),
+            } => self.relay_respond(
+                &who,
+                &turn_id,
+                &request_id,
+                (text, files, file_ids),
+                outcome,
+            ),
             AgentOp::RelayCancel {
                 turn_id,
                 request_id,
@@ -526,19 +550,24 @@ impl StoreSession<'_> {
                 request_id,
                 text,
                 files,
+                file_ids,
             } => self.send(
                 &who,
                 &recipient,
                 &request_id,
                 text,
                 files,
-                SendContext::default(),
+                SendContext {
+                    file_ids,
+                    ..Default::default()
+                },
             ),
             AgentOp::Reply {
                 message_id,
                 request_id,
                 text,
                 files,
+                file_ids,
             } => {
                 let parent = self.message(&message_id)?;
                 ensure!(parent.recipient == who.id, UNAVAILABLE);
@@ -552,6 +581,7 @@ impl StoreSession<'_> {
                     SendContext {
                         parent: Some(parent),
                         relay: None,
+                        file_ids,
                     },
                 )
             }
@@ -659,10 +689,23 @@ impl StoreSession<'_> {
     ) -> Result<Value> {
         uuid::Uuid::parse_str(request_id)
             .context("request_id must be a UUID; reuse it only when retrying the same message")?;
-        network::validate_contents(&text, &files)?;
-        let SendContext { parent, relay } = context;
+        let SendContext {
+            parent,
+            relay,
+            file_ids,
+        } = context;
+        network::validate_contents(&text, &files, file_ids.len())?;
+        ensure!(
+            file_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == file_ids.len(),
+            "duplicate file ID"
+        );
         let reply_to = parent.as_ref().map(|p| p.id.clone());
-        let fingerprint = message_fingerprint(recipient_id, &text, &files, &reply_to, &relay)?;
+        let fingerprint =
+            message_fingerprint(recipient_id, &text, &files, &reply_to, &relay, &file_ids)?;
         let existing: Option<(String, String)> = self
             .db
             .query_row(
@@ -728,6 +771,7 @@ impl StoreSession<'_> {
                 "remote exchange sender limit reached (16 messages)"
             );
         }
+        let attachments = self.seal_attachments(sender, &file_ids, expires_at)?;
         let message = Message {
             id: message_id,
             exchange_id: exchange_id.clone(),
@@ -735,6 +779,10 @@ impl StoreSession<'_> {
             recipient: recipient.id.clone(),
             text,
             files,
+            attachments: attachments
+                .iter()
+                .map(|f| f.grant.descriptor().clone())
+                .collect(),
             reply_to,
             created_at: timestamp,
             expires_at,
@@ -758,6 +806,7 @@ impl StoreSession<'_> {
             "exchange reply limit reached"
         );
         tx.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES (?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,serde_json::to_string(&message)?])?;
+        self.bind_attachments(&message, &attachments)?;
         self.record_relay_message(&message)?;
         if remote {
             self.queue_message(&recipient.node_id, request_id, &message)?;

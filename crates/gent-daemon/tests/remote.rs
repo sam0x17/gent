@@ -63,6 +63,9 @@ struct Pair {
 }
 impl Pair {
     async fn new(relay: &relay::RelayServer) -> Self {
+        Self::configured(&relay.endpoint, &relay.token).await
+    }
+    async fn configured(endpoint: &str, token: &str) -> Self {
         let homes: [tempfile::TempDir; 2] = std::array::from_fn(|_| {
             let temp = tempfile::tempdir().unwrap();
             fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -70,10 +73,10 @@ impl Pair {
         });
         let mut cfg = config::initialize(homes[0].path(), "remote").unwrap();
         cfg.relay = Some(config::RelayConfig {
-            endpoint: relay.endpoint.clone(),
+            endpoint: endpoint.into(),
             credential_file: "relay.key".into(),
         });
-        config::write_private(&homes[0].path().join("relay.key"), relay.token.as_bytes()).unwrap();
+        config::write_private(&homes[0].path().join("relay.key"), token.as_bytes()).unwrap();
         config::save(homes[0].path(), &cfg).unwrap();
         let source = Arc::new(Mutex::new(Store::open(homes[0].path()).unwrap()));
         let owner = config::read_private(&homes[0].path().join("owner.key")).unwrap();
@@ -182,6 +185,7 @@ impl Pair {
     }
     fn send(&self, text: &str, files: Vec<FilePart>, request: &str) -> AgentOp {
         AgentOp::Send {
+            file_ids: vec![],
             recipient: self.agents[1].clone(),
             request_id: request.into(),
             text: text.into(),
@@ -239,6 +243,7 @@ async fn remote_images_scoped_replies_and_authenticated_receipts_survive_restart
         pair.agent(
             1,
             AgentOp::Send {
+                file_ids: vec![],
                 recipient: pair.agents[0].clone(),
                 request_id: Uuid::new_v4().to_string(),
                 text: "unsolicited".into(),
@@ -251,6 +256,7 @@ async fn remote_images_scoped_replies_and_authenticated_receipts_survive_restart
     ok(pair.agent(
         1,
         AgentOp::Reply {
+            file_ids: vec![],
             message_id: message.clone(),
             request_id: Uuid::new_v4().to_string(),
             text: "scoped feedback".into(),
@@ -594,4 +600,277 @@ async fn revoked_configuration_grant_rejects_pending_edit_without_blocking_later
         }),
         Response::Error(_)
     ));
+}
+
+fn import_file(pair: &Pair, bytes: &[u8]) -> String {
+    let folders = ok(pair.agent(0, AgentOp::FilePaths));
+    fs::write(
+        std::path::Path::new(folders["import_directory"].as_str().unwrap())
+            .join("private-render.bin"),
+        bytes,
+    )
+    .unwrap();
+    ok(pair.agent(
+        0,
+        AgentOp::FileImport {
+            request_id: Uuid::new_v4().to_string(),
+            name: "private-render.bin".into(),
+            media_type: "application/x-gent-private-image".into(),
+        },
+    ))["file"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+fn attached_message(pair: &Pair, id: &str) -> AgentOp {
+    AgentOp::Send {
+        recipient: pair.agents[1].clone(),
+        request_id: Uuid::new_v4().to_string(),
+        text: "attachment visual review".into(),
+        files: vec![],
+        file_ids: vec![id.into()],
+    }
+}
+fn file_ready(pair: &Pair, node: usize, id: &str) -> bool {
+    matches!(pair.agent(node,AgentOp::FileStatus {file_id:id.into()}),Response::Ok(v) if v["state"]=="ready")
+}
+async fn receive_file(pair: &Pair, node: usize) -> String {
+    pair.wait(|| {
+        !ok(pair.agent(node, AgentOp::Inbox))
+            .as_array()
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    let inbox = ok(pair.agent(node, AgentOp::Inbox));
+    let id = inbox[0]["attachments"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pair.wait(|| file_ready(pair, node, &id)).await;
+    id
+}
+fn exported(pair: &Pair, node: usize, id: &str) -> Vec<u8> {
+    let result = ok(pair.agent(node, AgentOp::FileExport { file_id: id.into() }));
+    fs::read(result["path"].as_str().unwrap()).unwrap()
+}
+#[tokio::test]
+async fn automatic_attachment_dispatch_recovers_storage_loss_restart_and_rechecks_revocation() {
+    use std::sync::atomic::Ordering;
+    let relay = relay::RelayServer::start().await;
+    let mut pair = Pair::new(&relay).await;
+    pair.allow().await;
+    let bytes = vec![0x83; 2 * 1024 * 1024 + 7];
+    let source = import_file(&pair, &bytes);
+    pair.tasks[1].take();
+    relay.mode.store(1, Ordering::SeqCst);
+    let action = attached_message(&pair, &source);
+    let sent = ok(pair.agent(0, action.clone()));
+    pair.reopen(0);
+    relay.mode.store(0, Ordering::SeqCst);
+    pair.wait(|| {
+        relay.data.lock().unwrap().iter().any(|(k, v)| {
+            k.starts_with("objects/") && v.len() == 10 && v[1..].iter().all(|b| !b.is_empty())
+        })
+    })
+    .await;
+    // Erase relay ciphertext while keeping the sender's durable uploaded flags.
+    relay
+        .data
+        .lock()
+        .unwrap()
+        .retain(|k, _| !k.starts_with("objects/"));
+    pair.reopen(0);
+    pair.wait(|| {
+        relay
+            .data
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|k| k.starts_with("objects/"))
+    })
+    .await;
+    pair.reopen(1);
+    let id = receive_file(&pair, 1).await;
+    assert_ne!(id, source);
+    assert_eq!(exported(&pair, 1, &id), bytes);
+    assert_eq!(ok(pair.agent(0, action))["message_id"], sent["message_id"]);
+    let inbox = ok(pair.agent(1, AgentOp::Inbox));
+    let reply = AgentOp::Reply {
+        message_id: inbox[0]["id"].as_str().unwrap().into(),
+        request_id: Uuid::new_v4().to_string(),
+        text: "review result".into(),
+        files: vec![],
+        file_ids: vec![id.clone()],
+    };
+    ok(pair.agent(1, reply.clone()));
+    pair.reopen(1);
+    let returned = receive_file(&pair, 0).await;
+    assert_ne!(returned, id);
+    assert_eq!(exported(&pair, 0, &returned), bytes);
+    assert_eq!(ok(pair.agent(1, reply))["duplicate"], true);
+    // Inspect every opaque mailbox packet and object; private metadata remains at endpoints.
+    for entry in relay.data.lock().unwrap().values() {
+        for bytes in entry {
+            for private in [
+                "private-render.bin",
+                "application/x-gent-private-image",
+                "attachment visual review",
+            ] {
+                assert!(
+                    !bytes
+                        .windows(private.len())
+                        .any(|w| w == private.as_bytes())
+                );
+            }
+        }
+    }
+    let revision = pair.owner(
+        0,
+        OwnerOp::SetPolicy {
+            policy: Policy::default(),
+        },
+    )["revision"]
+        .as_u64()
+        .unwrap();
+    pair.wait(|| config::load(pair.homes[1].path()).unwrap().applied_revision == Some(revision))
+        .await;
+    assert!(matches!(
+        pair.agent(1, AgentOp::FileExport { file_id: id }),
+        Response::Error(_)
+    ));
+    assert!(matches!(
+        pair.agent(0, AgentOp::FileExport { file_id: returned }),
+        Response::Error(_)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires local Wrangler and GENT_TEST_RELAY_TOKEN_FILE"]
+async fn wrangler_dispatches_agent_attachments_with_native_files_and_restart() {
+    let endpoint = std::env::var("GENT_TEST_RELAY_URL").unwrap();
+    let token = config::read_private(std::path::Path::new(
+        &std::env::var("GENT_TEST_RELAY_TOKEN_FILE").unwrap(),
+    ))
+    .unwrap();
+    let mut pair = Pair::configured(&endpoint, &token).await;
+    pair.allow().await;
+    let bytes: Vec<_> = (0..gent_protocol::file_objects::MAX_FILE_BYTES)
+        .map(|i| (i * 31 + 7) as u8)
+        .collect();
+    let source = import_file(&pair, &bytes);
+    pair.tasks[1].take();
+    let action = attached_message(&pair, &source);
+    let sent = ok(pair.agent(0, action.clone()));
+    pair.reopen(0);
+    pair.reopen(1);
+    // 32 MiB debug crypto plus actual R2 writes can take longer than small tests.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    let received = loop {
+        let inbox = ok(pair.agent(1, AgentOp::Inbox));
+        if let Some(id) = inbox
+            .get(0)
+            .and_then(|m| m["attachments"][0]["id"].as_str())
+            && file_ready(&pair, 1, id)
+        {
+            break id.to_owned();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "large agent attachment timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    pair.reopen(1);
+    assert_eq!(exported(&pair, 1, &received), bytes);
+    assert_eq!(ok(pair.agent(0, action))["message_id"], sent["message_id"]);
+    let inbox = ok(pair.agent(1, AgentOp::Inbox));
+    let reply = AgentOp::Reply {
+        message_id: inbox[0]["id"].as_str().unwrap().into(),
+        request_id: Uuid::new_v4().to_string(),
+        text: "verified complete image".into(),
+        files: vec![],
+        file_ids: vec![received.clone()],
+    };
+    ok(pair.agent(1, reply));
+    pair.reopen(1);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    let returned = loop {
+        let inbox = ok(pair.agent(0, AgentOp::Inbox));
+        if let Some(id) = inbox
+            .get(0)
+            .and_then(|m| m["attachments"][0]["id"].as_str())
+            && file_ready(&pair, 0, id)
+        {
+            break id.to_owned();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "large forwarded file timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_ne!(received, returned);
+    assert_eq!(exported(&pair, 0, &returned), bytes);
+    if let Ok(root) = std::env::var("GENT_AGENT_FILE_PROOF_ROOT") {
+        for task in &mut pair.tasks {
+            task.take();
+        }
+        for (i, home) in pair.homes.iter().enumerate() {
+            let path = std::path::Path::new(&root).join(format!("node-{i}"));
+            config::private_dir(&path).unwrap();
+            // SQLite's backup is taken while the Store mutex excludes mutations.
+            // VACUUM INTO avoids depending on uncheckpointed WAL files.
+            let _guard = pair.stores[i].lock().unwrap();
+            let db = rusqlite::Connection::open(home.path().join("state.sqlite3")).unwrap();
+            db.execute(
+                "VACUUM INTO ?1",
+                [path.join("state.sqlite3").to_str().unwrap()],
+            )
+            .unwrap();
+            fs::set_permissions(
+                path.join("state.sqlite3"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        config::write_private(&std::path::Path::new(&root).join("report.json"),&serde_json::to_vec(&json!({"sent":sent,"source":source,"received":received,"returned":returned,"bytes":bytes.len()})).unwrap()).unwrap();
+        println!("Retained agent attachment evidence in {root}");
+    }
+}
+
+#[tokio::test]
+async fn configuration_sync_continues_while_object_requests_are_stalled() {
+    use std::sync::atomic::Ordering;
+    let relay = relay::RelayServer::start().await;
+    let pair = Pair::new(&relay).await;
+    pair.allow().await;
+    let source = import_file(&pair, b"file server stall");
+    relay.mode.store(6, Ordering::SeqCst);
+    ok(pair.agent(0, attached_message(&pair, &source)));
+    pair.wait(|| relay.data.lock().unwrap().contains_key("blocked-object"))
+        .await;
+    // The file HTTP call remains in flight for six seconds. Ordinary signed
+    // configuration must propagate without awaiting it or consuming its retries.
+    let revision = pair.owner(
+        0,
+        OwnerOp::SetPolicy {
+            policy: Policy::default(),
+        },
+    )["revision"]
+        .as_u64()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while config::load(pair.homes[1].path()).unwrap().applied_revision != Some(revision) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("file transfer blocked configuration sync");
+    assert!(
+        ok(pair.agent(1, AgentOp::Inbox))
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }

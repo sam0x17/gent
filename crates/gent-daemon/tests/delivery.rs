@@ -51,7 +51,8 @@ fn policy(store: &mut Store, owner: &str, policy: Policy) {
     }));
 }
 fn send(recipient: &str, request_id: &str) -> AgentOp {
-    AgentOp::Send {recipient:recipient.into(),request_id:request_id.into(),text:"review this image".into(),files:vec![FilePart {name:"pixel.png".into(),media_type:"image/png".into(),data_base64:"iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGP4z/AfK2IYWhIA0ad/gXfwoGMAAAAASUVORK5CYII=".into()}]}
+    AgentOp::Send {
+                file_ids: vec![],recipient:recipient.into(),request_id:request_id.into(),text:"review this image".into(),files:vec![FilePart {name:"pixel.png".into(),media_type:"image/png".into(),data_base64:"iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGP4z/AfK2IYWhIA0ad/gXfwoGMAAAAASUVORK5CYII=".into()}]}
 }
 
 #[test]
@@ -134,6 +135,7 @@ fn registered_identity_permissions_and_restart_delivery() {
         &mut store,
         &kb,
         AgentOp::Reply {
+            file_ids: vec![],
             message_id,
             request_id: uuid::Uuid::new_v4().to_string(),
             text: "make it blue".into(),
@@ -190,6 +192,7 @@ fn queued_work_is_rechecked_and_revoked_credentials_cannot_reregister() {
             &mut store,
             &kb,
             AgentOp::Reply {
+                file_ids: vec![],
                 message_id,
                 request_id: uuid::Uuid::new_v4().to_string(),
                 text: "no".into(),
@@ -237,6 +240,7 @@ fn exchange_limits_and_expiry_are_enforced() {
             &mut store,
             key,
             AgentOp::Reply {
+                file_ids: vec![],
                 message_id: parent,
                 request_id: uuid::Uuid::new_v4().to_string(),
                 text: "reply".into(),
@@ -252,6 +256,7 @@ fn exchange_limits_and_expiry_are_enforced() {
             &mut store,
             &ka,
             AgentOp::Reply {
+                file_ids: vec![],
                 message_id: parent,
                 request_id: uuid::Uuid::new_v4().to_string(),
                 text: "extra".into(),
@@ -276,6 +281,7 @@ fn exchange_limits_and_expiry_are_enforced() {
             &mut store,
             &kb,
             AgentOp::Reply {
+                file_ids: vec![],
                 message_id: next["message_id"].as_str().unwrap().into(),
                 request_id: uuid::Uuid::new_v4().to_string(),
                 text: "late".into(),

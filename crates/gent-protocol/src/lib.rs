@@ -215,6 +215,8 @@ pub struct Message {
     pub recipient: String,
     pub text: String,
     pub files: Vec<FilePart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<FileDescriptor>,
     pub reply_to: Option<String>,
     pub created_at: i64,
     pub expires_at: i64,
@@ -232,12 +234,26 @@ pub enum AgentOp {
     },
     Identity,
     Agents,
+    FilePaths,
+    FileImport {
+        request_id: String,
+        name: String,
+        media_type: String,
+    },
+    FileStatus {
+        file_id: String,
+    },
+    FileExport {
+        file_id: String,
+    },
     Send {
         recipient: String,
         request_id: String,
         text: String,
         #[serde(default)]
         files: Vec<FilePart>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        file_ids: Vec<String>,
     },
     Reply {
         message_id: String,
@@ -245,6 +261,8 @@ pub enum AgentOp {
         text: String,
         #[serde(default)]
         files: Vec<FilePart>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        file_ids: Vec<String>,
     },
     Inbox,
     Ack {
@@ -269,6 +287,8 @@ pub enum AgentOp {
         text: String,
         #[serde(default)]
         files: Vec<FilePart>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        file_ids: Vec<String>,
     },
     RelayTurnStatus {
         turn_id: String,
@@ -284,6 +304,8 @@ pub enum AgentOp {
         text: String,
         #[serde(default)]
         files: Vec<FilePart>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        file_ids: Vec<String>,
         outcome: RelayResponseKind,
     },
     RelayCancel {

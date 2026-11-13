@@ -25,7 +25,32 @@ struct GentMcp {
 fn tools() -> Vec<Tool> {
     let text = json!({"type":"string","maxLength":65536});
     let file = json!({"type":"object","additionalProperties":false,"required":["name","media_type","data_base64"],"properties":{"name":{"type":"string"},"media_type":{"type":"string"},"data_base64":{"type":"string"}}});
+    let file_ids = json!({"type":"array","maxItems":4,"uniqueItems":true,"items":{"type":"string","format":"uuid"}});
     let declarations = vec![
+        (
+            "gent_file_paths",
+            "Get this agent's local file handoff folders. A CLI host can copy real files into import_directory with its own filesystem tools. Paths refer to the daemon machine.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "gent_file_import",
+            "Import a regular file from this agent's import_directory by basename, up to 32 MiB. Returns a file ID usable in file_ids on send, reply, relay_send, or relay_respond. Keep source bytes unchanged for identical request_id retries.",
+            json!({"request_id":{"type":"string","format":"uuid"},"name":{"type":"string","maxLength":128},"media_type":{"type":"string","maxLength":128}}),
+            vec!["request_id", "name", "media_type"],
+        ),
+        (
+            "gent_file_status",
+            "Check a permitted file ID for pending download or ready bytes. Keys are never returned. Permissions and expiry are checked on every call.",
+            json!({"file_id":{"type":"string","format":"uuid"}}),
+            vec!["file_id"],
+        ),
+        (
+            "gent_file_export",
+            "Verify and export an authorized complete file into this agent's export_directory. Returns a local path for host file or image tools. Check gent_file_status while pending. Existing files with different bytes are never overwritten.",
+            json!({"file_id":{"type":"string","format":"uuid"}}),
+            vec!["file_id"],
+        ),
         (
             "gent_register",
             "Announce this conversation. The connection determines identity and node; registration does not grant messaging permissions.",
@@ -47,13 +72,13 @@ fn tools() -> Vec<Tool> {
         (
             "gent_send",
             "Send to the recipient agent ID returned by gent_agents. Use a new UUID request_id for new work; reuse it only for an identical retry. Optional files contain actual bytes.",
-            json!({"recipient":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file}}),
+            json!({"recipient":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
             vec!["recipient", "request_id", "text"],
         ),
         (
             "gent_reply",
             "Reply using a message ID from gent_inbox, within its bounded exchange. Reuse request_id only for an identical retry.",
-            json!({"message_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file}}),
+            json!({"message_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
             vec!["message_id", "request_id", "text"],
         ),
         (
@@ -95,7 +120,7 @@ fn tools() -> Vec<Tool> {
         (
             "gent_relay_send",
             "Forward one new turn to a saved attachment. Preserve the user's text and file bytes. A fresh UUID request_id creates work; an identical retry never resends it or changes its original target. The message remains attributed to this intermediary, without proof of human authorship.",
-            json!({"attachment_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file}}),
+            json!({"attachment_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
             vec!["attachment_id", "request_id", "text"],
         ),
         (
@@ -119,7 +144,7 @@ fn tools() -> Vec<Tool> {
         (
             "gent_relay_respond",
             "As the target, respond to your current relay turn with text and optional files. Use progress while work remains; complete to finish; cancelled only after handling a cancellation request. A final outcome advances the queue. Reuse request_id only for an identical retry. Normal host execution approvals still apply.",
-            json!({"turn_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"outcome":{"type":"string","enum":["progress","complete","cancelled"]}}),
+            json!({"turn_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids,"outcome":{"type":"string","enum":["progress","complete","cancelled"]}}),
             vec!["turn_id", "request_id", "text", "outcome"],
         ),
         (

@@ -152,6 +152,10 @@ async fn serve(
         return;
     }
     requests.fetch_add(1, Ordering::SeqCst);
+    if request[1].starts_with("/v1/objects/") && mode.load(Ordering::SeqCst) == 6 {
+        data.lock().unwrap().insert("blocked-object".into(), vec![]);
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    }
     let (status, response) = {
         let parts: Vec<_> = request[1].split('/').collect();
         let mut data = data.lock().unwrap();
@@ -159,6 +163,14 @@ async fn serve(
             (401, vec![])
         } else if request[1] == "/v1/watch" || mode.load(Ordering::SeqCst) == 1 {
             (503, vec![])
+        } else if parts.get(2) == Some(&"objects") {
+            object(
+                &mut data,
+                &parts,
+                &request[0],
+                &body,
+                mode.load(Ordering::SeqCst),
+            )
         } else if parts.len() == 4 {
             let next = if mode.load(Ordering::SeqCst) == 3 {
                 9999
@@ -202,4 +214,62 @@ async fn serve(
     );
     let _ = socket.write_all(header.as_bytes()).await;
     let _ = socket.write_all(&response).await;
+}
+
+// Development object transport for daemon scheduling tests. The Worker suite
+// separately verifies service quotas, conditional writes, expiry, and cleanup.
+fn object(
+    data: &mut BTreeMap<String, Vec<Vec<u8>>>,
+    parts: &[&str],
+    method: &str,
+    body: &[u8],
+    mode: usize,
+) -> (u16, Vec<u8>) {
+    let key = format!("objects/{}", parts[3]);
+    if parts.len() == 4 && method == "PUT" {
+        if let Some(saved) = data.get(&key) {
+            if saved[0] != body {
+                return (409, vec![]);
+            }
+        } else {
+            let manifest: gent_protocol::file_objects::Manifest =
+                serde_json::from_slice(body).unwrap();
+            let mut saved = vec![body.to_vec()];
+            saved.resize(manifest.chunks.len() + 1, vec![]);
+            data.insert(key.clone(), saved);
+        }
+    }
+    let Some(saved) = data.get_mut(&key) else {
+        return (404, vec![]);
+    };
+    let manifest: gent_protocol::file_objects::Manifest =
+        serde_json::from_slice(&saved[0]).unwrap();
+    if parts.len() == 4 {
+        let uploaded: Vec<_> = saved[1..]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| (!b.is_empty()).then_some(i))
+            .collect();
+        let complete = uploaded.len() == manifest.chunks.len();
+        let upload_until = manifest
+            .expires_at
+            .min(gent_daemon::store::now() as u64 + 3600);
+        return (200,serde_json::to_vec(&json!({"manifest":manifest,"uploaded":uploaded,"complete":complete,"upload_until":upload_until})).unwrap());
+    }
+    let index: usize = parts[4].parse().unwrap();
+    if method == "PUT" {
+        if !saved[index + 1].is_empty() && saved[index + 1] != body {
+            return (409, vec![]);
+        }
+        saved[index + 1] = body.to_vec();
+        (200,serde_json::to_vec(&json!({"stored":true,"index":index,"complete":saved[1..].iter().all(|b|!b.is_empty())})).unwrap())
+    } else if saved[index + 1].is_empty() {
+        (404, vec![])
+    } else {
+        let mut bytes = saved[index + 1].clone();
+        if mode == 2 {
+            bytes[0] ^= 1;
+        }
+        (200, bytes)
+    }
 }

@@ -68,11 +68,46 @@ pub enum Event {
         sender: Box<Registration>,
         request_id: String,
         message: Message,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<PrivateAttachment>,
     },
     Receipt {
         message_id: String,
         delivered: bool,
     },
+}
+
+/// Private MLS payload only. Never use this type in public agent responses.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivateAttachment {
+    #[serde(with = "private_grant")]
+    pub grant: gent_crypto::files::FileGrant,
+    pub manifest: gent_protocol::file_objects::Manifest,
+}
+
+mod private_grant {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use gent_crypto::files::{FileGrant, MAX_GRANT_BYTES};
+    use serde::{Deserialize, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S: Serializer>(grant: &FileGrant, s: S) -> Result<S::Ok, S::Error> {
+        let bytes = grant
+            .encode_private()
+            .map_err(|_| serde::ser::Error::custom("invalid file grant"))?;
+        let encoded = Zeroizing::new(STANDARD.encode(bytes.as_slice()));
+        s.serialize_str(&encoded)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<FileGrant, D::Error> {
+        let encoded = Zeroizing::new(String::deserialize(d)?);
+        let bad = || serde::de::Error::custom("invalid file grant");
+        if encoded.len() > MAX_GRANT_BYTES.div_ceil(3) * 4 {
+            return Err(bad());
+        }
+        let bytes = Zeroizing::new(STANDARD.decode(encoded.as_bytes()).map_err(|_| bad())?);
+        FileGrant::decode_private(&bytes).map_err(|_| bad())
+    }
 }
 
 /// Private bootstrap metadata, routed through established owner links. MLS key

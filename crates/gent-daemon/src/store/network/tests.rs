@@ -142,6 +142,7 @@ impl Pair {
         self.agent(
             0,
             AgentOp::Send {
+                file_ids: vec![],
                 recipient: self.agents[1].clone(),
                 request_id: Uuid::new_v4().to_string(),
                 text: "private work".into(),
@@ -200,6 +201,7 @@ async fn remote_relay_replies_cannot_strip_or_substitute_authenticated_turn_cont
         .agent(
             0,
             AgentOp::RelaySend {
+                file_ids: vec![],
                 attachment_id: attachment,
                 request_id: Uuid::new_v4().to_string(),
                 text: "original turn".into(),
@@ -238,6 +240,7 @@ async fn remote_relay_replies_cannot_strip_or_substitute_authenticated_turn_cont
                 .import_event(
                     pair.stores[1].identity.node.id(),
                     Event::Message {
+                        attachments: vec![],
                         sender: Box::new(registration.clone()),
                         request_id: request,
                         message,
@@ -248,6 +251,7 @@ async fn remote_relay_replies_cannot_strip_or_substitute_authenticated_turn_cont
         tx.rollback().unwrap();
     }
     let response = AgentOp::RelayRespond {
+        file_ids: vec![],
         turn_id: turn.clone(),
         request_id: Uuid::new_v4().to_string(),
         text: "verified reply".into(),
@@ -274,6 +278,7 @@ async fn crossed_cancellation_and_completion_do_not_reopen_or_lose_a_remote_turn
     let mut pair = Pair::new().await;
     let attachment = pair.relay_attach();
     let send = AgentOp::RelaySend {
+        file_ids: vec![],
         attachment_id: attachment.clone(),
         request_id: Uuid::new_v4().to_string(),
         text: "work".into(),
@@ -297,6 +302,7 @@ async fn crossed_cancellation_and_completion_do_not_reopen_or_lose_a_remote_turn
     };
     pair.agent(0, cancel.clone()).unwrap();
     let response = AgentOp::RelayRespond {
+        file_ids: vec![],
         turn_id: turn.clone(),
         request_id: Uuid::new_v4().to_string(),
         text: "already finished".into(),
@@ -356,6 +362,7 @@ async fn grant_revocation_blocks_relay_turns_before_encryption_and_before_target
         .agent(
             0,
             AgentOp::RelaySend {
+                file_ids: vec![],
                 attachment_id: attachment.clone(),
                 request_id: Uuid::new_v4().to_string(),
                 text: "accepted earlier".into(),
@@ -375,6 +382,7 @@ async fn grant_revocation_blocks_relay_turns_before_encryption_and_before_target
         .agent(
             0,
             AgentOp::RelaySend {
+                file_ids: vec![],
                 attachment_id: attachment,
                 request_id: Uuid::new_v4().to_string(),
                 text: "must not encrypt".into(),
@@ -597,6 +605,7 @@ async fn enrolled_peer_cannot_claim_unknown_foreign_agent_or_forge_reply_or_rece
             .import_event(
                 pair.stores[0].identity.node.id(),
                 Event::Message {
+                    attachments: vec![],
                     sender: Box::new(sender),
                     request_id: request,
                     message
@@ -642,6 +651,7 @@ async fn remote_exchange_budget_stays_bounded_when_both_nodes_queue_replies() {
     let initial = pair.send(vec![]).unwrap();
     pair.pump();
     let reply = |message: &Value| AgentOp::Reply {
+        file_ids: vec![],
         message_id: message["message_id"].as_str().unwrap().into(),
         request_id: Uuid::new_v4().to_string(),
         text: "response".into(),
@@ -845,4 +855,160 @@ async fn configuration_results_require_the_original_writer_request_and_verified_
         .unwrap()["state"],
         "applied"
     );
+}
+
+#[tokio::test]
+async fn attachment_grants_reject_substitution_and_downloads_resume_with_current_authority() {
+    let mut pair = Pair::new().await;
+    let paths = pair.agent(0, AgentOp::FilePaths).unwrap();
+    let bytes = vec![0x91; gent_crypto::files::CHUNK_BYTES * 2 + 7];
+    std::fs::write(
+        std::path::Path::new(paths["import_directory"].as_str().unwrap()).join("native.bin"),
+        &bytes,
+    )
+    .unwrap();
+    let imported = pair
+        .agent(
+            0,
+            AgentOp::FileImport {
+                request_id: Uuid::new_v4().to_string(),
+                name: "native.bin".into(),
+                media_type: "application/octet-stream".into(),
+            },
+        )
+        .unwrap();
+    let sent = pair
+        .agent(
+            0,
+            AgentOp::Send {
+                recipient: pair.agents[1].clone(),
+                request_id: Uuid::new_v4().to_string(),
+                text: "file review".into(),
+                files: vec![],
+                file_ids: vec![imported["file"]["id"].as_str().unwrap().into()],
+            },
+        )
+        .unwrap();
+    let message_id = sent["message_id"].as_str().unwrap();
+    let body: Vec<u8> = pair.stores[0]
+        .db
+        .query_row(
+            "SELECT body FROM network_events WHERE subject=?1",
+            [message_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let record: Record = serde_json::from_slice(&body).unwrap();
+    let id = match &record.event {
+        Event::Message { message, .. } => message.attachments[0].id.clone(),
+        _ => panic!(),
+    };
+    // Message publication waits for all object chunks; a restart preserves the job.
+    pair.pump();
+    assert!(
+        pair.agent(1, AgentOp::Inbox)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    pair.reopen(0);
+    let job = pair.stores[0].file_transfer(&id).unwrap().unwrap();
+    assert_eq!(job.missing, vec![0, 1, 2]);
+    let chunks: Vec<_> = (0..3)
+        .map(|i| pair.stores[0].file_upload(&id, i).unwrap())
+        .collect();
+    pair.stores[0].file_uploaded(&id, &[0, 1, 2]).unwrap();
+    // A forged grant for the same visible descriptor must be rejected, including
+    // duplicate messages after the original object has expired/reaped.
+    for attack in 0..4 {
+        let mut wire: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        match attack {
+            0 => {
+                wire["event"]["attachments"] = json!([]);
+            }
+            1 => {
+                wire["event"]["attachments"][0]["manifest"]["expires_at"] = json!(1);
+            }
+            2 => {
+                wire["event"]["message"]["attachments"][0]["name"] = json!("substituted.bin");
+            }
+            _ => {
+                wire["event"]["attachments"][0]["manifest"]["chunks"][0]["bytes"] = json!(17);
+            }
+        }
+        let forged: Record = serde_json::from_value(wire).unwrap();
+        let store = &pair.stores[1];
+        let tx = store.db.unchecked_transaction().unwrap();
+        let mut session = store.network_session(&tx, store.identity.state(&tx).unwrap());
+        assert!(
+            session
+                .import_event(pair.stores[0].identity.node.id(), forged.event)
+                .is_err()
+        );
+        tx.rollback().unwrap();
+    }
+    pair.pump();
+    let status = pair
+        .agent(
+            1,
+            AgentOp::FileStatus {
+                file_id: id.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(status["state"], "pending");
+    pair.stores[1].file_received(&id, 0, &chunks[0]).unwrap();
+    pair.reopen(1);
+    assert_eq!(
+        pair.stores[1].file_transfer(&id).unwrap().unwrap().missing,
+        vec![1, 2]
+    );
+    let mut bad = chunks[1].clone();
+    bad[0] ^= 1;
+    assert!(pair.stores[1].file_received(&id, 1, &bad).is_err());
+    pair.stores[1].file_received(&id, 1, &chunks[1]).unwrap();
+    pair.stores[1].file_received(&id, 2, &chunks[2]).unwrap();
+    let exported = pair
+        .agent(
+            1,
+            AgentOp::FileExport {
+                file_id: id.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::read(exported["path"].as_str().unwrap()).unwrap(),
+        bytes
+    );
+    let mut wire: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let grant = &mut wire["event"]["attachments"][0]["grant"];
+    let mut secret: serde_json::Value =
+        serde_json::from_slice(&STANDARD.decode(grant.as_str().unwrap()).unwrap()).unwrap();
+    secret["key"][0] = json!(secret["key"][0].as_u64().unwrap() ^ 1);
+    *grant = json!(STANDARD.encode(serde_json::to_vec(&secret).unwrap()));
+    for reaped in [false, true] {
+        let store = &pair.stores[1];
+        let tx = store.db.unchecked_transaction().unwrap();
+        if reaped {
+            tx.execute("DELETE FROM file_objects WHERE id=?1", [&id])
+                .unwrap();
+        }
+        let mut session = store.network_session(&tx, store.identity.state(&tx).unwrap());
+        let changed: Record = serde_json::from_value(wire.clone()).unwrap();
+        assert!(
+            session
+                .import_event(pair.stores[0].identity.node.id(), changed.event)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicting remote file grants")
+        );
+        tx.rollback().unwrap();
+    }
+    pair.policy(false);
+    pair.pump();
+    assert!(pair.stores[0].file_upload(&id, 0).is_err());
+    assert!(pair.stores[1].file_transfer(&id).is_err());
+    assert!(pair.stores[1].file_received(&id, 0, &chunks[0]).is_err());
+    assert!(pair.agent(1, AgentOp::FileExport { file_id: id }).is_err());
 }

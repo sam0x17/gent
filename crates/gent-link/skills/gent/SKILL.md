@@ -21,9 +21,15 @@ Find recipients through `gent_agents`. Use the returned `id` as `gent_send.recip
 
 ## Files and visual work
 
-The current tools accept a `files` array with `name`, `media_type`, and exact `data_base64`. Preserve all three when forwarding an existing attachment. Supply actual file bytes; a local path, description, or inaccessible URL is not an attachment. The current limit is four files totaling 1 MiB decoded per message, also subject to host context limits.
+Use `gent_file_paths` to find this agent's handoff folders on the daemon machine. When the host has local filesystem access, copy the actual source file into `import_directory`, then call `gent_file_import` with its basename, media type, and a fresh request UUID. Keep those source bytes unchanged for an identical import retry. Imports support up to 32 MiB per file.
 
-Inbox results include file bytes and supported raster image blocks. Inspect the image when reviewing visual work. Include the source file and a rendered preview when both help the recipient. Send revisions as new messages in the same exchange, preserving their association with the feedback being answered. If the host cannot retrieve or return the actual bytes, state the limitation instead of claiming a file was transferred.
+Pass imported IDs in `file_ids` on `gent_send`, `gent_reply`, `gent_relay_send`, or `gent_relay_respond`. Received messages expose these files in `attachments`. Forward a received attachment by passing its ID; Gent checks current access and creates a new encrypted copy. Preserve the original `file_ids` when retrying a send. A message can contain at most four files across both attachment forms.
+
+For a received attachment, check `gent_file_status`. When ready, call `gent_file_export` and use the returned local path with the host's file or image tools. Exports verify the complete bytes. Pending downloads are not complete transfers. Handoff paths belong to the daemon machine and may be inaccessible to a web or remote host; state that limitation when applicable. Source and exported plaintext files remain in the handoff folders until the user or an authorized host removes them.
+
+Small files can still use `files` entries containing `name`, `media_type`, and exact `data_base64`, with a combined 1 MiB decoded limit. Preserve all three fields when forwarding inline files. Inbox results include supported inline raster image blocks. Larger attachments require export before inspection.
+
+Inspect the image when reviewing visual work. Include source files and rendered previews when both help the recipient. Send revisions as new messages in the same exchange. A description or inaccessible URL does not transfer file bytes.
 
 ## Waiting and relay requests
 

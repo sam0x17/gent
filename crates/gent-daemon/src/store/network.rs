@@ -224,6 +224,7 @@ impl StoreSession<'_> {
                 sender: Box::new(self.registration(&message.sender)?),
                 request_id: request.into(),
                 message: message.clone(),
+                attachments: self.private_attachments(message)?,
             },
             Some(&message.id),
         )
@@ -381,6 +382,7 @@ impl StoreSession<'_> {
                 sender,
                 request_id,
                 message,
+                attachments,
             } => {
                 self.import_registration(peer, &sender)?;
                 ensure!(
@@ -389,7 +391,7 @@ impl StoreSession<'_> {
                         && !message.acknowledged,
                     "invalid remote message identity"
                 );
-                validate_contents(&message.text, &message.files)?;
+                validate_contents(&message.text, &message.files, message.attachments.len())?;
                 ensure!(
                     message.created_at >= 0
                         && message.created_at <= self.timestamp + 60
@@ -413,6 +415,7 @@ impl StoreSession<'_> {
                     .optional()?;
                 if let Some(previous) = previous {
                     ensure!(previous == payload, "conflicting remote message");
+                    self.bind_attachments(&message, &attachments)?;
                     return Ok(());
                 }
                 if !self.deliverable(&message)? {
@@ -465,8 +468,10 @@ impl StoreSession<'_> {
                     &message.files,
                     &message.reply_to,
                     &message.relay,
+                    &[],
                 )?;
                 self.db.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES(?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
+                self.bind_attachments(&message, &attachments)?;
                 self.record_relay_message(&message)?;
                 Ok(())
             }
@@ -474,12 +479,15 @@ impl StoreSession<'_> {
     }
 }
 
-pub(super) fn validate_contents(text: &str, files: &[FilePart]) -> Result<()> {
+pub(super) fn validate_contents(text: &str, files: &[FilePart], attachments: usize) -> Result<()> {
     ensure!(
-        text.len() <= MAX_TEXT_BYTES && (!text.is_empty() || !files.is_empty()),
+        text.len() <= MAX_TEXT_BYTES && (!text.is_empty() || !files.is_empty() || attachments != 0),
         "invalid message text"
     );
-    ensure!(files.len() <= 4, "at most four files per message");
+    ensure!(
+        files.len() + attachments <= 4,
+        "at most four files per message"
+    );
     let mut total = 0;
     for file in files {
         config::label(&file.name)?;
@@ -672,8 +680,26 @@ impl Store {
         let state = self.identity.state(&self.db)?;
         if let Some(subject) = &subject {
             let session = self.network_session(&self.db, state);
-            if !session.deliverable(&session.message(subject)?)? {
+            let message = session.message(subject)?;
+            if !session.deliverable(&message)? {
                 cancelled = true;
+            } else if !cancelled {
+                for file in &message.attachments {
+                    let status: Option<(u64,u64)> = self.db.query_row(
+                        "SELECT (SELECT COUNT(*) FROM file_chunks WHERE object_id=?1), (SELECT COALESCE(SUM(uploaded),0) FROM file_chunks WHERE object_id=?1) FROM file_objects WHERE id=?1 AND complete=1 AND expires_at>?2",
+                        params![file.id,session.timestamp], |r|Ok((r.get(0)?,r.get(1)?)),
+                    ).optional()?;
+                    match status {
+                        None => {
+                            cancelled = true;
+                            break;
+                        }
+                        Some((present, uploaded)) if present == 0 || present != uploaded => {
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
         if cancelled {
