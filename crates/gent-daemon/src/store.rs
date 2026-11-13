@@ -17,6 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Notify;
+mod pairing;
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -113,6 +114,13 @@ impl Store {
     fn execute(&mut self, request: Request) -> Result<Value> {
         if let Request::Owner { credential, .. } = &request {
             ensure!(hash(credential) == self.owner_hash, "unauthorized");
+        }
+        if let Request::Owner {
+            action: OwnerOp::Pair { cluster_id, action },
+            ..
+        } = request
+        {
+            return self.pair(&cluster_id, action);
         }
         let timestamp = now();
         let tx = self
@@ -312,9 +320,15 @@ impl StoreSession<'_> {
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
+            OwnerOp::Pair { .. } => {
+                anyhow::bail!("pairing must use its owner-authenticated entry point")
+            }
             OwnerOp::Status => Ok(
                 json!({"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":false,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
+            OwnerOp::Nodes => Ok(json!(self.state.state().nodes.iter().map(|(id, member)| {
+                json!({"id":id,"name":member.name,"status":if id == self.identity.node.id() { "local" } else { "unknown" },"revision":self.state.checkpoint().revision})
+            }).collect::<Vec<_>>())),
             OwnerOp::Agents => Ok(serde_json::to_value(self.all_agents()?)?),
             OwnerOp::Providers => {
                 let mut providers = BTreeMap::<String, Vec<Agent>>::new();

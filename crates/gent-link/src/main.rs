@@ -1,4 +1,5 @@
 mod mcp;
+mod pairing;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -48,6 +49,8 @@ enum Command {
     },
     /// List registered agents as the local owner.
     Agents,
+    /// List enrolled nodes; remote presence is currently unknown.
+    Nodes,
     /// Inspect or revoke a registration.
     Agent {
         #[command(subcommand)]
@@ -79,6 +82,11 @@ enum ClusterCommand {
     Status,
     /// Renew the locally held owner-signed configuration lease.
     Renew,
+    /// Join through an SSH-authenticated owner node; keys stay on their own machines.
+    Join(pairing::JoinArgs),
+    /// Private stdio protocol used by cluster join over SSH.
+    #[command(hide = true)]
+    PairingServe,
 }
 #[derive(Subcommand)]
 enum DaemonCommand {
@@ -191,6 +199,15 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Cluster {
             command: Some(ClusterCommand::Renew),
         }) => owner(&home, OwnerOp::Renew).await?,
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Join(args)),
+        }) => pairing::join(&home, args).await?,
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::PairingServe),
+        }) => {
+            pairing::serve(&home).await?;
+            return Ok(());
+        }
         Some(Command::Cluster { .. }) => owner(&home, OwnerOp::Status).await?,
         Some(Command::Daemon {
             command: Some(DaemonCommand::Run),
@@ -207,6 +224,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Some(Command::Providers { .. }) => owner(&home, OwnerOp::Providers).await?,
         Some(Command::Agents) => owner(&home, OwnerOp::Agents).await?,
+        Some(Command::Nodes) => owner(&home, OwnerOp::Nodes).await?,
         Some(Command::Agent {
             command: AgentCommand::Revoke { agent },
         }) => owner(&home, OwnerOp::Revoke { agent_id: agent }).await?,

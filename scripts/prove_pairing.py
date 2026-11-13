@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Opt-in SSH pairing and encrypted config sync between two real machines.
+
+Requires a running local development relay and an already trusted SSH owner host.
+Uses temporary clusters, makes no model calls, and removes its nodes afterward.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import shlex
+import signal
+import subprocess
+import tempfile
+import time
+from urllib.parse import urlparse
+
+
+PREPARE = r'''
+import json, os, pathlib, subprocess, sys, tempfile
+p = json.load(sys.stdin)
+home = pathlib.Path(tempfile.mkdtemp(prefix='gent-owner-pairing-'))
+result = subprocess.run([p['binary'], '--home', str(home), '--json', 'cluster', 'new', 'ssh-proof', '--local'], check=True, capture_output=True, text=True)
+config = json.loads(result.stdout)
+with open(home / 'config.toml', 'a') as f:
+    f.write('\n[relay]\nendpoint = ' + json.dumps(p['relay']) + '\ncredential_file = "relay.key"\n')
+fd = os.open(home / 'relay.key', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, 'w') as f:
+    f.write(p['token'])
+print(json.dumps({'home': str(home), 'cluster': config['cluster']['id'], 'node': config['node']['id']}))
+'''
+LAUNCH = r'''
+import os, pathlib, sys
+home, binary = sys.argv[1:]
+pathlib.Path(home, 'daemon.pid').write_text(str(os.getpid()))
+os.execv(binary, [binary, '--home', home, 'daemon', 'run'])
+'''
+REMOVE = r'''
+import os, pathlib, shutil, signal, sys, time
+home = pathlib.Path(sys.argv[1])
+if home.exists():
+    path = home / 'daemon.pid'
+    if path.exists():
+        pid = int(path.read_text())
+        try:
+            os.kill(pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(.05)
+        else:
+            raise RuntimeError('owner daemon did not stop; retaining its state')
+    shutil.rmtree(home)
+'''
+
+
+def wait_for(check):
+    end = time.monotonic() + 30
+    while time.monotonic() < end:
+        if check():
+            return
+        time.sleep(.1)
+    raise AssertionError('timed out waiting for node/configuration')
+
+
+def stop(process):
+    if process and process.poll() is None:
+        process.send_signal(signal.SIGINT)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--owner', required=True)
+    parser.add_argument('--remote-binary', required=True, help='Absolute Gent binary path on the owner')
+    parser.add_argument('--binary', default='target/debug/gent')
+    parser.add_argument('--relay-url', default='http://127.0.0.1:18787')
+    parser.add_argument('--relay-token-file', required=True)
+    parser.add_argument('--remote-relay-port', type=int, default=18789)
+    args = parser.parse_args()
+    url = urlparse(args.relay_url)
+    assert url.scheme == 'http' and url.hostname == '127.0.0.1' and url.port
+    assert args.remote_binary.startswith('/') and 1024 <= args.remote_relay_port < 65536
+    key = Path(args.relay_token_file)
+    assert not key.is_symlink() and key.stat().st_mode & 0o077 == 0
+    token = key.read_text().strip()
+    assert len(token) == 64 and all(c in '0123456789abcdefABCDEF' for c in token)
+    ssh = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=5', '-o', 'ForwardAgent=no']
+
+    def remote(command, payload=None, check=True):
+        return subprocess.run(ssh + ['--', args.owner, shlex.join(command)], input=payload, capture_output=True, text=True, check=check, timeout=30)
+
+    binary = str(Path(args.binary).resolve())
+    owner_home = None
+    local_daemon = owner_daemon = None
+    with tempfile.TemporaryDirectory(prefix='gent-joined-pairing-') as folder:
+        home = Path(folder) / 'node'
+        local = [binary, '--home', str(home), '--json']
+
+        def cli(*command):
+            result = subprocess.run(local + list(command), check=True, capture_output=True, text=True, timeout=40)
+            return json.loads(result.stdout)
+
+        try:
+            setup = json.loads(remote(['python3', '-c', PREPARE], json.dumps({'binary': args.remote_binary, 'relay': f'http://127.0.0.1:{args.remote_relay_port}', 'token': token})).stdout)
+            owner_home = setup['home']
+            owner = [args.remote_binary, '--home', owner_home, '--json']
+            with open(Path(folder) / 'owner.log', 'w') as log:
+                owner_daemon = subprocess.Popen(ssh + ['-o', 'ExitOnForwardFailure=yes', '-R', f'127.0.0.1:{args.remote_relay_port}:127.0.0.1:{url.port}', '--', args.owner, shlex.join(['python3', '-c', LAUNCH, owner_home, args.remote_binary])], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            wait_for(lambda: remote(owner + ['daemon', 'status'], check=False).returncode == 0)
+            join = ['cluster', 'join', setup['cluster'], '--via', args.owner, '--name', 'joining-machine', '--remote-gent', args.remote_binary, '--remote-home', owner_home, '--relay-endpoint', args.relay_url]
+            assert cli(*join)['joined']
+            identity = (home / 'identity.key').read_bytes()
+            assert identity.startswith(b'GENTKEY2')
+            assert cli(*join)['already_joined']
+            assert (home / 'identity.key').read_bytes() == identity
+
+            def start_local():
+                with open(Path(folder) / 'joined.log', 'a') as log:
+                    return subprocess.Popen(local + ['daemon', 'run'], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+
+            local_daemon = start_local()
+            wait_for(lambda: (home / 'daemon.sock').exists())
+            nodes = cli('nodes')
+            assert len(nodes) == 2 and len({n['id'] for n in nodes}) == 2
+            changed = json.loads(remote(owner + ['node', 'name', 'set', 'owner-after-join']).stdout)
+            wait_for(lambda: cli('cluster')['authority']['revision'] == changed['revision'])
+            assert next(n for n in cli('nodes') if n['id'] == setup['node'])['name'] == 'owner-after-join'
+            assert cli('node', 'name') == 'joining-machine'
+            stop(local_daemon)
+            local_daemon = None
+            changed = json.loads(remote(owner + ['node', 'name', 'set', 'owner-while-peer-offline']).stdout)
+            local_daemon = start_local()
+            wait_for(lambda: (home / 'daemon.sock').exists())
+            wait_for(lambda: cli('cluster')['authority']['revision'] == changed['revision'])
+            assert next(n for n in cli('nodes') if n['id'] == setup['node'])['name'] == 'owner-while-peer-offline'
+            print('PASS: SSH-authenticated two-machine join, node-only keys, idempotent CLI retry, encrypted relay configuration sync, and offline catch-up')
+        finally:
+            stop(local_daemon)
+            if owner_home:
+                remote(['python3', '-c', REMOVE, owner_home])
+            stop(owner_daemon)
+
+
+if __name__ == '__main__':
+    main()

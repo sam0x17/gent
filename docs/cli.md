@@ -31,6 +31,8 @@ gent cluster
 
 Use `gent cluster new` to create a cluster instead of joining one. Creation can prompt for a name. Joining requires an invitation or existing membership and cryptographic enrollment approval; knowing a cluster ID does not grant access.
 
+The development build implements `gent cluster join CLUSTER_UUID --via user@owner-host --name laptop` using an already trusted SSH owner account and a configured development relay. Optional `--remote-gent`, `--remote-home`, and `--relay-endpoint` arguments select nondefault paths or a tunneled relay. It preserves node identity on interrupted retries and imports only the development transport credential, never the owner's signing key. GitHub/invitation enrollment remains pending. See [the tested SSH workflow](local-proof.md#join-another-machine-through-ssh).
+
 Setup must recover from an interrupted step and be safe to rerun. Preserve device identity, existing settings, and unrelated shell configuration. End with a concise status report and the next action, if any.
 
 ## Nodes and clusters
@@ -58,7 +60,7 @@ Names are display labels. Renaming a node must preserve its stable identity, key
 
 Changing the active cluster selects the default context for subsequent CLI commands. It does not move existing agents, pending messages, or relay attachments into another cluster, and it does not leave the old cluster. The daemon can maintain separate connections for joined clusters. An explicit `--cluster <id-or-name>` selects a cluster for one applicable command without changing the default. Keep identities, queues, keys, and policy isolated by cluster.
 
-Node status should distinguish connected, disconnected, degraded, and unknown or stale information. A disconnected node can still have running local agents, so do not report that they have stopped. Show freshness when using cached state. Authorized owner CLI queries can list the cluster's nodes; agent-facing queries must respect that agent's enumeration permissions and avoid leaking hidden agents or counts.
+Node status should distinguish connected, disconnected, degraded, and unknown or stale information. The current `gent nodes` command lists signed membership, reporting the current node as `local` and remote presence as `unknown`. A disconnected node can still have running local agents, so do not report that they have stopped. Show freshness when using cached state. Authorized owner CLI queries can list the cluster's nodes; agent-facing queries must respect that agent's enumeration permissions and avoid leaking hidden agents or counts.
 
 ## Daemon and shell hooks
 

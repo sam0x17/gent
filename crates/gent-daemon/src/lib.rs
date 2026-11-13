@@ -1,6 +1,7 @@
 //! Native daemon with local agent RPC and optional encrypted configuration sync.
 pub mod config;
 pub mod encrypted;
+pub mod pairing;
 pub mod replica;
 mod runtime;
 pub mod store;

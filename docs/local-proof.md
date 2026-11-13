@@ -111,9 +111,38 @@ After a signed change commits, Gent projects the newest state into TOML while pr
 
 Encrypted configuration streams update this same live policy automatically when a development relay is configured. Ordinary CLI/MCP messages remain local.
 
+## Join another machine through SSH
+
+The owner daemon must be running with a configured development relay, as described below. Obtain its cluster UUID with `gent cluster`. On the joining machine, use an existing trusted SSH destination for that owner's OS account:
+
+```sh
+gent --home ~/.gent-peer cluster join CLUSTER_UUID --via sam@owner-host --name laptop
+gent --home ~/.gent-peer daemon run
+```
+
+Gent uses SSH's existing host-key trust with `StrictHostKeyChecking=yes`, noninteractive authentication, and no agent forwarding. It never accepts an unknown host key automatically. The remote login must be able to invoke Gent and read the owner's local RPC credential. Use `--remote-gent /absolute/path/to/gent` and `--remote-home /absolute/private/state` when the defaults do not match the owner machine.
+
+The joining node generates and retains its own signing key. The owner approves its signed enrollment request through the authenticated SSH channel, then both sides establish an MLS configuration stream. Bootstrap metadata, the stream grant, key package, and development relay credential travel inside SSH. The owner's signing key and local RPC credential never leave that machine. This enrolls a trusted daemon with full cluster-configuration access; agent messaging still follows its separate permission policy.
+
+The command imports the owner's relay origin and shared development token into private local storage. `--relay-endpoint http://127.0.0.1:PORT` can override that origin when a development SSH tunnel exposes the relay at a different local address. Without an owner relay, joining stops before enrollment. The shared token is temporary development authorization, not a per-node production credential.
+
+Interrupted joins retain their node key and progress in a private sibling directory, such as `~/.gent-peer.joining`. Rerun the same command and node name to resume. Gent installs the finished runtime atomically and refuses to overwrite another node or unrelated files. A completed retry reports `already_joined`. A stale unconsumed stream grant gets a fresh key package while preserving node identity; obsolete streams still need eventual pruning. Do not delete pending state to repair an interrupted join, since that would lose its identity.
+
+`gent nodes` lists enrolled node IDs and names. Remote presence is currently `unknown`; a membership record does not prove another daemon is online. Joined nodes receive signed configuration changes, but owner edits, including renaming a joined node, cannot yet be forwarded from them. SSH pairing is implemented; GitHub login and invite-based pairing are pending.
+
+An opt-in proof creates temporary nodes on two machines, pairs through the real CLI, checks encrypted configuration delivery through a local relay, restarts the receiving daemon, and verifies catch-up. It needs a running loopback development relay, a private token file, and an already trusted SSH host. It makes no model calls and removes its temporary nodes afterward:
+
+```sh
+python3 scripts/prove_pairing.py --owner sam@owner-host \
+  --remote-binary /absolute/path/to/gent \
+  --relay-token-file /absolute/private/relay.key
+```
+
+This proof passes with a Mac Studio owner and Linux joining node. It tests cross-machine configuration, not remote agent messages or files.
+
 ## Development configuration relay
 
-The transport tests provision enrolled nodes and configuration streams through trusted Rust APIs. There is no normal `gent cluster join` command yet. Adding a relay URL alone does not enroll a node or establish a stream. Joined nodes store their own signing key and verified bootstrap state in `identity.key`, without the owner's signing secret. They can receive updates but cannot yet forward configuration edits to the owner.
+Adding a relay URL alone does not enroll a node or establish a stream. Use SSH pairing above, or the trusted Rust enrollment APIs in transport test fixtures. Joined nodes store their own signing key and verified bootstrap state in `identity.key`, without the owner's signing secret. They can receive updates but cannot yet forward configuration edits to the owner.
 
 For an already provisioned test node, add these machine-local settings to `config.toml` and restart the daemon:
 
@@ -139,4 +168,4 @@ Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per ex
 
 Codex and Claude Code pass explicit pairing, session continuity, and a small image round trip on both OSes. Separate concurrent conversations in normal shared host configurations, automatic binding, and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. The current transport is polling-only. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Remote agent-message encryption and delivery, protected node pairing, edits from joined nodes, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. Automatic configuration sync has been tested through a local relay; a complete workflow between two physical machines is still pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
+Remote agent-message encryption and delivery, invite-based pairing, edits from joined nodes, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing and automatic configuration sync pass between two physical machines through a local relay; a complete agent workflow between them is still pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.

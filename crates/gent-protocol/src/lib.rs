@@ -180,12 +180,42 @@ pub enum AgentOp {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOp {
     Status,
+    Nodes,
     Agents,
     Providers,
-    SetPolicy { policy: Policy },
+    SetPolicy {
+        policy: Policy,
+    },
     Renew,
-    RenameNode { name: String },
-    Revoke { agent_id: String },
+    RenameNode {
+        name: String,
+    },
+    Revoke {
+        agent_id: String,
+    },
+    /// Owner-only bootstrap over an independently authenticated private channel.
+    Pair {
+        cluster_id: String,
+        action: PairingOp,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PairingOp {
+    Snapshot,
+    Enroll {
+        request: String,
+    },
+    Configuration {
+        request_id: String,
+        peer: String,
+        key_package: String,
+    },
+    History {
+        revision: u64,
+        digest: [u8; 32],
+    },
 }
 
 #[derive(Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 # Security component proofs
 
-`gent-crypto` verifies owner-approved node identities and signed configuration history. The live daemon uses that authority for RPC permission checks and owner configuration changes. `gent-daemon::encrypted` supplies MLS messaging and authenticated directional streams, including configuration recovery after authority expires. An optional background dispatcher synchronizes encrypted configuration through a development relay, updating the live database and its policy. Agent-message encryption and remote delivery remain unimplemented in the live RPC path; protected node pairing is also pending.
+`gent-crypto` verifies owner-approved node identities and signed configuration history. The live daemon uses that authority for RPC permission checks and owner configuration changes. `gent-daemon::encrypted` supplies MLS messaging and authenticated directional streams, including configuration recovery after authority expires. An optional background dispatcher synchronizes encrypted configuration through a development relay, updating the live database and its policy. Node pairing is available through authenticated SSH. Agent-message encryption and remote delivery remain unimplemented in the live RPC path.
 
 ## Trust boundary
 
@@ -10,11 +10,11 @@ The owner signing key authorizes membership and policy. Each node has a separate
 
 This version assumes one active configuration writer holding the cluster's owner key. Recovery copies must remain offline until the writer is deliberately replaced. Concurrent holders of that key can sign competing histories; receivers reject forks against their saved checkpoint, but this implementation does not provide distributed consensus between independent owner writers. Delegated administration and owner-key replacement need further design and tests.
 
-Signed states contain private node names, membership, and policy; signatures alone do not conceal them. The configuration dispatcher encrypts these records in established MLS streams before upload. Initial grants and key packages still require protected pairing and have no network publication path. A future hosted bridge must receive only its agent's scoped credentials and grants, never this full configuration or the owner key.
+Signed states contain private node names, membership, and policy; signatures alone do not conceal them. The configuration dispatcher encrypts these records in established MLS streams before upload. Initial grants and key packages travel through authenticated SSH pairing and are never published to the relay in plaintext. A future hosted bridge must receive only its agent's scoped credentials and grants, never this full configuration or the owner key.
 
 ## Keys and signed records
 
-Owner and node keys use Ed25519 through `ed25519-dalek`, with system randomness and strict signature verification. Weak public keys are rejected. A node cannot use the owner key, share another active node's signing key, or reuse a retired key. Secret-bearing types have no `Debug` or serialization implementation. Explicit secret export returns a zeroizing buffer for protected endpoint storage.
+Owner and node keys use Ed25519 through `ed25519-dalek`, with system randomness and strict signature verification. Weak public keys are rejected. A node cannot use the owner key, share another active node's signing key, or reuse a retired key. Owner and node signing-key types have no `Debug` or serialization implementation. Explicit secret export returns a zeroizing buffer for protected endpoint storage.
 
 Signed bodies use [RFC 8785 JSON canonicalization](https://www.rfc-editor.org/rfc/rfc8785.html) through `serde_jcs`. The signing inputs are:
 
@@ -48,13 +48,17 @@ These are validation bounds for the prototype. History compaction and operationa
 1. The new node generates its own signing key and node ID locally.
 2. It obtains the cluster's trusted anchor and current checkpoint through the pairing flow.
 3. It signs an enrollment request containing that anchor, base revision/digest, its node ID and public key, display name, random request ID, and validity period.
-4. The owner independently confirms the complete 32-byte request fingerprint. Echoing the fingerprint shown by an untrusted relay is insufficient. The eventual CLI must compare information from the new node or use an authenticated pairing channel.
+4. The owner authenticates the complete request through the protected pairing channel or independently confirms its complete 32-byte fingerprint. Echoing the fingerprint shown by an untrusted relay is insufficient. The current CLI uses an authenticated SSH channel.
 5. The owner verifies proof of key possession, fingerprint, target cluster, exact current checkpoint, and expiry, then signs the next configuration revision.
-6. The joining node verifies the owner's history against its pinned anchor before treating itself as enrolled.
+6. The joining node obtains a verified checkpoint directly from the trusted owner endpoint, or verifies the owner's history against its independently pinned anchor. Once installed, its authority advances only through verified history.
 
-Requests last 15 minutes. Any intervening configuration revision makes a request stale, so retrying requires a request for the new checkpoint and renewed approval. This intentionally favors explicit approval over concurrent invitations in the initial implementation. Replaying an accepted request cannot add a node again because its base checkpoint is no longer current.
+Requests last 15 minutes. An intervening configuration revision makes an unaccepted request stale; retrying requires a request for the new checkpoint and owner authorization. A protected SSH retry for an already approved node/key returns current bootstrap state without enrolling another node or issuing another revision. A different key, retired node, or different authority is rejected.
 
-The library implements request signing and verification, owner approval, and membership changes. It does not yet implement the invitation transport, pairing UI, GitHub service authorization, or `gent cluster join` command. No enrollment secret or private signing key belongs in a model-visible tool argument.
+`gent cluster join CLUSTER_UUID --via user@owner-host --name laptop` implements this flow through the owner's existing SSH login and local RPC credential. It requires trusted SSH host keys, disables interactive authentication and agent forwarding, bounds protocol frames, and invokes only a dedicated pairing protocol on the remote machine. Remote command paths are shell-quoted; target names cannot inject SSH options or commands. Owner-only pairing RPCs are separate from MCP agent operations. No enrollment secret or private signing key belongs in a model-visible tool argument.
+
+The joining machine saves its own key, the authenticated owner pin, and request IDs in a private sibling staging directory. The owner approves enrollment, then signs a two-node configuration-stream grant using the joining node's fresh MLS key package. A joining runtime receives no owner signing secret. Interrupted retries preserve identity and reuse committed operations; a stale unconsumed grant gets a fresh package and stream. Once its runtime is installed, it verifies bounded history batches through its saved checkpoint before accepting a grant at that exact revision. State is published atomically only after the stream is ready. Old unused streams and abandoned joins currently require future retention/revocation work; local temporary-file deletion does not promise forensic erasure.
+
+The owner must have a configured development relay before enrollment. Pairing copies its shared synthetic relay credential over SSH into a separate private file; it never exports the owner signing key or local RPC credential. This token still lacks production account and per-node scope. First bootstrap trusts the SSH-authenticated endpoint's verified snapshot; subsequent installed state cannot be replaced by a new snapshot. A replaced owner pin is rejected on resume. GitHub authorization, invitation-based pairing, owner-key replacement, and recovery from an old whole-endpoint backup remain separate work.
 
 ## Revisions, expiry, and revocation
 
@@ -84,7 +88,7 @@ The local runtime stores authority, accepted history, MLS tables, registrations,
 
 First startup creates separate owner and node Ed25519 keys and pins genesis in `identity.key`, a mode-0600 file under the private state directory. The original `owner.key` remains the distinct local RPC credential. The owner file's `GENTKEY1` header precedes the two private keys and bootstrap records; it has no model-facing accessor. Key buffers are zeroized on drop. This is protected local storage, without OS keychain encryption or forensic-erasure guarantees.
 
-`Store::install_joined` installs an already enrolled node using its own signing key and independently verified authority. Its `GENTKEY2` file contains that node's private key, trust anchor, checkpoint, and signed state, with no owner signing secret. It creates a separate local RPC credential and atomically installs the initialized directory, refusing to overwrite an existing configuration. This is a trusted Rust API, unavailable through RPC, MCP, or the relay. Its caller must have completed authenticated pairing; the actual pairing transport and CLI remain pending. Joined nodes reject signing operations until edit forwarding to the active owner is implemented.
+`Store::install_joined` installs an already enrolled node using its own signing key and independently verified authority. Its `GENTKEY2` file contains that node's private key, trust anchor, checkpoint, and signed state, with no owner signing secret. It creates a separate local RPC credential and atomically installs the initialized directory, refusing to overwrite an existing configuration. This remains a trusted Rust API; the SSH CLI calls it after authenticated enrollment. A relay or MCP agent cannot invoke it. Joined nodes reject signing and owner-pairing operations until the corresponding delegation or forwarding is implemented.
 
 Bootstrap preserves existing local node and cluster IDs, registrations, and messages. An interrupted bootstrap reuses the same saved keys and genesis. Missing keys for an initialized database, mismatched identities, symlink/shared key files, or an authority anchor that differs from the separate key-file pin fail closed. The database must also be a private regular file. Restoring the entire key file and database from an older backup remains outside rollback protection.
 
@@ -167,7 +171,7 @@ The relay cannot create a valid alternative sequence or skip a predecessor witho
 
 ## Encrypted configuration recovery
 
-`ordered::configuration` gives each trusted receiving daemon its own two-node configuration stream. An owner-signed grant binds the cluster anchor, exact initial checkpoint, group and origin digest, and both node IDs and signing keys. Provisioning requires fresh authority at both ends. The grant, like a key package, contains private identity metadata and must travel through protected pairing; that transport is still pending. A hosted bridge must never receive a configuration grant.
+`ordered::configuration` gives each trusted receiving daemon its own two-node configuration stream. An owner-signed grant binds the cluster anchor, exact initial checkpoint, group and origin digest, and both node IDs and signing keys. Provisioning requires fresh authority at both ends. The grant and key package contain private identity metadata and travel through authenticated SSH pairing. A hosted bridge must never receive a configuration grant.
 
 Only an established configuration stream may receive or retransmit with expired authority. Its saved grant and both endpoint keys must still match known membership. Revocation or signing-key replacement disables it. Fresh authority is required to create a stream, publish a new fragment, or refresh encryption keys. Ordinary data APIs reject configuration streams, and configuration APIs reject data streams. Configuration records never enter the application inbox.
 
@@ -197,7 +201,7 @@ The local Worker persists opaque packets in D1. Its insertion triggers enforce c
 
 The dispatcher rotates through batches of up to 32 streams with four concurrent transfers and never holds the RPC store mutex during network requests. It scans at most 4,096 established streams, excluding known revoked or replaced peers. Idle receivers poll once per second; progressing transfers continue after 10 ms, and errors back off per stream from one to 30 seconds. These are development parameters, not a latency guarantee. Publication wakes immediately, but remote application still waits for polling, transfer, and verification. Push/WebSocket notification transport is needed to meet the intended immediate-sync behavior and reduce polling cost before a hosted trial.
 
-This path handles configuration only. Normal enrollment, edits from joined nodes, encrypted agent traffic, authenticated recipient acknowledgments, queue pruning, service quotas, and retention limits remain unfinished. The test fixture establishes trusted enrollment in-process and does not prove a user-facing pairing flow or a two-physical-machine agent workflow. Local endpoint and relay histories currently grow without pruning.
+This path handles configuration only. Invitation-based enrollment, edits from joined nodes, encrypted agent traffic, authenticated recipient acknowledgments, queue pruning, service quotas, and retention limits remain unfinished. Core dispatcher tests establish enrollment in-process; a separate two-machine CLI proof now covers SSH enrollment and configuration delivery through the actual local Worker. A two-machine agent workflow remains pending. Local endpoint and relay histories currently grow without pruning.
 
 ## Boundaries still to implement
 
@@ -205,7 +209,7 @@ Key packages contain identity metadata and must travel inside an authenticated, 
 
 Node authentication does not authorize one agent to read another agent's messages. MLS inbox/outbox accessors are for trusted local code. Local RPC now checks signed policy inside its queue transaction, and configuration reception shares that authority. Remote message integration still must bind authenticated agent envelopes, enforce registration ownership, recheck policy before encryption and after decryption, and commit cryptographic state with the corresponding agent queue changes.
 
-Configuration streams belong only to trusted daemons; messaging groups serve separately authorized endpoints. Remote agent-message transport, file-key grants, periodic epoch refresh scheduling, pairing UX, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before remote agent delivery is enabled.
+Configuration streams belong only to trusted daemons; messaging groups serve separately authorized endpoints. Remote agent-message transport, file-key grants, periodic epoch refresh scheduling, invitation pairing, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before remote agent delivery is enabled.
 
 ## Verification
 
@@ -221,6 +225,10 @@ Nine runtime tests cover the newest accepted policy across existing handles and 
 
 Five dispatcher tests pass on Linux and macOS. They cover automatic newest-revision replacement, outages, peer restart, complete relay storage loss, corrupted packets and false positions, fragmented large configurations without an agent turn, safe endpoint/credential setup, and applying already-buffered traffic while the relay is offline. Fixtures also verify joined nodes receive no owner signing secret. An additional opt-in test passes through the real local Wrangler/D1 Worker on Linux, including offline catch-up. It is ignored by the default suite and uses the same trusted enrollment fixture.
 
+Nine pairing tests cover identity/credential separation, lost replies at five protocol boundaries, stale requests and grants, concurrent owner edits, replacement owner keys, tampered grants, private/missing key files, refusal to overwrite unrelated state, owner-only access, exact cluster/checkpoint checks, and rejecting enrollment without a configuration transport. Two CLI tests check SSH argument handling and bounded frames. These tests pass on Linux and macOS.
+
+The opt-in `scripts/prove_pairing.py` also passes with a Mac Studio owner and Linux joining node. It invokes the real SSH CLI, checks idempotent join and node-only keys, runs both daemons, observes signed node metadata changes through local Wrangler/D1, and verifies catch-up after the receiver restarts. Temporary nodes and processes are removed afterward. It does not test encrypted agent messages, hosted account authorization, or invite-based pairing.
+
 Run from the public repository root:
 
 ```sh
@@ -229,4 +237,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo check -p gent-crypto --features mls --target wasm32-unknown-unknown --locked
 ```
 
-The native workspace has 77 passing default tests on Linux and macOS, plus the opt-in Worker test described above. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, real pairing UX, and lost-state recovery tests remain required before production use.
+The native workspace has 88 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.
