@@ -18,6 +18,7 @@ use std::{
 };
 use tokio::sync::Notify;
 mod configuration;
+mod mesh;
 mod network;
 mod pairing;
 
@@ -60,6 +61,7 @@ impl Store {
           CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
         network::schema(&db)?;
         configuration::schema(&db)?;
+        mesh::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -339,9 +341,18 @@ impl StoreSession<'_> {
             OwnerOp::Status => Ok(
                 json!({"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
-            OwnerOp::Nodes => Ok(json!(self.state.state().nodes.iter().map(|(id, member)| {
-                json!({"id":id,"name":member.name,"can_configure":member.can_configure,"status":if id == self.identity.node.id() { "local" } else { "unknown" },"revision":self.state.checkpoint().revision})
-            }).collect::<Vec<_>>())),
+            OwnerOp::Nodes => {
+                let links = self
+                    .db
+                    .prepare("SELECT peer,peer_key FROM network_links")?
+                    .query_map([], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+                Ok(json!(self.state.state().nodes.iter().map(|(id, member)| {
+                    json!({"id":id,"name":member.name,"can_configure":member.can_configure,"data_link":links.get(id).is_some_and(|key| key.as_slice() == member.signing_key),"status":if id == self.identity.node.id() { "local" } else { "unknown" },"revision":self.state.checkpoint().revision})
+                }).collect::<Vec<_>>()))
+            }
             OwnerOp::Agents => Ok(serde_json::to_value(self.all_agents()?)?),
             OwnerOp::Providers => {
                 let mut providers = BTreeMap::<String, Vec<Agent>>::new();
@@ -361,26 +372,52 @@ impl StoreSession<'_> {
                 None => self.configuration_requests(),
             },
             OwnerOp::DelegateConfiguration { node_id, allow } => {
-                let update = self.state.delegate_configuration(self.identity.signing_owner()?, &node_id, allow, self.timestamp as u64)?;
+                let update = self.state.delegate_configuration(
+                    self.identity.signing_owner()?,
+                    &node_id,
+                    allow,
+                    self.timestamp as u64,
+                )?;
                 self.state = self.identity.apply(self.db, update)?;
-                Ok(json!({"applied":true,"revision":self.state.checkpoint().revision,"node_id":node_id,"can_configure":allow}))
+                Ok(
+                    json!({"applied":true,"revision":self.state.checkpoint().revision,"node_id":node_id,"can_configure":allow}),
+                )
             }
             OwnerOp::SetPolicy { policy } => {
                 let disk = config::load_for_runtime(self.home)?;
-                ensure!(disk.node.id == self.config.node.id && disk.cluster.id == self.config.cluster.id, "cannot change active identities while daemon runs");
-                self.submit_configuration(&uuid::Uuid::new_v4().to_string(), ConfigurationEdit::Replace { cluster_name: disk.cluster.name, node_name: disk.node.name, policy })
+                ensure!(
+                    disk.node.id == self.config.node.id
+                        && disk.cluster.id == self.config.cluster.id,
+                    "cannot change active identities while daemon runs"
+                );
+                self.submit_configuration(
+                    &uuid::Uuid::new_v4().to_string(),
+                    ConfigurationEdit::Replace {
+                        cluster_name: disk.cluster.name,
+                        node_name: disk.node.name,
+                        policy,
+                    },
+                )
             }
-            OwnerOp::Renew => self.submit_configuration(&uuid::Uuid::new_v4().to_string(), ConfigurationEdit::Renew),
-            OwnerOp::RenameNode { name } => self.submit_configuration(&uuid::Uuid::new_v4().to_string(), ConfigurationEdit::RenameNode { name }),
+            OwnerOp::Renew => self
+                .submit_configuration(&uuid::Uuid::new_v4().to_string(), ConfigurationEdit::Renew),
+            OwnerOp::RenameNode { name } => self.submit_configuration(
+                &uuid::Uuid::new_v4().to_string(),
+                ConfigurationEdit::RenameNode { name },
+            ),
             OwnerOp::Revoke { agent_id } => {
                 self.ensure_local_origin(&agent_id)?;
                 ensure!(
-                    self.db
-                        .execute("UPDATE agents SET revoked=1 WHERE id=?1 AND node_id=?2", params![agent_id,self.identity.node.id()])?
-                        == 1,
+                    self.db.execute(
+                        "UPDATE agents SET revoked=1 WHERE id=?1 AND node_id=?2",
+                        params![agent_id, self.identity.node.id()]
+                    )? == 1,
                     "unknown agent"
                 );
-                self.db.execute("UPDATE network_origins SET generation=generation+1 WHERE agent=?1", [&agent_id])?;
+                self.db.execute(
+                    "UPDATE network_origins SET generation=generation+1 WHERE agent=?1",
+                    [&agent_id],
+                )?;
                 self.announce(&agent_id)?;
                 Ok(json!({"revoked":true}))
             }

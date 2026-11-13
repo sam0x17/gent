@@ -344,6 +344,7 @@ impl StoreSession<'_> {
     }
     fn import_event(&mut self, peer: &str, event: Event) -> Result<()> {
         match event {
+            Event::Mesh { envelope } => self.import_mesh(peer, envelope),
             Event::ConfigurationRequest { request_id, edit } => {
                 self.accept_configuration(peer, request_id, *edit)
             }
@@ -537,16 +538,22 @@ impl Store {
             "data link requires a different node"
         );
         for (group, writer) in [(outgoing, self.identity.node.id()), (incoming, peer)] {
-            let (purpose, saved_writer, roster): (String, String, Vec<u8>) = tx.query_row(
-                "SELECT purpose,writer,roster_hash FROM streams WHERE group_id=?1",
-                [group],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
+            let (purpose, saved_writer, roster, writer_key): (String, String, Vec<u8>, Vec<u8>) =
+                tx.query_row(
+                    "SELECT purpose,writer,roster_hash,writer_key FROM streams WHERE group_id=?1",
+                    [group],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?;
             let mut members = vec![peer, self.identity.node.id()];
             members.sort();
             ensure!(
                 purpose == "data"
                     && saved_writer == writer
+                    && state
+                        .state()
+                        .nodes
+                        .get(writer)
+                        .is_some_and(|n| n.signing_key.as_slice() == writer_key)
                     && roster == Sha256::digest(serde_json::to_vec(&members)?).as_slice(),
                 "data link has an unexpected roster or writer"
             );

@@ -102,6 +102,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--owner', required=True)
     parser.add_argument('--remote-binary', required=True, help='Absolute Gent binary path on the owner')
+    parser.add_argument('--remote-join-helper', help='Optional join_local example binary to test a second remote node and peer mesh')
     parser.add_argument('--binary', default='target/debug/gent')
     parser.add_argument('--relay-url', default='http://127.0.0.1:18787')
     parser.add_argument('--relay-token-file', required=True)
@@ -121,7 +122,8 @@ def main():
 
     binary = str(Path(args.binary).resolve())
     owner_home = None
-    local_daemon = owner_daemon = None
+    peer_home = None
+    local_daemon = owner_daemon = peer_daemon = tunnel = None
     clients = []
     with tempfile.TemporaryDirectory(prefix='gent-joined-pairing-') as folder:
         home = Path(folder) / 'node'
@@ -140,9 +142,12 @@ def main():
             setup = json.loads(remote(['python3', '-c', PREPARE], json.dumps({'binary': args.remote_binary, 'relay': f'http://127.0.0.1:{args.remote_relay_port}', 'token': token})).stdout)
             owner_home = setup['home']
             owner = [args.remote_binary, '--home', owner_home, '--json']
+            with open(Path(folder) / 'tunnel.log', 'a') as log:
+                tunnel = subprocess.Popen(ssh + ['-o', 'ExitOnForwardFailure=yes', '-N', '-R', f'127.0.0.1:{args.remote_relay_port}:127.0.0.1:{url.port}', '--', args.owner], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            wait_for(lambda: remote(['python3', '-c', 'import socket,sys; socket.create_connection(("127.0.0.1",int(sys.argv[1])),2).close()', str(args.remote_relay_port)], check=False).returncode == 0)
             def start_owner():
                 with open(Path(folder) / 'owner.log', 'a') as log:
-                    return subprocess.Popen(ssh + ['-o', 'ExitOnForwardFailure=yes', '-R', f'127.0.0.1:{args.remote_relay_port}:127.0.0.1:{url.port}', '--', args.owner, shlex.join(['python3', '-c', LAUNCH, owner_home, args.remote_binary])], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+                    return subprocess.Popen(ssh + ['--', args.owner, shlex.join(['python3', '-c', LAUNCH, owner_home, args.remote_binary])], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
 
             owner_daemon = start_owner()
             wait_for(lambda: remote(owner + ['daemon', 'status'], check=False).returncode == 0)
@@ -238,15 +243,56 @@ def main():
             denied = subprocess.run(local + ['node', 'name', 'set', 'not-authorized'], capture_output=True, text=True, timeout=15)
             assert denied.returncode != 0 and 'configuration-management grant' in denied.stderr
             assert cli('node', 'name') == 'pending-while-owner-offline'
+            if args.remote_join_helper:
+                peer_home = remote(['python3', '-c', 'import tempfile; print(tempfile.mkdtemp(prefix="gent-mesh-proof-"))']).stdout.strip()
+                remote([args.remote_join_helper, owner_home, peer_home])
+                peer_cli = [args.remote_binary, '--home', peer_home, '--json']
+                with open(Path(folder) / 'mac-peer.log', 'a') as log:
+                    peer_daemon = subprocess.Popen(ssh + ['--', args.owner, shlex.join(['python3', '-c', LAUNCH, peer_home, args.remote_binary])], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+                wait_for(lambda: remote(peer_cli + ['daemon', 'status'], check=False).returncode == 0)
+                c = Client(ssh + ['--', args.owner, shlex.join(peer_cli + ['mcp', 'serve', '--binding', peer_home + '/visual.key'])])
+                clients.append(c)
+                cid = c.call('gent_register', {'name': 'mac-peer', 'provider': 'generic-mcp'})[0]['agent']['id']
+                peer_node = json.loads(remote(peer_cli + ['node']).stdout)['id']
+                wait_for(lambda: any(n['id'] == peer_node and n['data_link'] for n in cli('nodes')))
+                wait_for(lambda: len(cli('agents')) == 3 and len(json.loads(remote(peer_cli + ['agents']).stdout)) == 3)
+                remote(owner + ['permission', 'allow', aid, cid, '--permission', 'enumerate', 'send'])
+                remote(owner + ['permission', 'allow', cid, aid, '--permission', 'enumerate', 'receive'])
+                wait_for(lambda: any(agent['id'] == cid for agent in a.call('gent_agents')[0]))
+                wait_for(lambda: any(agent['id'] == aid for agent in c.call('gent_agents')[0]))
+                remote(['python3', '-c', STOP_OWNER, owner_home])
+                stop(owner_daemon)
+                owner_daemon = None
+                sent = a.call('gent_send', {'recipient': cid, 'request_id': str(uuid.uuid4()), 'text': 'direct mesh image with owner offline', 'files': files})[0]
+                wait_for(lambda: len(c.call('gent_inbox')[0]) == 1)
+                inbox, raw = c.call('gent_inbox')
+                assert inbox[0]['id'] == sent['message_id'] and any(part['type'] == 'image' and part['data'] == PNG for part in raw['content'])
+                c.call('gent_ack', {'message_id': sent['message_id']})
+                wait_for(lambda: a.call('gent_message_status', {'message_id': sent['message_id']})[0]['state'] == 'delivered')
+                stop(local_daemon)
+                local_daemon = None
+                direct_reply = c.call('gent_reply', {'message_id': sent['message_id'], 'request_id': str(uuid.uuid4()), 'text': 'direct mesh feedback', 'files': files})[0]
+                local_daemon = start_local()
+                wait_for(lambda: (home / 'daemon.sock').exists())
+                wait_for(lambda: any(m['id'] == direct_reply['message_id'] for m in a.call('gent_inbox')[0]))
+                inbox, raw = a.call('gent_inbox')
+                assert any(part['type'] == 'image' and part['data'] == PNG for part in raw['content'])
+                unseen = remote(['python3', '-c', 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]+"/state.sqlite3"); print(db.execute("SELECT COUNT(*) FROM messages WHERE id IN (?,?)",sys.argv[2:]).fetchone()[0])', owner_home, sent['message_id'], direct_reply['message_id']]).stdout.strip()
+                assert unseen == '0'
+                print('PASS: direct joined Linux-Mac MCP image/reply/receipt, owner offline, peer restart, and no owner message copy')
             print('PASS: two-machine pairing, encrypted MCP images/replies/receipts, remote permission edits and renaming, idempotent requests, offline owner recovery, and administration revocation')
             print(f'Configuration applied in {config_latency * 1000:.0f} ms, including the SSH owner command; observation made no daemon requests')
         finally:
             for client in clients:
                 client.close()
             stop(local_daemon)
+            if peer_home:
+                remote(['python3', '-c', REMOVE, peer_home])
+            stop(peer_daemon)
             if owner_home:
                 remote(['python3', '-c', REMOVE, owner_home])
             stop(owner_daemon)
+            stop(tunnel)
 
 
 if __name__ == '__main__':

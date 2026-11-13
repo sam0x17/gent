@@ -246,11 +246,25 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>) {
     let mut cursor = 0usize;
     let mut previous_error = None;
     loop {
-        let result = local(store.clone(), |store| store.sync_streams()).await;
+        let result = local(store.clone(), |store| {
+            let pending = store.mesh_tick();
+            Ok((store.sync_streams()?, pending))
+        })
+        .await;
         let mut progressed = false;
+        let mut mesh_pending = false;
         let mut error = None;
         match result {
-            Ok(streams) => {
+            Ok((streams, pending)) => {
+                match pending {
+                    Ok(pending) => mesh_pending = pending,
+                    Err(e) => {
+                        // Peer setup cannot prevent configuration recovery or
+                        // delivery over already established streams.
+                        mesh_pending = true;
+                        error = Some(e.to_string());
+                    }
+                }
                 retries.retain(|group, _| streams.iter().any(|s| &s.group == group));
                 transferred.retain(|group, _| streams.iter().any(|s| &s.group == group));
                 let begin = cursor.min(streams.len());
@@ -312,6 +326,9 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>) {
         } else {
             push.reconcile_after()
         };
+        if mesh_pending {
+            pause = pause.min(Duration::from_secs(1));
+        }
         if let Some(retry) = retries
             .values()
             .map(|r| r.at.saturating_duration_since(Instant::now()))

@@ -49,6 +49,9 @@ impl Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
+    Mesh {
+        envelope: MeshEnvelope,
+    },
     ConfigurationRequest {
         request_id: Uuid,
         edit: Box<gent_protocol::ConfigurationEdit>,
@@ -70,6 +73,26 @@ pub enum Event {
         message_id: String,
         delivered: bool,
     },
+}
+
+/// Private bootstrap metadata, routed through established owner links. MLS key
+/// packages and Welcome signatures independently authenticate the actual peer.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshEnvelope {
+    pub origin: String,
+    pub target: String,
+    pub origin_key: gent_crypto::PublicKey,
+    pub target_key: gent_crypto::PublicKey,
+    pub link: Uuid,
+    pub signal: MeshSignal,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MeshSignal {
+    Offer { key_package: String },
+    Welcome { packet: String },
 }
 
 #[derive(Clone, Serialize, Deserialize)]

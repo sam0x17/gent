@@ -33,7 +33,7 @@ fn fingerprint(edit: &ConfigurationEdit) -> Result<String> {
     Ok(hash(&serde_json::to_string(edit)?))
 }
 impl StoreSession<'_> {
-    fn configuration_writer(&self) -> Result<String> {
+    pub(super) fn configuration_writer(&self) -> Result<String> {
         let mut writers = std::collections::BTreeSet::new();
         let mut query = self.db.prepare("SELECT grant FROM configuration_streams")?;
         for grant in query.query_map([], |r| r.get::<_, Vec<u8>>(0))? {

@@ -212,7 +212,7 @@ The local Worker persists opaque packets in D1. Its insertion triggers enforce c
 
 The dispatcher rotates through batches of up to 32 streams with four concurrent transfers and never holds the RPC store mutex during network requests. It scans at most 4,096 configuration streams plus two data streams per linked peer (up to 1,024 peers), excluding known revoked or replaced peers. Local commits and relay push signals wake it immediately. Progressing transfers continue after 10 ms; errors back off per stream from one to 30 seconds. Retry deadlines remain active while push is connected. Network, storage, verification, and backlog still determine application latency.
 
-The dispatcher also carries agent records and configuration proposals/results over separate data streams. Invitation-based enrollment, automatic links between joined peers, queue pruning, service quotas, and retention limits remain unfinished. Local endpoint and relay histories currently grow without pruning.
+The dispatcher also carries agent records, configuration proposals/results, and peer bootstrap records over separate data streams. Invitation-based enrollment, queue pruning, service quotas, and retention limits remain unfinished. Local endpoint and relay histories currently grow without pruning.
 
 ### Push notifications and recovery
 
@@ -226,7 +226,7 @@ This proof has one shared-token notification realm and broadcasts to all its con
 
 ## Encrypted agent delivery
 
-SSH pairing establishes two exact-roster data streams between the owner and a joining node. Each stream has one authenticated writer. Current topology is owner-to-peer; automatic peer-to-peer mesh establishment is pending. A remote directory entry never carries a usable MCP credential.
+SSH pairing establishes two exact-roster data streams between the owner and a joining node. Automatic peer setup adds the same independent streams between joined nodes. Each stream has one authenticated writer. A remote directory entry never carries a usable MCP credential.
 
 New agent IDs are domain-separated hashes of their hosting node UUID and a random nonce, encoded as UUIDv8. An enrolled malicious node cannot claim another node's unknown agent ID using its own nonce. Legacy random IDs retain their credentials and require an owner-signed cluster/agent/node binding; the owner persists unique assignments and rejects conflicting ownership. Directory updates have monotonic generations, immutable origins, and permanent revocation tombstones. Enumeration policy still filters the agent-facing directory.
 
@@ -246,7 +246,19 @@ Key packages contain identity metadata and must travel inside an authenticated, 
 
 Node authentication does not authorize one agent to read another agent's messages. MLS inbox/outbox accessors are for trusted local code. The live RPC path and remote import check signed policy and bind each registration to its authenticated hosting node. Trusted daemons can read records addressed to their node; MCP callers receive only their permitted directory and inbox.
 
-Configuration streams belong only to trusted daemons; messaging streams serve separately authenticated endpoints. Automatic mesh establishment, larger-file storage and grants, periodic epoch refresh scheduling, invitation pairing, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before production use.
+Configuration streams belong only to trusted daemons; messaging streams serve separately authenticated endpoints. Larger-file storage and grants, periodic epoch refresh scheduling, invitation pairing, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before production use.
+
+## Automatic peer mesh
+
+A joined daemon discovers peers from signed cluster membership and exchanges MLS key packages and Welcome packets through its existing encrypted owner link. The owner forwards each record over the intended peer's encrypted owner link. It binds the origin to the authenticated sending node; recipients accept forwarded records only from their configured configuration writer. Both node IDs and their current signing keys determine a pair's stable bootstrap identity. The service receives only encrypted packets, including for key packages, node identities, and routing inside these records.
+
+Each endpoint independently verifies the peer's key package against current signed authority. A Welcome must have the peer's valid packet signature, the matching MLS creator, and exactly those two nodes in its roster. A third node's valid package or Welcome cannot substitute for the peer. Each direction has a separate single-writer stream. The owner sees bootstrap metadata as a trusted cluster node but receives neither application group keys nor peer messages. Established streams use the relay directly, and ordinary agent enumeration, send, receive, reply, and delivery rules still apply.
+
+Both nodes offer a package, create their outgoing stream from the other's offer, and join the incoming Welcome. Deterministic request IDs and persisted cryptographic operations make each step retryable after a crash. Source offers commit with their outgoing events. Owner forwarding commits with the job result; endpoint Welcome responses commit with the saved outgoing group and job result. Joining may commit before its job marker, so a retry verifies and reuses the same origin. Installing both streams and announcing existing local registrations is atomic. Configuration recovery and existing stream delivery continue if peer maintenance encounters an error.
+
+Bootstrap overtaken by node revocation or key replacement is discarded. The dispatcher rechecks signed membership before sending and importing ordinary messages; a bootstrap grant does not override agent policy or expiry. Current state can remain valid during an owner outage only until its existing lease expires. Fresh peer setup requires the owner to forward bootstrap records. Replacing lost endpoint state or signing keys and recovering expired unused key packages remain separate recovery work; this version does not silently replace established links.
+
+Maintenance prepares at most eight peer offers, processes eight due jobs, and installs eight completed links per pass. Pending jobs have a per-node count limit of 8,192, bounded payloads, and retry backoff capped at 32 seconds. While jobs are pending, idle reconciliation pauses are capped at one second; network and processing time can add delay. Setup errors are retained locally for retry and logged when they change. Completed jobs, packages, streams, and ciphertext history are retained. The full mesh grows quadratically with cluster size; large-cluster scaling, pruning, aggregate quotas, and user-facing repair commands remain unfinished. `gent nodes` reports established links separately from remote presence.
 
 ## Verification
 
@@ -266,7 +278,11 @@ Ten pairing tests cover identity/credential separation, legacy agent migration, 
 
 Two additional authority tests cover signed configuration grants, old canonical membership encoding, self-grant rejection, key rotation, and removed nodes. Two runtime tests inject proposal/result persistence failures and reject results with the wrong writer, fingerprint, or checkpoint. Two automatic relay tests cover offline owners, source restart, acceptance ordering, identical/conflicting retries, encrypted proposals, pending-edit revocation, continued progress after rejection, and MCP credential isolation. Pairing retries also verify that revoked rights stay revoked.
 
+Three peer-mesh runtime tests cover offer/forwarding rollback, restart without another key package, forged routes and conflicting signals, wrong-node key packages and Welcome signatures, and revocation overtaking bootstrap. Two relay tests establish a three-node mesh, exchange a 1 MiB image and scoped reply while the owner is offline, recover through relay outage and peer restart, check authenticated receipts, and add a fourth node. They verify the owner stores no peer messages and that failed job persistence reuses cryptographic streams across restart. These tests pass on Linux and macOS.
+
 The opt-in `scripts/prove_pairing.py` also passes with a Mac Studio owner and Linux joining node. It invokes the real SSH CLI, checks idempotent join and node-only keys, observes signed node metadata changes through local Wrangler/D1, and runs two independent MCP clients. The clients exchange actual PNG bytes and MCP image blocks in both directions, reject unsolicited reverse sends, receive authenticated delivery receipts, and retrieve a queued reply after restarting the receiver. Permissions and renaming are submitted from Linux; exact retries preserve the accepted revision. Another edit survives Mac owner downtime and Linux daemon restart, then applies after owner recovery. Revoking administration blocks further joined-node edits. Temporary nodes and processes are removed afterward. Hosted account authorization, real model iteration across machines, and invite-based pairing remain untested.
+
+With `--remote-join-helper`, that proof also passes with a second temporary Mac daemon enrolled through the owner's local protected socket. It establishes a direct link between the joined Linux and Mac nodes, stops the owner daemon, exchanges an MCP image and recipient receipt, queues an image reply while Linux is stopped, and retrieves it after restart. The owner database contains neither peer message. A separate SSH tunnel keeps the local relay reachable while the owner daemon is offline.
 
 Run from the public repository root:
 
@@ -276,4 +292,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo check -p gent-crypto --features mls --target wasm32-unknown-unknown --locked
 ```
 
-The native workspace has 108 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.
+The native workspace has 113 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.
