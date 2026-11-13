@@ -70,6 +70,12 @@ pub fn print_transport(value: &Value) {
             authority["accepted_digests"]
         );
         println!(
+            "Accepted revisions: {} / {}, including {} legacy digest reservations. Verification digests remain retained.",
+            authority["accepted_revisions"],
+            authority["max_accepted_revisions"],
+            authority["legacy_digest_reservations"]
+        );
+        println!(
             "Configuration records due for compaction: {}; pending join pins: {}.",
             authority["full_records_due"], authority["pending_join_pins"]
         );
@@ -77,7 +83,7 @@ pub fn print_transport(value: &Value) {
             "Unconfirmed packets remain for offline peers. Verified checkpoints release confirmed packet capacity."
         );
         println!(
-            "Legacy retries count against admission limits. Accepted authority digests, event deduplication, raw groups, plaintext, and total database size have separate retention needs."
+            "Legacy retries count against admission limits. Raw groups, plaintext, and total database size have separate retention needs."
         );
     }
 }

@@ -1,13 +1,13 @@
 use super::*;
 
-fn renew(f: &Fixture) {
+pub(super) fn renew(f: &Fixture) {
     let state = f.endpoint(0).authority_state().unwrap();
     f.endpoint(0)
         .apply_authority(&[state.renew(&f.owner, f.now).unwrap()])
         .unwrap();
 }
 
-fn clean(f: &Fixture, node: usize) {
+pub(super) fn clean(f: &Fixture, node: usize) {
     while f.endpoint(node).clean_storage(false).unwrap()["authority_records_compacted"]
         .as_u64()
         .unwrap()

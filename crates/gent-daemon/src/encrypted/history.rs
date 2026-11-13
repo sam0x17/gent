@@ -8,6 +8,7 @@ pub const RECENT_STATES: u64 = 64;
 const CLEAN_BATCH: u64 = 8;
 const MAX_RECORDS: u64 = 8192;
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_ACCEPTED_REVISIONS: u64 = 1_048_576;
 type StoredAuthority = (Vec<u8>, Vec<u8>, Vec<u8>, String);
 
 fn current(db: &Connection) -> Result<Option<(VerifiedState, String)>> {
@@ -79,11 +80,39 @@ pub(crate) fn remember(db: &Connection, checkpoint: &Checkpoint) -> Result<()> {
         saved.is_none_or(|hash| hash == checkpoint.state_hash),
         "authority history fork"
     );
+    if saved.is_some() {
+        return Ok(());
+    }
+    // Legacy full records already represent accepted revisions. Their slots
+    // stay reserved until a verified digest replaces the full body, even when
+    // an old database exceeds today's admission limit.
+    let reserved: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM authority_history WHERE revision=?1)",
+        [checkpoint.revision],
+        |r| r.get(0),
+    )?;
+    if !reserved {
+        let (digests, legacy) = digest_usage(db)?;
+        ensure!(
+            digests.saturating_add(legacy) < MAX_ACCEPTED_REVISIONS,
+            "accepted revision history quota exhausted; inspect gent transport status; cleanup preserves verification digests"
+        );
+    }
     db.execute(
-        "INSERT OR IGNORE INTO authority_digests VALUES(?1,?2)",
+        "INSERT INTO authority_digests VALUES(?1,?2)",
         params![checkpoint.revision, checkpoint.state_hash.as_slice()],
     )?;
     Ok(())
+}
+
+fn digest_usage(db: &Connection) -> Result<(u64, u64)> {
+    Ok(db.query_row(
+        "SELECT (SELECT COUNT(*) FROM authority_digests),
+        (SELECT COUNT(*) FROM authority_history h WHERE NOT EXISTS
+            (SELECT 1 FROM authority_digests d WHERE d.revision=h.revision))",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
 }
 
 /// Hold the complete suffix needed by a join interrupted before its daemon is
@@ -251,7 +280,7 @@ pub(crate) fn status(db: &Connection) -> Result<Value> {
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let digests: u64 = db.query_row("SELECT COUNT(*) FROM authority_digests", [], |r| r.get(0))?;
+    let (digests, legacy) = digest_usage(db)?;
     let (floor, pins) = if let Some((state, node)) = current(db)? {
         let (f, _, p) = floor(db, &state, &node)?;
         (f, p)
@@ -266,6 +295,8 @@ pub(crate) fn status(db: &Connection) -> Result<Value> {
     Ok(
         json!({"full_records":count,"full_record_bytes":bytes,"max_records":MAX_RECORDS,"max_record_bytes":MAX_BYTES,
         "accepted_digests":digests,"full_records_due":eligible,"retain_from_revision":floor,"pending_join_pins":pins,
+        "accepted_revisions":digests.saturating_add(legacy),"legacy_digest_reservations":legacy,
+        "max_accepted_revisions":MAX_ACCEPTED_REVISIONS,"max_digest_payload_bytes":MAX_ACCEPTED_REVISIONS*32,
         "recent_full_records":RECENT_STATES,"compaction_batch_limit":CLEAN_BATCH}),
     )
 }
@@ -280,5 +311,73 @@ mod tests {
         capacity(&db, MAX_BYTES as usize - 2).unwrap();
         assert!(capacity(&db, MAX_BYTES as usize - 1).is_err());
         assert!(capacity(&db, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn accepted_revision_capacity_reserves_legacy_records_and_keeps_existing_forks_detectable() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE authority_history(revision INTEGER PRIMARY KEY,state BLOB)")
+            .unwrap();
+        schema(&db, 10).unwrap();
+        db.execute(
+            "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<?1)
+            INSERT INTO authority_digests SELECT i,zeroblob(32) FROM n",
+            [MAX_ACCEPTED_REVISIONS - 2],
+        )
+        .unwrap();
+        let legacy = MAX_ACCEPTED_REVISIONS - 1;
+        db.execute("INSERT INTO authority_history VALUES(?1,X'00')", [legacy])
+            .unwrap();
+        assert_eq!(digest_usage(&db).unwrap(), (MAX_ACCEPTED_REVISIONS - 1, 1));
+        let unknown = Checkpoint {
+            revision: MAX_ACCEPTED_REVISIONS,
+            state_hash: [3; 32],
+        };
+        assert!(
+            remember(&db, &unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("accepted revision history quota")
+        );
+        remember(
+            &db,
+            &Checkpoint {
+                revision: 0,
+                state_hash: [0; 32],
+            },
+        )
+        .unwrap();
+        assert!(
+            remember(
+                &db,
+                &Checkpoint {
+                    revision: 0,
+                    state_hash: [1; 32]
+                }
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("fork")
+        );
+        remember(
+            &db,
+            &Checkpoint {
+                revision: legacy,
+                state_hash: [2; 32],
+            },
+        )
+        .unwrap();
+        db.execute("DELETE FROM authority_history WHERE revision=?1", [legacy])
+            .unwrap();
+        assert_eq!(digest_usage(&db).unwrap(), (MAX_ACCEPTED_REVISIONS, 0));
+        assert!(remember(&db, &unknown).is_err());
+        // An oversized migrated database also retains previously reserved work.
+        db.execute(
+            "INSERT INTO authority_history VALUES(?1,X'00')",
+            [unknown.revision],
+        )
+        .unwrap();
+        remember(&db, &unknown).unwrap();
+        assert_eq!(digest_usage(&db).unwrap(), (MAX_ACCEPTED_REVISIONS + 1, 0));
     }
 }

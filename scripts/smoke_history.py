@@ -127,9 +127,43 @@ def main():
                 time.sleep(.05)
             a, b = connect()
             retired(a, 'gent_send', live)
+            # Fill only this disposable database with synthetic reservations.
+            # Real verification evidence is never deleted to make quota space.
+            known_id = str(uuid.uuid4())
+            known = cli('--request-id', known_id, 'cluster', 'renew')
+            usage = cli('transport')['authority_history']
+            limit = usage['max_accepted_revisions']
+            assert limit == 1048576 and usage['max_digest_payload_bytes'] == 32 * 1024 * 1024
+            count = limit - usage['accepted_revisions']
+            synthetic_start = 10000000
+            with sqlite3.connect(home / 'state.sqlite3') as db:
+                checkpoint = db.execute('SELECT checkpoint FROM authority').fetchone()[0]
+                db.execute('''WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?)
+                    INSERT INTO authority_digests SELECT ?+i,zeroblob(32) FROM n''', (count, synthetic_start))
+            stop()
+            start()
+            assert cli('--request-id', known_id, 'cluster', 'renew')['revision'] == known['revision']
+            blocked_id = str(uuid.uuid4())
+            failed = subprocess.run(base + ['--json', '--request-id', blocked_id, 'cluster', 'renew'], capture_output=True, text=True, timeout=30)
+            assert failed.returncode != 0 and 'accepted revision history quota' in failed.stderr
+            with sqlite3.connect(home / 'state.sqlite3') as db:
+                assert db.execute('SELECT checkpoint FROM authority').fetchone()[0] == checkpoint
+                assert db.execute('SELECT COUNT(*) FROM configuration_edits WHERE id=?', (blocked_id,)).fetchone()[0] == 0
+            cli('transport', 'clean')
+            assert cli('transport')['authority_history']['accepted_revisions'] == limit
+            assert 'Accepted revisions: 1048576 / 1048576' in cli('transport', structured=False)
+            admitted = a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'existing authority at capacity'})[0]
+            assert any(m['id'] == admitted['message_id'] for m in b.call('gent_inbox')[0])
+            b.call('gent_ack', {'message_id': admitted['message_id']})
+            assert a.call('gent_message_status', {'message_id': admitted['message_id']})[0]['state'] == 'delivered'
+            with sqlite3.connect(home / 'state.sqlite3') as db:
+                assert db.execute('DELETE FROM authority_digests WHERE revision>? AND revision<=?', (synthetic_start, synthetic_start + count)).rowcount == count
+            accepted = cli('--request-id', blocked_id, 'cluster', 'renew')
+            assert accepted['state'] == 'applied' and accepted['revision'] == known['revision'] + 1
             with sqlite3.connect(home / 'state.sqlite3') as db:
                 assert db.execute('PRAGMA foreign_key_check').fetchall() == []
             print('PASS: UUIDv7 admission, retained retries, CLI preview/cleanup, native-file retry retirement, restart, and startup maintenance')
+            print('PASS: accepted-revision quota, restart, exact owner retry, atomic refusal, CLI diagnostics, continued MCP delivery and retry after fixture capacity release')
         finally:
             for client in clients:
                 client.close()

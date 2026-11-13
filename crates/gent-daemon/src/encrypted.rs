@@ -1035,7 +1035,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        matches!(version, 0..=10),
+        matches!(version, 0..=11),
         "unsupported MLS database version"
     );
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
@@ -1100,7 +1100,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
           CREATE TABLE IF NOT EXISTS stream_confirmed (
             group_id BLOB PRIMARY KEY,reader TEXT NOT NULL,reader_key BLOB NOT NULL,
             sequence INTEGER NOT NULL,digest BLOB NOT NULL,receipt BLOB NOT NULL);
-          PRAGMA user_version=10;",
+          PRAGMA user_version=11;",
         )?;
     let has_purpose = {
         let mut columns = schema.prepare("PRAGMA table_info(streams)")?;
@@ -1144,10 +1144,12 @@ pub(crate) fn initialize_authority(
             identity.public_key().as_slice()
         ],
     )?;
+    // Reserve the accepted revision before inserting its full body; otherwise
+    // a new bootstrap could masquerade as an already reserved legacy record.
+    history::remember(db, state.checkpoint())?;
     db.execute(
         "INSERT INTO authority_history VALUES(?1,?2)",
         params![state.checkpoint().revision, state.signed().encode()?],
     )?;
-    history::remember(db, state.checkpoint())?;
     Ok(())
 }

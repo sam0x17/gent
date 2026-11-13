@@ -72,6 +72,10 @@ def exercise_authority_history(cli, owner_cli, applied, restart, wait_for):
         history = command('transport')['authority_history']
         assert history['full_records'] == 64 and history['full_records_due'] == 0
         assert history['accepted_digests'] >= 80
+        assert history['accepted_revisions'] == history['accepted_digests']
+        assert history['legacy_digest_reservations'] == 0
+        assert history['max_accepted_revisions'] == 1048576
+        assert history['max_digest_payload_bytes'] == 32 * 1024 * 1024
     restart()
     for command in (cli, owner_cli):
         assert command('transport')['authority_history']['full_records'] == 64

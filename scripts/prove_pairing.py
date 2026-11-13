@@ -278,6 +278,7 @@ def main():
                 remote_human = remote([args.remote_binary, '--home', owner_home, 'transport']).stdout
                 for text in (human, remote_human):
                     assert 'Signed configurations:' in text and 'Accepted digests:' in text
+                    assert 'Accepted revisions:' in text and 'Verification digests remain retained.' in text
                     assert 'data retry records:' in text and 'configuration retry records:' in text
                     assert 'Verified checkpoints release confirmed packet capacity.' in text
             if args.file_objects:
