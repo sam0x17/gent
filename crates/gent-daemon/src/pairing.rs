@@ -109,6 +109,15 @@ impl Invitation {
 /// Implementations must authenticate the owner endpoint independently of Gent's
 /// relay and protect the entire channel, including bootstrap metadata and tokens.
 pub trait Peer {
+    /// Invitation channels prove this persisted identity before requesting any
+    /// snapshot. SSH peers already authenticate through the owner's login.
+    fn prepare_node(
+        &mut self,
+        _node: &NodeIdentity,
+        _name: &str,
+    ) -> impl Future<Output = Result<()>> {
+        async { Ok(()) }
+    }
     fn call(&mut self, action: PairingOp) -> impl Future<Output = Result<Value>>;
     fn prepare_service(&mut self, _service: &ServiceRelay) -> impl Future<Output = Result<()>> {
         async { anyhow::bail!("this pairing client does not support service enrollment") }
@@ -345,6 +354,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
         if store.needs_data_pairing()? {
             let node = store.pairing_node()?;
             drop(store);
+            peer.prepare_node(&node, &config.node.name).await?;
             let snapshot: Snapshot = serde_json::from_value(peer.call(PairingOp::Snapshot).await?)?;
             let state = snapshot.verify(options.cluster)?;
             let mut endpoint = OrderedEndpoint::open_runtime(&home, &node)?;
@@ -413,6 +423,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
             json!({"joined":true,"node":config.node,"cluster":config.cluster,"configuration_relay":true,"next":"gent daemon install"}),
         );
     }
+    peer.prepare_node(&pending.node, options.name).await?;
     let snapshot: Snapshot = serde_json::from_value(peer.call(PairingOp::Snapshot).await?)?;
     let mut state = snapshot.verify(options.cluster)?;
     pending.pin(&state)?;
@@ -444,7 +455,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     pending.pin(&state)?;
     pending.pin_service(&enrolled.service)?;
     state.authorize_node(pending.node.id(), &pending.node.public_key(), now() as u64)?;
-    // Both snapshots arrive directly from the SSH-authenticated owner. This is
+    // Both snapshots arrive through an independently authenticated owner channel. This is
     // bootstrap authority only; an installed runtime advances through history.
     if !config::path(&pending.runtime).exists() {
         Store::install_joined(&pending.runtime, &pending.node, &state)?;

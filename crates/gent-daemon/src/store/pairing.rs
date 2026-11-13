@@ -13,7 +13,17 @@ impl Store {
         ensure!(cluster == self.config.cluster.id, "wrong pairing cluster");
         self.identity.signing_owner()?;
         self.maintain()?;
-        let timestamp = now() as u64;
+        self.pair_authorized(action, true, now() as u64)
+    }
+
+    /// The SSH owner or invitation dispatcher has already checked authority.
+    /// Invitation callers must keep their admission lock through this operation.
+    pub(super) fn pair_authorized(
+        &mut self,
+        action: PairingOp,
+        can_configure: bool,
+        timestamp: u64,
+    ) -> Result<Value> {
         match action {
             PairingOp::Data {
                 request_id,
@@ -78,8 +88,9 @@ impl Store {
             PairingOp::Enroll { request } => {
                 ensure!(request.len() <= 8192, "enrollment request too large");
                 let request = SignedEnrollment::decode(&STANDARD.decode(request)?)?;
-                // SSH authenticates the owner invoking this RPC and protects the
-                // complete request. No fingerprint supplied by the relay is trusted.
+                // The owner-authenticated caller or restricted invitation
+                // dispatcher approves this exact identity. A fingerprint supplied
+                // by the relay is never sufficient authority.
                 let fingerprint = request.fingerprint()?;
                 let tx = self
                     .db
@@ -98,12 +109,12 @@ impl Store {
                         timestamp,
                     )?;
                 } else {
-                    let update = state.enroll_configurator(
-                        self.identity.signing_owner()?,
-                        &request,
-                        fingerprint,
-                        timestamp,
-                    )?;
+                    let owner = self.identity.signing_owner()?;
+                    let update = if can_configure {
+                        state.enroll_configurator(owner, &request, fingerprint, timestamp)?
+                    } else {
+                        state.enroll(owner, &request, fingerprint, timestamp)?
+                    };
                     state = self.identity.apply(&tx, update)?;
                 }
                 encrypted::history::pin_join(

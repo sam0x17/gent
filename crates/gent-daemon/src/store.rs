@@ -20,6 +20,7 @@ use tokio::sync::Notify;
 mod configuration;
 mod files;
 mod history;
+pub mod invitations;
 mod mesh;
 mod network;
 mod pairing;
@@ -262,6 +263,7 @@ impl Store {
     /// Agent RPCs never bypass expiry or trigger a renewal themselves.
     pub fn maintain(&mut self) -> Result<()> {
         // Local cleanup remains available after membership/lease loss.
+        self.clean_invitations()?;
         self.clean_files()?;
         self.clean_history()?;
         {
