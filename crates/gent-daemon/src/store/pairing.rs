@@ -98,7 +98,7 @@ impl Store {
                         timestamp,
                     )?;
                 } else {
-                    let update = state.enroll(
+                    let update = state.enroll_configurator(
                         self.identity.signing_owner()?,
                         &request,
                         fingerprint,

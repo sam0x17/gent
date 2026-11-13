@@ -17,6 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Notify;
+mod configuration;
 mod network;
 mod pairing;
 
@@ -58,6 +59,7 @@ impl Store {
           CREATE INDEX IF NOT EXISTS messages_inbox ON messages(recipient,acknowledged);
           CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
         network::schema(&db)?;
+        configuration::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -158,7 +160,7 @@ impl Store {
         // Filesystem projection is retryable after the authoritative commit.
         // A caller must not interpret a projection failure as an unapplied edit.
         let projected = self.project_config();
-        if value.get("applied").is_some() || value.get("config_saved").is_some() {
+        if value.get("applied") == Some(&Value::Bool(true)) || value.get("config_saved").is_some() {
             value["config_saved"] = json!(projected.is_ok());
             if let Err(error) = projected {
                 value["config_error"] = json!(error.to_string());
@@ -338,7 +340,7 @@ impl StoreSession<'_> {
                 json!({"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
             OwnerOp::Nodes => Ok(json!(self.state.state().nodes.iter().map(|(id, member)| {
-                json!({"id":id,"name":member.name,"status":if id == self.identity.node.id() { "local" } else { "unknown" },"revision":self.state.checkpoint().revision})
+                json!({"id":id,"name":member.name,"can_configure":member.can_configure,"status":if id == self.identity.node.id() { "local" } else { "unknown" },"revision":self.state.checkpoint().revision})
             }).collect::<Vec<_>>())),
             OwnerOp::Agents => Ok(serde_json::to_value(self.all_agents()?)?),
             OwnerOp::Providers => {
@@ -353,41 +355,23 @@ impl StoreSession<'_> {
                 }
                 Ok(json!(providers))
             }
+            OwnerOp::Configure { request_id, edit } => self.submit_configuration(&request_id, edit),
+            OwnerOp::ConfigurationRequests { request_id } => match request_id {
+                Some(id) => self.configuration_status(&id),
+                None => self.configuration_requests(),
+            },
+            OwnerOp::DelegateConfiguration { node_id, allow } => {
+                let update = self.state.delegate_configuration(self.identity.signing_owner()?, &node_id, allow, self.timestamp as u64)?;
+                self.state = self.identity.apply(self.db, update)?;
+                Ok(json!({"applied":true,"revision":self.state.checkpoint().revision,"node_id":node_id,"can_configure":allow}))
+            }
             OwnerOp::SetPolicy { policy } => {
                 let disk = config::load_for_runtime(self.home)?;
-                ensure!(
-                    disk.node.id == self.config.node.id
-                        && disk.cluster.id == self.config.cluster.id,
-                    "cannot change active identities while daemon runs"
-                );
-                let update = self.state.configure(
-                    self.identity.signing_owner()?,
-                    &disk.cluster.name,
-                    (&disk.node.id, &disk.node.name),
-                    policy,
-                    self.timestamp as u64,
-                )?;
-                self.state = self.identity.apply(self.db, update)?;
-                Ok(json!({"applied":true,"revision":self.state.checkpoint().revision}))
+                ensure!(disk.node.id == self.config.node.id && disk.cluster.id == self.config.cluster.id, "cannot change active identities while daemon runs");
+                self.submit_configuration(&uuid::Uuid::new_v4().to_string(), ConfigurationEdit::Replace { cluster_name: disk.cluster.name, node_name: disk.node.name, policy })
             }
-            OwnerOp::Renew => {
-                let update = self
-                    .state
-                    .renew(self.identity.signing_owner()?, self.timestamp as u64)?;
-                self.state = self.identity.apply(self.db, update)?;
-                Ok(json!({"applied":true,"revision":self.state.checkpoint().revision}))
-            }
-            OwnerOp::RenameNode { name } => {
-                let update = self.state.configure(
-                    self.identity.signing_owner()?,
-                    &self.state.state().name,
-                    (self.identity.node.id(), &name),
-                    self.state.state().policy.clone(),
-                    self.timestamp as u64,
-                )?;
-                self.state = self.identity.apply(self.db, update)?;
-                Ok(json!({"applied":true,"revision":self.state.checkpoint().revision,"name":name}))
-            }
+            OwnerOp::Renew => self.submit_configuration(&uuid::Uuid::new_v4().to_string(), ConfigurationEdit::Renew),
+            OwnerOp::RenameNode { name } => self.submit_configuration(&uuid::Uuid::new_v4().to_string(), ConfigurationEdit::RenameNode { name }),
             OwnerOp::Revoke { agent_id } => {
                 self.ensure_local_origin(&agent_id)?;
                 ensure!(

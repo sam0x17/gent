@@ -339,3 +339,187 @@ async fn queued_remote_work_and_directory_tombstones_obey_newer_permissions() {
     .await;
     assert_eq!(ok(pair.agent(0, AgentOp::Agents)), json!([]));
 }
+
+fn edit(label: &str) -> gent_protocol::ConfigurationEdit {
+    gent_protocol::ConfigurationEdit::Policy {
+        policy: Policy {
+            groups: std::collections::BTreeMap::from([(label.into(), vec![])]),
+            ..Default::default()
+        },
+    }
+}
+fn request_status(pair: &Pair, node: usize, id: &str) -> Value {
+    pair.owner(
+        node,
+        OwnerOp::ConfigurationRequests {
+            request_id: Some(id.into()),
+        },
+    )
+}
+#[tokio::test]
+async fn offline_configuration_requests_survive_restart_and_later_acceptance_wins() {
+    let relay = relay::RelayServer::start().await;
+    let mut pair = Pair::new(&relay).await;
+    pair.tasks[0].take();
+    let id = Uuid::new_v4().to_string();
+    let action = OwnerOp::Configure {
+        request_id: id.clone(),
+        edit: edit("offline-proposal"),
+    };
+    assert_eq!(pair.owner(1, action.clone())["state"], "queued");
+    assert!(
+        !config::load(pair.homes[1].path())
+            .unwrap()
+            .policy
+            .groups
+            .contains_key("offline-proposal")
+    );
+    pair.reopen(1);
+    assert_eq!(request_status(&pair, 1, &id)["state"], "queued");
+    let earlier = pair.owner(
+        0,
+        OwnerOp::Configure {
+            request_id: Uuid::new_v4().to_string(),
+            edit: edit("accepted-before-offline-request"),
+        },
+    )["revision"]
+        .as_u64()
+        .unwrap();
+    pair.reopen(0);
+    pair.wait(|| request_status(&pair, 1, &id)["state"] == "applied")
+        .await;
+    assert_eq!(request_status(&pair, 1, &id)["revision"], earlier + 1);
+    for home in &pair.homes {
+        assert!(
+            config::load(home.path())
+                .unwrap()
+                .policy
+                .groups
+                .contains_key("offline-proposal")
+        );
+    }
+    let after = pair.owner(
+        0,
+        OwnerOp::Configure {
+            request_id: Uuid::new_v4().to_string(),
+            edit: edit("newest"),
+        },
+    )["revision"]
+        .as_u64()
+        .unwrap();
+    pair.wait(|| config::load(pair.homes[1].path()).unwrap().applied_revision == Some(after))
+        .await;
+    assert_eq!(pair.owner(1, action)["revision"], earlier + 1);
+    assert_eq!(
+        pair.owner(0, OwnerOp::Status)["authority"]["revision"],
+        after
+    );
+    assert!(
+        config::load(pair.homes[1].path())
+            .unwrap()
+            .policy
+            .groups
+            .contains_key("newest")
+    );
+    assert!(matches!(
+        pair.stores[1].lock().unwrap().handle(Request::Owner {
+            credential: pair.owners[1].clone(),
+            action: OwnerOp::Configure {
+                request_id: id,
+                edit: edit("conflicting-retry")
+            }
+        }),
+        Response::Error(_)
+    ));
+    for packet in relay.data.lock().unwrap().values().flatten() {
+        assert!(!String::from_utf8_lossy(packet).contains("offline-proposal"));
+    }
+}
+
+#[tokio::test]
+async fn revoked_configuration_grant_rejects_pending_edit_without_blocking_later_work() {
+    let relay = relay::RelayServer::start().await;
+    let mut pair = Pair::new(&relay).await;
+    let node = config::load(pair.homes[1].path()).unwrap().node.id;
+    pair.tasks[1].take();
+    let id = Uuid::new_v4().to_string();
+    pair.owner(
+        1,
+        OwnerOp::Configure {
+            request_id: id.clone(),
+            edit: edit("must-not-apply"),
+        },
+    );
+    let revoked = pair.owner(
+        0,
+        OwnerOp::DelegateConfiguration {
+            node_id: node.clone(),
+            allow: false,
+        },
+    )["revision"]
+        .as_u64()
+        .unwrap();
+    pair.reopen(1);
+    pair.wait(|| request_status(&pair, 1, &id)["state"] == "rejected")
+        .await;
+    assert_eq!(
+        pair.owner(0, OwnerOp::Status)["authority"]["revision"],
+        revoked
+    );
+    assert!(
+        !config::load(pair.homes[0].path())
+            .unwrap()
+            .policy
+            .groups
+            .contains_key("must-not-apply")
+    );
+    assert!(matches!(
+        pair.stores[1].lock().unwrap().handle(Request::Owner {
+            credential: pair.owners[1].clone(),
+            action: OwnerOp::DelegateConfiguration {
+                node_id: node.clone(),
+                allow: true
+            }
+        }),
+        Response::Error(_)
+    ));
+    let granted = pair.owner(
+        0,
+        OwnerOp::DelegateConfiguration {
+            node_id: node.clone(),
+            allow: true,
+        },
+    )["revision"]
+        .as_u64()
+        .unwrap();
+    pair.wait(|| config::load(pair.homes[1].path()).unwrap().applied_revision == Some(granted))
+        .await;
+    let rename = Uuid::new_v4().to_string();
+    pair.owner(
+        1,
+        OwnerOp::Configure {
+            request_id: rename.clone(),
+            edit: gent_protocol::ConfigurationEdit::RenameNode {
+                name: "new-peer-name".into(),
+            },
+        },
+    );
+    pair.wait(|| request_status(&pair, 1, &rename)["state"] == "applied")
+        .await;
+    assert_eq!(config::load(pair.homes[1].path()).unwrap().node.id, node);
+    assert_eq!(
+        config::load(pair.homes[1].path()).unwrap().node.name,
+        "new-peer-name"
+    );
+    assert_eq!(request_status(&pair, 1, &id)["state"], "rejected");
+    assert!(matches!(
+        pair.stores[1].lock().unwrap().handle(Request::Owner {
+            credential: pair.keys[1].clone(),
+            action: OwnerOp::Configure {
+                request_id: Uuid::new_v4().to_string(),
+                edit: edit("agent-escalation")
+            }
+        }),
+        Response::Error(_)
+    ));
+}

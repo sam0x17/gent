@@ -49,6 +49,15 @@ impl Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
+    ConfigurationRequest {
+        request_id: Uuid,
+        edit: Box<gent_protocol::ConfigurationEdit>,
+    },
+    ConfigurationResult {
+        request_id: Uuid,
+        fingerprint: String,
+        result: EditResult,
+    },
     Registration {
         agent: Registration,
     },
@@ -61,6 +70,13 @@ pub enum Event {
         message_id: String,
         delivered: bool,
     },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EditResult {
+    Applied { checkpoint: Checkpoint },
+    Rejected { reason: String },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

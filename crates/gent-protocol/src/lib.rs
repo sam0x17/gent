@@ -179,7 +179,35 @@ pub enum AgentOp {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfigurationEdit {
+    Policy {
+        policy: Policy,
+    },
+    Replace {
+        cluster_name: String,
+        node_name: String,
+        policy: Policy,
+    },
+    RenameNode {
+        name: String,
+    },
+    Renew,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOp {
+    Configure {
+        request_id: String,
+        edit: ConfigurationEdit,
+    },
+    ConfigurationRequests {
+        request_id: Option<String>,
+    },
+    DelegateConfiguration {
+        node_id: String,
+        allow: bool,
+    },
     Status,
     Nodes,
     Agents,

@@ -124,7 +124,13 @@ impl StoreSession<'_> {
             revoked: agent.revoked,
         })
     }
-    fn queue(&self, peer: &str, id: Uuid, event: Event, subject: Option<&str>) -> Result<()> {
+    pub(super) fn queue(
+        &self,
+        peer: &str,
+        id: Uuid,
+        event: Event,
+        subject: Option<&str>,
+    ) -> Result<()> {
         let key: Vec<u8> = self
             .db
             .query_row(
@@ -134,7 +140,20 @@ impl StoreSession<'_> {
             )
             .optional()?
             .context("node is not connected; establish its encrypted data streams")?;
-        active_peer(&self.state, peer, &key, self.timestamp)?;
+        if matches!(&event, Event::ConfigurationRequest { .. }) {
+            // A local owner may queue an edit while offline/expired. Publication
+            // still requires fresh authority; acceptance rechecks delegation.
+            ensure!(
+                self.state
+                    .state()
+                    .nodes
+                    .get(peer)
+                    .is_some_and(|n| n.signing_key.as_slice() == key),
+                "configuration writer key changed"
+            );
+        } else {
+            active_peer(&self.state, peer, &key, self.timestamp)?;
+        }
         if self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM network_sent WHERE id=?1)",
             [id.to_string()],
@@ -323,8 +342,16 @@ impl StoreSession<'_> {
         }
         Ok(())
     }
-    fn import_event(&self, peer: &str, event: Event) -> Result<()> {
+    fn import_event(&mut self, peer: &str, event: Event) -> Result<()> {
         match event {
+            Event::ConfigurationRequest { request_id, edit } => {
+                self.accept_configuration(peer, request_id, *edit)
+            }
+            Event::ConfigurationResult {
+                request_id,
+                fingerprint,
+                result,
+            } => self.import_configuration_result(peer, request_id, &fingerprint, result),
             Event::Registration { agent } => self.import_registration(peer, &agent),
             Event::Receipt {
                 message_id,
@@ -827,6 +854,7 @@ impl Store {
             }
             tx.execute("DELETE FROM inbox WHERE sequence=?1", [sequence])?;
             tx.commit()?;
+            let _ = self.project_config();
             self.sync_wakeup.notify_one();
         }
         Ok(())

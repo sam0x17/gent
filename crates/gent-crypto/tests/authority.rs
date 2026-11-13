@@ -417,3 +417,57 @@ fn legacy_agent_certificates_require_exact_owner_cluster_agent_and_node() {
     altered.signature[0] ^= 1;
     assert!(altered.verify(state.anchor(), &agent, node.id()).is_err());
 }
+
+#[test]
+fn configuration_delegation_is_owner_signed_and_old_membership_encoding_is_preserved() {
+    let (owner, node, mut state) = fixture();
+    let old = state.signed().encode().unwrap();
+    assert!(!String::from_utf8_lossy(&old).contains("can_configure"));
+    assert_eq!(SignedState::decode(&old).unwrap().encode().unwrap(), old);
+    let (other, _, _) = fixture();
+    assert!(
+        state
+            .delegate_configuration(&other, node.id(), true, NOW)
+            .is_err()
+    );
+    let grant = state
+        .delegate_configuration(&owner, node.id(), true, NOW)
+        .unwrap();
+    state.apply_chain(&[grant], NOW).unwrap();
+    assert!(state.state().nodes[node.id()].can_configure);
+    let revoked = state
+        .delegate_configuration(&owner, node.id(), false, NOW)
+        .unwrap();
+    state.apply_chain(&[revoked], NOW).unwrap();
+    assert!(!state.state().nodes[node.id()].can_configure);
+    let peer = NodeIdentity::generate().unwrap();
+    let mut req = request(&peer, &state, NOW);
+    req.request.member.can_configure = true;
+    assert!(req.fingerprint().is_err());
+}
+
+#[test]
+fn explicit_configuration_enrollment_and_key_rotation_preserve_owner_approved_rights() {
+    let (owner, _, mut state) = fixture();
+    let peer = NodeIdentity::generate().unwrap();
+    let req = request(&peer, &state, NOW);
+    let update = state
+        .enroll_configurator(&owner, &req, req.fingerprint().unwrap(), NOW)
+        .unwrap();
+    state.apply_chain(&[update], NOW).unwrap();
+    assert!(state.state().nodes[peer.id()].can_configure);
+    let replacement = peer.replacement().unwrap();
+    let req = request(&replacement, &state, NOW);
+    let update = state
+        .rotate_node_key(&owner, &req, req.fingerprint().unwrap(), NOW)
+        .unwrap();
+    state.apply_chain(&[update], NOW).unwrap();
+    assert!(state.state().nodes[peer.id()].can_configure);
+    let update = state.revoke_node(&owner, peer.id(), NOW).unwrap();
+    state.apply_chain(&[update], NOW).unwrap();
+    assert!(
+        state
+            .delegate_configuration(&owner, peer.id(), true, NOW)
+            .is_err()
+    );
+}

@@ -62,6 +62,23 @@ if home.exists():
 '''
 
 
+STOP_OWNER = r'''
+import os, pathlib, signal, sys, time
+path = pathlib.Path(sys.argv[1]) / 'daemon.pid'
+pid = int(path.read_text())
+os.kill(pid, signal.SIGINT)
+for _ in range(100):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        path.unlink()
+        break
+    time.sleep(.05)
+else:
+    raise RuntimeError('owner daemon did not stop')
+'''
+
+
 def wait_for(check):
     end = time.monotonic() + 30
     while time.monotonic() < end:
@@ -123,8 +140,11 @@ def main():
             setup = json.loads(remote(['python3', '-c', PREPARE], json.dumps({'binary': args.remote_binary, 'relay': f'http://127.0.0.1:{args.remote_relay_port}', 'token': token})).stdout)
             owner_home = setup['home']
             owner = [args.remote_binary, '--home', owner_home, '--json']
-            with open(Path(folder) / 'owner.log', 'w') as log:
-                owner_daemon = subprocess.Popen(ssh + ['-o', 'ExitOnForwardFailure=yes', '-R', f'127.0.0.1:{args.remote_relay_port}:127.0.0.1:{url.port}', '--', args.owner, shlex.join(['python3', '-c', LAUNCH, owner_home, args.remote_binary])], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            def start_owner():
+                with open(Path(folder) / 'owner.log', 'a') as log:
+                    return subprocess.Popen(ssh + ['-o', 'ExitOnForwardFailure=yes', '-R', f'127.0.0.1:{args.remote_relay_port}:127.0.0.1:{url.port}', '--', args.owner, shlex.join(['python3', '-c', LAUNCH, owner_home, args.remote_binary])], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+
+            owner_daemon = start_owner()
             wait_for(lambda: remote(owner + ['daemon', 'status'], check=False).returncode == 0)
             join = ['cluster', 'join', setup['cluster'], '--via', args.owner, '--name', 'joining-machine', '--remote-gent', args.remote_binary, '--remote-home', owner_home, '--relay-endpoint', args.relay_url]
             assert cli(*join)['joined']
@@ -164,8 +184,8 @@ def main():
             wait_for(lambda: len(cli('agents')) == 2)
             wait_for(lambda: len(json.loads(remote(owner + ['agents']).stdout)) == 2)
             assert a.call('gent_agents')[0] == b.call('gent_agents')[0] == []
-            remote(owner + ['permission', 'allow', aid, bid, '--permission', 'enumerate', 'send'])
-            granted = json.loads(remote(owner + ['permission', 'allow', bid, aid, '--permission', 'enumerate', 'receive']).stdout)
+            cli('permission', 'allow', aid, bid, '--permission', 'enumerate', 'send')
+            granted = cli('permission', 'allow', bid, aid, '--permission', 'enumerate', 'receive')
             wait_for(lambda: applied(granted['revision']))
             wait_for(lambda: len(a.call('gent_agents')[0]) == 1)
             files = [{'name': 'visual.png', 'media_type': 'image/png', 'data_base64': PNG}]
@@ -192,7 +212,33 @@ def main():
             local_daemon = start_local()
             wait_for(lambda: (home / 'daemon.sock').exists())
             wait_for(lambda: any(m['id'] == queued['message_id'] for m in a.call('gent_inbox')[0]))
-            print('PASS: two-machine SSH pairing, encrypted configuration sync, MCP images in both directions, scoped replies, authenticated receipts, and offline catch-up')
+            rename_id = str(uuid.uuid4())
+            renamed = cli('--request-id', rename_id, 'node', 'name', 'set', 'joined-after-edit')
+            assert renamed['state'] == 'applied'
+            assert cli('--request-id', rename_id, 'node', 'name', 'set', 'joined-after-edit')['revision'] == renamed['revision']
+            assert cli('node', 'name') == 'joined-after-edit'
+            remote(['python3', '-c', STOP_OWNER, owner_home])
+            stop(owner_daemon)
+            owner_daemon = None
+            pending_id = str(uuid.uuid4())
+            pending = cli('--request-id', pending_id, 'node', 'name', 'set', 'pending-while-owner-offline')
+            assert pending['state'] == 'queued' and not pending['applied']
+            assert cli('node', 'name') == 'joined-after-edit'
+            stop(local_daemon)
+            local_daemon = start_local()
+            wait_for(lambda: (home / 'daemon.sock').exists())
+            assert cli('config', 'request', pending_id)['state'] == 'queued'
+            owner_daemon = start_owner()
+            wait_for(lambda: remote(owner + ['daemon', 'status'], check=False).returncode == 0)
+            wait_for(lambda: cli('config', 'request', pending_id)['state'] == 'applied')
+            assert cli('node', 'name') == 'pending-while-owner-offline'
+            node = cli('node')['id']
+            revoked = json.loads(remote(owner + ['node', 'admin', 'revoke', node]).stdout)
+            wait_for(lambda: applied(revoked['revision']))
+            denied = subprocess.run(local + ['node', 'name', 'set', 'not-authorized'], capture_output=True, text=True, timeout=15)
+            assert denied.returncode != 0 and 'configuration-management grant' in denied.stderr
+            assert cli('node', 'name') == 'pending-while-owner-offline'
+            print('PASS: two-machine pairing, encrypted MCP images/replies/receipts, remote permission edits and renaming, idempotent requests, offline owner recovery, and administration revocation')
             print(f'Configuration applied in {config_latency * 1000:.0f} ms, including the SSH owner command; observation made no daemon requests')
         finally:
             for client in clients:

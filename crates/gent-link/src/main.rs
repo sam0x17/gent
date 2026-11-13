@@ -4,7 +4,7 @@ mod pairing;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use gent_daemon::{config, request};
-use gent_protocol::{Effect, OwnerOp, Permission, Request, Rule, Selector};
+use gent_protocol::{ConfigurationEdit, Effect, OwnerOp, Permission, Request, Rule, Selector};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -22,6 +22,9 @@ struct Cli {
     /// Machine-readable output.
     #[arg(long, global = true)]
     json: bool,
+    /// Stable UUID for retrying a policy edit, config apply, rename, or renewal.
+    #[arg(long, global = true)]
+    request_id: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -112,10 +115,20 @@ enum AgentCommand {
 }
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Grant or revoke configuration management on an enrolled node (owner only).
+    Admin {
+        #[command(subcommand)]
+        command: NodeAdminCommand,
+    },
     Name {
         #[command(subcommand)]
         command: Option<NodeNameCommand>,
     },
+}
+#[derive(Subcommand)]
+enum NodeAdminCommand {
+    Grant { node: String },
+    Revoke { node: String },
 }
 #[derive(Subcommand)]
 enum NodeNameCommand {
@@ -126,6 +139,12 @@ enum ConfigCommand {
     Path,
     Validate,
     Apply,
+    /// List the latest 100 local configuration requests, including offline edits.
+    Requests,
+    /// Inspect an accepted, rejected, or pending configuration request.
+    Request {
+        id: String,
+    },
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum PermissionName {
@@ -161,6 +180,37 @@ async fn owner(home: &std::path::Path, action: OwnerOp) -> Result<Value> {
     )
     .await
 }
+async fn configure(home: &std::path::Path, id: &str, edit: ConfigurationEdit) -> Result<Value> {
+    let mut value = owner(
+        home,
+        OwnerOp::Configure {
+            request_id: id.into(),
+            edit,
+        },
+    )
+    .await?;
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while value["state"] == "queued" && tokio::time::Instant::now() < until {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        match owner(
+            home,
+            OwnerOp::ConfigurationRequests {
+                request_id: Some(id.into()),
+            },
+        )
+        .await
+        {
+            Ok(status) => value = status,
+            Err(_) => break, // The durable request remains inspectable after restart.
+        }
+    }
+    ensure!(
+        value["state"] != "rejected",
+        "configuration request {id} rejected: {}",
+        value["reason"].as_str().unwrap_or("unknown reason")
+    );
+    Ok(value)
+}
 fn selector(value: String) -> Result<Selector> {
     Ok(match value.as_str() {
         "*" => Selector::All,
@@ -180,6 +230,9 @@ async fn main() {
 }
 
 async fn execute(cli: Cli) -> Result<()> {
+    let request_id = cli
+        .request_id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let home = cli
         .home
         .or_else(|| std::env::var_os("GENT_HOME").map(PathBuf::from))
@@ -198,7 +251,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Some(Command::Cluster {
             command: Some(ClusterCommand::Renew),
-        }) => owner(&home, OwnerOp::Renew).await?,
+        }) => configure(&home, &request_id, ConfigurationEdit::Renew).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Join(args)),
         }) => pairing::join(&home, args).await?,
@@ -245,7 +298,16 @@ async fn execute(cli: Cli) -> Result<()> {
                 Some(NodeCommand::Name {
                     command: Some(NodeNameCommand::Set { name }),
                 }),
-        }) => owner(&home, OwnerOp::RenameNode { name }).await?,
+        }) => configure(&home, &request_id, ConfigurationEdit::RenameNode { name }).await?,
+        Some(Command::Node {
+            command: Some(NodeCommand::Admin { command }),
+        }) => {
+            let (node_id, allow) = match command {
+                NodeAdminCommand::Grant { node } => (node, true),
+                NodeAdminCommand::Revoke { node } => (node, false),
+            };
+            owner(&home, OwnerOp::DelegateConfiguration { node_id, allow }).await?
+        }
         Some(Command::Node {
             command: Some(NodeCommand::Name { command: None }),
         }) => {
@@ -278,10 +340,28 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Config {
             command: Some(ConfigCommand::Apply),
         }) => {
+            let proposed = config::load(&home)?;
+            configure(
+                &home,
+                &request_id,
+                ConfigurationEdit::Replace {
+                    cluster_name: proposed.cluster.name,
+                    node_name: proposed.node.name,
+                    policy: proposed.policy,
+                },
+            )
+            .await?
+        }
+        Some(Command::Config {
+            command: Some(ConfigCommand::Requests),
+        }) => owner(&home, OwnerOp::ConfigurationRequests { request_id: None }).await?,
+        Some(Command::Config {
+            command: Some(ConfigCommand::Request { id }),
+        }) => {
             owner(
                 &home,
-                OwnerOp::SetPolicy {
-                    policy: config::load(&home)?.policy,
+                OwnerOp::ConfigurationRequests {
+                    request_id: Some(id),
                 },
             )
             .await?
@@ -319,9 +399,10 @@ async fn execute(cli: Cli) -> Result<()> {
                     config.policy.rules.push(rule);
                 }
             }
-            owner(
+            configure(
                 &home,
-                OwnerOp::SetPolicy {
+                &request_id,
+                ConfigurationEdit::Policy {
                     policy: config.policy,
                 },
             )

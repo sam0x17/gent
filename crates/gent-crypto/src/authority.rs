@@ -51,6 +51,9 @@ impl openmls_traits::signatures::Signer for NodeIdentity {
 pub struct NodeMember {
     pub name: String,
     pub signing_key: PublicKey,
+    /// Owner-approved configuration editing, independent of node membership.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_configure: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -556,6 +559,7 @@ impl NodeIdentity {
         Ok(NodeMember {
             name: name.into(),
             signing_key: self.public_key(),
+            can_configure: false,
         })
     }
 
@@ -598,6 +602,10 @@ impl EnrollmentRequest {
         id(&self.node_id)?;
         id(&self.nonce)?;
         label(&self.member.name)?;
+        ensure!(
+            !self.member.can_configure,
+            "enrollment cannot self-grant administration"
+        );
         public_key(&self.anchor.owner_key)?;
         public_key(&self.member.signing_key)?;
         ensure!(
@@ -874,7 +882,35 @@ impl VerifiedState {
         approved_fingerprint: Digest,
         now: u64,
     ) -> Result<SignedState> {
-        self.accept_request(owner, request, approved_fingerprint, now, false)
+        self.accept_request(owner, request, approved_fingerprint, now, false, false)
+    }
+
+    /// Explicit owner approval for a machine used to manage cluster configuration.
+    pub fn enroll_configurator(
+        &self,
+        owner: &OwnerKey,
+        request: &SignedEnrollment,
+        approved: Digest,
+        now: u64,
+    ) -> Result<SignedState> {
+        self.accept_request(owner, request, approved, now, false, true)
+    }
+
+    pub fn delegate_configuration(
+        &self,
+        owner: &OwnerKey,
+        node: &str,
+        allow: bool,
+        now: u64,
+    ) -> Result<SignedState> {
+        self.revise(owner, now, |state| {
+            state
+                .nodes
+                .get_mut(node)
+                .context("unknown node")?
+                .can_configure = allow;
+            Ok(())
+        })
     }
 
     pub fn rotate_node_key(
@@ -884,7 +920,7 @@ impl VerifiedState {
         approved_fingerprint: Digest,
         now: u64,
     ) -> Result<SignedState> {
-        self.accept_request(owner, request, approved_fingerprint, now, true)
+        self.accept_request(owner, request, approved_fingerprint, now, true, false)
     }
 
     fn accept_request(
@@ -894,6 +930,7 @@ impl VerifiedState {
         approved: Digest,
         now: u64,
         rotation: bool,
+        can_configure: bool,
     ) -> Result<SignedState> {
         self.require_fresh(now)?;
         ensure!(
@@ -918,9 +955,13 @@ impl VerifiedState {
                 (false, None) => {}
                 _ => anyhow::bail!("node enrollment mode does not match membership"),
             }
-            state
-                .nodes
-                .insert(request.node_id.clone(), request.member.clone());
+            let mut member = request.member.clone();
+            member.can_configure = if rotation {
+                state.nodes[&request.node_id].can_configure
+            } else {
+                can_configure
+            };
+            state.nodes.insert(request.node_id.clone(), member);
             Ok(())
         })
     }

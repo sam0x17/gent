@@ -43,12 +43,14 @@ Setup must recover from an interrupted step and be safe to rerun. Preserve devic
 | `gent node` | Show details for the current node. |
 | `gent node name` | Print the current node's name. |
 | `gent node name set my-node` | Rename the current node and publish its updated encrypted metadata to its joined clusters. |
+| `gent node admin grant NODE_UUID` | On the active owner, authorize an enrolled node to submit configuration edits. |
+| `gent node admin revoke NODE_UUID` | On the active owner, revoke that delegated capability; pending edits are checked at acceptance. |
 | `gent nodes` | List all visible nodes in the active cluster with status and last-seen information. |
 | `gent node show <node>` | Inspect a node by stable ID or unambiguous name. |
 | `gent node revoke <node>` | Revoke a node's cluster membership through authorized enrollment and key-rotation procedures. |
 | `gent cluster` | Show overall status for the active cluster, including node availability and configuration synchronization. |
 | `gent cluster status` | Explicit alias for the same cluster status view. |
-| `gent cluster renew` | Renew the signed configuration lease using the active owner's authority. |
+| `gent cluster renew` | Renew the signed configuration lease locally on the owner, or request renewal from an authorized joined node. |
 | `gent clusters` | List the user's configured or authorized clusters, marking the active one. |
 | `gent cluster new [name]` | Create and select a cluster, establishing its initial owner keys and policy locally. |
 | `gent cluster join <cluster-id>` | Join and select an existing cluster after authentication and authorized enrollment. |
@@ -134,10 +136,14 @@ Additional command families should follow the same grammar as their functionalit
 | `gent config path` | Print `~/.gent/config.toml` as an absolute path. |
 | `gent config validate` | Validate local TOML without publishing changes. |
 | `gent config edit` | Open the configured editor on the local TOML file. |
-| `gent config apply` | Validate local changes and publish authorized signed, encrypted cluster revisions, checking for conflicts. |
+| `gent config apply` | Submit local cluster/node names and policy to the active owner; the newest accepted revision replaces earlier shared settings. |
+| `gent config requests` | List the latest 100 configuration requests submitted on this node. |
+| `gent config request REQUEST_UUID` | Inspect a request's queued, applied, or rejected status and its revision or rejection reason. |
 | `gent doctor` | Diagnose configuration, auth, daemon, hooks, MCP registration, and connectivity; provide concrete repair commands without starting inference. |
 
 Messages carry an explicit authenticated user or agent identity. Do not infer sender authority from the shell's active cluster or an agent ID passed as an argument. Relay and permission-management commands must expose their acting identity and target scope when added.
+
+Configuration mutations accept `--request-id UUID` for retrying an identical proposal. A retry returns the original result; reusing the ID with different content fails. The CLI waits about five seconds for acceptance, then reports a durable `queued` request if the owner remains unavailable. Queued edits survive daemon restarts and do not change effective policy before acceptance. Rejected mutations exit nonzero; `gent config request` can inspect their recorded reason. See [configuration administration](local-proof.md#configuration-administration) for grants, retries, and offline behavior.
 
 Incoming delivery wakes or resumes idle agents where the host supports it, queues for busy agents, and never interrupts automatically. Expose pending state and the reason when the host requires a future user turn or inbox check. Bound automatic exchanges and report when a limit is reached.
 

@@ -310,7 +310,7 @@ async fn enrolled_peer_cannot_claim_unknown_foreign_agent_or_forge_reply_or_rece
     pair.pump();
     let store = &pair.stores[1];
     let tx = store.db.unchecked_transaction().unwrap();
-    let session = store.network_session(&tx, store.identity.state(&tx).unwrap());
+    let mut session = store.network_session(&tx, store.identity.state(&tx).unwrap());
     let mut message = session
         .message(sent["message_id"].as_str().unwrap())
         .unwrap();
@@ -410,4 +410,182 @@ async fn remote_exchange_budget_stays_bounded_when_both_nodes_queue_replies() {
             .unwrap();
         assert_eq!(count, MAX_EXCHANGE_MESSAGES);
     }
+}
+
+impl Pair {
+    fn owner(&mut self, i: usize, action: OwnerOp) -> Result<Value> {
+        self.stores[i].execute(Request::Owner {
+            credential: config::read_private(&self.homes[i].path().join("owner.key"))?,
+            action,
+        })
+    }
+}
+#[tokio::test]
+async fn configuration_proposal_revision_and_result_recover_atomically_after_storage_failures() {
+    let mut pair = Pair::new().await;
+    let id = Uuid::new_v4().to_string();
+    let action = OwnerOp::Configure {
+        request_id: id.clone(),
+        edit: ConfigurationEdit::RenameNode {
+            name: "renamed-remotely".into(),
+        },
+    };
+    pair.stores[1].db.execute_batch("CREATE TRIGGER fail_proposal BEFORE INSERT ON network_events BEGIN SELECT RAISE(ABORT,'disk failure'); END;").unwrap();
+    assert!(pair.owner(1, action.clone()).is_err());
+    assert!(
+        pair.owner(
+            1,
+            OwnerOp::ConfigurationRequests {
+                request_id: Some(id.clone())
+            }
+        )
+        .is_err()
+    );
+    pair.stores[1]
+        .db
+        .execute_batch("DROP TRIGGER fail_proposal;")
+        .unwrap();
+    assert_eq!(pair.owner(1, action.clone()).unwrap()["state"], "queued");
+    let before = pair.stores[0]
+        .identity
+        .state(&pair.stores[0].db)
+        .unwrap()
+        .checkpoint()
+        .clone();
+    pair.stores[0].db.execute_batch("CREATE TRIGGER fail_result BEFORE INSERT ON configuration_edits BEGIN SELECT RAISE(ABORT,'disk failure'); END;").unwrap();
+    let group: Vec<u8> = pair.stores[1]
+        .db
+        .query_row("SELECT outgoing FROM network_links", [], |r| r.get(0))
+        .unwrap();
+    let next = pair.stores[0].data_next(&group).unwrap();
+    pair.stores[1].data_prepare(&group).unwrap();
+    let packet = pair.stores[1].data_outgoing(&group, next).unwrap().unwrap();
+    assert!(pair.stores[0].data_receive(&packet).is_err());
+    assert_eq!(
+        pair.stores[0]
+            .identity
+            .state(&pair.stores[0].db)
+            .unwrap()
+            .checkpoint(),
+        &before
+    );
+    pair.reopen(0);
+    pair.stores[0]
+        .db
+        .execute_batch("DROP TRIGGER fail_result;")
+        .unwrap();
+    pair.stores[0].data_next(&group).unwrap();
+    pair.pump();
+    let result = pair
+        .owner(
+            1,
+            OwnerOp::ConfigurationRequests {
+                request_id: Some(id.clone()),
+            },
+        )
+        .unwrap();
+    assert_eq!(result["revision"], before.revision + 1);
+    assert_eq!(
+        pair.owner(1, action).unwrap()["revision"],
+        result["revision"]
+    );
+    assert_eq!(
+        config::load(pair.homes[1].path()).unwrap().node.name,
+        "renamed-remotely"
+    );
+    assert_eq!(
+        pair.stores[0]
+            .identity
+            .state(&pair.stores[0].db)
+            .unwrap()
+            .checkpoint()
+            .revision,
+        before.revision + 1
+    );
+}
+
+#[tokio::test]
+async fn configuration_results_require_the_original_writer_request_and_verified_revision() {
+    let mut pair = Pair::new().await;
+    let id = Uuid::new_v4();
+    let edit = ConfigurationEdit::RenameNode {
+        name: "pending".into(),
+    };
+    pair.owner(
+        1,
+        OwnerOp::Configure {
+            request_id: id.to_string(),
+            edit,
+        },
+    )
+    .unwrap();
+    let store = &pair.stores[1];
+    let tx = store.db.unchecked_transaction().unwrap();
+    let state = store.identity.state(&tx).unwrap();
+    let fingerprint: String = tx
+        .query_row(
+            "SELECT fingerprint FROM configuration_edits WHERE origin=?1 AND id=?2",
+            params![store.identity.node.id(), id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let session = store.network_session(&tx, state.clone());
+    let mut checkpoint = state.checkpoint().clone();
+    checkpoint.state_hash[0] ^= 1;
+    assert!(
+        session
+            .import_configuration_result(
+                pair.stores[0].identity.node.id(),
+                id,
+                &fingerprint,
+                crate::messages::EditResult::Applied { checkpoint }
+            )
+            .is_err()
+    );
+    assert!(
+        session
+            .import_configuration_result(
+                store.identity.node.id(),
+                id,
+                &fingerprint,
+                crate::messages::EditResult::Rejected {
+                    reason: "forged".into()
+                }
+            )
+            .is_err()
+    );
+    assert!(
+        session
+            .import_configuration_result(
+                pair.stores[0].identity.node.id(),
+                id,
+                "wrong request digest",
+                crate::messages::EditResult::Rejected {
+                    reason: "forged".into()
+                }
+            )
+            .is_err()
+    );
+    tx.rollback().unwrap();
+    assert_eq!(
+        pair.owner(
+            1,
+            OwnerOp::ConfigurationRequests {
+                request_id: Some(id.to_string())
+            }
+        )
+        .unwrap()["state"],
+        "queued"
+    );
+    pair.pump();
+    assert_eq!(
+        pair.owner(
+            1,
+            OwnerOp::ConfigurationRequests {
+                request_id: Some(id.to_string())
+            }
+        )
+        .unwrap()["state"],
+        "applied"
+    );
 }

@@ -159,6 +159,23 @@ async fn joined_node_keeps_its_keys_and_imports_only_development_relay_access() 
         true
     );
     assert_eq!(owner.calls, calls);
+    let node = config::load(&home).unwrap().node.id;
+    owner
+        .owner(OwnerOp::DelegateConfiguration {
+            node_id: node.clone(),
+            allow: false,
+        })
+        .unwrap();
+    join(&home, &mut owner).await.unwrap();
+    assert!(
+        owner
+            .owner(OwnerOp::Nodes)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == node && n["can_configure"] == false)
+    );
 }
 
 #[tokio::test]

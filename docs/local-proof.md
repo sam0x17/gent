@@ -101,7 +101,7 @@ gent permission deny AGENT_B_ID AGENT_A_ID --permission receive
 
 This blocks new messages and delivery of queued messages from A to B, as well as replies in the blocked relationship. Owner commands can inspect local and linked-node registrations; agent-facing discovery exposes only permitted peers. `last_seen` records local agent activity or receipt of a remote announcement and does not prove an active model turn or live connection.
 
-Selectors support an agent ID, `'*'`, `same-node`, `node:UUID`, or `group:NAME`. Quote `'*'` in the shell. Groups and rules are stored under `[policy]` in `config.toml`. Edit the TOML to remove a rule, then run `gent config validate` and `gent config apply`. Applying a change signs and commits a new revision. The newest accepted revision replaces the previous shared configuration; editing the file without applying it does not change active permissions. `gent agent revoke AGENT_ID` invalidates a registration hosted on the current node and publishes its tombstone to linked peers. Remote administrative forwarding is pending.
+Selectors support an agent ID, `'*'`, `same-node`, `node:UUID`, or `group:NAME`. Quote `'*'` in the shell. Groups and rules are stored under `[policy]` in `config.toml`. Edit the TOML to remove a rule, then run `gent config validate` and `gent config apply`. The active owner signs and commits accepted edits, including requests from authorized joined nodes. The newest accepted revision replaces the previous shared configuration; editing the file without applying it does not change active permissions. `gent agent revoke AGENT_ID` invalidates a registration hosted on the current node and publishes its tombstone to linked peers. Revoking an agent hosted on another node through administrative forwarding remains pending.
 
 Signed authority and message queues share `state.sqlite3`. First daemon startup preserves existing local identities and creates a private `identity.key` for node and owner signing keys, separate from the RPC credential in `owner.key`. Keep both keys and the database private. Existing databases must have mode 0600; Gent rejects shared or symlink files. Missing signing keys for an initialized database cause an error instead of silently creating a different identity.
 
@@ -128,9 +128,9 @@ The command imports the owner's relay origin and shared development token into p
 
 Interrupted joins retain their node key and progress in a private sibling directory, such as `~/.gent-peer.joining`. Rerun the same command and node name to resume. Gent installs the finished runtime atomically and refuses to overwrite another node or unrelated files. A completed retry reports `already_joined`. Rerunning the join command upgrades an older configuration-only node with data streams and owner-certified legacy agent IDs, preserving existing bindings. A stale unconsumed stream grant gets a fresh key package while preserving node identity; obsolete streams still need eventual pruning. Do not delete pending state to repair an interrupted join, since that would lose its identity.
 
-`gent nodes` lists enrolled node IDs and names. Remote presence is currently `unknown`; a membership record does not prove another daemon is online. Joined nodes receive signed configuration changes, but owner edits, including renaming a joined node, cannot yet be forwarded from them. SSH pairing is implemented; GitHub login and invite-based pairing are pending.
+`gent nodes` lists enrolled node IDs, names, and the signed `can_configure` capability. Remote presence is currently `unknown`; a membership record does not prove another daemon is online. Newly SSH-enrolled nodes receive configuration-management permission. Existing nodes keep their previous grant on join retry, so retrying cannot restore revoked administration. Nodes enrolled by older versions need an explicit owner grant. SSH pairing is implemented; GitHub login and invite-based pairing are pending.
 
-An opt-in proof creates temporary nodes on two machines, pairs through the real CLI, and checks encrypted configuration delivery through a local relay. It registers independent MCP clients, grants permissions, transfers images in both directions, verifies scoped replies and recipient acknowledgments, then queues a reply while the receiving daemon is offline and retrieves it after restart. It needs Python 3.11 or newer, a running loopback development relay, a private token file, and an already trusted SSH host. It makes no model calls and removes its temporary nodes afterward:
+An opt-in proof creates temporary nodes on two machines, pairs through the real CLI, and checks encrypted configuration delivery through a local relay. It registers independent MCP clients, grants permissions from the joined node, transfers images in both directions, verifies scoped replies and recipient acknowledgments, then queues a reply while the receiving daemon is offline and retrieves it after restart. It also checks remote renaming, identical request retries, queued edits surviving owner downtime and source restart, and revoked administration. It needs Python 3.11 or newer, a running loopback development relay, a private token file, and an already trusted SSH host. It makes no model calls and removes its temporary nodes afterward:
 
 ```sh
 python3 scripts/prove_pairing.py --owner sam@owner-host \
@@ -140,9 +140,34 @@ python3 scripts/prove_pairing.py --owner sam@owner-host \
 
 This proof passes with a Mac Studio owner and Linux joining node. Links currently connect each joined node with the owner. Joined-peer-to-joined-peer discovery and delivery need automatic mesh establishment; the owner does not forward another node's agent identity or messages.
 
+## Configuration administration
+
+The owner CLI and authorized joined-node CLIs can change policy, apply cluster and current-node names from TOML, rename the current node, and request lease renewal. MCP agent credentials cannot invoke these owner operations. Scoped administration through MCP remains planned.
+
+On the owner node, use the stable node ID from `gent nodes`:
+
+```sh
+gent node admin grant NODE_UUID
+gent node admin revoke NODE_UUID
+```
+
+These are independent examples. The grant authorizes configuration proposals; it does not export owner keys or permit enrollment or further delegation. The active owner retains signing authority regardless of its own `can_configure` flag. All proposals and results travel in encrypted node streams, and the owner rechecks the signed grant when accepting each edit.
+
+Accepted changes immediately enter replication to the other nodes. Their signed revision orders changes, regardless of device clocks or when an editor first loaded the file. A later accepted policy replaces an earlier policy in full. The owner must be available for acceptance; while it is offline, authorized joined nodes persist requests and report `queued`. The queue survives restarts. Current policy remains in effect until a signed revision arrives, and normal communication still requires an unexpired lease.
+
+For an exact retry, choose a UUID once and retain it with the proposed content:
+
+```sh
+gent --request-id 11111111-1111-4111-8111-111111111111 node name set laptop
+gent config request 11111111-1111-4111-8111-111111111111
+gent config requests
+```
+
+The CLI waits about five seconds before returning a still-queued request. Its eventual state is `applied` with a revision or `rejected` with a reason. An identical retry returns the original result; different content under the same UUID fails. A rejected request stays rejected even if the owner later restores its grant; submit new intent under a new UUID. Retrying `config apply` or a permission command requires the same complete proposal, including any policy loaded from TOML. Accepted incoming revisions can replace local TOML edits, so submit intended changes promptly and inspect the request status.
+
 ## Development configuration relay
 
-Adding a relay URL alone does not enroll a node or establish a stream. Use SSH pairing above, or the trusted Rust enrollment APIs in transport test fixtures. Joined nodes store their own signing key and verified bootstrap state in `identity.key`, without the owner's signing secret. They can receive updates but cannot yet forward configuration edits to the owner.
+Adding a relay URL alone does not enroll a node or establish a stream. Use SSH pairing above, or the trusted Rust enrollment APIs in transport test fixtures. Joined nodes store their own signing key and verified bootstrap state in `identity.key`, without the owner's signing secret. Configuration proposals require a signed administration grant and established data streams to the owner.
 
 For an already provisioned test node, add these machine-local settings to `config.toml` and restart the daemon:
 
@@ -168,4 +193,4 @@ Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per ex
 
 Codex and Claude Code pass explicit pairing, session continuity, and a small image round trip on both OSes. Separate concurrent conversations in normal shared host configurations, automatic binding, and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Automatic links between joined peers, invite-based pairing, edits from joined nodes, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, configuration sync, and generic MCP messaging pass between two physical machines through a local relay. A visual iteration involving real models across those machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
+Automatic links between joined peers, invite-based pairing, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, configuration sync and edits from joined nodes, and generic MCP messaging pass between two physical machines through a local relay. A visual iteration involving real models across those machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
