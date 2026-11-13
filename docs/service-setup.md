@@ -1,6 +1,6 @@
 # Service cluster setup
 
-The source build can provision the first owner node against a configured Gent account service. The public account and messaging services are not deployed yet. Real GitHub consent, invitation enrollment and additional service-backed nodes still need integration work.
+The source build can provision an owner and join additional nodes through a trusted SSH channel against a configured Gent account service. The public account and messaging services are not deployed yet. Real GitHub consent and invitation enrollment remain unfinished.
 
 For a configured service:
 
@@ -15,7 +15,27 @@ Use `gent auth login --service https://YOUR_ACCOUNT_ORIGIN` for an alternate dep
 
 `gent cluster new NAME` requires an unconfigured state directory, allowing an existing login under `auth/`. It creates the node and cluster UUIDs, owner signing key, node signing key and signed genesis locally before reserving their IDs at the account service. The service receives those IDs and a transport credential, never the signing keys, policy or display names. The credential grants access to cluster ciphertext; local signed authority still controls agents and decryption.
 
-`--local` retains the independent development setup. Existing development or SSH-paired clusters are not automatically converted to service transport. They can have compacted mailbox history that requires a separate migration procedure. The existing SSH join path refuses to copy a service credential. A service-created cluster currently supports its owner node; adding other nodes requires the next enrollment stage.
+`--local` retains the independent development setup. Existing development or SSH-paired clusters are not automatically converted to service transport. They can have compacted mailbox history that requires a separate migration procedure.
+
+## Add another machine through SSH
+
+On the new machine, sign into the same Gent service and GitHub account as the owner:
+
+```sh
+gent auth login
+gent cluster join CLUSTER_UUID --via user@owner-host --name laptop
+gent daemon install
+```
+
+The owner's daemon must be running and its SSH host key already trusted. Use `--remote-gent` or `--remote-home` for nondefault owner paths. Service joins use the owner's pinned relay address and reject `--relay-endpoint` overrides. For local service proofs, mirror the loopback account and relay ports over SSH so both machines see the same origins.
+
+An owner configured by the earlier source build may lack the new local `[service]` metadata. Stop its daemon, run `gent cluster connect`, then start it again before accepting service joins. This adds metadata from its pinned setup record without changing keys or relay storage.
+
+SSH protects the trust anchor, signed enrollment request, configuration grants and key packages. The joining machine creates its signing key locally; the owner signs its membership. Service snapshots carry account/relay metadata and omit the owner's relay credential. The CLI checks its own account session and cluster ownership before requesting enrollment, then provisions a separate transport credential under that session using the actual joined node ID. The owner signing key stays on the owner. This initial single-user implementation requires the same account on each machine; invitation and multi-user enrollment need separate authorization work.
+
+Joining preserves the existing `auth/` directory and the inodes of service, daemon and login lock files. Cryptographic state and pending credential admission remain in a private sibling directory named `~/.gent.joining`. Once ready, an immutable manifest records each runtime file's length and SHA-256 digest. Publication copies verified private files without overwriting conflicts and publishes `config.toml` last. A retry resumes partial publication from the same staged bytes. Temporary copy files stay in the staging directory. Completed publication removes staging copies; a later join retry can finish cleanup after an interruption.
+
+Rerun the original join command to resume, including the original node name while staging remains. A pending join prevents `cluster new` or `daemon install --local` from replacing its identity. Stop an existing daemon before retrying a join or reconnecting. Existing development SSH joins continue to import only their shared development credential.
 
 ## Interrupted setup and reconnecting
 
@@ -36,7 +56,7 @@ gent cluster connect
 gent daemon start
 ```
 
-Use `gent daemon install` instead of `start` if the service is not installed. Setup verifies the locally held owner signing identity. Signing into another account or service cannot take over that state directory. The journal, `relay.key`, login record and local identity files remain private. Concurrent replacement of a configuration or credential file causes publication to fail so the command can be retried after resolving the change.
+Use `gent daemon install` instead of `start` if the service is not installed. Setup verifies either the locally held owner identity or the existing enrolled node-only identity. The journal records which role it expects. Signing into another account or service cannot take over that state directory. The journal, `relay.key`, login record and local identity files remain private. Concurrent replacement of a configuration or credential file causes publication to fail so the command can be retried after resolving the change.
 
 Each connect checks service authority. A valid credential is reused. Once a previously confirmed credential is revoked or expired, connect can issue another after a valid login, preserving encryption identity. A lost admission response retains its exact candidate. If that candidate is still unconfirmed after switching login sessions, retry may need to wait for its 15-minute admission window to close. Only an explicit expired-candidate response permits replacing an unconfirmed token; network errors and a timestamp ahead of the service clock do not. Node retirement remains permanent and cannot be bypassed with connect.
 
@@ -46,4 +66,4 @@ Credentials expire with their issuing account session, currently after 30 days. 
 
 `scripts/prove_setup.py` runs against the private repository's real local account Worker and synthetic GitHub provider. Its forwarding proxy interrupts responses after database commits. The proof covers durable identity, publication before/after configuration, lost reservation and enrollment responses, process termination, competing setup/logout, credential publication conflicts, missing-state and file-link rejection, account pinning, user-service installation, daemon exclusion, credential replacement and permanent retirement. It checks both Linux systemd and Mac launchd through deliberate SSH testing.
 
-The setup proof does not exercise relay ciphertext delivery. Separate native service-relay proofs cover MLS synchronization and 32 MiB encrypted file transport. Real GitHub authorization, hosted deployment, end-to-end onboarding of a second node and lost-state recovery still precede daily use.
+The first-owner setup proof does not exercise relay ciphertext delivery. The private account harness's `--relay --pairing` mode runs `scripts/prove_pairing.py` between Linux and the Mac Studio with separate fixture account sessions. It checks service records against real node IDs, different node credentials, encrypted configuration and MCP image/file/reply delivery, restarts, and joined-node credential replacement after logout. Its account sessions are supplied by the synthetic provider fixture; independent CLI login tests cover the browser/device flows. Separate native service-relay proofs cover maximum-size 32 MiB encrypted files. Real GitHub authorization, hosted deployment, invitation enrollment and lost-state recovery still precede daily use.

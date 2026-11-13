@@ -31,7 +31,7 @@ gent cluster
 
 Use `gent cluster new` to create a cluster instead of joining one. Creation can prompt for a name. Joining requires an invitation or existing membership and cryptographic enrollment approval; knowing a cluster ID does not grant access.
 
-The development build implements `gent cluster join CLUSTER_UUID --via user@owner-host --name laptop` using an already trusted SSH owner account and a configured development relay. Optional `--remote-gent`, `--remote-home`, and `--relay-endpoint` arguments select nondefault paths or a tunneled relay. It preserves node identity on interrupted retries and imports only the development transport credential, never the owner's signing key. GitHub/invitation enrollment remains pending. See [the tested SSH workflow](local-proof.md#join-another-machine-through-ssh).
+The development build implements `gent cluster join CLUSTER_UUID --via user@owner-host --name laptop` using an already trusted SSH owner account and a configured development relay. Optional `--remote-gent`, `--remote-home`, and `--relay-endpoint` arguments select nondefault paths or a tunneled relay. It preserves node identity on interrupted retries and imports only the development transport credential, never the owner's signing key. Service-backed SSH joins now preserve prior login state and issue a separate node credential; sign into the same account and service first. They use the pinned relay origin and reject `--relay-endpoint` overrides. Invitation enrollment remains pending. See [the tested SSH workflow](local-proof.md#join-another-machine-through-ssh).
 
 Setup must recover from an interrupted step and be safe to rerun. Preserve device identity, existing settings, and unrelated shell configuration. End with a concise status report and the next action, if any.
 
@@ -54,7 +54,7 @@ The current build implements service installation for configured nodes and `gent
 | `gent node revoke <node>` | Revoke a node's cluster membership through authorized enrollment and key-rotation procedures. |
 | `gent cluster` | Show overall status for the active cluster, including node availability and configuration synchronization. |
 | `gent cluster status` | Explicit alias for the same cluster status view. |
-| `gent cluster connect` | Resume first-owner service setup or replace an invalid relay credential, preserving local identity. Stop the daemon first. |
+| `gent cluster connect` | Resume service setup or replace an invalid relay credential on an owner or joined node, preserving local identity. Stop the daemon first. |
 | `gent cluster renew` | Renew the signed configuration lease locally on the owner, or request renewal from an authorized joined node. |
 | `gent clusters` | List the user's configured or authorized clusters, marking the active one. |
 | `gent cluster new [name]` | Create and select a cluster, establishing its initial owner keys and policy locally. |

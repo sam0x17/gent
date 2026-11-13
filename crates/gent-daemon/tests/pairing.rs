@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 struct Owner {
@@ -22,6 +22,7 @@ struct Owner {
     change_before: Option<usize>,
     calls: usize,
     corrupt_grant: bool,
+    publication_conflict: Option<PathBuf>,
 }
 impl Owner {
     fn new() -> Self {
@@ -51,6 +52,7 @@ impl Owner {
             change_before: None,
             calls: 0,
             corrupt_grant: false,
+            publication_conflict: None,
         }
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
@@ -75,6 +77,7 @@ impl Peer for Owner {
             })?;
         }
         let is_configuration = matches!(action, PairingOp::Configuration { .. });
+        let is_accept = matches!(action, PairingOp::AcceptData { .. });
         let mut value = self.owner(OwnerOp::Pair {
             cluster_id: self.cluster.clone(),
             action,
@@ -85,11 +88,99 @@ impl Peer for Owner {
             bytes[index] ^= 1;
             value["grant"] = STANDARD.encode(bytes).into();
         }
+        if is_accept && let Some(path) = self.publication_conflict.take() {
+            config::write_private(&path, b"preserve conflicting file")?;
+        }
         if self.fail_after == Some(self.calls) {
             bail!("lost SSH reply after commit");
         }
         Ok(value)
     }
+}
+
+#[tokio::test]
+async fn publication_recovers_partial_copies_and_preserves_login_and_lock_inodes() {
+    use std::os::unix::fs::MetadataExt;
+    let mut owner = Owner::new();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("joined");
+    config::private_dir(&home).unwrap();
+    config::write_private(&home.join("auth/session.json"), b"unchanged fixture login").unwrap();
+    drop(config::state_lock(&home, "service.lock").unwrap());
+    let locked = config::state_lock(&home, "daemon.lock").unwrap();
+    assert!(join(&home, &mut owner).await.is_err());
+    assert_eq!(owner.calls, 0);
+    drop(locked);
+    let inodes = ["auth/session.json", "service.lock", "daemon.lock"]
+        .map(|p| fs::metadata(home.join(p)).unwrap().ino());
+    owner.publication_conflict = Some(home.join("owner.key"));
+    assert!(join(&home, &mut owner).await.is_err());
+    assert!(!config::path(&home).exists());
+    assert!(home.join("identity.key").exists());
+    assert_eq!(
+        fs::read(home.join("owner.key")).unwrap(),
+        b"preserve conflicting file"
+    );
+    assert!(config::initialize(&home, "replacement").is_err());
+    let dir = config::pending_join(&home).unwrap();
+    assert!(dir.join("publication.json").exists());
+    let identity = fs::read(home.join("identity.key")).unwrap();
+    let calls = owner.calls;
+    fs::remove_file(home.join("owner.key")).unwrap(); // Remove only the injected fixture conflict.
+    join(&home, &mut owner).await.unwrap();
+    assert_eq!(
+        owner.calls, calls,
+        "committed publication should need no new owner requests"
+    );
+    assert_eq!(fs::read(home.join("identity.key")).unwrap(), identity);
+    assert_eq!(
+        fs::read(home.join("auth/session.json")).unwrap(),
+        b"unchanged fixture login"
+    );
+    assert_eq!(
+        inodes,
+        ["auth/session.json", "service.lock", "daemon.lock"]
+            .map(|p| fs::metadata(home.join(p)).unwrap().ino())
+    );
+    assert!(!dir.exists());
+}
+
+#[tokio::test]
+async fn service_snapshot_never_exports_owner_credential_and_rejects_unprepared_clients() {
+    let mut owner = Owner::new();
+    let mut cfg = config::load(owner.home.path()).unwrap();
+    cfg.cluster.local_only = false;
+    cfg.service = Some(config::ServiceConfig {
+        origin: "https://accounts.example/".into(),
+        account_id: uuid::Uuid::new_v4().to_string(),
+    });
+    let token = format!("gent_t1.{}.{}", gent_daemon::store::now(), "ab".repeat(32));
+    config::write_private(&owner.home.path().join("relay.key"), token.as_bytes()).unwrap();
+    config::save(owner.home.path(), &cfg).unwrap();
+    owner.reopen();
+    let snapshot = owner
+        .owner(OwnerOp::Pair {
+            cluster_id: owner.cluster.clone(),
+            action: PairingOp::Snapshot,
+        })
+        .unwrap();
+    assert!(snapshot["relay"].is_null());
+    assert_eq!(
+        snapshot["service"]["account"]["account_id"],
+        cfg.service.unwrap().account_id
+    );
+    assert!(!snapshot.to_string().contains(&token));
+    let temp = tempfile::tempdir().unwrap();
+    assert!(join(&temp.path().join("joined"), &mut owner).await.is_err());
+    assert_eq!(
+        owner
+            .owner(OwnerOp::Nodes)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 async fn join(home: &Path, owner: &mut Owner) -> Result<Value> {
     let cluster = owner.cluster.clone();

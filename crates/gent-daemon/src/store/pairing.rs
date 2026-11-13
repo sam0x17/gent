@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     encrypted::ordered::OrderedEndpoint,
-    pairing::{Invitation, RelayAccess, Snapshot},
+    pairing::{Invitation, RelayAccess, ServiceRelay, Snapshot},
 };
 use gent_crypto::SignedEnrollment;
 use gent_protocol::PairingOp;
@@ -168,23 +168,48 @@ impl Store {
             &self.identity.node.public_key(),
             now() as u64,
         )?;
-        let relay = self
+        let service = self
             .config
-            .relay
+            .service
             .as_ref()
-            .map(|relay| -> Result<RelayAccess> {
-                Ok(RelayAccess {
-                    endpoint: relay.endpoint.clone(),
-                    credential: config::read_private(&self.home.join(&relay.credential_file))?,
+            .map(|account| -> Result<_> {
+                Ok(ServiceRelay {
+                    account: account.clone(),
+                    relay_endpoint: self
+                        .config
+                        .relay
+                        .as_ref()
+                        .context("missing service relay")?
+                        .endpoint
+                        .clone(),
                 })
             })
             .transpose()?;
+        ensure!(
+            self.config.cluster.local_only || service.is_some(),
+            "service metadata is missing; stop the daemon and run gent cluster connect"
+        );
+        let relay = if service.is_some() {
+            None
+        } else {
+            self.config
+                .relay
+                .as_ref()
+                .map(|relay| -> Result<RelayAccess> {
+                    Ok(RelayAccess {
+                        endpoint: relay.endpoint.clone(),
+                        credential: config::read_private(&self.home.join(&relay.credential_file))?,
+                    })
+                })
+                .transpose()?
+        };
         Ok(serde_json::to_value(Snapshot {
             anchor: state.anchor().clone(),
             checkpoint: state.checkpoint().clone(),
             state: STANDARD.encode(state.signed().encode()?),
             writer: self.identity.node.id().into(),
             relay,
+            service,
         })?)
     }
 }

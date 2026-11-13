@@ -174,7 +174,7 @@ enum ClusterCommand {
         #[arg(long)]
         local: bool,
     },
-    /// Resume service setup or refresh this owner node's revoked/expired credential.
+    /// Resume service setup or refresh this node's revoked/expired credential.
     /// Stop the daemon first; sign into the original account with gent auth login.
     Connect,
     Status,

@@ -24,6 +24,7 @@ use std::{
 };
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
+mod publication;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,10 +46,31 @@ pub struct Snapshot {
     pub state: String,
     pub writer: String,
     pub relay: Option<RelayAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServiceRelay>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceRelay {
+    pub account: config::ServiceConfig,
+    pub relay_endpoint: String,
 }
 impl Snapshot {
     fn verify(&self, cluster: &str) -> Result<VerifiedState> {
         ensure!(self.anchor.cluster_id == cluster, "wrong pairing cluster");
+        ensure!(
+            self.relay.is_none() || self.service.is_none(),
+            "ambiguous pairing transport"
+        );
+        if let Some(service) = &self.service {
+            service.account.validate()?;
+            config::RelayConfig {
+                endpoint: service.relay_endpoint.clone(),
+                credential_file: "relay.key".into(),
+            }
+            .validate()?;
+        }
         let state = VerifiedState::restore(
             self.anchor.clone(),
             self.checkpoint.clone(),
@@ -88,6 +110,17 @@ impl Invitation {
 /// relay and protect the entire channel, including bootstrap metadata and tokens.
 pub trait Peer {
     fn call(&mut self, action: PairingOp) -> impl Future<Output = Result<Value>>;
+    fn prepare_service(&mut self, _service: &ServiceRelay) -> impl Future<Output = Result<()>> {
+        async { anyhow::bail!("this pairing client does not support service enrollment") }
+    }
+    fn provision_service(
+        &mut self,
+        _runtime: &Path,
+        _home: &Path,
+        _service: &ServiceRelay,
+    ) -> impl Future<Output = Result<()>> {
+        async { anyhow::bail!("this pairing client does not support service enrollment") }
+    }
 }
 
 pub struct Options<'a> {
@@ -122,16 +155,8 @@ impl Pending {
             "cluster ID must be a canonical UUID"
         );
         config::private_dir(home)?;
-        ensure!(
-            fs::read_dir(home)?.next().is_none(),
-            "node directory is already configured"
-        );
-        let mut name = home
-            .file_name()
-            .context("missing node directory name")?
-            .to_os_string();
-        name.push(".joining");
-        let dir = home.with_file_name(name);
+        let dir = config::pending_join(home)?;
+        publication::check_home(home, &dir)?;
         config::private_dir(&dir)?;
         let lock_path = dir.join("lock");
         if fs::symlink_metadata(&lock_path).is_ok() {
@@ -218,6 +243,26 @@ impl Pending {
         self.save_seed()?;
         Ok(())
     }
+
+    fn pin_service(&self, service: &Option<ServiceRelay>) -> Result<()> {
+        let path = self.dir.join("service-pin.json");
+        if path.exists() {
+            let previous: Option<ServiceRelay> =
+                serde_json::from_slice(&read_private_bytes(&path, 8192)?)?;
+            ensure!(
+                previous == *service,
+                "pairing service changed; restore the original service settings"
+            );
+        } else {
+            // A pre-service pending join must not be converted mid-bootstrap.
+            ensure!(
+                service.is_none() || !config::path(&self.runtime).exists(),
+                "pending join has no service pin"
+            );
+            config::write_private(&path, &serde_json::to_vec(service)?)?;
+        }
+        Ok(())
+    }
 }
 
 fn read_private_bytes(path: &Path, limit: usize) -> Result<Zeroizing<Vec<u8>>> {
@@ -284,6 +329,10 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
         .validate()?;
     }
     let home = std::path::absolute(home)?;
+    config::private_dir(&home)?;
+    let home = fs::canonicalize(home)?;
+    let _service_lock = config::state_lock(&home, "service.lock")?;
+    let _daemon_lock = config::state_lock(&home, "daemon.lock")?;
     if config::path(&home).exists() {
         let config = config::load(&home)?;
         ensure!(
@@ -292,6 +341,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
         );
         // Loading the runtime verifies that the identity and checkpoint still exist.
         let store = Store::open(&home)?;
+        let local_node = store.pairing_node()?;
         if store.needs_data_pairing()? {
             let node = store.pairing_node()?;
             drop(store);
@@ -306,16 +356,76 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
             drop(endpoint);
             connect_data(&home, &node, &snapshot.writer, peer).await?;
         }
+        if let Some(account) = &config.service {
+            let service = ServiceRelay {
+                account: account.clone(),
+                relay_endpoint: config
+                    .relay
+                    .as_ref()
+                    .context("missing service relay")?
+                    .endpoint
+                    .clone(),
+            };
+            ensure!(
+                options.relay_endpoint.is_none(),
+                "service relay overrides are not supported"
+            );
+            peer.prepare_service(&service).await?;
+            peer.provision_service(&home, &home, &service).await?;
+        }
+        cleanup_published(&home, &local_node);
         return Ok(
             json!({"joined":true,"already_joined":true,"node":config.node,"cluster":config.cluster}),
         );
     }
     let mut pending = Pending::open(&home, &options)?;
+    if publication::started(&pending.dir) {
+        let staged = config::load(&pending.runtime)?;
+        let service = staged
+            .service
+            .as_ref()
+            .map(|account| -> Result<_> {
+                Ok(ServiceRelay {
+                    account: account.clone(),
+                    relay_endpoint: staged
+                        .relay
+                        .as_ref()
+                        .context("missing staged relay")?
+                        .endpoint
+                        .clone(),
+                })
+            })
+            .transpose()?;
+        pending.pin_service(&service)?;
+        if let Some(service) = &service {
+            ensure!(
+                options.relay_endpoint.is_none(),
+                "service relay overrides are not supported"
+            );
+            peer.prepare_service(service).await?;
+        }
+        let config = publication::publish(&home, &pending)?;
+        let _ = fs::remove_dir_all(&pending.dir);
+        if let Some(service) = &service {
+            peer.provision_service(&home, &home, service).await?;
+        }
+        return Ok(
+            json!({"joined":true,"node":config.node,"cluster":config.cluster,"configuration_relay":true,"next":"gent daemon install"}),
+        );
+    }
     let snapshot: Snapshot = serde_json::from_value(peer.call(PairingOp::Snapshot).await?)?;
     let mut state = snapshot.verify(options.cluster)?;
     pending.pin(&state)?;
+    pending.pin_service(&snapshot.service)?;
+    if let Some(service) = &snapshot.service {
+        ensure!(
+            options.relay_endpoint.is_none(),
+            "service relay overrides are not supported"
+        );
+        peer.prepare_service(service).await?;
+    }
     ensure!(
-        snapshot.relay.is_some(),
+        snapshot.relay.is_some() || snapshot.service.is_some(),
         "owner has no configuration relay; configure [relay] and restart its daemon before joining"
     );
     let request = pending.node.request_enrollment(
@@ -332,6 +442,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     )?;
     state = enrolled.verify(options.cluster)?;
     pending.pin(&state)?;
+    pending.pin_service(&enrolled.service)?;
     state.authorize_node(pending.node.id(), &pending.node.public_key(), now() as u64)?;
     // Both snapshots arrive directly from the SSH-authenticated owner. This is
     // bootstrap authority only; an installed runtime advances through history.
@@ -414,7 +525,11 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     connect_data(&pending.runtime, &pending.node, &enrolled.writer, peer).await?;
     drop(Store::open(&pending.runtime)?); // Project the latest verified policy.
     let mut config = config::load(&pending.runtime)?;
-    {
+    if let Some(service) = &enrolled.service {
+        peer.provision_service(&pending.runtime, &home, service)
+            .await?;
+        config = config::load(&pending.runtime)?;
+    } else {
         let relay = enrolled
             .relay
             .as_ref()
@@ -435,13 +550,28 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
         config.relay = Some(settings);
     }
     config::save(&pending.runtime, &config)?;
-    fs::rename(&pending.runtime, &home)
-        .context("publishing joined node; destination must remain empty")?;
-    fs::File::open(home.parent().context("missing home parent")?)?.sync_all()?;
+    let config = publication::publish(&home, &pending)?;
     let result = json!({"joined":true,"node":config.node,"cluster":config.cluster,"configuration_relay":config.relay.is_some(),"next":["gent","--home",home,"daemon","run"]});
     // Cleanup failure does not turn a committed installation into a failed join.
     let _ = fs::remove_dir_all(&pending.dir);
     Ok(result)
+}
+
+fn cleanup_published(home: &Path, node: &NodeIdentity) {
+    let Ok(dir) = config::pending_join(home) else {
+        return;
+    };
+    if !publication::started(&dir) {
+        return;
+    }
+    let Ok(bytes) = read_private_bytes(&dir.join("join.key"), 8192) else {
+        return;
+    };
+    if bytes.len() > 40 && &bytes[..8] == b"GENTJOIN" && bytes[8..40] == *node.expose_secret() {
+        // This node is already committed and verified. A crash after publishing
+        // config.toml may have left its private staging copies behind.
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 /// Establish independent writer streams in both directions through the same

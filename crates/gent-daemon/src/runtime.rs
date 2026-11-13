@@ -276,6 +276,7 @@ pub(crate) fn install_joined(
                 local_only: true,
             },
             relay: None,
+            service: None,
             policy: state.state().policy.clone(),
             extra: Default::default(),
         },

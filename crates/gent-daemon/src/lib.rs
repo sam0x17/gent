@@ -12,11 +12,10 @@ pub mod store;
 pub mod sync;
 
 use anyhow::{Context, Result, ensure};
-use fs2::FileExt;
 use gent_protocol::{MAX_FRAME_BYTES, Request, Response};
 use std::{
     fs,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -56,15 +55,7 @@ pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value>
 
 pub async fn run(home: &Path) -> Result<()> {
     config::private_dir(home)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(home.join("daemon.lock"))?;
-    lock.try_lock_exclusive()
-        .context("a daemon is already running for this state directory")?;
+    let _lock = config::state_lock(home, "daemon.lock")?;
     let store = Arc::new(Mutex::new(store::Store::open(home)?));
     let socket = home.join("daemon.sock");
     if socket.exists() {

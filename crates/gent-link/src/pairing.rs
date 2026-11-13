@@ -1,10 +1,15 @@
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use gent_daemon::pairing::{self, Options, Peer};
+use gent_daemon::pairing::{self, Options, Peer, ServiceRelay};
 use gent_protocol::{MAX_FRAME_BYTES, OwnerOp, PairingOp, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{io::IsTerminal, path::Path, process::Stdio, time::Duration};
+use std::{
+    io::IsTerminal,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -92,6 +97,8 @@ fn remote_command(args: &JoinArgs) -> Result<Command> {
 }
 
 struct Remote {
+    home: PathBuf,
+    service: Option<crate::auth::Service>,
     command: Command,
     cluster: String,
     child: Option<Child>,
@@ -99,6 +106,39 @@ struct Remote {
     output: Option<BufReader<ChildStdout>>,
 }
 impl Peer for Remote {
+    async fn prepare_service(&mut self, relay: &ServiceRelay) -> Result<()> {
+        if self.service.is_none() {
+            self.service = Some(crate::auth::Service::open(&self.home).await?);
+        }
+        let service = self.service.as_ref().expect("login loaded");
+        ensure!(
+            service.origin()? == crate::auth::origin(&relay.account.origin)?
+                && service.session.account_id == relay.account.account_id,
+            "sign into the owner's Gent service and account before joining"
+        );
+        let endpoint = crate::auth::origin(&relay.relay_endpoint)?;
+        ensure!(
+            endpoint.scheme() == "https" || service.origin()?.scheme() == "http",
+            "an HTTPS account service cannot select an insecure relay"
+        );
+        service.require_cluster_owner(&self.cluster).await
+    }
+    async fn provision_service(
+        &mut self,
+        runtime: &Path,
+        home: &Path,
+        relay: &ServiceRelay,
+    ) -> Result<()> {
+        crate::cluster::provision_joined(
+            runtime,
+            home,
+            self.service
+                .as_ref()
+                .context("service login was not prepared")?,
+            relay,
+        )
+        .await
+    }
     async fn call(&mut self, action: PairingOp) -> Result<Value> {
         tokio::time::timeout(Duration::from_secs(30), async {
             if self.child.is_none() {
@@ -133,6 +173,8 @@ impl Peer for Remote {
 
 pub async fn join(home: &Path, args: JoinArgs) -> Result<Value> {
     let mut peer = Remote {
+        home: crate::managed_file::normalize(home)?,
+        service: None,
         command: remote_command(&args)?,
         cluster: args.cluster.clone(),
         child: None,

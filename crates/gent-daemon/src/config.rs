@@ -31,10 +31,35 @@ pub struct Config {
     /// Node-local transport settings are never replicated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayConfig>,
+    /// Account routing metadata, local to this node and never replicated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServiceConfig>,
     #[serde(default)]
     pub policy: Policy,
     #[serde(flatten)]
     pub extra: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceConfig {
+    pub origin: String,
+    pub account_id: String,
+}
+impl ServiceConfig {
+    pub fn validate(&self) -> Result<()> {
+        RelayConfig {
+            endpoint: self.origin.clone(),
+            credential_file: "unused".into(),
+        }
+        .validate()?;
+        let id = uuid::Uuid::parse_str(&self.account_id).context("invalid service account")?;
+        ensure!(
+            !id.is_nil() && id.to_string() == self.account_id,
+            "invalid service account"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -203,6 +228,13 @@ impl Config {
         if let Some(relay) = &self.relay {
             relay.validate()?;
         }
+        if let Some(service) = &self.service {
+            service.validate()?;
+            ensure!(
+                !self.cluster.local_only && self.relay.is_some(),
+                "service metadata requires service transport"
+            );
+        }
         Ok(())
     }
 }
@@ -219,6 +251,10 @@ pub fn initialize(home: &Path, name: &str) -> Result<Config> {
     if path(home).exists() {
         bail!("already configured; existing identity has been preserved");
     }
+    ensure!(
+        !pending_join(home)?.exists(),
+        "a node join is pending; rerun gent cluster join to preserve its identity"
+    );
     let config = fresh(name)?;
     binding(&home.join("owner.key"))?;
     save(home, &config)?;
@@ -245,7 +281,44 @@ pub fn fresh(name: &str) -> Result<Config> {
             local_only: true,
         },
         relay: None,
+        service: None,
         policy: Policy::default(),
         extra: BTreeMap::new(),
     })
+}
+
+pub fn pending_join(home: &Path) -> Result<PathBuf> {
+    let mut name = home
+        .file_name()
+        .context("missing node directory name")?
+        .to_os_string();
+    name.push(".joining");
+    Ok(home.with_file_name(name))
+}
+
+/// Persistent lock files stay in the final home across installation. Never
+/// rename or remove them: that could split writers between different inodes.
+pub fn state_lock(home: &Path, name: &str) -> Result<fs::File> {
+    use fs2::FileExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let path = home.join(name);
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        ensure!(
+            meta.is_file()
+                && !meta.file_type().is_symlink()
+                && meta.nlink() == 1
+                && meta.permissions().mode() & 0o077 == 0,
+            "state lock must be a private regular file"
+        );
+    }
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    lock.try_lock_exclusive()
+        .context("node is busy; stop its daemon or wait for the other setup command")?;
+    Ok(lock)
 }

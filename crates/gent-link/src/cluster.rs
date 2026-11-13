@@ -1,12 +1,13 @@
-//! Recoverable first-owner setup. Cryptographic invitation enrollment is a
-//! separate operation; service credentials never establish cluster trust.
+//! Recoverable service setup for owners and SSH-enrolled nodes. Service
+//! credentials never establish cryptographic cluster trust.
 use crate::{
     auth,
     managed_file::{self, Snapshot},
 };
 use anyhow::{Context, Result, ensure};
 use gent_daemon::{
-    config::{self, Config, RelayConfig},
+    config::{self, Config, RelayConfig, ServiceConfig},
+    pairing::ServiceRelay,
     store::Store,
 };
 use gent_protocol::service::{TransportSession, transport_created_at};
@@ -25,6 +26,8 @@ const CREDENTIAL: &str = "relay.key";
 #[serde(deny_unknown_fields)]
 struct Setup {
     version: u8,
+    #[serde(default)]
+    role: SetupRole,
     service: String,
     account_id: String,
     cluster_id: String,
@@ -34,6 +37,14 @@ struct Setup {
     /// Cleared once config.toml exists. A later missing config requires restore.
     initial: Option<Config>,
     credential: Option<Credential>,
+}
+
+#[derive(Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SetupRole {
+    #[default]
+    Owner,
+    Joined,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,6 +88,10 @@ impl Setup {
         auth::origin(&self.relay_endpoint)?;
         config::label(&self.name)?;
         if let Some(initial) = &self.initial {
+            ensure!(
+                self.role == SetupRole::Owner,
+                "joined setup cannot initialize owner keys"
+            );
             initial.validate()?;
             ensure!(
                 initial.node.id == self.node_id && initial.cluster.id == self.cluster_id,
@@ -124,6 +139,13 @@ impl Setup {
         });
         // Persist before sending any admission request.
         self.save(home)
+    }
+
+    fn account(&self) -> ServiceConfig {
+        ServiceConfig {
+            origin: self.service.clone(),
+            account_id: self.account_id.clone(),
+        }
     }
 }
 
@@ -178,6 +200,10 @@ pub async fn connect(home: &Path, name: Option<&str>) -> Result<Value> {
         None => {
             let name = name.context("no service setup to resume; run gent cluster new NAME")?;
             ensure!(
+                !config::pending_join(&home)?.exists(),
+                "a node join is pending; rerun gent cluster join to preserve its identity"
+            );
+            ensure!(
                 private_snapshot(&config::path(&home))?.text.is_none(),
                 "already configured; existing identity has been preserved"
             );
@@ -197,8 +223,13 @@ pub async fn connect(home: &Path, name: Option<&str>) -> Result<Value> {
                 endpoint: relay_endpoint.clone(),
                 credential_file: home.join(CREDENTIAL),
             });
+            initial.service = Some(ServiceConfig {
+                origin: service.origin()?.into(),
+                account_id: service.session.account_id.clone(),
+            });
             let setup = Setup {
                 version: 1,
+                role: SetupRole::Owner,
                 service: service.origin()?.into(),
                 account_id: service.session.account_id.clone(),
                 cluster_id: initial.cluster.id.clone(),
@@ -229,7 +260,10 @@ pub async fn connect(home: &Path, name: Option<&str>) -> Result<Value> {
     setup.initial = None;
     setup.save(&home)?;
     // Keys and signed genesis are durable before any service cluster is created.
-    Store::open(&home)?.require_provisioning_owner()?;
+    match setup.role {
+        SetupRole::Owner => Store::open(&home)?.require_provisioning_owner()?,
+        SetupRole::Joined => Store::open(&home)?.require_provisioning_joined()?,
+    }
     let mut config = config::load(&home)?;
     setup.verify_config(&config)?;
     let config_snapshot = private_snapshot(&config::path(&home))?;
@@ -242,9 +276,36 @@ pub async fn connect(home: &Path, name: Option<&str>) -> Result<Value> {
                 && r.credential_file == home.join(CREDENTIAL)),
         "relay settings changed; restore the pinned endpoint before reconnecting"
     );
-    service.reserve_cluster(&setup.cluster_id).await?;
+    ensure!(
+        config
+            .service
+            .as_ref()
+            .is_none_or(|s| *s == setup.account()),
+        "local service metadata changed"
+    );
+    match setup.role {
+        SetupRole::Owner => service.reserve_cluster(&setup.cluster_id).await?,
+        SetupRole::Joined => service.require_cluster_owner(&setup.cluster_id).await?,
+    }
+    let session = provision(&mut setup, &service, &home).await?;
+    config_snapshot.verify()?;
+    credential_snapshot.write(&setup.credential.as_ref().expect("candidate saved").token)?;
+    config.cluster.local_only = false;
+    config.service = Some(setup.account());
+    config_snapshot.write(&toml_edit::ser::to_string_pretty(&config)?)?;
+    Ok(json!({"status":"configured", "service":setup.service,
+        "cluster":config.cluster,"node":config.node,"relay_endpoint":setup.relay_endpoint,
+        "credential_expires_at":session.expires_at,
+        "next":"gent daemon install"}))
+}
+
+async fn provision(
+    setup: &mut Setup,
+    service: &auth::Service,
+    home: &Path,
+) -> Result<TransportSession> {
     if setup.credential.is_none() {
-        setup.candidate(&service, &home)?;
+        setup.candidate(service, home)?;
     }
     let mut session = None;
     // At most one candidate replacement. Ambiguous failures keep their exact
@@ -278,18 +339,87 @@ pub async fn connect(home: &Path, name: Option<&str>) -> Result<Value> {
             attempt == 0,
             "credential could not be admitted; check the system clock and retry"
         );
-        setup.candidate(&service, &home)?;
+        setup.candidate(service, home)?;
     }
     let session = session.context("transport provisioning did not finish")?;
     let credential = setup.credential.as_mut().expect("candidate saved");
     credential.confirmed = true;
-    setup.save(&home)?;
+    setup.save(home)?;
+    Ok(session)
+}
+
+/// The caller holds final-home daemon/service locks and this login's lock. The
+/// staged runtime already has an SSH-approved node-only signing identity.
+pub(crate) async fn provision_joined(
+    runtime: &Path,
+    home: &Path,
+    service: &auth::Service,
+    relay: &ServiceRelay,
+) -> Result<()> {
+    Store::open(runtime)?.require_provisioning_joined()?;
+    let mut config = config::load(runtime)?;
+    service.require_cluster_owner(&config.cluster.id).await?;
+    let mut setup = match read(runtime)? {
+        Some(setup) => {
+            setup.verify_config(&config)?;
+            ensure!(
+                setup.role == SetupRole::Joined
+                    && setup.account() == relay.account
+                    && setup.relay_endpoint == relay.relay_endpoint,
+                "joined service setup changed"
+            );
+            setup
+        }
+        None => {
+            ensure!(
+                config.service.is_none(),
+                "service setup record is missing; restore it before reconnecting"
+            );
+            let setup = Setup {
+                version: 1,
+                role: SetupRole::Joined,
+                service: relay.account.origin.clone(),
+                account_id: relay.account.account_id.clone(),
+                cluster_id: config.cluster.id.clone(),
+                node_id: config.node.id.clone(),
+                name: config.cluster.name.clone(),
+                relay_endpoint: relay.relay_endpoint.clone(),
+                initial: None,
+                credential: None,
+            };
+            setup.save(runtime)?;
+            setup
+        }
+    };
+    ensure!(
+        setup.account_id == service.session.account_id
+            && auth::origin(&setup.service)? == service.origin()?,
+        "joined account changed"
+    );
+    let settings = RelayConfig {
+        endpoint: setup.relay_endpoint.clone(),
+        credential_file: home.join(CREDENTIAL),
+    };
+    ensure!(
+        config
+            .service
+            .as_ref()
+            .is_none_or(|s| *s == setup.account())
+            && config
+                .relay
+                .as_ref()
+                .is_none_or(|r| r.endpoint == settings.endpoint
+                    && r.credential_file == settings.credential_file),
+        "joined transport settings changed"
+    );
+    let config_snapshot = private_snapshot(&config::path(runtime))?;
+    let credential_snapshot = private_snapshot(&runtime.join(CREDENTIAL))?;
+    provision(&mut setup, service, runtime).await?;
     config_snapshot.verify()?;
     credential_snapshot.write(&setup.credential.as_ref().expect("candidate saved").token)?;
     config.cluster.local_only = false;
+    config.relay = Some(settings);
+    config.service = Some(setup.account());
     config_snapshot.write(&toml_edit::ser::to_string_pretty(&config)?)?;
-    Ok(json!({"status":"configured", "service":setup.service,
-        "cluster":config.cluster,"node":config.node,"relay_endpoint":setup.relay_endpoint,
-        "credential_expires_at":session.expires_at,
-        "next":"gent daemon install"}))
+    Ok(())
 }

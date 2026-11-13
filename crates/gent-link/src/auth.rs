@@ -257,6 +257,20 @@ impl Service {
         );
         Ok(())
     }
+    pub async fn require_cluster_owner(&self, id: &str) -> Result<()> {
+        let (status, value) = response(
+            self.request(Method::GET, "v1/clusters")?
+                .bearer_auth(&self.saved.token),
+        )
+        .await?;
+        let clusters: Vec<ServiceCluster> = serde_json::from_value(success(status, value)?)
+            .map_err(|_| anyhow::anyhow!("invalid service cluster list"))?;
+        ensure!(
+            clusters.iter().any(|c| c.id == id && c.role == "owner"),
+            "the signed-in account does not own this service cluster"
+        );
+        Ok(())
+    }
     pub async fn transport_session(&self, token: &str) -> Result<Option<TransportSession>> {
         let (status, value) = response(
             self.request(Method::GET, "v1/transport/session")?

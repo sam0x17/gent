@@ -6,6 +6,7 @@ Uses temporary clusters, makes no model calls, and removes its nodes afterward.
 """
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -30,13 +31,20 @@ PREPARE = r'''
 import json, os, pathlib, subprocess, sys, tempfile
 p = json.load(sys.stdin)
 home = pathlib.Path(tempfile.mkdtemp(prefix='gent-owner-pairing-'))
-result = subprocess.run([p['binary'], '--home', str(home), '--json', 'cluster', 'new', 'ssh-proof', '--local'], check=True, capture_output=True, text=True)
+command = [p['binary'], '--home', str(home), '--json']
+if p.get('service_session'):
+    (home / 'auth').mkdir(mode=0o700)
+    path = home / 'auth' / 'session.json'
+    path.write_text(json.dumps(p['service_session'])); path.chmod(0o600)
+    subprocess.run(command + ['auth', 'status'], check=True, capture_output=True, text=True)
+result = subprocess.run(command + ['cluster', 'new', 'ssh-proof'] + ([] if p.get('service_session') else ['--local']), check=True, capture_output=True, text=True)
 config = json.loads(result.stdout)
-with open(home / 'config.toml', 'a') as f:
-    f.write('\n[relay]\nendpoint = ' + json.dumps(p['relay']) + '\ncredential_file = "relay.key"\n')
-fd = os.open(home / 'relay.key', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, 'w') as f:
-    f.write(p['token'])
+if not p.get('service_session'):
+    with open(home / 'config.toml', 'a') as f:
+        f.write('\n[relay]\nendpoint = ' + json.dumps(p['relay']) + '\ncredential_file = "relay.key"\n')
+    fd = os.open(home / 'relay.key', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(p['token'])
 print(json.dumps({'home': str(home), 'cluster': config['cluster']['id'], 'node': config['node']['id']}))
 '''
 LAUNCH = r'''
@@ -125,7 +133,11 @@ def main():
     parser.add_argument('--remote-join-helper', help='Optional join_local example binary to test a second remote node and peer mesh')
     parser.add_argument('--binary', default='target/debug/gent')
     parser.add_argument('--relay-url', default='http://127.0.0.1:18787')
-    parser.add_argument('--relay-token-file', required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--relay-token-file')
+    mode.add_argument('--service-auth-file', type=Path, help='Private local fixture sessions for owner, joined node and recovery')
+    parser.add_argument('--service-report', type=Path)
+    parser.add_argument('--service-database', type=Path, help='Disposable local account SQL for an enrollment rollback probe')
     parser.add_argument('--file-objects', action='store_true', help='Also prove native files through authenticated MCP and separate ciphertext storage')
     parser.add_argument('--transport-storage', action='store_true', help='Also prove bounded packet/retry storage, replay evidence, compaction, and startup cleanup')
     parser.add_argument('--configuration-storage', action='store_true', help='Also prove signed configuration history compaction across both machines and restarts')
@@ -138,10 +150,22 @@ def main():
     url = urlparse(args.relay_url)
     assert url.scheme == 'http' and url.hostname == '127.0.0.1' and url.port
     assert args.remote_binary.startswith('/') and 1024 <= args.remote_relay_port < 65536
-    key = Path(args.relay_token_file)
-    assert not key.is_symlink() and key.stat().st_mode & 0o077 == 0
-    token = key.read_text().strip()
-    assert len(token) == 64 and all(c in '0123456789abcdefABCDEF' for c in token)
+    service_auth = None
+    token = None
+    if args.service_auth_file:
+        assert not args.remote_join_helper, 'service join requires the account-aware CLI'
+        key = args.service_auth_file
+        assert not key.is_symlink() and key.stat().st_mode & 0o077 == 0
+        service_auth = json.loads(key.read_text())
+        account_url = urlparse(service_auth['owner']['service'])
+        assert account_url.scheme == 'http' and account_url.hostname == '127.0.0.1' and account_url.port
+        assert all(v['service'] == service_auth['owner']['service'] for v in service_auth.values())
+        args.remote_relay_port = url.port  # Preserve the pinned origin through the fixture tunnel.
+    else:
+        key = Path(args.relay_token_file)
+        assert not key.is_symlink() and key.stat().st_mode & 0o077 == 0
+        token = key.read_text().strip()
+        assert len(token) == 64 and all(c in '0123456789abcdefABCDEF' for c in token)
     ssh = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=5', '-o', 'ForwardAgent=no']
 
     def remote(command, payload=None, check=True):
@@ -166,24 +190,71 @@ def main():
             return tomllib.loads((home / 'config.toml').read_text())['applied_revision'] == revision
 
         try:
-            setup = json.loads(remote(['python3', '-c', PREPARE], json.dumps({'binary': args.remote_binary, 'relay': f'http://127.0.0.1:{args.remote_relay_port}', 'token': token})).stdout)
+            extra_forward = ['-R', f'127.0.0.1:{account_url.port}:127.0.0.1:{account_url.port}'] if service_auth else []
+            with open(Path(folder) / 'tunnel.log', 'a') as log:
+                tunnel = subprocess.Popen(ssh + ['-o', 'ExitOnForwardFailure=yes', '-N', '-R', f'127.0.0.1:{args.remote_relay_port}:127.0.0.1:{url.port}', *extra_forward, '--', args.owner], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            wait_for(lambda: remote(['python3', '-c', 'import socket,sys; socket.create_connection(("127.0.0.1",int(sys.argv[1])),2).close()', str(args.remote_relay_port)], check=False).returncode == 0)
+            assert tunnel.poll() is None, 'SSH fixture forwarding failed'
+            setup = json.loads(remote(['python3', '-c', PREPARE], json.dumps({'binary': args.remote_binary, 'relay': f'http://127.0.0.1:{args.remote_relay_port}', 'token': token,
+                'service_session': service_auth['owner'] if service_auth else None})).stdout)
             owner_home = setup['home']
             owner = [args.remote_binary, '--home', owner_home, '--json']
-            with open(Path(folder) / 'tunnel.log', 'a') as log:
-                tunnel = subprocess.Popen(ssh + ['-o', 'ExitOnForwardFailure=yes', '-N', '-R', f'127.0.0.1:{args.remote_relay_port}:127.0.0.1:{url.port}', '--', args.owner], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-            wait_for(lambda: remote(['python3', '-c', 'import socket,sys; socket.create_connection(("127.0.0.1",int(sys.argv[1])),2).close()', str(args.remote_relay_port)], check=False).returncode == 0)
+            if service_auth:
+                home.mkdir(mode=0o700)
+                (home / 'auth').mkdir(mode=0o700)
+                auth_path = home / 'auth' / 'session.json'
+                auth_path.write_text(json.dumps(service_auth['joined'])); auth_path.chmod(0o600)
+                cli('auth', 'status')
+                auth_before = auth_path.read_bytes()
             def start_owner():
                 with open(Path(folder) / 'owner.log', 'a') as log:
                     return subprocess.Popen(ssh + ['--', args.owner, shlex.join(['python3', '-c', LAUNCH, owner_home, args.remote_binary])], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
 
             owner_daemon = start_owner()
             wait_for(lambda: remote(owner + ['daemon', 'status'], check=False).returncode == 0)
-            join = ['cluster', 'join', setup['cluster'], '--via', args.owner, '--name', 'joining-machine', '--remote-gent', args.remote_binary, '--remote-home', owner_home, '--relay-endpoint', args.relay_url]
+            join = ['cluster', 'join', setup['cluster'], '--via', args.owner, '--name', 'joining-machine', '--remote-gent', args.remote_binary, '--remote-home', owner_home]
+            if not service_auth:
+                join += ['--relay-endpoint', args.relay_url]
+            if service_auth:
+                auth_path.write_text(json.dumps(service_auth['outsider']))
+                denied = subprocess.run(local + join, capture_output=True, text=True, timeout=40)
+                assert denied.returncode != 0 and 'account before joining' in denied.stderr
+                assert len(json.loads(remote(owner + ['nodes']).stdout)) == 1
+                pending_dir = home.with_name(home.name + '.joining')
+                pending_key = (pending_dir / 'join.key').read_bytes()
+                auth_path.write_bytes(auth_before)
+                assert args.service_database is not None
+                import sqlite3
+                with sqlite3.connect(args.service_database) as account_db:
+                    account_db.execute("CREATE TRIGGER pairing_transport_failure BEFORE INSERT ON transport_sessions BEGIN SELECT RAISE(ABORT,'pairing fixture rollback'); END")
+                try:
+                    refused = subprocess.run(local + join, capture_output=True, text=True, timeout=40)
+                    assert refused.returncode != 0 and 'could not provision this node' in refused.stderr
+                finally:
+                    with sqlite3.connect(args.service_database) as account_db:
+                        account_db.execute('DROP TRIGGER pairing_transport_failure')
+                pending_token = json.loads((pending_dir / 'node' / 'service.json').read_text())['credential']['token']
+                assert not (home / 'config.toml').exists()
+                assert len(json.loads(remote(owner + ['nodes']).stdout)) == 2
             assert cli(*join)['joined']
             identity = (home / 'identity.key').read_bytes()
             assert identity.startswith(b'GENTKEY2')
             assert cli(*join)['already_joined']
             assert (home / 'identity.key').read_bytes() == identity
+            if service_auth:
+                assert auth_path.read_bytes() == auth_before
+                joined_token = (home / 'relay.key').read_text()
+                assert joined_token == pending_token and identity[8:40] == pending_key[8:40]
+                owner_hash = remote(['python3', '-c', 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1],"relay.key").read_bytes()).hexdigest())', owner_home]).stdout.strip()
+                assert hashlib.sha256(joined_token.encode()).hexdigest() != owner_hash
+                cli('cluster', 'connect')
+                assert (home / 'relay.key').read_text() == joined_token
+                if args.service_report:
+                    args.service_report.write_text(json.dumps({'cluster_id': setup['cluster'], 'owner_node': setup['node'],
+                        'joined_node': cli('config')['node']['id'], 'owner_credential_hash': owner_hash,
+                        'joined_credential_hash': hashlib.sha256(joined_token.encode()).hexdigest()}))
+                print('PASS: wrong-account rejection before enrollment, failed service admission resumes the same node/key/candidate')
+                print('PASS: service node IDs match signing identities, independent credentials, preserved login and joined-node reconnect')
 
             def start_local():
                 with open(Path(folder) / 'joined.log', 'a') as log:
@@ -287,7 +358,6 @@ def main():
                     assert 'data retry records:' in text and 'configuration retry records:' in text
                     assert 'Verified checkpoints release confirmed packet capacity.' in text
             if args.file_objects:
-                import hashlib
                 folders = a.call('gent_file_paths')[0]
                 source = Path(folders['import_directory']) / 'native-review.bin'
                 assert source.resolve().is_relative_to(home.resolve())
@@ -355,6 +425,29 @@ def main():
                 edit_storage_checks.wait_for_results(cli, edit_cases, wait_for)
             wait_for(lambda: cli('config', 'request', pending_id)['state'] == 'applied')
             assert cli('node', 'name') == 'pending-while-owner-offline'
+            if service_auth:
+                from urllib.error import HTTPError
+                from urllib.request import Request, urlopen
+                stop(local_daemon)
+                local_daemon = None
+                cli('auth', 'logout')
+                try:
+                    urlopen(Request(args.relay_url + '/v1/mailboxes/revoked-proof', headers={'Authorization':'Bearer '+joined_token}), timeout=10)
+                except HTTPError as error:
+                    assert error.code == 401
+                else:
+                    raise AssertionError('logged-out joined credential still reached relay')
+                auth_path.write_text(json.dumps(service_auth['recovery']))
+                cli('auth', 'status')
+                cli('cluster', 'connect')
+                assert (home / 'relay.key').read_text() != joined_token
+                assert (home / 'identity.key').read_bytes() == identity
+                local_daemon = start_local()
+                wait_for(lambda: (home / 'daemon.sock').exists())
+                renewed = b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': b.request_id(), 'text': 'after joined credential renewal'})[0]
+                wait_for(lambda: any(m['id'] == renewed['message_id'] for m in a.call('gent_inbox')[0]))
+                a.call('gent_ack', {'message_id': renewed['message_id']})
+                print('PASS: joined logout revokes relay access; new login reconnects with unchanged keys and resumes encrypted delivery')
             if args.edit_storage:
                 edit_storage_checks.completed(home, cli, owner_cli, edit_cases)
             node = cli('node')['id']

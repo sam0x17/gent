@@ -57,12 +57,29 @@ impl Store {
             self.identity.owner.is_some(),
             "service cluster setup requires this cluster's owner signing key"
         );
+        self.require_provisioning_member()
+    }
+
+    pub fn require_provisioning_member(&self) -> Result<()> {
         let state = self.identity.state(&self.db)?;
         ensure!(
-            state.state().nodes.contains_key(self.identity.node.id()),
+            state
+                .state()
+                .nodes
+                .get(self.identity.node.id())
+                .is_some_and(|n| n.signing_key == self.identity.node.public_key()),
             "this node is no longer enrolled in the cluster"
         );
+        // Expired authority can still obtain ciphertext transport to recover its
+        // latest signed configuration. RPC access continues to require freshness.
         Ok(())
+    }
+    pub fn require_provisioning_joined(&self) -> Result<()> {
+        ensure!(
+            self.identity.owner.is_none(),
+            "the existing owner cannot be replaced by a joined identity"
+        );
+        self.require_provisioning_member()
     }
 
     pub fn open(home: &Path) -> Result<Self> {
