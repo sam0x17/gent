@@ -1,5 +1,5 @@
 //! Automatic encrypted configuration and agent-record transport over an opaque relay.
-//! The development relay token authorizes storage, never cluster authority.
+//! Relay transport credentials authorize storage, never cluster key authority.
 use crate::{config, store::Store};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -47,8 +47,9 @@ struct Stored {
 impl Relay {
     pub(crate) fn open(settings: &config::RelayConfig, home: &std::path::Path) -> Result<Self> {
         let origin = settings.validate()?;
-        let credential =
-            zeroize::Zeroizing::new(config::read_private(&home.join(&settings.credential_file))?);
+        let credential = zeroize::Zeroizing::new(config::read_relay_credential(
+            &home.join(&settings.credential_file),
+        )?);
         let mut value = header::HeaderValue::from_str(&format!("Bearer {}", credential.as_str()))?;
         value.set_sensitive(true);
         let mut headers = header::HeaderMap::new();

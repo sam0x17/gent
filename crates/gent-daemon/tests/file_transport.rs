@@ -141,7 +141,7 @@ async fn client_does_not_forward_credentials_through_redirects() {
 #[ignore = "requires local Wrangler object storage and GENT_TEST_RELAY_TOKEN_FILE"]
 async fn wrangler_transports_encrypted_file_objects_with_endpoint_restart() {
     let token_path = std::env::var("GENT_TEST_RELAY_TOKEN_FILE").unwrap();
-    let token = config::read_private(Path::new(&token_path)).unwrap();
+    let token = config::read_relay_credential(Path::new(&token_path)).unwrap();
     let parent = std::env::var("GENT_FILE_PROOF_ROOT").ok();
     let temporary = if let Some(parent) = parent {
         tempfile::tempdir_in(parent).unwrap()

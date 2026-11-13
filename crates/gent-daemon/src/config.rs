@@ -109,6 +109,16 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn read_private(path: &Path) -> Result<String> {
+    read_credential(path, false)
+}
+
+/// Relay transport accepts a service-issued node credential or the local proof
+/// token. Owner RPC and agent binding readers retain their separate format.
+pub fn read_relay_credential(path: &Path) -> Result<String> {
+    read_credential(path, true)
+}
+
+fn read_credential(path: &Path, relay: bool) -> Result<String> {
     let metadata = fs::symlink_metadata(path).context("credential file is unavailable")?;
     ensure!(
         metadata.is_file() && !metadata.file_type().is_symlink(),
@@ -120,7 +130,8 @@ pub fn read_private(path: &Path) -> Result<String> {
     );
     let value = fs::read_to_string(path)?;
     ensure!(
-        value.trim().len() == 64 && value.trim().bytes().all(|b| b.is_ascii_hexdigit()),
+        (value.trim().len() == 64 && value.trim().bytes().all(|b| b.is_ascii_hexdigit()))
+            || (relay && gent_protocol::service::transport_created_at(value.trim()).is_some()),
         "invalid credential file"
     );
     Ok(value.trim().into())

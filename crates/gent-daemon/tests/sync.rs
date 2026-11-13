@@ -371,6 +371,13 @@ fn relay_configuration_requires_a_private_token_and_safe_origin() {
         );
     }
     let home = private_temp();
+    let token_path = home.path().join("transport.key");
+    let token = format!("gent_t1.{}.{}", now(), "ab".repeat(32));
+    config::write_private(&token_path, token.as_bytes()).unwrap();
+    assert_eq!(config::read_relay_credential(&token_path).unwrap(), token);
+    assert!(config::read_private(&token_path).is_err());
+    config::write_private(&token_path, token.replace("gent_t1", "gent_s1").as_bytes()).unwrap();
+    assert!(config::read_relay_credential(&token_path).is_err());
     config::initialize(home.path(), "test").unwrap();
     let mut cfg = config::load(home.path()).unwrap();
     cfg.relay = Some(RelayConfig {
@@ -386,11 +393,19 @@ fn relay_configuration_requires_a_private_token_and_safe_origin() {
 #[ignore = "requires the local Wrangler relay and GENT_TEST_RELAY_TOKEN_FILE"]
 async fn wrangler_transports_actual_encrypted_configuration() {
     let endpoint = std::env::var("GENT_TEST_RELAY_URL").unwrap();
-    let token = config::read_private(std::path::Path::new(
+    let token = config::read_relay_credential(std::path::Path::new(
         &std::env::var("GENT_TEST_RELAY_TOKEN_FILE").unwrap(),
     ))
     .unwrap();
     let f = Fixture::new(&endpoint, &token);
+    if let Ok(path) = std::env::var("GENT_TEST_RELAY_PEER_TOKEN_FILE") {
+        let peer = config::read_relay_credential(std::path::Path::new(&path)).unwrap();
+        assert!(
+            peer != token,
+            "per-node proof requires distinct credentials"
+        );
+        config::write_private(&f.homes[1].path().join("relay.key"), peer.as_bytes()).unwrap();
+    }
     let _source = f.start(0);
     let receiver = f.start(1);
     let first = f.set(policy("wrangler-private-policy"));

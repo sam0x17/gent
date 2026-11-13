@@ -46,7 +46,7 @@ impl Listener {
             loop {
                 let started = Instant::now();
                 // Errors contain no application state and are not logged with
-                // request headers, which carry the development credential.
+                // request headers, which carry the transport credential.
                 let _ = listen(&relay, &wakeup, &flag).await;
                 flag.store(false, Ordering::SeqCst);
                 wakeup.notify_one();

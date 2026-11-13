@@ -69,7 +69,15 @@ Status is read-only and checks the service before reporting an active session. O
 
 Native Linux and Mac proofs exercise the actual CLI against a local Rust account Worker backed by D1 and a synthetic GitHub provider. They cover browser callback/state/PKCE validation, device polling and slow-down, private credential storage, rejected links, interrupted-login recovery, offline logout and byte-identical existing cluster files. The browser proof sends the callback over HTTP; it does not launch a GUI browser or exercise real GitHub consent.
 
-`scripts/prove_auth.py` is the public CLI portion of that private service harness. The optional `test-auth-provider` build feature accepts an explicit fixture provider only when both it and the account service are loopback origins. Default builds omit this override. Real GitHub consent, production deployment, service-backed node enrollment and relay authorization remain unverified or unfinished. Service logout currently leaves the separate development relay credential unchanged.
+`scripts/prove_auth.py` is the public CLI portion of that private service harness. The optional `test-auth-provider` build feature accepts an explicit fixture provider only when both it and the account service are loopback origins. Default builds omit this override. Real GitHub consent, production deployment and guided service-backed node enrollment remain unverified or unfinished. Service logout leaves the separate development relay credential unchanged; it revokes dependent credentials issued for the service-backed relay prototype.
+
+## Service-backed transport proof
+
+The daemon can now use an individual node credential from the account service instead of a shared development token. The separate private relay build checks live account/node authority and isolates storage and notifications by cluster. Its local proofs pass on Linux and macOS with distinct node credentials for MLS configuration synchronization, plus 32 MiB encrypted file transfers and endpoint restart. See [service-backed relay authority](security.md#service-backed-relay-authority) for the boundary and revocation semantics.
+
+`wrangler_transports_actual_encrypted_configuration` accepts an optional `GENT_TEST_RELAY_PEER_TOKEN_FILE` pointing to the second endpoint's private credential. `wrangler_transports_encrypted_file_objects_with_endpoint_restart` also accepts a service node credential through its existing private token-file parameter. The private harness issues these fixture credentials and runs the real Workers; the public tests do not create service accounts themselves.
+
+These are transport component proofs. The service node labels are fixture IDs, and trusted test code distributes the cryptographic state. The CLI does not yet provision or renew service node credentials, enroll hosted nodes or migrate a development cluster to the service. SSH development pairing continues to require its shared development token and cannot copy a service credential to another node.
 
 ## Daemon services
 

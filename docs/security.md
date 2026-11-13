@@ -20,7 +20,21 @@ The CLI generates a timestamped 256-bit service bearer and saves it before excha
 
 Local credentials live in `~/.gent/auth/session.json`, separate from cluster configuration and keys, beneath private directories with private file permissions and a mutation lock. Status validates the current session remotely; cached identity never proves current authentication. Logout first marks the credential locally disabled. If the service is unreachable, server revocation remains pending and the disabled credential is retained solely for retry. Successful logout clears the record. Other software running as the same OS user remains trusted.
 
-Account SQL contains identity links, session digests, opaque cluster IDs and service memberships. Each operation uses a fresh primary D1 session; mutations recheck authority in their transaction. These records contain no messages, private cluster names, policies or encryption keys. Service membership cannot create a valid cryptographic enrollment or grant decryption access. The current account API is separate from the development relay: logout and cluster retirement do not revoke that relay's transport credential. Hosted enrollment and routing revocation must connect these operations before hosted use.
+Account SQL contains identity links, session digests, opaque cluster IDs and service memberships. Each operation uses a fresh primary D1 session; mutations recheck authority in their transaction. These records contain no messages, private cluster names, policies or encryption keys. Service membership cannot create a valid cryptographic enrollment or grant decryption access. The account API now authorizes the service-backed relay described below. The separate shared-token development relay remains independent of account logout and cluster retirement.
+
+## Service-backed relay authority
+
+The local service prototype issues a separate credential for each service node. Its `gent_t1` prefix distinguishes it from the account bearer, owner RPC key and agent binding. The daemon's relay reader accepts this format; owner/agent credential readers retain their original format. SSH development pairing does not copy service credentials. Guided per-node provisioning and cryptographic enrollment remain unfinished.
+
+A cluster owner issues transport credentials under an active account session. The service stores their digests, node/cluster association and expiry. Credentials expire with the issuing account session. Logout revokes that session's dependent credentials; other sessions remain independent. Suspension, cluster retirement, membership revocation and node revocation also deny access. Revoked node IDs retain tombstones, including when revocation precedes first enrollment. Restoring an account or membership cannot reactivate revoked credentials.
+
+The relay checks current account authority through a service binding for each HTTP request and before each notification. Digest checks require a separate service-to-service secret; a digest is not a public bearer. There is no cross-request authorization cache, and unavailable authority denies access. Uploads are checked again after buffering and waiting for a Durable Object's gate. Already admitted operations may complete after a concurrent revocation.
+
+Mailbox keys, file storage, quotas, cleanup and notification realms are scoped by the authenticated cluster. Identical external resource IDs in different clusters remain isolated. Hibernating sockets retain only a credential digest and scope, never the bearer. Periodic alarms recheck idle connections and close revoked or expired access; the target interval is 30 seconds, subject to platform scheduling. Service mode limits connections to 64 per cluster and four per credential.
+
+These credentials authorize cluster-level ciphertext transport for trusted daemons. They do not enforce private agent permissions, approve cryptographic node keys or convey file keys. Hosted agents and plaintext bridges must receive narrower endpoint capabilities. The native proofs use separately provisioned service labels and trusted fixture key exchange; binding guided enrollment to actual node/cluster identity remains unfinished. Service revocation does not replace signed cryptographic node removal or retract delivered plaintext.
+
+Local proofs cover identical-ID isolation, revocation, restarts, notifications and native encrypted transport on Linux and macOS. Production deployment, real GitHub consent, automatic provisioning/renewal, restore reconciliation and aggregate service budgets remain unfinished.
 
 ## Keys and signed records
 
@@ -314,7 +328,7 @@ Five agent-file tests, one adversarial network test, and two automatic-dispatch 
 
 ### File-object relay protocol
 
-All object routes require the development relay credential. IDs are canonical UUIDv4 strings. The public manifest contains `version: 1`, an ordered `chunks` array of `{bytes, sha256}` entries covering ciphertext and its AEAD tags, and `expires_at`. It contains no filename, media type, plaintext hash, agent identity, or key. File sizes, opaque IDs, ciphertext hashes, deadlines, and access timing remain visible to the service.
+All object routes require the relay's configured transport credential: a shared development token or a node credential in the separate service-backed build. IDs are canonical UUIDv4 strings. The public manifest contains `version: 1`, an ordered `chunks` array of `{bytes, sha256}` entries covering ciphertext and its AEAD tags, and `expires_at`. It contains no filename, media type, plaintext hash, agent identity, or key. File sizes, opaque IDs, ciphertext hashes, deadlines, and access timing remain visible to the service.
 
 | Request | Behavior |
 | --- | --- |
