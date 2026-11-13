@@ -2,7 +2,7 @@
 
 The first implementation connects agents on one machine through the same stdio MCP tools. It has no model API clients or provider catalog. Unknown host labels work without adding Gent code. The daemon owns identity, policy, and durable delivery; each host retains inference and its broader conversation history.
 
-This proof runs on macOS and Linux. It has no remote listener, E2EE protocol, hosted account, or production service. Messages and attachments are stored in the trusted user's local SQLite database. Other software running as that user can access that state and its credentials. Do not treat an agent with unrestricted shell access as isolated from the operating-system user.
+This proof runs on macOS and Linux. Agent messages and attachments stay in the trusted user's local SQLite database. An optional development relay carries end-to-end encrypted configuration updates between pre-enrolled nodes; there is no hosted account or production service yet. Other software running as the same user can access endpoint state and credentials. Do not treat an agent with unrestricted shell access as isolated from the operating-system user.
 
 ## Build and verify
 
@@ -109,7 +109,23 @@ After a signed change commits, Gent projects the newest state into TOML while pr
 
 `gent cluster` and `gent daemon status` show the active revision and lease status. The owner daemon renews its 24-hour configuration lease when six hours or less remain, checking at startup and every 15 minutes. Use `gent cluster renew` to renew immediately. Agent operations remain blocked if the lease expires before a renewal commits.
 
-Encrypted configuration streams can now update this same live policy through trusted library APIs. Automatic network distribution, remote edit requests, and protected node pairing are still pending; ordinary CLI/MCP messages remain local.
+Encrypted configuration streams update this same live policy automatically when a development relay is configured. Ordinary CLI/MCP messages remain local.
+
+## Development configuration relay
+
+The transport tests provision enrolled nodes and configuration streams through trusted Rust APIs. There is no normal `gent cluster join` command yet. Adding a relay URL alone does not enroll a node or establish a stream. Joined nodes store their own signing key and verified bootstrap state in `identity.key`, without the owner's signing secret. They can receive updates but cannot yet forward configuration edits to the owner.
+
+For an already provisioned test node, add these machine-local settings to `config.toml` and restart the daemon:
+
+```toml
+[relay]
+endpoint = "http://127.0.0.1:18787"
+credential_file = "relay.key"
+```
+
+`relay.key` is a private mode-0600 file containing the development relay's 64-character hexadecimal credential. Relative paths resolve under the node's state directory; absolute paths are also accepted. Keep it out of model-visible arguments. Use an HTTPS origin outside loopback; URL credentials, paths, queries, fragments, and redirects are rejected. Relay settings are read at daemon startup and are never replicated.
+
+Every committed owner edit or renewal wakes publication immediately. Receivers poll about once per second while idle, apply verified revisions without an agent turn, and replace older shared settings. Errors retry with backoff up to 30 seconds. Offline nodes catch up from retained encrypted history. Relay acknowledgments prove neither receipt nor policy acceptance, so local history is retained even after upload. See [the synchronization protocol and limits](security.md#automatic-configuration-sync). Push transport and retention limits remain necessary before a hosted trial.
 
 ## Files, retries, and limits
 
@@ -123,4 +139,4 @@ Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per ex
 
 Codex and Claude Code pass explicit pairing, session continuity, and a small image round trip on both OSes. Separate concurrent conversations in normal shared host configurations, automatic binding, and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. The current transport is polling-only. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Cross-machine transport, encryption and enrollment, signed configuration replication, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. The [CLI design](cli.md) and [registration design](providers.md) describe those planned interfaces.
+Remote agent-message encryption and delivery, protected node pairing, edits from joined nodes, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. Automatic configuration sync has been tested through a local relay; a complete workflow between two physical machines is still pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.

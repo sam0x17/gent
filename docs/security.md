@@ -1,6 +1,6 @@
 # Security component proofs
 
-`gent-crypto` verifies owner-approved node identities and signed configuration history. The live daemon now uses that authority for RPC permission checks and owner configuration changes. `gent-daemon::encrypted` supplies MLS messaging and authenticated directional streams, including configuration recovery after authority expires. Configuration streams can share the live database and update its policy. Agent-message encryption, protected pairing, and remote delivery remain unimplemented in the live RPC path.
+`gent-crypto` verifies owner-approved node identities and signed configuration history. The live daemon uses that authority for RPC permission checks and owner configuration changes. `gent-daemon::encrypted` supplies MLS messaging and authenticated directional streams, including configuration recovery after authority expires. An optional background dispatcher synchronizes encrypted configuration through a development relay, updating the live database and its policy. Agent-message encryption and remote delivery remain unimplemented in the live RPC path; protected node pairing is also pending.
 
 ## Trust boundary
 
@@ -10,7 +10,7 @@ The owner signing key authorizes membership and policy. Each node has a separate
 
 This version assumes one active configuration writer holding the cluster's owner key. Recovery copies must remain offline until the writer is deliberately replaced. Concurrent holders of that key can sign competing histories; receivers reject forks against their saved checkpoint, but this implementation does not provide distributed consensus between independent owner writers. Delegated administration and owner-key replacement need further design and tests.
 
-The service must receive encrypted forms of these records. Signed states contain private node names, membership, and policy; signatures alone do not conceal them. The current implementation has no upload path. A future hosted bridge must receive only its agent's scoped credentials and grants, never this full configuration or the owner key.
+Signed states contain private node names, membership, and policy; signatures alone do not conceal them. The configuration dispatcher encrypts these records in established MLS streams before upload. Initial grants and key packages still require protected pairing and have no network publication path. A future hosted bridge must receive only its agent's scoped credentials and grants, never this full configuration or the owner key.
 
 ## Keys and signed records
 
@@ -82,17 +82,19 @@ The standalone replica database contains private configuration, but no node or o
 
 The local runtime stores authority, accepted history, MLS tables, registrations, exchanges, and message queues in one private `state.sqlite3`. Each RPC starts an immediate transaction, verifies the saved state and local node identity, and uses that state's policy for discovery, send, reply, inbox, and acknowledgment. Agent requests require fresh authority. A previously opened daemon handle reloads authority for every request; it cannot keep using an earlier policy from memory. Registration activity and message/exchange writes commit together.
 
-First startup creates separate owner and node Ed25519 keys and pins genesis in `identity.key`, a mode-0600 file under the private state directory. The original `owner.key` remains the distinct local RPC credential. `identity.key` uses a versioned binary header, the two private keys, and bootstrap records; it has no model-facing accessor. Key buffers are zeroized on drop. This is protected local storage, without OS keychain encryption or forensic-erasure guarantees. Only the initial owner runtime is implemented. Joining runtimes must receive their own node keys and trusted anchor, without copying the owner's signing key.
+First startup creates separate owner and node Ed25519 keys and pins genesis in `identity.key`, a mode-0600 file under the private state directory. The original `owner.key` remains the distinct local RPC credential. The owner file's `GENTKEY1` header precedes the two private keys and bootstrap records; it has no model-facing accessor. Key buffers are zeroized on drop. This is protected local storage, without OS keychain encryption or forensic-erasure guarantees.
+
+`Store::install_joined` installs an already enrolled node using its own signing key and independently verified authority. Its `GENTKEY2` file contains that node's private key, trust anchor, checkpoint, and signed state, with no owner signing secret. It creates a separate local RPC credential and atomically installs the initialized directory, refusing to overwrite an existing configuration. This is a trusted Rust API, unavailable through RPC, MCP, or the relay. Its caller must have completed authenticated pairing; the actual pairing transport and CLI remain pending. Joined nodes reject signing operations until edit forwarding to the active owner is implemented.
 
 Bootstrap preserves existing local node and cluster IDs, registrations, and messages. An interrupted bootstrap reuses the same saved keys and genesis. Missing keys for an initialized database, mismatched identities, symlink/shared key files, or an authority anchor that differs from the separate key-file pin fail closed. The database must also be a private regular file. Restoring the entire key file and database from an older backup remains outside rollback protection.
 
-Owner configuration changes create a signed revision, persist history/checkpoint, and queue a TOML projection in one transaction. Accepted changes are ordered by signed revision: the newest change replaces the previous shared configuration. Later authorized edits can replace an earlier policy without a merge, including edits begun from an older view. Invalid revisions, stale replay, and forks still fail verification. History is immediately available to each configuration stream's publication cursor. The network publisher and routing of remote edit requests to the active owner writer are still pending.
+Owner configuration changes create a signed revision, persist history/checkpoint, and queue a TOML projection in one transaction. Accepted changes are ordered by signed revision: the newest change replaces the previous shared configuration. Later authorized edits can replace an earlier policy without a merge, including edits begun from an older view. Invalid revisions, stale replay, and forks still fail verification. The commit immediately wakes the configuration dispatcher, with history available to each stream's publication cursor. Routing remote edit requests to the active owner writer remains pending.
 
 After commit, Gent writes the newest signed settings to `config.toml` atomically, preserving unrelated local settings. The file's `applied_revision` records that projection. A filesystem failure leaves committed authority in force and a durable retry marker; the RPC reports `applied: true` with `config_saved: false`. Restart, subsequent successful RPCs, and maintenance retry the latest state, never a saved older projection. Editing TOML alone does not change active authority: `gent config apply` authorizes and signs the edit. `gent node name set` also goes through the daemon and requires it to be running.
 
-The owner daemon checks renewal at startup and every 15 minutes, renewing when at most six hours remain in the 24-hour lease. `gent cluster renew` requests an immediate owner renewal. Agent requests do not renew authority themselves. Expired authority blocks them until a renewal commits; failed renewal storage leaves them blocked. This schedule applies only to the current local owner runtime; remote renewal distribution and owner replacement remain required.
+The owner daemon checks renewal at startup and every 15 minutes, renewing when at most six hours remain in the 24-hour lease. `gent cluster renew` requests an immediate owner renewal. Agent requests do not renew authority themselves. Expired authority blocks them until a renewal commits; failed renewal storage leaves them blocked. Joined nodes receive signed renewals through their configuration streams and never self-renew. Owner replacement remains unfinished.
 
-`OrderedEndpoint::open_runtime` attaches trusted daemon code to this database. Receiving a complete configuration revision advances the same checkpoint used by live RPC permission checks and queues the same TOML projection. Tests pass encrypted packets between this runtime and an isolated peer, including a newer denial that blocks an already queued message. This proves shared policy enforcement and persistence; no network relay is involved.
+`OrderedEndpoint::open_runtime` attaches trusted daemon code to this database. Receiving a complete configuration revision advances the same checkpoint used by live RPC permission checks and queues the same TOML projection. Runtime tests pass encrypted packets directly between peers, including a newer denial that blocks an already queued message. Separate dispatcher tests exercise network synchronization through a local relay.
 
 ## MLS messaging proof
 
@@ -177,13 +179,33 @@ Configuration ciphertext has a separate 8 MiB pending quota, with 3 MiB reserved
 
 This recovers an expired node that retains its keys, checkpoint, and established stream. It does not recover lost keys or roll back an endpoint backup safely. The sender needs a contiguous retained history after each recipient's initial checkpoint. Retention, stream replacement, and protected distribution of initial grants and key packages remain required for live operation.
 
+## Automatic configuration sync
+
+An explicit machine-local `[relay]` setting starts the daemon's background configuration task. It needs established, owner-authorized configuration streams and no agent turn. Successful signed edits and lease renewals notify the task after commit. Publication persists each encrypted packet before upload; reception verifies the packet, MLS sender, and signed history before changing live policy. A saved pending packet is drained before contacting the relay, so it can finish applying after a restart even while the network is unavailable.
+
+The development HTTP protocol uses a base64url-encoded opaque group ID as its mailbox address:
+
+| Request | Response |
+| --- | --- |
+| `GET /v1/mailboxes/{group}` | JSON `{"next": N}`, an untrusted next-storage-position hint. |
+| `PUT /v1/mailboxes/{group}/{sequence}` with the encoded packet as its body | JSON `{"stored": true, "sequence": N}` on success. |
+| `GET /v1/mailboxes/{group}/{sequence}` | Exact encoded packet, or HTTP 404 if unavailable. |
+
+Uploads are limited to 1 MiB, and JSON metadata responses to 1 KiB. The client bounds streamed responses, disables redirects, and sets connection/request timeouts. HTTPS is required except for loopback development origins. The credential comes from a private local file, separate from node/owner keys. The proof relay uses a shared synthetic bearer token; it does not implement account or per-node service authorization. That token authorizes storage only. Possession does not authorize a signed revision or decrypt a packet.
+
+The local Worker persists opaque packets in D1. Its insertion triggers enforce contiguous storage and advance the mailbox head atomically. Exact retries succeed, conflicting bytes and gaps fail. Neither a relay position nor a storage acknowledgment proves recipient acceptance. The sender rejects a position beyond its local history and retains all ciphertext/history after upload, allowing retransmission after relay storage loss. Endpoints verify the requested group and sequence and never use a relay timestamp to order policy changes. The service still sees opaque routing IDs, traffic sizes, and timing.
+
+The dispatcher rotates through batches of up to 32 streams with four concurrent transfers and never holds the RPC store mutex during network requests. It scans at most 4,096 established streams, excluding known revoked or replaced peers. Idle receivers poll once per second; progressing transfers continue after 10 ms, and errors back off per stream from one to 30 seconds. These are development parameters, not a latency guarantee. Publication wakes immediately, but remote application still waits for polling, transfer, and verification. Push/WebSocket notification transport is needed to meet the intended immediate-sync behavior and reduce polling cost before a hosted trial.
+
+This path handles configuration only. Normal enrollment, edits from joined nodes, encrypted agent traffic, authenticated recipient acknowledgments, queue pruning, service quotas, and retention limits remain unfinished. The test fixture establishes trusted enrollment in-process and does not prove a user-facing pairing flow or a two-physical-machine agent workflow. Local endpoint and relay histories currently grow without pruning.
+
 ## Boundaries still to implement
 
 Key packages contain identity metadata and must travel inside an authenticated, encrypted enrollment or distribution channel. They must not become a plaintext public directory. MLS Welcome messages protect their group information, while ordinary MLS headers still expose opaque group IDs, epochs, sizes, and timing. The surrounding routing protocol must account for this metadata.
 
 Node authentication does not authorize one agent to read another agent's messages. MLS inbox/outbox accessors are for trusted local code. Local RPC now checks signed policy inside its queue transaction, and configuration reception shares that authority. Remote message integration still must bind authenticated agent envelopes, enforce registration ownership, recheck policy before encryption and after decryption, and commit cryptographic state with the corresponding agent queue changes.
 
-Configuration streams belong only to trusted daemons; messaging groups serve separately authorized endpoints. Automatic network distribution, file-key grants, periodic epoch refresh scheduling, pairing UX, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before remote delivery is enabled.
+Configuration streams belong only to trusted daemons; messaging groups serve separately authorized endpoints. Remote agent-message transport, file-key grants, periodic epoch refresh scheduling, pairing UX, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before remote agent delivery is enabled.
 
 ## Verification
 
@@ -197,6 +219,8 @@ Two configuration-grant tests and eleven configuration-stream tests cover owner/
 
 Nine runtime tests cover the newest accepted policy across existing handles and restarts, failed policy/message transactions, retryable TOML projection, encrypted updates affecting live inbox access, key-file protections, interrupted bootstrap, expiry/renewal failure, and preservation of legacy registrations and messages. The existing delivery and MCP smoke tests now exercise the signed runtime path.
 
+Five dispatcher tests pass on Linux and macOS. They cover automatic newest-revision replacement, outages, peer restart, complete relay storage loss, corrupted packets and false positions, fragmented large configurations without an agent turn, safe endpoint/credential setup, and applying already-buffered traffic while the relay is offline. Fixtures also verify joined nodes receive no owner signing secret. An additional opt-in test passes through the real local Wrangler/D1 Worker on Linux, including offline catch-up. It is ignored by the default suite and uses the same trusted enrollment fixture.
+
 Run from the public repository root:
 
 ```sh
@@ -205,4 +229,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo check -p gent-crypto --features mls --target wasm32-unknown-unknown --locked
 ```
 
-The full native workspace has 72 passing tests on Linux and macOS. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, remote transport tests, real pairing UX, and lost-state recovery tests remain required before production use.
+The native workspace has 77 passing default tests on Linux and macOS, plus the opt-in Worker test described above. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, real pairing UX, and lost-state recovery tests remain required before production use.

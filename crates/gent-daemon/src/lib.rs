@@ -1,9 +1,10 @@
-//! Native local daemon. Remote transport is intentionally absent until E2EE enrollment exists.
+//! Native daemon with local agent RPC and optional encrypted configuration sync.
 pub mod config;
 pub mod encrypted;
 pub mod replica;
 mod runtime;
 pub mod store;
+pub mod sync;
 
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
@@ -68,8 +69,9 @@ pub async fn run(home: &Path) -> Result<()> {
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     let permits = Arc::new(Semaphore::new(32));
     let mut maintenance = tokio::time::interval(Duration::from_secs(15 * 60));
+    let sync_task = sync::start(store.clone())?;
     eprintln!(
-        "Gent daemon listening at {} (local proof; remote transport unavailable)",
+        "Gent daemon listening at {} (development build; agent messaging is local)",
         socket.display()
     );
     loop {
@@ -93,6 +95,10 @@ pub async fn run(home: &Path) -> Result<()> {
                 });
             }
         }
+    }
+    if let Some(task) = sync_task {
+        task.abort();
+        let _ = task.await;
     }
     fs::remove_file(socket)?;
     Ok(())

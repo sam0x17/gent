@@ -24,6 +24,8 @@ tokio.workspace = true
 toml.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
 
 [lints]
 workspace = true

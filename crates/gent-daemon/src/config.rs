@@ -28,10 +28,43 @@ pub struct Config {
     pub applied_revision: Option<u64>,
     pub node: NodeConfig,
     pub cluster: ClusterConfig,
+    /// Development configuration transport; local settings are never replicated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayConfig>,
     #[serde(default)]
     pub policy: Policy,
     #[serde(flatten)]
     pub extra: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayConfig {
+    pub endpoint: String,
+    pub credential_file: PathBuf,
+}
+impl RelayConfig {
+    pub fn validate(&self) -> Result<reqwest::Url> {
+        let url = reqwest::Url::parse(&self.endpoint)?;
+        ensure!(
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.path() == "/",
+            "relay endpoint must be an origin without credentials, path, query, or fragment"
+        );
+        let loopback = matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"));
+        ensure!(
+            url.scheme() == "https" || (url.scheme() == "http" && loopback),
+            "relay requires HTTPS except on loopback"
+        );
+        ensure!(
+            !self.credential_file.as_os_str().is_empty(),
+            "relay credential file is required"
+        );
+        Ok(url)
+    }
 }
 
 pub fn secret() -> String {
@@ -156,6 +189,9 @@ impl Config {
                 "identity must be a canonical nonzero UUID"
             );
         }
+        if let Some(relay) = &self.relay {
+            relay.validate()?;
+        }
         Ok(())
     }
 }
@@ -187,6 +223,7 @@ pub fn initialize(home: &Path, name: &str) -> Result<Config> {
             name: name.into(),
             local_only: true,
         },
+        relay: None,
         policy: Policy::default(),
         extra: BTreeMap::new(),
     };

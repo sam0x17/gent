@@ -32,7 +32,37 @@ struct Progress {
     offset: usize,
 }
 
+#[derive(Clone)]
+pub struct ConfigurationStream {
+    pub group: Vec<u8>,
+    pub outgoing: bool,
+}
+
 impl OrderedEndpoint<'_> {
+    /// Only established, still-authorized configuration streams are eligible.
+    /// Expiry alone does not hide the recovery route; known revocation does.
+    pub fn configuration_streams(&mut self, now: u64) -> Result<Vec<ConfigurationStream>> {
+        self.inner.transact_mode(now, true, |session| {
+            let mut query = session.db.prepare(
+                "SELECT group_id FROM configuration_streams ORDER BY group_id LIMIT 4097",
+            )?;
+            let groups = query
+                .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(groups.len() <= 4096, "too many configuration streams");
+            let mut streams = Vec::new();
+            for group in groups {
+                if let Ok(stream) = checked_stream(session, &group, Purpose::Configuration) {
+                    streams.push(ConfigurationStream {
+                        group,
+                        outgoing: stream.writer == session.signer.id(),
+                    });
+                }
+            }
+            Ok(streams)
+        })
+    }
+
     pub fn authority_state(&self) -> Result<VerifiedState> {
         self.inner.authority_state()
     }

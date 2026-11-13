@@ -13,8 +13,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::Notify;
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -38,6 +40,7 @@ pub struct Store {
     config: Config,
     identity: Identity,
     owner_hash: String,
+    pub(crate) sync_wakeup: Arc<Notify>,
 }
 impl Store {
     pub fn open(home: &Path) -> Result<Self> {
@@ -93,6 +96,7 @@ impl Store {
             config,
             owner_hash,
             identity,
+            sync_wakeup: Arc::new(Notify::new()),
         };
         // Projection failure must never replace committed authority with TOML.
         let _ = store.project_config();
@@ -115,6 +119,7 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = self.identity.state(&tx)?;
+        let initial_checkpoint = state.checkpoint().clone();
         let mut config = self.config.clone();
         config.policy = state.state().policy.clone();
         config.cluster.name.clone_from(&state.state().name);
@@ -141,7 +146,11 @@ impl Store {
                 session.agent(&credential, action)?
             }
         };
+        let changed = session.state.checkpoint() != &initial_checkpoint;
         tx.commit()?;
+        if changed {
+            self.sync_wakeup.notify_one();
+        }
         // Filesystem projection is retryable after the authoritative commit.
         // A caller must not interpret a projection failure as an unapplied edit.
         let projected = self.project_config();
@@ -179,11 +188,88 @@ impl Store {
                 .is_some_and(|n| n.signing_key == self.identity.node.public_key()),
             "local node is no longer enrolled"
         );
-        if state.state().expires_at.saturating_sub(timestamp) <= 6 * 60 * 60 {
-            let update = state.renew(&self.identity.owner, timestamp)?;
+        let renew = self.identity.owner.is_some()
+            && state.state().expires_at.saturating_sub(timestamp) <= 6 * 60 * 60;
+        if renew {
+            let update = state.renew(self.identity.signing_owner()?, timestamp)?;
             self.identity.apply(&tx, update)?;
         }
         tx.commit()?;
+        if renew {
+            self.sync_wakeup.notify_one();
+        }
+        self.project_config()
+    }
+
+    /// Trusted enrollment API. The supplied authority must already be verified
+    /// through protected pairing. It installs no owner signing secret.
+    pub fn install_joined(
+        home: &Path,
+        node: &gent_crypto::NodeIdentity,
+        state: &VerifiedState,
+    ) -> Result<()> {
+        runtime::install_joined(home, node, state)
+    }
+
+    pub(crate) fn relay_settings(&self) -> Option<(config::RelayConfig, PathBuf)> {
+        self.config
+            .relay
+            .clone()
+            .map(|relay| (relay, self.home.clone()))
+    }
+    pub(crate) fn sync_streams(
+        &self,
+    ) -> Result<Vec<encrypted::ordered::configuration::ConfigurationStream>> {
+        encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?
+            .configuration_streams(now() as u64)
+    }
+    pub(crate) fn sync_prepare(&self, group: &[u8]) -> Result<()> {
+        let mut endpoint =
+            encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
+        let timestamp = now() as u64;
+        if endpoint.authority_state()?.require_fresh(timestamp).is_ok() {
+            endpoint.next_configuration(group, uuid::Uuid::new_v4(), timestamp)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn sync_outgoing(
+        &self,
+        group: &[u8],
+        next: u64,
+    ) -> Result<Option<gent_crypto::stream::Packet>> {
+        let mut endpoint =
+            encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
+        let timestamp = now() as u64;
+        let status = endpoint.configuration_status(group, timestamp)?;
+        ensure!(next <= status.next, "relay position exceeds local history");
+        Ok(endpoint
+            .configuration_outbox(group, next.checked_sub(1), 1, timestamp)?
+            .pop())
+    }
+    pub(crate) fn sync_next(&mut self, group: &[u8]) -> Result<u64> {
+        let mut endpoint =
+            encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
+        let timestamp = now() as u64;
+        // A restart may find a packet committed to the receive buffer before
+        // its authority transaction ran. Apply it without requiring the relay.
+        let pending = endpoint.drain_configuration(group, 1, timestamp)?;
+        let next = endpoint
+            .configuration_status(group, timestamp)
+            .map(|status| status.next);
+        drop(endpoint);
+        if !pending.is_empty() {
+            self.project_config()?;
+            self.sync_wakeup.notify_one();
+        }
+        next
+    }
+    pub(crate) fn sync_receive(&mut self, packet: &gent_crypto::stream::Packet) -> Result<()> {
+        let mut endpoint =
+            encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
+        let timestamp = now() as u64;
+        endpoint.stage_configuration(packet, timestamp)?;
+        endpoint.drain_configuration(packet.group(), 1, timestamp)?;
+        self.sync_wakeup.notify_one();
         self.project_config()
     }
 }
@@ -250,7 +336,7 @@ impl StoreSession<'_> {
                     "cannot change active identities while daemon runs"
                 );
                 let update = self.state.configure(
-                    &self.identity.owner,
+                    self.identity.signing_owner()?,
                     &disk.cluster.name,
                     (&disk.node.id, &disk.node.name),
                     policy,
@@ -262,13 +348,13 @@ impl StoreSession<'_> {
             OwnerOp::Renew => {
                 let update = self
                     .state
-                    .renew(&self.identity.owner, self.timestamp as u64)?;
+                    .renew(self.identity.signing_owner()?, self.timestamp as u64)?;
                 self.state = self.identity.apply(self.db, update)?;
                 Ok(json!({"applied":true,"revision":self.state.checkpoint().revision}))
             }
             OwnerOp::RenameNode { name } => {
                 let update = self.state.configure(
-                    &self.identity.owner,
+                    self.identity.signing_owner()?,
                     &self.state.state().name,
                     (self.identity.node.id(), &name),
                     self.state.state().policy.clone(),
