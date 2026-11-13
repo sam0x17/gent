@@ -273,6 +273,29 @@ This proof passes with a Mac Studio owner and Linux joining node. Additional joi
 
 To extend the proof to three daemons across the two machines, build `cargo build --locked -p gent-daemon --example join_local` on the owner machine and add `--remote-join-helper /absolute/path/to/target/debug/examples/join_local` to the command above. This test helper creates a second temporary Mac node through the owner's protected local RPC socket. Linux still uses the real SSH join command. The test exchanges MCP images, replies, and receipts directly between the two joined nodes while the owner daemon is stopped, restarts the Linux receiver, and checks that the owner database has no copy of those messages. The SSH relay tunnel stays open independently of the owner daemon. All temporary nodes and processes are removed afterward.
 
+## Real-agent visual iteration
+
+`scripts/prove_visual.py` runs real Codex and Claude Code conversations on two machines through the same SSH enrollment and encrypted development relay. It requires Python 3.11 or newer on both machines, existing host authentication, and a copy of the script on the remote machine:
+
+```sh
+python3 scripts/prove_visual.py --owner sam@owner-host \
+  --remote-binary /absolute/path/to/gent \
+  --remote-script /absolute/path/to/scripts/prove_visual.py \
+  --remote-python /absolute/path/to/python3 \
+  --local-host codex --remote-host claude-code \
+  --local-host-binary /absolute/path/to/codex \
+  --remote-host-binary /absolute/path/to/claude \
+  --relay-token-file /absolute/private/relay.key
+```
+
+Swap the host names and executable paths to exercise Claude locally and Codex remotely. Both combinations pass with Linux as builder and macOS as reviewer. The test consumes model usage, keeps synthetic state in private `/tmp/gent-visual-*` directories on both machines, and stops its daemons and SSH tunnel. Host authentication and saved MCP configuration stay in their usual locations; temporary installation settings are supplied per invocation.
+
+The builder renders a small code-native status card and sends SVG source plus a PNG preview. The reviewer identifies the original dot's color and position, replies with a correction and reference files, then reviews and approves the builder's revision. Each message uses Gent, with only the builder permitted to initiate an exchange. Both daemons restart while visual feedback is pending. The test verifies session/agent continuity, four messages in one reply chain, exact attachment bytes at the receiving endpoint, and delivery receipts. Native compression libraries can produce different valid PNG encodings, so expected bytes come from the sender's renderer.
+
+The harness schedules host turns and grants test permissions; it does not inject peer replies or attachments into prompts. Codex uses its read-only shell sandbox for the renderer; Claude permits the renderer command through a Bash prefix rule. Prompts restrict shell use to the renderer, and recorded commands match that restriction. Unrelated configured MCP servers and plugins are disabled. This proof uses a 160 x 100 graphic and inline base64. It establishes a small visual exchange, not arbitrary application editing, large attachments, automatic host wake-up, or persistent relay mode.
+
+The bundled [agent guidance](../crates/gent-link/skills/gent/SKILL.md) is advertised through MCP server instructions. It covers returned agent IDs, retry IDs, receipt semantics, file bytes, polling, and the current relay limits. Messaging grants do not authorize policy changes or confer human authority.
+
 ## Configuration administration
 
 The owner CLI and authorized joined-node CLIs can change policy, apply cluster and current-node names from TOML, rename the current node, and request lease renewal. MCP agent credentials cannot invoke these owner operations. Scoped administration through MCP remains planned.
@@ -324,6 +347,6 @@ Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per ex
 
 ## Remaining integration work
 
-Codex and Claude Code have explicit and host-metadata binding proofs on both OSes. Interactive conversation transitions and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
+Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. Actual subagent execution and practical larger-file workflows remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Invite-based pairing, GitHub login, remote connectors, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, and generic MCP messaging use the local development relay. A visual iteration involving real models across machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
+Invite-based pairing, GitHub login, remote connectors, and persistent relay attachments remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, generic MCP messaging, and a small real-model visual revision use the local development relay. Shared agent guidance is bundled through MCP instructions. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.

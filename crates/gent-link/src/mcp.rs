@@ -46,14 +46,14 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_send",
-            "Send text and optional file bytes. Use a new UUID request_id for new work; reuse it only for an identical retry.",
-            json!({"recipient":{"type":"string"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file}}),
+            "Send to the recipient agent ID returned by gent_agents. Use a new UUID request_id for new work; reuse it only for an identical retry. Optional files contain actual bytes.",
+            json!({"recipient":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file}}),
             vec!["recipient", "request_id", "text"],
         ),
         (
             "gent_reply",
-            "Reply to a received message within its bounded exchange. Reuse request_id only for an identical retry.",
-            json!({"message_id":{"type":"string"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file}}),
+            "Reply using a message ID from gent_inbox, within its bounded exchange. Reuse request_id only for an identical retry.",
+            json!({"message_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file}}),
             vec!["message_id", "request_id", "text"],
         ),
         (
@@ -65,13 +65,13 @@ fn tools() -> Vec<Tool> {
         (
             "gent_ack",
             "Acknowledge a message delivered to this registration. This records receipt, not completion of the requested work.",
-            json!({"message_id":{"type":"string"}}),
+            json!({"message_id":{"type":"string","format":"uuid"}}),
             vec!["message_id"],
         ),
         (
             "gent_message_status",
             "Inspect a message sent or received by this registration.",
-            json!({"message_id":{"type":"string"}}),
+            json!({"message_id":{"type":"string","format":"uuid"}}),
             vec!["message_id"],
         ),
     ];
@@ -80,8 +80,12 @@ fn tools() -> Vec<Tool> {
 
 impl ServerHandler for GentMcp {
     fn get_info(&self) -> ServerConfig {
+        let instructions = include_str!("../skills/gent/SKILL.md")
+            .split_once("\n---\n")
+            .expect("bundled skill has closing frontmatter")
+            .1;
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Call gent_register for this conversation before other Gent tools. Use gent_inbox to check messages. The host connection determines identity; credentials and session selectors are never tool arguments. Discovery, sends, receipt, and replies follow cluster permissions. Connected nodes exchange encrypted messages and files; remote delivery requires configured transport.")
+            .with_instructions(instructions)
     }
 
     async fn list_tools(
