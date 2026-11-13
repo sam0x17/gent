@@ -304,7 +304,17 @@ def main():
                 received = incoming(b, sent_file['message_id'])['attachments'][0]
                 assert received['id'] != imported['id']
                 wait_for(lambda: b.call('gent_file_status', {'file_id': received['id']})[0]['state'] == 'ready')
+                inject = "import pathlib,sqlite3,sys; db=sqlite3.connect(pathlib.Path(sys.argv[1])/'state.sqlite3'); db.execute(\"CREATE TRIGGER proof_handoff_failure BEFORE INSERT ON file_handoffs WHEN NEW.slot<>'' BEGIN SELECT RAISE(ABORT,'proof handoff failure'); END\"); db.commit()"
+                remote(['python3', '-c', inject, owner_home])
+                failed_export = b.call('gent_file_export', {'file_id': received['id']}, error=True)
+                assert 'proof handoff failure' in json.dumps(failed_export)
+                pending_exports = json.loads(remote(owner + ['files']).stdout)
+                assert pending_exports['exports']['pending'] == 1
+                restart_relay_nodes()
+                release = "import pathlib,sqlite3,sys; db=sqlite3.connect(pathlib.Path(sys.argv[1])/'state.sqlite3'); db.execute('DROP TRIGGER proof_handoff_failure'); db.commit()"
+                remote(['python3', '-c', release, owner_home])
                 exported = b.call('gent_file_export', {'file_id': received['id']})[0]
+                assert json.loads(remote(owner + ['files']).stdout)['exports']['pending'] == 0
                 verify = "import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]).resolve(); assert p.is_relative_to(pathlib.Path(sys.argv[2]).resolve()); print(hashlib.sha256(p.read_bytes()).hexdigest())"
                 digest = remote(['/opt/homebrew/bin/python3', '-c', verify, exported['path'], owner_home]).stdout.strip()
                 assert digest == hashlib.sha256(content).hexdigest() == received['sha256']
@@ -318,7 +328,7 @@ def main():
                 assert output.resolve().is_relative_to(home.resolve()) and output.read_bytes() == content
                 b.call('gent_ack', {'message_id': sent_file['message_id']})
                 a.call('gent_ack', {'message_id': result['message_id']})
-                print('PASS: two-machine native MCP files, exact 2 MiB bytes, scoped forwarding, and both daemon restarts')
+                print('PASS: two-machine native MCP files, exact 2 MiB bytes, interrupted export tracking recovery, scoped forwarding, and both daemon restarts')
 
             rename_id = str(uuid.uuid4())
             renamed = cli('--request-id', rename_id, 'node', 'name', 'set', 'joined-after-edit')

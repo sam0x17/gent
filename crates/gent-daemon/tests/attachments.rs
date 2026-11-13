@@ -8,6 +8,8 @@ use std::{
     path::PathBuf,
 };
 use uuid::Uuid;
+#[path = "attachments/handoff_limits.rs"]
+mod handoff_limits;
 #[path = "attachments/history.rs"]
 mod history;
 #[path = "attachments/retention.rs"]

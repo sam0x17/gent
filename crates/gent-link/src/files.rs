@@ -213,6 +213,15 @@ pub fn print_report(value: &Value) {
             "More copies due: {}. Run gent files status for details.",
             value["more_due"]
         );
+        let exports = &value["exports"];
+        println!(
+            "Interrupted exports: {} removed, {} missing, {} preserved, {} blocked; more due: {}.",
+            exports["removed"],
+            exports["missing"],
+            exports["preserved"],
+            exports["blocked"],
+            exports["more_due"]
+        );
     } else {
         let objects = &value["objects"];
         let handoffs = &value["handoffs"];
@@ -235,6 +244,37 @@ pub fn print_report(value: &Value) {
             "Changed copies preserved: {}; cleanup blocked: {}.",
             handoffs["preserved"], handoffs["blocked"]
         );
+        println!(
+            "Plaintext reservations: {} / {} copies; {} / {} bytes, including pending exports.",
+            handoffs["reserved_copies"],
+            handoffs["max_copies"],
+            handoffs["reserved_bytes"],
+            handoffs["max_bytes"]
+        );
+        println!(
+            "Pending exports: {} ({} reserved bytes).",
+            value["exports"]["pending"], value["exports"]["reserved_bytes"]
+        );
+        if let Some(exports) = value["exports"]["attention"].as_array() {
+            for item in exports {
+                println!(
+                    "  {}: {}; temporary: {}; cleanup recovery: {}; verified: {}.",
+                    item["outcome"],
+                    item["path"],
+                    item["temporary_path"],
+                    item["recovery_path"],
+                    item["ready"]
+                );
+                if !item["reason"].is_null() {
+                    println!("    {}", item["reason"]);
+                }
+            }
+            if !exports.is_empty() {
+                println!(
+                    "Retry exports while the source is accessible. Changed or unverified copies stay reserved until resolved."
+                );
+            }
+        }
         if let Some(attention) = value["attention"].as_array() {
             for item in attention {
                 // JSON quoting escapes control characters in a user-selected home path.

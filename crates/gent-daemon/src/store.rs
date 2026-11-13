@@ -130,6 +130,37 @@ impl Store {
     }
 
     fn execute(&mut self, request: Request) -> Result<Value> {
+        if let Request::Agent {
+            credential,
+            action: AgentOp::FileExport { file_id },
+        } = &request
+        {
+            // Persist capacity before creating plaintext, then persist the
+            // completed inode before publication. Each step rechecks authority.
+            for step in [
+                files::ExportStep::Reserve,
+                files::ExportStep::Write,
+                files::ExportStep::Publish,
+            ] {
+                let value = self.execute_step(
+                    Request::Agent {
+                        credential: credential.clone(),
+                        action: AgentOp::FileExport {
+                            file_id: file_id.clone(),
+                        },
+                    },
+                    step,
+                )?;
+                if !value.is_null() {
+                    return Ok(value);
+                }
+            }
+            anyhow::bail!("export did not finish");
+        }
+        self.execute_step(request, files::ExportStep::Reserve)
+    }
+
+    fn execute_step(&mut self, request: Request, export_step: files::ExportStep) -> Result<Value> {
         if let Request::Owner { credential, .. } = &request {
             ensure!(hash(credential) == self.owner_hash, "unauthorized");
         }
@@ -168,7 +199,7 @@ impl Store {
                     &self.identity.node.public_key(),
                     timestamp as u64,
                 )?;
-                session.agent(&credential, action)?
+                session.agent(&credential, action, export_step)?
             }
         };
         tx.commit()?;
@@ -520,7 +551,12 @@ impl StoreSession<'_> {
         }
     }
 
-    fn agent(&mut self, credential: &str, action: AgentOp) -> Result<Value> {
+    fn agent(
+        &mut self,
+        credential: &str,
+        action: AgentOp,
+        export_step: files::ExportStep,
+    ) -> Result<Value> {
         ensure!(
             credential.len() == 64 && credential.bytes().all(|b| b.is_ascii_hexdigit()),
             "invalid registration credential"
@@ -569,7 +605,7 @@ impl StoreSession<'_> {
                 media_type,
             } => self.file_import(&who, &request_id, &name, &media_type),
             AgentOp::FileStatus { file_id } => self.file_status(&who, &file_id),
-            AgentOp::FileExport { file_id } => self.file_export(&who, &file_id),
+            AgentOp::FileExport { file_id } => self.file_export(&who, &file_id, export_step),
             AgentOp::RelayAttach { target, request_id } => {
                 self.relay_attach(&who, &target, &request_id)
             }

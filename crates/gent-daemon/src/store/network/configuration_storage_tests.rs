@@ -65,7 +65,7 @@ async fn pending_large_policy_survives_legacy_migration_restart_and_exact_retrie
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        12
+        13
     );
     assert_eq!(
         pair.owner(1, OwnerOp::HistoryStatus).unwrap()["configuration_edits"]["legacy_records"],

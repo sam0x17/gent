@@ -28,6 +28,8 @@ Pass imported IDs in `file_ids` on `gent_send`, `gent_reply`, `gent_relay_send`,
 
 For a received attachment, check `gent_file_status`. When ready, call `gent_file_export` and use the returned local path with the host's file or image tools. Exports verify the complete bytes. Pending downloads are not complete transfers. Handoff paths belong to the daemon machine and may be inaccessible to a web or remote host; state that limitation when applicable. Imported and exported handoff copies are temporary: Gent cleans unchanged copies after the returned `cleanup_after` timestamp. Save lasting files elsewhere. Changed or untracked files require user/host cleanup; do not treat expiry as proof that all plaintext copies were erased.
 
+Retry an interrupted export with the same file ID while access is valid. If Gent reports changed temporary or destination contents, preserve those files and report the conflict. A plaintext quota error requires owner inspection through `gent files`; repeating a new export does not create more capacity.
+
 Small files can still use `files` entries containing `name`, `media_type`, and exact `data_base64`, with a combined 1 MiB decoded limit. Preserve all three fields when forwarding inline files. Inbox results include supported inline raster image blocks. Larger attachments require export before inspection.
 
 Inspect the image when reviewing visual work. Include source files and rendered previews when both help the recipient. Send revisions as new messages in the same exchange. A description or inaccessible URL does not transfer file bytes.

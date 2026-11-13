@@ -4,7 +4,8 @@ fn expire(f: &Fixture) {
     f.db()
         .execute_batch(
             "UPDATE file_objects SET expires_at=1;
-        UPDATE file_handoffs SET expires_at=1,next_attempt=0;",
+        UPDATE file_handoffs SET expires_at=1,next_attempt=0;
+        UPDATE file_exports SET expires_at=1,next_attempt=0;",
         )
         .unwrap();
 }
@@ -241,7 +242,7 @@ fn reimport_extends_handoff_deadline_and_cleanup_is_bounded() {
 }
 
 #[test]
-fn directory_substitution_and_uncommitted_exports_remain_untouched() {
+fn directory_substitution_and_uncommitted_exports_recover_independently() {
     let mut f = Fixture::new();
     let (_, id, path) = imported(&mut f, "source");
     f.db()
@@ -276,8 +277,9 @@ fn directory_substitution_and_uncommitted_exports_remain_untouched() {
     fs::rename(outbox, &saved).unwrap();
     symlink(&saved, outbox).unwrap();
     expire(&f);
-    assert_eq!(clean(&mut f, false)["handoffs_blocked"], 1);
+    let cleaned = clean(&mut f, false);
+    assert_eq!(cleaned["handoffs_blocked"], 1);
+    assert_eq!(cleaned["exports"]["removed"], 1);
     assert_eq!(fs::read(saved.join("source")).unwrap(), b"private source");
-    // Files created before ledger commit (or by an older version) are untracked.
-    assert_eq!(fs::read(export).unwrap(), b"private source");
+    assert!(!export.exists());
 }

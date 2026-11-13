@@ -4,8 +4,16 @@ use crate::{file_objects::Objects, messages::PrivateAttachment};
 use gent_crypto::files::{FileGrant, seal};
 use gent_protocol::file_objects::Manifest;
 use zeroize::Zeroizing;
+mod exports;
 mod host;
 mod retention;
+
+#[derive(Clone, Copy)]
+pub(super) enum ExportStep {
+    Reserve,
+    Write,
+    Publish,
+}
 
 const FILE_UNAVAILABLE: &str = "file unavailable";
 
@@ -157,24 +165,6 @@ impl StoreSession<'_> {
             json!({"file":grant.descriptor(),"state":if status.complete {"ready"} else {"pending"},
             "chunks_present":status.chunks_present,"chunks_total":grant.chunk_count(),"expires_at":status.expires_at}),
         )
-    }
-
-    pub(super) fn file_export(&self, who: &Agent, id: &str) -> Result<Value> {
-        let grant = self.accessible_file(who, id)?;
-        let bytes = self.objects()?.read(id)?;
-        let paths = host::Folders::open(self.home, &who.id)?;
-        let (path, stamp) = paths.write(grant.descriptor(), &bytes)?;
-        let expiry = self.objects()?.status(id)?.expires_at;
-        retention::track(
-            self.db,
-            &who.id,
-            id,
-            &grant.descriptor().name,
-            &stamp,
-            &grant.descriptor().sha256,
-            expiry,
-        )?;
-        Ok(json!({"file":grant.descriptor(),"path":path,"cleanup_after":expiry}))
     }
 
     pub(super) fn seal_attachments(
