@@ -1,6 +1,7 @@
-//! Native daemon with local agent RPC and optional encrypted configuration sync.
+//! Native daemon with local agent RPC and encrypted configuration/message sync.
 pub mod config;
 pub mod encrypted;
+pub mod messages;
 pub mod pairing;
 pub mod replica;
 mod runtime;
@@ -72,7 +73,7 @@ pub async fn run(home: &Path) -> Result<()> {
     let mut maintenance = tokio::time::interval(Duration::from_secs(15 * 60));
     let sync_task = sync::start(store.clone())?;
     eprintln!(
-        "Gent daemon listening at {} (development build; agent messaging is local)",
+        "Gent daemon listening at {} (development build)",
         socket.display()
     );
     loop {

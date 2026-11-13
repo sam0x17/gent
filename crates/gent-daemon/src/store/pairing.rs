@@ -15,6 +15,62 @@ impl Store {
         self.maintain()?;
         let timestamp = now() as u64;
         match action {
+            PairingOp::Data {
+                request_id,
+                peer,
+                key_package,
+                legacy_agents,
+            } => {
+                ensure!(
+                    key_package.len() <= 24 * 1024 && legacy_agents.len() <= 1024,
+                    "pairing data request too large"
+                );
+                let request = uuid::Uuid::parse_str(&request_id)?;
+                let mut endpoint = OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
+                let packet = endpoint.create(
+                    request,
+                    &[(&peer, &STANDARD.decode(key_package)?)],
+                    timestamp,
+                )?;
+                let key_id =
+                    gent_crypto::scoped_id(b"gent/pair-return-package/v1\0", &[request.as_bytes()]);
+                let package = endpoint.key_package(key_id, timestamp)?;
+                drop(endpoint);
+                let tx = self.db.unchecked_transaction()?;
+                let session = self.network_session(&tx, self.identity.state(&tx)?);
+                let legacy = legacy_agents
+                    .iter()
+                    .map(|agent| session.certify_legacy(agent, &peer))
+                    .collect::<Result<Vec<_>>>()?;
+                tx.commit()?;
+                Ok(
+                    json!({"packet":STANDARD.encode(packet.encode()?),"key_package":STANDARD.encode(package),"legacy":legacy}),
+                )
+            }
+            PairingOp::AcceptData {
+                peer,
+                packet,
+                outgoing_group,
+            } => {
+                ensure!(
+                    packet.len() <= 1024 * 1024 && outgoing_group.len() <= 512,
+                    "pairing data response too large"
+                );
+                let packet = gent_crypto::stream::Packet::decode(&STANDARD.decode(packet)?)?;
+                OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?.join(
+                    &packet,
+                    &peer,
+                    &[self.identity.node.id(), &peer],
+                    timestamp,
+                )?;
+                self.install_data_link(
+                    &peer,
+                    &STANDARD.decode(outgoing_group)?,
+                    packet.group(),
+                    &[],
+                )?;
+                Ok(json!({"connected":true}))
+            }
             PairingOp::Snapshot => {
                 let state = self.identity.state(&self.db)?;
                 self.pairing_snapshot(&state)

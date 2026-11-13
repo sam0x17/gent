@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Opt-in SSH pairing and encrypted config sync between two real machines.
+"""Opt-in SSH pairing, config sync, and encrypted MCP messages between two machines.
 
 Requires a running local development relay and an already trusted SSH owner host.
 Uses temporary clusters, makes no model calls, and removes its nodes afterward.
 """
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,9 @@ import signal
 import subprocess
 import tempfile
 import time
+import uuid
 from urllib.parse import urlparse
+from smoke_mcp import Client, PNG
 
 
 PREPARE = r'''
@@ -64,7 +67,7 @@ def wait_for(check):
         if check():
             return
         time.sleep(.1)
-    raise AssertionError('timed out waiting for node/configuration')
+    raise AssertionError('timed out waiting for node/configuration/message')
 
 
 def stop(process):
@@ -101,6 +104,7 @@ def main():
     binary = str(Path(args.binary).resolve())
     owner_home = None
     local_daemon = owner_daemon = None
+    clients = []
     with tempfile.TemporaryDirectory(prefix='gent-joined-pairing-') as folder:
         home = Path(folder) / 'node'
         local = [binary, '--home', str(home), '--json']
@@ -142,8 +146,47 @@ def main():
             wait_for(lambda: (home / 'daemon.sock').exists())
             wait_for(lambda: cli('cluster')['authority']['revision'] == changed['revision'])
             assert next(n for n in cli('nodes') if n['id'] == setup['node'])['name'] == 'owner-while-peer-offline'
-            print('PASS: SSH-authenticated two-machine join, node-only keys, idempotent CLI retry, encrypted relay configuration sync, and offline catch-up')
+            a = Client(local + ['mcp', 'serve', '--binding', str(home / 'visual.key')])
+            clients.append(a)
+            b = Client(ssh + ['--', args.owner, shlex.join(owner + ['mcp', 'serve', '--binding', owner_home + '/visual.key'])])
+            clients.append(b)
+            aid = a.call('gent_register', {'name': 'linux-visual', 'provider': 'generic-mcp'})[0]['agent']['id']
+            bid = b.call('gent_register', {'name': 'mac-review', 'provider': 'generic-mcp'})[0]['agent']['id']
+            wait_for(lambda: len(cli('agents')) == 2)
+            wait_for(lambda: len(json.loads(remote(owner + ['agents']).stdout)) == 2)
+            assert a.call('gent_agents')[0] == b.call('gent_agents')[0] == []
+            remote(owner + ['permission', 'allow', aid, bid, '--permission', 'enumerate', 'send'])
+            granted = json.loads(remote(owner + ['permission', 'allow', bid, aid, '--permission', 'enumerate', 'receive']).stdout)
+            wait_for(lambda: cli('cluster')['authority']['revision'] == granted['revision'])
+            wait_for(lambda: len(a.call('gent_agents')[0]) == 1)
+            files = [{'name': 'visual.png', 'media_type': 'image/png', 'data_base64': PNG}]
+            attempt = {'recipient': bid, 'request_id': str(uuid.uuid4()), 'text': 'review this image', 'files': files}
+            sent = a.call('gent_send', attempt)[0]
+            assert a.call('gent_send', attempt)[0]['duplicate']
+            wait_for(lambda: len(b.call('gent_inbox')[0]) == 1)
+            inbox, raw = b.call('gent_inbox')
+            assert inbox[0]['id'] == sent['message_id']
+            assert base64.b64decode(inbox[0]['files'][0]['data_base64']) == base64.b64decode(PNG)
+            assert any(part['type'] == 'image' and part['data'] == PNG for part in raw['content'])
+            b.call('gent_send', {'recipient': aid, 'request_id': str(uuid.uuid4()), 'text': 'unsolicited'}, error=True)
+            b.call('gent_ack', {'message_id': sent['message_id']})
+            wait_for(lambda: a.call('gent_message_status', {'message_id': sent['message_id']})[0]['state'] == 'delivered')
+            reply = b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': str(uuid.uuid4()), 'text': 'image reviewed', 'files': files})[0]
+            wait_for(lambda: len(a.call('gent_inbox')[0]) == 1)
+            inbox, raw = a.call('gent_inbox')
+            assert inbox[0]['id'] == reply['message_id'] and inbox[0]['reply_to'] == sent['message_id']
+            assert any(part['type'] == 'image' and part['data'] == PNG for part in raw['content'])
+            a.call('gent_ack', {'message_id': reply['message_id']})
+            stop(local_daemon)
+            local_daemon = None
+            queued = b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': str(uuid.uuid4()), 'text': 'follow-up while offline'})[0]
+            local_daemon = start_local()
+            wait_for(lambda: (home / 'daemon.sock').exists())
+            wait_for(lambda: any(m['id'] == queued['message_id'] for m in a.call('gent_inbox')[0]))
+            print('PASS: two-machine SSH pairing, encrypted configuration sync, MCP images in both directions, scoped replies, authenticated receipts, and offline catch-up')
         finally:
+            for client in clients:
+                client.close()
             stop(local_daemon)
             if owner_home:
                 remote(['python3', '-c', REMOVE, owner_home])

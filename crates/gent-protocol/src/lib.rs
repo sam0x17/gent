@@ -131,6 +131,7 @@ pub struct FilePart {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Message {
     pub id: String,
     pub exchange_id: String,
@@ -215,6 +216,17 @@ pub enum PairingOp {
     History {
         revision: u64,
         digest: [u8; 32],
+    },
+    Data {
+        request_id: String,
+        peer: String,
+        key_package: String,
+        legacy_agents: Vec<String>,
+    },
+    AcceptData {
+        peer: String,
+        packet: String,
+        outgoing_group: String,
     },
 }
 

@@ -1,8 +1,8 @@
 # Local development proof
 
-The first implementation connects agents on one machine through the same stdio MCP tools. It has no model API clients or provider catalog. Unknown host labels work without adding Gent code. The daemon owns identity, policy, and durable delivery; each host retains inference and its broader conversation history.
+The development implementation connects local and directly paired remote agents through the same stdio MCP tools. It has no model API clients or provider catalog. Unknown host labels work without adding Gent code. The daemon owns identity, policy, and durable delivery; each host retains inference and its broader conversation history.
 
-This proof runs on macOS and Linux. Agent messages and attachments stay in the trusted user's local SQLite database. An optional development relay carries end-to-end encrypted configuration updates between pre-enrolled nodes; there is no hosted account or production service yet. Other software running as the same user can access endpoint state and credentials. Do not treat an agent with unrestricted shell access as isolated from the operating-system user.
+This proof runs on macOS and Linux. Agent messages and attachments stay in the trusted user's local SQLite database. An optional development relay carries end-to-end encrypted configuration, agent announcements, messages, and files between SSH-paired nodes; there is no hosted account or production service yet. Other software running as the same user can access endpoint state and credentials. Do not treat an agent with unrestricted shell access as isolated from the operating-system user.
 
 ## Build and verify
 
@@ -99,9 +99,9 @@ A can now initiate an exchange with B. B can discover A, receive its message, an
 gent permission deny AGENT_B_ID AGENT_A_ID --permission receive
 ```
 
-This blocks new messages and delivery of queued messages from A to B, as well as replies in the blocked relationship. Owner commands can inspect all local registrations; agent-facing discovery exposes only permitted peers. `last_seen` records an agent's latest request and does not prove an active model turn or live connection.
+This blocks new messages and delivery of queued messages from A to B, as well as replies in the blocked relationship. Owner commands can inspect local and linked-node registrations; agent-facing discovery exposes only permitted peers. `last_seen` records local agent activity or receipt of a remote announcement and does not prove an active model turn or live connection.
 
-Selectors support an agent ID, `'*'`, `same-node`, `node:UUID`, or `group:NAME`. Quote `'*'` in the shell. Groups and rules are stored under `[policy]` in `config.toml`. Edit the TOML to remove a rule, then run `gent config validate` and `gent config apply`. Applying a change signs and commits a new revision. The newest accepted revision replaces the previous shared configuration; editing the file without applying it does not change active permissions. `gent agent revoke AGENT_ID` invalidates that registration credential permanently in this proof.
+Selectors support an agent ID, `'*'`, `same-node`, `node:UUID`, or `group:NAME`. Quote `'*'` in the shell. Groups and rules are stored under `[policy]` in `config.toml`. Edit the TOML to remove a rule, then run `gent config validate` and `gent config apply`. Applying a change signs and commits a new revision. The newest accepted revision replaces the previous shared configuration; editing the file without applying it does not change active permissions. `gent agent revoke AGENT_ID` invalidates a registration hosted on the current node and publishes its tombstone to linked peers. Remote administrative forwarding is pending.
 
 Signed authority and message queues share `state.sqlite3`. First daemon startup preserves existing local identities and creates a private `identity.key` for node and owner signing keys, separate from the RPC credential in `owner.key`. Keep both keys and the database private. Existing databases must have mode 0600; Gent rejects shared or symlink files. Missing signing keys for an initialized database cause an error instead of silently creating a different identity.
 
@@ -109,7 +109,7 @@ After a signed change commits, Gent projects the newest state into TOML while pr
 
 `gent cluster` and `gent daemon status` show the active revision and lease status. The owner daemon renews its 24-hour configuration lease when six hours or less remain, checking at startup and every 15 minutes. Use `gent cluster renew` to renew immediately. Agent operations remain blocked if the lease expires before a renewal commits.
 
-Encrypted configuration streams update this same live policy automatically when a development relay is configured. Ordinary CLI/MCP messages remain local.
+Encrypted configuration streams update this same live policy automatically when a development relay is configured. The same MCP operations send messages to permitted agents on directly paired nodes. `remote_ready` reports that at least one authorized data link and relay configuration exist; it does not prove current connectivity.
 
 ## Join another machine through SSH
 
@@ -122,15 +122,15 @@ gent --home ~/.gent-peer daemon run
 
 Gent uses SSH's existing host-key trust with `StrictHostKeyChecking=yes`, noninteractive authentication, and no agent forwarding. It never accepts an unknown host key automatically. The remote login must be able to invoke Gent and read the owner's local RPC credential. Use `--remote-gent /absolute/path/to/gent` and `--remote-home /absolute/private/state` when the defaults do not match the owner machine.
 
-The joining node generates and retains its own signing key. The owner approves its signed enrollment request through the authenticated SSH channel, then both sides establish an MLS configuration stream. Bootstrap metadata, the stream grant, key package, and development relay credential travel inside SSH. The owner's signing key and local RPC credential never leave that machine. This enrolls a trusted daemon with full cluster-configuration access; agent messaging still follows its separate permission policy.
+The joining node generates and retains its own signing key. The owner approves its signed enrollment request through the authenticated SSH channel, then both sides establish an MLS configuration stream and two directional data streams. Bootstrap metadata, the stream grant, key package, and development relay credential travel inside SSH. The owner's signing key and local RPC credential never leave that machine. This enrolls a trusted daemon with full cluster-configuration access; agent messaging still follows its separate permission policy.
 
 The command imports the owner's relay origin and shared development token into private local storage. `--relay-endpoint http://127.0.0.1:PORT` can override that origin when a development SSH tunnel exposes the relay at a different local address. Without an owner relay, joining stops before enrollment. The shared token is temporary development authorization, not a per-node production credential.
 
-Interrupted joins retain their node key and progress in a private sibling directory, such as `~/.gent-peer.joining`. Rerun the same command and node name to resume. Gent installs the finished runtime atomically and refuses to overwrite another node or unrelated files. A completed retry reports `already_joined`. A stale unconsumed stream grant gets a fresh key package while preserving node identity; obsolete streams still need eventual pruning. Do not delete pending state to repair an interrupted join, since that would lose its identity.
+Interrupted joins retain their node key and progress in a private sibling directory, such as `~/.gent-peer.joining`. Rerun the same command and node name to resume. Gent installs the finished runtime atomically and refuses to overwrite another node or unrelated files. A completed retry reports `already_joined`. Rerunning the join command upgrades an older configuration-only node with data streams and owner-certified legacy agent IDs, preserving existing bindings. A stale unconsumed stream grant gets a fresh key package while preserving node identity; obsolete streams still need eventual pruning. Do not delete pending state to repair an interrupted join, since that would lose its identity.
 
 `gent nodes` lists enrolled node IDs and names. Remote presence is currently `unknown`; a membership record does not prove another daemon is online. Joined nodes receive signed configuration changes, but owner edits, including renaming a joined node, cannot yet be forwarded from them. SSH pairing is implemented; GitHub login and invite-based pairing are pending.
 
-An opt-in proof creates temporary nodes on two machines, pairs through the real CLI, checks encrypted configuration delivery through a local relay, restarts the receiving daemon, and verifies catch-up. It needs a running loopback development relay, a private token file, and an already trusted SSH host. It makes no model calls and removes its temporary nodes afterward:
+An opt-in proof creates temporary nodes on two machines, pairs through the real CLI, and checks encrypted configuration delivery through a local relay. It registers independent MCP clients, grants permissions, transfers images in both directions, verifies scoped replies and recipient acknowledgments, then queues a reply while the receiving daemon is offline and retrieves it after restart. It needs a running loopback development relay, a private token file, and an already trusted SSH host. It makes no model calls and removes its temporary nodes afterward:
 
 ```sh
 python3 scripts/prove_pairing.py --owner sam@owner-host \
@@ -138,7 +138,7 @@ python3 scripts/prove_pairing.py --owner sam@owner-host \
   --relay-token-file /absolute/private/relay.key
 ```
 
-This proof passes with a Mac Studio owner and Linux joining node. It tests cross-machine configuration, not remote agent messages or files.
+This proof passes with a Mac Studio owner and Linux joining node. Links currently connect each joined node with the owner. Joined-peer-to-joined-peer discovery and delivery need automatic mesh establishment; the owner does not forward another node's agent identity or messages.
 
 ## Development configuration relay
 
@@ -162,10 +162,10 @@ Send file contents as `{ "name": "image.png", "media_type": "image/png", "data_b
 
 Use a fresh UUID `request_id` for each new send or reply. Reuse it only for an identical retry; conflicting content is rejected. Repeated inbox reads retain the same message IDs until acknowledgment. Acknowledge after accepting the message; Gent cannot guarantee a host will perform requested work exactly once after a crash.
 
-Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per exchange, and a 24-hour exchange lifetime. Inbox responses are bounded; acknowledge retrieved messages before requesting the next batch. The proof has no queue pruning or disk quota yet.
+Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per exchange, and a 24-hour exchange lifetime. Remote exchanges allocate 16 messages to each sender, including the initial message, so independently queued replies cannot exceed 32 when the nodes reconnect. Inbox responses are bounded; acknowledge retrieved messages before requesting the next batch. The proof has no queue pruning or disk quota yet.
 
 ## Remaining integration work
 
 Codex and Claude Code pass explicit pairing, session continuity, and a small image round trip on both OSes. Separate concurrent conversations in normal shared host configurations, automatic binding, and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. The current transport is polling-only. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Remote agent-message encryption and delivery, invite-based pairing, edits from joined nodes, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing and automatic configuration sync pass between two physical machines through a local relay; a complete agent workflow between them is still pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
+Automatic links between joined peers, invite-based pairing, edits from joined nodes, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, configuration sync, and generic MCP messaging pass between two physical machines through a local relay. A visual iteration involving real models across those machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.

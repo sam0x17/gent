@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
+mod agents;
+pub use agents::*;
 
 pub type Digest = [u8; 32];
 pub type PublicKey = [u8; 32];

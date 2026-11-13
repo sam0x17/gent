@@ -1,6 +1,6 @@
-//! Automatic configuration publication and reception over an opaque relay.
+//! Automatic encrypted configuration and agent-record transport over an opaque relay.
 //! The development relay token authorizes storage, never cluster authority.
-use crate::{config, encrypted::ordered::configuration::ConfigurationStream, store::Store};
+use crate::{config, store::Store};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{StreamExt, stream};
@@ -16,6 +16,13 @@ use tokio::{sync::Notify, task::JoinHandle, time::Instant};
 
 const MAX_FRAME: usize = 1024 * 1024;
 type SharedStore = Arc<Mutex<Store>>;
+
+#[derive(Clone)]
+pub(crate) struct Stream {
+    pub group: Vec<u8>,
+    pub outgoing: bool,
+    pub configuration: bool,
+}
 
 #[derive(Clone)]
 struct Relay {
@@ -76,7 +83,7 @@ impl Relay {
         let bytes = packet.encode()?;
         ensure!(
             bytes.len() <= MAX_FRAME,
-            "configuration packet exceeds relay frame limit"
+            "encrypted packet exceeds relay frame limit"
         );
         let response = self
             .client
@@ -153,28 +160,52 @@ async fn local<T: Send + 'static>(
     .await?
 }
 
-async fn transfer(
-    store: SharedStore,
-    relay: Relay,
-    entry: ConfigurationStream,
-) -> Result<Option<u64>> {
+async fn transfer(store: SharedStore, relay: Relay, entry: Stream) -> Result<Option<u64>> {
     let group = entry.group;
     if entry.outgoing {
         let g = group.clone();
-        local(store.clone(), move |store| store.sync_prepare(&g)).await?;
+        local(store.clone(), move |store| {
+            if entry.configuration {
+                store.sync_prepare(&g)
+            } else {
+                store.data_prepare(&g)
+            }
+        })
+        .await?;
         // Relay position is an untrusted availability hint. Bounds and pinned
         // recipient authorization are checked again before reading the outbox.
         let next = relay.position(&group).await?;
-        let packet = local(store, move |store| store.sync_outgoing(&group, next)).await?;
+        let packet = local(store, move |store| {
+            if entry.configuration {
+                store.sync_outgoing(&group, next)
+            } else {
+                store.data_outgoing(&group, next)
+            }
+        })
+        .await?;
         if let Some(packet) = packet {
             relay.put(&packet).await?;
             return Ok(Some(next));
         }
     } else {
         let g = group.clone();
-        let next = local(store.clone(), move |store| store.sync_next(&g)).await?;
+        let next = local(store.clone(), move |store| {
+            if entry.configuration {
+                store.sync_next(&g)
+            } else {
+                store.data_next(&g)
+            }
+        })
+        .await?;
         if let Some(packet) = relay.get(&group, next).await? {
-            local(store, move |store| store.sync_receive(&packet)).await?;
+            local(store, move |store| {
+                if entry.configuration {
+                    store.sync_receive(&packet)
+                } else {
+                    store.data_receive(&packet)
+                }
+            })
+            .await?;
             return Ok(Some(next));
         }
     }
@@ -187,7 +218,7 @@ struct Retry {
 }
 
 /// Start only when the owner has configured a relay endpoint and private token
-/// file. The task needs no MCP turn, and never sends pairing or key material.
+/// file. The task needs no MCP turn and never publishes plaintext pairing metadata.
 pub fn start(store: SharedStore) -> Result<Option<JoinHandle<()>>> {
     let (settings, wakeup) = {
         let guard = store
@@ -198,7 +229,7 @@ pub fn start(store: SharedStore) -> Result<Option<JoinHandle<()>>> {
     let Some((settings, home)) = settings else {
         return Ok(None);
     };
-    let relay = Relay::open(&settings, &home).context("configuration relay setup failed")?;
+    let relay = Relay::open(&settings, &home).context("encrypted relay setup failed")?;
     Ok(Some(tokio::spawn(run(store, relay, wakeup))))
 }
 
@@ -265,7 +296,7 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>) {
         }
         if let Some(error) = &error {
             if previous_error.as_ref() != Some(error) {
-                eprintln!("Gent configuration sync waiting: {error}");
+                eprintln!("Gent encrypted sync waiting: {error}");
             }
             previous_error = error.clone().into();
         }

@@ -766,6 +766,11 @@ impl Session<'_> {
     }
     fn receive(&self, group_id: &[u8], wire: &[u8], writer: Option<&str>) -> Result<Received> {
         self.receive_with(group_id, wire, writer, |id, sender, body| {
+            let runtime: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='network_links')", [], |r| r.get(0))?;
+            if runtime {
+                let pending: usize = self.db.query_row("SELECT COALESCE(SUM(length(body)),0) FROM inbox WHERE group_id IN (SELECT incoming FROM network_links)", [], |r| r.get(0))?;
+                ensure!(pending + body.len() <= crate::messages::MAX_PENDING_BYTES, "pending node-record queue is full");
+            }
             self.db.execute(
                 "INSERT INTO inbox(group_id,sender,id,body) VALUES(?1,?2,?3,?4)",
                 params![group_id, sender, id.to_string(), body],

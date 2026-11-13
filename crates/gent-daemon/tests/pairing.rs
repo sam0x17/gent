@@ -163,7 +163,7 @@ async fn joined_node_keeps_its_keys_and_imports_only_development_relay_access() 
 
 #[tokio::test]
 async fn lost_pairing_replies_resume_without_duplicate_members_or_streams() {
-    for interrupted in 1..=5 {
+    for interrupted in 1..=8 {
         let mut owner = Owner::new();
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("joined");
@@ -396,5 +396,57 @@ async fn joining_without_a_configuration_transport_does_not_enroll_a_disconnecte
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn upgrading_joined_runtime_certifies_legacy_agents_without_changing_credentials() {
+    let mut owner = Owner::new();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("joined");
+    join(&home, &mut owner).await.unwrap();
+    let identity = fs::read(home.join("identity.key")).unwrap();
+    let credential = config::secret();
+    let agent = uuid::Uuid::new_v4().to_string();
+    // An old runtime has the original registration table but no data link or
+    // agent-origin records. Preserve its random ID and hashed MCP credential.
+    let db = rusqlite::Connection::open(home.join("state.sqlite3")).unwrap();
+    db.execute("DELETE FROM network_links", []).unwrap();
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(credential.as_bytes()));
+    db.execute(
+        "INSERT INTO agents VALUES(?1,?2,?3,'legacy','existing-host',0,0)",
+        rusqlite::params![agent, hash, config::load(&home).unwrap().node.id],
+    )
+    .unwrap();
+    drop(db);
+    join(&home, &mut owner).await.unwrap();
+    assert_eq!(identity, fs::read(home.join("identity.key")).unwrap());
+    let mut joined = Store::open(&home).unwrap();
+    let response = joined.handle(Request::Agent {
+        credential,
+        action: gent_protocol::AgentOp::Register {
+            name: "legacy".into(),
+            provider: "existing-host".into(),
+        },
+    });
+    match response {
+        Response::Ok(value) => assert_eq!(value["agent"]["id"], agent),
+        Response::Error(error) => panic!("{error}"),
+    }
+    let db = rusqlite::Connection::open(home.join("state.sqlite3")).unwrap();
+    let certificate: Vec<u8> = db
+        .query_row(
+            "SELECT legacy FROM network_origins WHERE agent=?1",
+            [&agent],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let certificate: gent_crypto::SignedLegacyAgentBinding =
+        serde_json::from_slice(&certificate).unwrap();
+    assert_eq!(certificate.binding.agent, agent);
+    assert_eq!(
+        certificate.binding.node,
+        config::load(&home).unwrap().node.id
     );
 }

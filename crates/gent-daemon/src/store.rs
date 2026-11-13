@@ -17,6 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Notify;
+mod network;
 mod pairing;
 
 pub fn now() -> i64 {
@@ -29,9 +30,6 @@ pub fn now() -> i64 {
 }
 fn hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
-}
-fn id() -> String {
-    uuid::Uuid::new_v4().to_string()
 }
 const UNAVAILABLE: &str = "recipient or message unavailable";
 
@@ -59,6 +57,7 @@ impl Store {
           CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL REFERENCES agents(id), recipient TEXT NOT NULL REFERENCES agents(id), request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0, UNIQUE(sender,request_id));
           CREATE INDEX IF NOT EXISTS messages_inbox ON messages(recipient,acknowledged);
           CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
+        network::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -127,7 +126,6 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = self.identity.state(&tx)?;
-        let initial_checkpoint = state.checkpoint().clone();
         let mut config = self.config.clone();
         config.policy = state.state().policy.clone();
         config.cluster.name.clone_from(&state.state().name);
@@ -154,11 +152,9 @@ impl Store {
                 session.agent(&credential, action)?
             }
         };
-        let changed = session.state.checkpoint() != &initial_checkpoint;
         tx.commit()?;
-        if changed {
-            self.sync_wakeup.notify_one();
-        }
+        // Also wakes directory/message publication after a committed agent RPC.
+        self.sync_wakeup.notify_one();
         // Filesystem projection is retryable after the authoritative commit.
         // A caller must not interpret a projection failure as an unapplied edit.
         let projected = self.project_config();
@@ -225,11 +221,19 @@ impl Store {
             .clone()
             .map(|relay| (relay, self.home.clone()))
     }
-    pub(crate) fn sync_streams(
-        &self,
-    ) -> Result<Vec<encrypted::ordered::configuration::ConfigurationStream>> {
-        encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?
-            .configuration_streams(now() as u64)
+    pub(crate) fn sync_streams(&self) -> Result<Vec<crate::sync::Stream>> {
+        let mut streams: Vec<_> =
+            encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?
+                .configuration_streams(now() as u64)?
+                .into_iter()
+                .map(|s| crate::sync::Stream {
+                    group: s.group,
+                    outgoing: s.outgoing,
+                    configuration: true,
+                })
+                .collect();
+        streams.extend(self.data_streams()?);
+        Ok(streams)
     }
     pub(crate) fn sync_prepare(&self, group: &[u8]) -> Result<()> {
         let mut endpoint =
@@ -302,21 +306,28 @@ impl StoreSession<'_> {
         })
     }
     fn get_agent(&self, id: &str) -> Result<Agent> {
-        self.db
+        let mut agent = self
+            .db
             .query_row(
                 "SELECT id,node_id,name,provider,last_seen,revoked FROM agents WHERE id=?1",
                 [id],
                 Self::decode_agent,
             )
             .optional()?
-            .context(UNAVAILABLE)
+            .context(UNAVAILABLE)?;
+        agent.revoked |= !self.state.state().nodes.contains_key(&agent.node_id);
+        Ok(agent)
     }
     fn all_agents(&self) -> Result<Vec<Agent>> {
-        Ok(self
+        let mut agents = self
             .db
             .prepare("SELECT id,node_id,name,provider,last_seen,revoked FROM agents ORDER BY id")?
             .query_map([], Self::decode_agent)?
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect::<Result<Vec<_>, _>>()?;
+        for agent in &mut agents {
+            agent.revoked |= !self.state.state().nodes.contains_key(&agent.node_id);
+        }
+        Ok(agents)
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
@@ -324,7 +335,7 @@ impl StoreSession<'_> {
                 anyhow::bail!("pairing must use its owner-authenticated entry point")
             }
             OwnerOp::Status => Ok(
-                json!({"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":false,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
+                json!({"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
             OwnerOp::Nodes => Ok(json!(self.state.state().nodes.iter().map(|(id, member)| {
                 json!({"id":id,"name":member.name,"status":if id == self.identity.node.id() { "local" } else { "unknown" },"revision":self.state.checkpoint().revision})
@@ -378,12 +389,15 @@ impl StoreSession<'_> {
                 Ok(json!({"applied":true,"revision":self.state.checkpoint().revision,"name":name}))
             }
             OwnerOp::Revoke { agent_id } => {
+                self.ensure_local_origin(&agent_id)?;
                 ensure!(
                     self.db
-                        .execute("UPDATE agents SET revoked=1 WHERE id=?1", [agent_id])?
+                        .execute("UPDATE agents SET revoked=1 WHERE id=?1 AND node_id=?2", params![agent_id,self.identity.node.id()])?
                         == 1,
                     "unknown agent"
                 );
+                self.db.execute("UPDATE network_origins SET generation=generation+1 WHERE agent=?1", [&agent_id])?;
+                self.announce(&agent_id)?;
                 Ok(json!({"revoked":true}))
             }
         }
@@ -398,7 +412,17 @@ impl StoreSession<'_> {
         if let AgentOp::Register { name, provider } = &action {
             config::label(name)?;
             config::label(provider)?;
-            self.db.execute("INSERT INTO agents(id,credential_hash,node_id,name,provider,last_seen) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(credential_hash) DO NOTHING",params![id(),digest,self.config.node.id,name,provider,self.timestamp])?;
+            if !self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE credential_hash=?1)",
+                [&digest],
+                |r| r.get::<_, bool>(0),
+            )? {
+                let nonce = uuid::Uuid::new_v4();
+                let agent = gent_crypto::agent_id(self.identity.node.id(), nonce)?;
+                self.db.execute("INSERT INTO agents(id,credential_hash,node_id,name,provider,last_seen) VALUES (?1,?2,?3,?4,?5,?6)",params![agent,digest,self.config.node.id,name,provider,self.timestamp])?;
+                self.db.execute("INSERT INTO network_origins(agent,nonce,legacy,generation) VALUES(?1,?2,NULL,1)",params![agent,nonce.to_string()])?;
+                self.announce(&agent)?;
+            }
         }
         let who=self.db.query_row("SELECT id,node_id,name,provider,last_seen,revoked FROM agents WHERE credential_hash=?1",[&digest],Self::decode_agent).optional()?.context("register this connection first")?;
         ensure!(!who.revoked, "registration revoked");
@@ -412,7 +436,7 @@ impl StoreSession<'_> {
         )?;
         match action {
             AgentOp::Register { .. } | AgentOp::Identity => Ok(
-                json!({"agent":self.get_agent(&who.id)?,"cluster_id":self.config.cluster.id,"node_name":self.config.node.name,"delivery":"polling","remote_ready":false}),
+                json!({"agent":self.get_agent(&who.id)?,"cluster_id":self.config.cluster.id,"node_name":self.config.node.name,"delivery":"polling","remote_ready":self.remote_ready()?}),
             ),
             AgentOp::Agents => Ok(json!(
                 self.all_agents()?
@@ -472,8 +496,12 @@ impl StoreSession<'_> {
                 );
                 self.db.execute(
                     "UPDATE messages SET acknowledged=1 WHERE id=?1",
-                    [message_id],
+                    [&message_id],
                 )?;
+                let sender = self.get_agent(&message.sender)?;
+                if sender.node_id != self.identity.node.id() {
+                    self.receipt(&sender.node_id, &message_id, true)?;
+                }
                 Ok(json!({"acknowledged":true}))
             }
             AgentOp::MessageStatus { message_id } => {
@@ -484,7 +512,13 @@ impl StoreSession<'_> {
                 );
                 let state = if message.expires_at <= self.timestamp {
                     "expired"
-                } else if !self.deliverable(&message)? {
+                } else if !self.deliverable(&message)?
+                    || self.db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM network_rejections WHERE message=?1)",
+                        [&message.id],
+                        |r| r.get::<_, bool>(0),
+                    )?
+                {
                     "revoked"
                 } else if message.acknowledged {
                     "delivered"
@@ -572,10 +606,8 @@ impl StoreSession<'_> {
         }
         let recipient = self.get_agent(recipient_id)?;
         ensure!(sender.id != recipient.id, UNAVAILABLE);
-        ensure!(
-            recipient.node_id == self.identity.node.id(),
-            "remote delivery is not available yet"
-        );
+        let remote = recipient.node_id != self.identity.node.id();
+        let message_id = crate::messages::message_id(&sender.id, request_id)?;
         let timestamp = self.timestamp;
         let (exchange_id, expires_at) = if let Some(parent) = parent {
             ensure!(
@@ -599,10 +631,21 @@ impl StoreSession<'_> {
             (parent.exchange_id, expiry)
         } else {
             ensure!(self.config.policy.can_open(sender, &recipient), UNAVAILABLE);
-            (id(), timestamp + EXCHANGE_TTL_SECONDS)
+            (message_id.clone(), timestamp + EXCHANGE_TTL_SECONDS)
         };
+        if remote {
+            let sent: u32 = self.db.query_row(
+                "SELECT COUNT(*) FROM messages WHERE json_extract(payload,'$.exchange_id')=?1 AND sender=?2",
+                params![exchange_id, sender.id],
+                |r| r.get(0),
+            )?;
+            ensure!(
+                sent < MAX_EXCHANGE_MESSAGES / 2,
+                "remote exchange sender limit reached (16 messages)"
+            );
+        }
         let message = Message {
-            id: id(),
+            id: message_id,
             exchange_id: exchange_id.clone(),
             sender: sender.id.clone(),
             recipient: recipient.id.clone(),
@@ -628,6 +671,9 @@ impl StoreSession<'_> {
             "exchange reply limit reached"
         );
         tx.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES (?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,serde_json::to_string(&message)?])?;
+        if remote {
+            self.queue_message(&recipient.node_id, request_id, &message)?;
+        }
         Ok(json!({"message_id":message.id,"exchange_id":exchange_id,"duplicate":false}))
     }
 }

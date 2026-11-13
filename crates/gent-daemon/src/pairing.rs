@@ -291,7 +291,21 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
             "node already belongs to another cluster"
         );
         // Loading the runtime verifies that the identity and checkpoint still exist.
-        drop(Store::open(&home)?);
+        let store = Store::open(&home)?;
+        if store.needs_data_pairing()? {
+            let node = store.pairing_node()?;
+            drop(store);
+            let snapshot: Snapshot = serde_json::from_value(peer.call(PairingOp::Snapshot).await?)?;
+            let state = snapshot.verify(options.cluster)?;
+            let mut endpoint = OrderedEndpoint::open_runtime(&home, &node)?;
+            ensure!(
+                endpoint.authority_state()?.anchor() == state.anchor(),
+                "pairing authority changed"
+            );
+            catch_up(&mut endpoint, peer, None).await?;
+            drop(endpoint);
+            connect_data(&home, &node, &snapshot.writer, peer).await?;
+        }
         return Ok(
             json!({"joined":true,"already_joined":true,"node":config.node,"cluster":config.cluster}),
         );
@@ -397,6 +411,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     }
     catch_up(&mut endpoint, peer, None).await?;
     drop(endpoint);
+    connect_data(&pending.runtime, &pending.node, &enrolled.writer, peer).await?;
     drop(Store::open(&pending.runtime)?); // Project the latest verified policy.
     let mut config = config::load(&pending.runtime)?;
     {
@@ -427,4 +442,85 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     // Cleanup failure does not turn a committed installation into a failed join.
     let _ = fs::remove_dir_all(&pending.dir);
     Ok(result)
+}
+
+/// Establish independent writer streams in both directions through the same
+/// authenticated channel as enrollment. Request IDs persist before any network call.
+async fn connect_data(
+    home: &Path,
+    node: &NodeIdentity,
+    writer: &str,
+    peer: &mut impl Peer,
+) -> Result<()> {
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PendingData {
+        request: Uuid,
+        peer: String,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DataInvitation {
+        packet: String,
+        key_package: String,
+        legacy: Vec<gent_crypto::SignedLegacyAgentBinding>,
+    }
+    let path = home.join(format!("data-pairing-{writer}.json"));
+    let saved = if path.exists() {
+        serde_json::from_slice::<PendingData>(&read_private_bytes(&path, 4096)?)?
+    } else {
+        let saved = PendingData {
+            request: Uuid::new_v4(),
+            peer: writer.into(),
+        };
+        config::write_private(&path, &serde_json::to_vec(&saved)?)?;
+        saved
+    };
+    ensure!(
+        saved.peer == writer && !saved.request.is_nil(),
+        "invalid saved data pairing"
+    );
+    let mut endpoint = OrderedEndpoint::open_runtime(home, node)?;
+    let package = endpoint.key_package(saved.request, now() as u64)?;
+    let store = Store::open(home)?;
+    let legacy_agents = store.legacy_registrations()?;
+    drop(store);
+    let invitation: DataInvitation = serde_json::from_value(
+        peer.call(PairingOp::Data {
+            request_id: saved.request.to_string(),
+            peer: node.id().into(),
+            key_package: STANDARD.encode(package),
+            legacy_agents,
+        })
+        .await?,
+    )?;
+    catch_up(&mut endpoint, peer, None).await?;
+    let incoming = Packet::decode(&STANDARD.decode(invitation.packet)?)?;
+    endpoint.join(&incoming, writer, &[node.id(), writer], now() as u64)?;
+    let reverse_id =
+        gent_crypto::scoped_id(b"gent/pair-return-stream/v1\0", &[saved.request.as_bytes()]);
+    let outgoing = endpoint.create(
+        reverse_id,
+        &[(writer, &STANDARD.decode(invitation.key_package)?)],
+        now() as u64,
+    )?;
+    let response = peer
+        .call(PairingOp::AcceptData {
+            peer: node.id().into(),
+            packet: STANDARD.encode(outgoing.encode()?),
+            outgoing_group: STANDARD.encode(incoming.group()),
+        })
+        .await?;
+    ensure!(
+        response.get("connected") == Some(&Value::Bool(true)),
+        "invalid data pairing response"
+    );
+    drop(endpoint);
+    Store::open(home)?.install_data_link(
+        writer,
+        outgoing.group(),
+        incoming.group(),
+        &invitation.legacy,
+    )?;
+    Ok(())
 }

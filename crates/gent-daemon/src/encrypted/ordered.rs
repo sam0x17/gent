@@ -180,6 +180,23 @@ impl<'a> OrderedEndpoint<'a> {
     pub fn send(&mut self, group: &[u8], id: Uuid, body: &[u8], now: u64) -> Result<Packet> {
         self.publish(group, now, |session| session.send(group, id, body))
     }
+    /// Policy and encryption share the same immediate transaction, closing the
+    /// race with a configuration change between queue inspection and encryption.
+    pub(crate) fn send_checked(
+        &mut self,
+        group: &[u8],
+        id: Uuid,
+        body: &[u8],
+        now: u64,
+        check: impl FnOnce(&Connection, &VerifiedState) -> Result<()>,
+    ) -> Result<Packet> {
+        self.inner.transact(now, |session| {
+            check(session.db, &session.state)?;
+            publish_in(session, group, Purpose::Data, |session| {
+                session.send(group, id, body)
+            })
+        })
+    }
     pub fn rotate(&mut self, group: &[u8], id: Uuid, now: u64) -> Result<Packet> {
         self.publish(group, now, |session| session.rotate(group, id))
     }

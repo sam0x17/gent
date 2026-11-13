@@ -346,3 +346,74 @@ fn invalid_policy_authority_reuse_and_last_node_removal_fail() {
             .is_err()
     );
 }
+
+#[test]
+fn agent_ids_bind_the_hosting_node_and_unambiguous_inputs() {
+    let node = uuid::Uuid::new_v4().to_string();
+    let other = uuid::Uuid::new_v4().to_string();
+    let nonce = uuid::Uuid::new_v4();
+    let agent = agent_id(&node, nonce).unwrap();
+    assert_eq!(agent, agent_id(&node, nonce).unwrap());
+    assert_ne!(agent, agent_id(&other, nonce).unwrap());
+    assert_ne!(agent, agent_id(&node, uuid::Uuid::new_v4()).unwrap());
+    assert!(agent_id(&node, uuid::Uuid::nil()).is_err());
+    assert!(agent_id("not-a-node", nonce).is_err());
+    assert_ne!(
+        scoped_id(b"a", &[b"bc", b"d"]),
+        scoped_id(b"a", &[b"b", b"cd"])
+    );
+    assert_ne!(scoped_id(b"a", &[b"bc"]), scoped_id(b"ab", &[b"c"]));
+}
+
+#[test]
+fn legacy_agent_certificates_require_exact_owner_cluster_agent_and_node() {
+    let (owner, node, state) = fixture();
+    let agent = uuid::Uuid::new_v4().to_string();
+    let certificate = owner
+        .bind_legacy_agent(&state, &agent, node.id(), NOW)
+        .unwrap();
+    certificate
+        .verify(state.anchor(), &agent, node.id())
+        .unwrap();
+    let (other_owner, other_node, other_state) = fixture();
+    assert!(
+        certificate
+            .verify(other_state.anchor(), &agent, node.id())
+            .is_err()
+    );
+    assert!(
+        certificate
+            .verify(state.anchor(), &agent, other_node.id())
+            .is_err()
+    );
+    assert!(
+        certificate
+            .verify(state.anchor(), other_node.id(), node.id())
+            .is_err()
+    );
+    assert!(
+        owner
+            .bind_legacy_agent(&state, &agent, other_node.id(), NOW)
+            .is_err()
+    );
+    assert!(
+        other_owner
+            .bind_legacy_agent(&state, &agent, node.id(), NOW)
+            .is_err()
+    );
+    assert!(
+        owner
+            .bind_legacy_agent(&state, &agent, node.id(), state.state().expires_at + 1)
+            .is_err()
+    );
+    let mut altered = certificate.clone();
+    altered.binding.agent = other_node.id().into();
+    assert!(
+        altered
+            .verify(state.anchor(), other_node.id(), node.id())
+            .is_err()
+    );
+    let mut altered = certificate;
+    altered.signature[0] ^= 1;
+    assert!(altered.verify(state.anchor(), &agent, node.id()).is_err());
+}
