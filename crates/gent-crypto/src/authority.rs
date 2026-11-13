@@ -289,7 +289,8 @@ fn decode<T: Serialize + DeserializeOwned>(bytes: &[u8], limit: usize) -> Result
     Ok(value)
 }
 
-fn validate_policy(policy: &Policy) -> Result<()> {
+/// Shared validation for TOML proposals and owner-signed policy records.
+pub fn validate_policy(policy: &Policy) -> Result<()> {
     ensure!(
         policy.rules.len() <= 4096 && policy.groups.len() <= 256,
         "policy exceeds limits"
@@ -437,10 +438,29 @@ impl OwnerKey {
         node_name: &str,
         now: u64,
     ) -> Result<VerifiedState> {
+        self.create_cluster_with_id(
+            (&uuid::Uuid::new_v4().to_string(), name),
+            first,
+            node_name,
+            Policy::default(),
+            now,
+        )
+    }
+
+    /// Bootstrap a locally owned cluster while preserving an existing local ID.
+    /// This does not authorize replacing any previously pinned trust anchor.
+    pub fn create_cluster_with_id(
+        &self,
+        cluster: (&str, &str),
+        first: &NodeIdentity,
+        node_name: &str,
+        policy: Policy,
+        now: u64,
+    ) -> Result<VerifiedState> {
         let state = ClusterState {
             version: 1,
-            cluster_id: uuid::Uuid::new_v4().to_string(),
-            name: name.into(),
+            cluster_id: cluster.0.into(),
+            name: cluster.1.into(),
             owner_key: self.public_key(),
             revision: 0,
             previous: None,
@@ -451,7 +471,7 @@ impl OwnerKey {
             nodes: BTreeMap::from([(first.id.clone(), first.member(node_name)?)]),
             retired_nodes: BTreeSet::new(),
             retired_keys: BTreeSet::new(),
-            policy: Policy::default(),
+            policy,
         };
         let signed = self.sign(state)?;
         let anchor = TrustAnchor {
@@ -821,6 +841,23 @@ impl VerifiedState {
 
     pub fn set_policy(&self, owner: &OwnerKey, policy: Policy, now: u64) -> Result<SignedState> {
         self.revise(owner, now, |state| {
+            state.policy = policy;
+            Ok(())
+        })
+    }
+
+    /// Apply an owner-authorized TOML edit as one ordered cluster revision.
+    pub fn configure(
+        &self,
+        owner: &OwnerKey,
+        name: &str,
+        node: (&str, &str),
+        policy: Policy,
+        now: u64,
+    ) -> Result<SignedState> {
+        self.revise(owner, now, |state| {
+            state.name = name.into();
+            state.nodes.get_mut(node.0).context("unknown node")?.name = node.1.into();
             state.policy = policy;
             Ok(())
         })

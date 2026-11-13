@@ -46,6 +46,7 @@ Setup must recover from an interrupted step and be safe to rerun. Preserve devic
 | `gent node revoke <node>` | Revoke a node's cluster membership through authorized enrollment and key-rotation procedures. |
 | `gent cluster` | Show overall status for the active cluster, including node availability and configuration synchronization. |
 | `gent cluster status` | Explicit alias for the same cluster status view. |
+| `gent cluster renew` | Renew the signed configuration lease using the active owner's authority. |
 | `gent clusters` | List the user's configured or authorized clusters, marking the active one. |
 | `gent cluster new [name]` | Create and select a cluster, establishing its initial owner keys and policy locally. |
 | `gent cluster join <cluster-id>` | Join and select an existing cluster after authentication and authorized enrollment. |

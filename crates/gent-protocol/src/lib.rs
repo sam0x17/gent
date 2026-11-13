@@ -183,6 +183,8 @@ pub enum OwnerOp {
     Agents,
     Providers,
     SetPolicy { policy: Policy },
+    Renew,
+    RenameNode { name: String },
     Revoke { agent_id: String },
 }
 

@@ -16,7 +16,7 @@ An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQL
 
 This build communicates only through a local Unix socket. Remote transport, runtime E2EE, hosted accounts, service installation, and persistent relay mode are not implemented. Codex and Claude Code CLI tests pass on Linux and macOS with explicit per-conversation bindings, including session resume and an image-file round trip. Automatic chat binding, concurrent conversations in shared host configurations, and desktop/web/mobile integration remain to be verified.
 
-The [security components](docs/security.md) provide owner-approved node keys, signed configuration history, durable checkpoints, and MLS encrypted messaging. Directional streams authenticate packet order and buffer gaps so delayed messages survive encryption-epoch changes. Separate configuration streams let expired nodes recover verified authority before resuming ordinary messages. Tests cover offline delivery, restart, concurrent traffic, key substitution, replays, transactional recovery, and node removal. These are library components; protected pairing and integration with agent permissions, the local CLI, and network transport remain unfinished.
+The daemon now applies [signed cluster authority](docs/security.md#live-daemon-authority) inside its RPC permission and delivery transactions. Owner changes create ordered revisions; the newest accepted configuration wins and is projected back to TOML. MLS configuration streams can update that same live policy. The encryption libraries also provide authenticated directional messaging and recovery after authority expires. Protected pairing, encrypted agent-message integration, and automatic network distribution remain unfinished.
 
 ## Planned setup
 

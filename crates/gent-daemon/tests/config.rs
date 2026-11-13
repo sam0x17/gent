@@ -41,6 +41,19 @@ fn invalid_edits_do_not_replace_working_configuration() {
     cfg.node.name = "\n".into();
     assert!(config::save(root.path(), &cfg).is_err());
     assert_eq!(fs::read(config::path(root.path())).unwrap(), original);
+    cfg.node.name = "valid".into();
+    cfg.policy.rules.push(gent_protocol::Rule {
+        actor: gent_protocol::Selector::Group("missing".into()),
+        peer: gent_protocol::Selector::All,
+        permission: gent_protocol::Permission::Enumerate,
+        effect: gent_protocol::Effect::Allow,
+    });
+    assert!(cfg.validate().is_err());
+    assert!(config::save(root.path(), &cfg).is_err());
+    assert_eq!(fs::read(config::path(root.path())).unwrap(), original);
+    cfg.policy.rules.clear();
+    cfg.node.id = uuid::Uuid::nil().to_string();
+    assert!(cfg.validate().is_err());
 }
 
 #[test]

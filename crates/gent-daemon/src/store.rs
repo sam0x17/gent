@@ -1,8 +1,13 @@
-use crate::config::{self, Config};
+use crate::{
+    config::{self, Config},
+    encrypted,
+    runtime::{self, Identity},
+};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use gent_crypto::VerifiedState;
 use gent_protocol::*;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -30,20 +35,25 @@ const UNAVAILABLE: &str = "recipient or message unavailable";
 pub struct Store {
     db: Connection,
     home: PathBuf,
-    pub config: Config,
+    config: Config,
+    identity: Identity,
     owner_hash: String,
 }
 impl Store {
     pub fn open(home: &Path) -> Result<Self> {
-        let config = config::load(home)?;
+        let config = config::load_for_runtime(home)?;
         let owner_hash = hash(&config::read_private(&home.join("owner.key"))?);
-        let db = Connection::open(home.join("state.sqlite3"))?;
+        ensure!(
+            home.join("state.sqlite3").exists() || !home.join(runtime::KEY_FILE).exists(),
+            "authority database is missing; restore this node's state"
+        );
+        let mut db = encrypted::open_database(home, "state.sqlite3")?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
           CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, credential_hash TEXT UNIQUE NOT NULL, node_id TEXT NOT NULL, name TEXT NOT NULL, provider TEXT NOT NULL, last_seen INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS exchanges (id TEXT PRIMARY KEY, a TEXT NOT NULL REFERENCES agents(id), b TEXT NOT NULL REFERENCES agents(id), expires_at INTEGER NOT NULL, count INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL REFERENCES agents(id), recipient TEXT NOT NULL REFERENCES agents(id), request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0, UNIQUE(sender,request_id));
-          CREATE INDEX IF NOT EXISTS inbox ON messages(recipient,acknowledged);
+          CREATE INDEX IF NOT EXISTS messages_inbox ON messages(recipient,acknowledged);
           CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
@@ -74,31 +84,119 @@ impl Store {
         } else {
             db.execute("INSERT INTO metadata VALUES ('node',?1)", [&config.node.id])?;
         }
-        Ok(Self {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let identity = Identity::load_or_create(home, &config, &tx, now() as u64)?;
+        tx.commit()?;
+        let mut store = Self {
             db,
             home: home.into(),
             config,
             owner_hash,
-        })
+            identity,
+        };
+        // Projection failure must never replace committed authority with TOML.
+        let _ = store.project_config();
+        Ok(store)
     }
 
     pub fn handle(&mut self, request: Request) -> Response {
-        let result = match request {
-            Request::Owner { credential, action } => {
-                if hash(&credential) != self.owner_hash {
-                    Err(anyhow::anyhow!("unauthorized"))
-                } else {
-                    self.owner(action)
-                }
-            }
-            Request::Agent { credential, action } => self.agent(&credential, action),
-        };
-        match result {
+        match self.execute(request) {
             Ok(value) => Response::Ok(value),
             Err(error) => Response::Error(error.to_string()),
         }
     }
 
+    fn execute(&mut self, request: Request) -> Result<Value> {
+        if let Request::Owner { credential, .. } = &request {
+            ensure!(hash(credential) == self.owner_hash, "unauthorized");
+        }
+        let timestamp = now();
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state = self.identity.state(&tx)?;
+        let mut config = self.config.clone();
+        config.policy = state.state().policy.clone();
+        config.cluster.name.clone_from(&state.state().name);
+        if let Some(node) = state.state().nodes.get(self.identity.node.id()) {
+            config.node.name.clone_from(&node.name);
+        }
+        config.applied_revision = Some(state.checkpoint().revision);
+        let mut session = StoreSession {
+            db: &tx,
+            home: &self.home,
+            config,
+            identity: &self.identity,
+            state,
+            timestamp,
+        };
+        let mut value = match request {
+            Request::Owner { action, .. } => session.owner(action)?,
+            Request::Agent { credential, action } => {
+                session.state.authorize_node(
+                    self.identity.node.id(),
+                    &self.identity.node.public_key(),
+                    timestamp as u64,
+                )?;
+                session.agent(&credential, action)?
+            }
+        };
+        tx.commit()?;
+        // Filesystem projection is retryable after the authoritative commit.
+        // A caller must not interpret a projection failure as an unapplied edit.
+        let projected = self.project_config();
+        if value.get("applied").is_some() || value.get("config_saved").is_some() {
+            value["config_saved"] = json!(projected.is_ok());
+            if let Err(error) = projected {
+                value["config_error"] = json!(error.to_string());
+            }
+        }
+        Ok(value)
+    }
+
+    fn project_config(&mut self) -> Result<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        runtime::project(&self.home, &tx, &self.identity)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The owner daemon renews its lease without requiring an agent turn.
+    /// Agent RPCs never bypass expiry or trigger a renewal themselves.
+    pub fn maintain(&mut self) -> Result<()> {
+        let timestamp = now() as u64;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state = self.identity.state(&tx)?;
+        ensure!(
+            state
+                .state()
+                .nodes
+                .get(self.identity.node.id())
+                .is_some_and(|n| n.signing_key == self.identity.node.public_key()),
+            "local node is no longer enrolled"
+        );
+        if state.state().expires_at.saturating_sub(timestamp) <= 6 * 60 * 60 {
+            let update = state.renew(&self.identity.owner, timestamp)?;
+            self.identity.apply(&tx, update)?;
+        }
+        tx.commit()?;
+        self.project_config()
+    }
+}
+
+struct StoreSession<'a> {
+    db: &'a Connection,
+    home: &'a Path,
+    config: Config,
+    identity: &'a Identity,
+    state: VerifiedState,
+    timestamp: i64,
+}
+impl StoreSession<'_> {
     fn decode_agent(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
         Ok(Agent {
             id: row.get(0)?,
@@ -129,7 +227,7 @@ impl Store {
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
             OwnerOp::Status => Ok(
-                json!({"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":false}),
+                json!({"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":false,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
             OwnerOp::Agents => Ok(serde_json::to_value(self.all_agents()?)?),
             OwnerOp::Providers => {
@@ -145,16 +243,39 @@ impl Store {
                 Ok(json!(providers))
             }
             OwnerOp::SetPolicy { policy } => {
-                let mut disk = config::load(&self.home)?;
+                let disk = config::load_for_runtime(self.home)?;
                 ensure!(
                     disk.node.id == self.config.node.id
                         && disk.cluster.id == self.config.cluster.id,
                     "cannot change active identities while daemon runs"
                 );
-                disk.policy = policy;
-                config::save(&self.home, &disk)?;
-                self.config = disk;
-                Ok(json!({"applied":true}))
+                let update = self.state.configure(
+                    &self.identity.owner,
+                    &disk.cluster.name,
+                    (&disk.node.id, &disk.node.name),
+                    policy,
+                    self.timestamp as u64,
+                )?;
+                self.state = self.identity.apply(self.db, update)?;
+                Ok(json!({"applied":true,"revision":self.state.checkpoint().revision}))
+            }
+            OwnerOp::Renew => {
+                let update = self
+                    .state
+                    .renew(&self.identity.owner, self.timestamp as u64)?;
+                self.state = self.identity.apply(self.db, update)?;
+                Ok(json!({"applied":true,"revision":self.state.checkpoint().revision}))
+            }
+            OwnerOp::RenameNode { name } => {
+                let update = self.state.configure(
+                    &self.identity.owner,
+                    &self.state.state().name,
+                    (self.identity.node.id(), &name),
+                    self.state.state().policy.clone(),
+                    self.timestamp as u64,
+                )?;
+                self.state = self.identity.apply(self.db, update)?;
+                Ok(json!({"applied":true,"revision":self.state.checkpoint().revision,"name":name}))
             }
             OwnerOp::Revoke { agent_id } => {
                 ensure!(
@@ -177,13 +298,17 @@ impl Store {
         if let AgentOp::Register { name, provider } = &action {
             config::label(name)?;
             config::label(provider)?;
-            self.db.execute("INSERT INTO agents(id,credential_hash,node_id,name,provider,last_seen) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(credential_hash) DO NOTHING",params![id(),digest,self.config.node.id,name,provider,now()])?;
+            self.db.execute("INSERT INTO agents(id,credential_hash,node_id,name,provider,last_seen) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(credential_hash) DO NOTHING",params![id(),digest,self.config.node.id,name,provider,self.timestamp])?;
         }
         let who=self.db.query_row("SELECT id,node_id,name,provider,last_seen,revoked FROM agents WHERE credential_hash=?1",[&digest],Self::decode_agent).optional()?.context("register this connection first")?;
         ensure!(!who.revoked, "registration revoked");
+        ensure!(
+            who.node_id == self.identity.node.id(),
+            "credential belongs to another node"
+        );
         self.db.execute(
             "UPDATE agents SET last_seen=?1 WHERE id=?2",
-            params![now(), who.id],
+            params![self.timestamp, who.id],
         )?;
         match action {
             AgentOp::Register { .. } | AgentOp::Identity => Ok(
@@ -257,7 +382,7 @@ impl Store {
                     message.sender == who.id || message.recipient == who.id,
                     UNAVAILABLE
                 );
-                let state = if message.expires_at <= now() {
+                let state = if message.expires_at <= self.timestamp {
                     "expired"
                 } else if !self.deliverable(&message)? {
                     "revoked"
@@ -286,7 +411,7 @@ impl Store {
         Ok(message)
     }
     fn deliverable(&self, message: &Message) -> Result<bool> {
-        if message.expires_at <= now() {
+        if message.expires_at <= self.timestamp {
             return Ok(false);
         }
         let a = self.get_agent(&message.sender)?;
@@ -347,7 +472,11 @@ impl Store {
         }
         let recipient = self.get_agent(recipient_id)?;
         ensure!(sender.id != recipient.id, UNAVAILABLE);
-        let timestamp = now();
+        ensure!(
+            recipient.node_id == self.identity.node.id(),
+            "remote delivery is not available yet"
+        );
+        let timestamp = self.timestamp;
         let (exchange_id, expires_at) = if let Some(parent) = parent {
             ensure!(
                 self.config.policy.can_reply(sender, &recipient),
@@ -384,7 +513,7 @@ impl Store {
             expires_at,
             acknowledged: false,
         };
-        let tx = self.db.transaction()?;
+        let tx = self.db;
         if message.reply_to.is_none() {
             tx.execute(
                 "INSERT INTO exchanges VALUES (?1,?2,?3,?4,0)",
@@ -399,7 +528,6 @@ impl Store {
             "exchange reply limit reached"
         );
         tx.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES (?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,serde_json::to_string(&message)?])?;
-        tx.commit()?;
         Ok(json!({"message_id":message.id,"exchange_id":exchange_id,"duplicate":false}))
     }
 }

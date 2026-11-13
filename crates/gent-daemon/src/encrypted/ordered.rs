@@ -57,6 +57,26 @@ impl<'a> OrderedEndpoint<'a> {
             inner: EncryptedEndpoint::open(home, identity)?,
         })
     }
+
+    /// Attach trusted daemon code to the live RPC database. Configuration
+    /// reception and RPC permission checks then share one authority checkpoint.
+    pub fn open_runtime(home: &Path, identity: &'a NodeIdentity) -> Result<Self> {
+        ensure!(
+            home.join("state.sqlite3").exists(),
+            "runtime is not initialized"
+        );
+        let db = open_database(home, "state.sqlite3")?;
+        let initialized: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='signed_authority')",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(initialized, "runtime is not initialized");
+        authority(&db, identity)?;
+        Ok(Self {
+            inner: EncryptedEndpoint { db, identity },
+        })
+    }
     pub fn initialize(&mut self, state: &VerifiedState, now: u64) -> Result<()> {
         self.inner.initialize(state, now)
     }

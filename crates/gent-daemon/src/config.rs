@@ -23,6 +23,9 @@ pub struct ClusterConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub version: u32,
+    /// Last signed revision projected to this file; edits require config apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_revision: Option<u64>,
     pub node: NodeConfig,
     pub cluster: ClusterConfig,
     #[serde(default)]
@@ -113,11 +116,18 @@ pub fn path(home: &Path) -> PathBuf {
     home.join("config.toml")
 }
 pub fn load(home: &Path) -> Result<Config> {
+    let config = load_for_runtime(home)?;
+    config.validate()?;
+    Ok(config)
+}
+/// Read local identity/settings while allowing an unapplied shared-policy edit.
+/// Existing runtime authority comes from the verified database, not this file.
+pub(crate) fn load_for_runtime(home: &Path) -> Result<Config> {
     let config: Config = toml::from_str(
         &fs::read_to_string(path(home))
             .context("no Gent configuration; run gent cluster new <name> --local")?,
     )?;
-    config.validate()?;
+    config.validate_local()?;
     Ok(config)
 }
 pub fn save(home: &Path, config: &Config) -> Result<()> {
@@ -126,16 +136,26 @@ pub fn save(home: &Path, config: &Config) -> Result<()> {
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        self.validate_local()?;
+        label(&self.node.name)?;
+        label(&self.cluster.name)?;
+        gent_crypto::validate_policy(&self.policy)?;
+        Ok(())
+    }
+    fn validate_local(&self) -> Result<()> {
         ensure!(self.version == 1, "unsupported configuration version");
         ensure!(
             self.cluster.local_only,
             "this build supports local proofs only; remote enrollment is not implemented"
         );
-        uuid::Uuid::parse_str(&self.node.id).context("invalid node identity")?;
-        uuid::Uuid::parse_str(&self.cluster.id).context("invalid cluster identity")?;
-        label(&self.node.name)?;
-        label(&self.cluster.name)?;
-        ensure!(self.policy.rules.len() <= 4096, "too many permission rules");
+        for value in [&self.node.id, &self.cluster.id] {
+            let parsed =
+                uuid::Uuid::parse_str(value).context("invalid node or cluster identity")?;
+            ensure!(
+                !parsed.is_nil() && parsed.to_string() == *value,
+                "identity must be a canonical nonzero UUID"
+            );
+        }
         Ok(())
     }
 }
@@ -154,6 +174,7 @@ pub fn initialize(home: &Path, name: &str) -> Result<Config> {
     }
     let config = Config {
         version: 1,
+        applied_revision: None,
         node: NodeConfig {
             id: uuid::Uuid::new_v4().to_string(),
             name: std::env::var("HOSTNAME")

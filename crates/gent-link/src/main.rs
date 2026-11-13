@@ -77,6 +77,8 @@ enum ClusterCommand {
         local: bool,
     },
     Status,
+    /// Renew the locally held owner-signed configuration lease.
+    Renew,
 }
 #[derive(Subcommand)]
 enum DaemonCommand {
@@ -186,7 +188,10 @@ async fn execute(cli: Cli) -> Result<()> {
             );
             json!(config::initialize(&home, &name)?)
         }
-        Some(Command::Cluster { .. }) => json!(config::load(&home)?.cluster),
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Renew),
+        }) => owner(&home, OwnerOp::Renew).await?,
+        Some(Command::Cluster { .. }) => owner(&home, OwnerOp::Status).await?,
         Some(Command::Daemon {
             command: Some(DaemonCommand::Run),
         }) => {
@@ -222,24 +227,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 Some(NodeCommand::Name {
                     command: Some(NodeNameCommand::Set { name }),
                 }),
-        }) => {
-            config::label(&name)?;
-            let mut config = config::load(&home)?;
-            config.node.name = name;
-            config::save(&home, &config)?;
-            // Apply also refreshes the daemon's node display label when it is running.
-            if home.join("daemon.sock").exists() {
-                owner(
-                    &home,
-                    OwnerOp::SetPolicy {
-                        policy: config.policy.clone(),
-                    },
-                )
-                .await
-                .context("node name saved, but daemon refresh failed")?;
-            }
-            json!(config.node)
-        }
+        }) => owner(&home, OwnerOp::RenameNode { name }).await?,
         Some(Command::Node {
             command: Some(NodeCommand::Name { command: None }),
         }) => {

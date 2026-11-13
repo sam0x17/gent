@@ -2,6 +2,7 @@
 pub mod config;
 pub mod encrypted;
 pub mod replica;
+mod runtime;
 pub mod store;
 
 use anyhow::{Context, Result, ensure};
@@ -66,6 +67,7 @@ pub async fn run(home: &Path) -> Result<()> {
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     let permits = Arc::new(Semaphore::new(32));
+    let mut maintenance = tokio::time::interval(Duration::from_secs(15 * 60));
     eprintln!(
         "Gent daemon listening at {} (local proof; remote transport unavailable)",
         socket.display()
@@ -73,6 +75,14 @@ pub async fn run(home: &Path) -> Result<()> {
     loop {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break,
+            _=maintenance.tick()=> {
+                let store = store.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = store.lock().expect("store lock poisoned").maintain() {
+                        eprintln!("Gent configuration maintenance pending: {error}");
+                    }
+                }).await?;
+            }
             connection=listener.accept()=> {
                 let (stream,_)=connection?;
                 let Ok(permit)=permits.clone().try_acquire_owned() else { continue; };

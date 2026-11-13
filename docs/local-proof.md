@@ -101,7 +101,15 @@ gent permission deny AGENT_B_ID AGENT_A_ID --permission receive
 
 This blocks new messages and delivery of queued messages from A to B, as well as replies in the blocked relationship. Owner commands can inspect all local registrations; agent-facing discovery exposes only permitted peers. `last_seen` records an agent's latest request and does not prove an active model turn or live connection.
 
-Selectors support an agent ID, `'*'`, `same-node`, `node:UUID`, or `group:NAME`. Quote `'*'` in the shell. Groups and rules are stored under `[policy]` in `config.toml`. Edit the TOML to remove a rule, then run `gent config validate` and `gent config apply`. Applying changes updates this daemon only; signed encrypted replication is not implemented. `gent agent revoke AGENT_ID` invalidates that registration credential permanently in this proof.
+Selectors support an agent ID, `'*'`, `same-node`, `node:UUID`, or `group:NAME`. Quote `'*'` in the shell. Groups and rules are stored under `[policy]` in `config.toml`. Edit the TOML to remove a rule, then run `gent config validate` and `gent config apply`. Applying a change signs and commits a new revision. The newest accepted revision replaces the previous shared configuration; editing the file without applying it does not change active permissions. `gent agent revoke AGENT_ID` invalidates that registration credential permanently in this proof.
+
+Signed authority and message queues share `state.sqlite3`. First daemon startup preserves existing local identities and creates a private `identity.key` for node and owner signing keys, separate from the RPC credential in `owner.key`. Keep both keys and the database private. Existing databases must have mode 0600; Gent rejects shared or symlink files. Missing signing keys for an initialized database cause an error instead of silently creating a different identity.
+
+After a signed change commits, Gent projects the newest state into TOML while preserving unrelated local settings. If the filesystem write fails, the result reports `applied: true` and `config_saved: false`; the committed policy remains in effect and projection is retried. `applied_revision` identifies the revision represented by the file. Node renaming now uses this signed path and requires a running daemon.
+
+`gent cluster` and `gent daemon status` show the active revision and lease status. The owner daemon renews its 24-hour configuration lease when six hours or less remain, checking at startup and every 15 minutes. Use `gent cluster renew` to renew immediately. Agent operations remain blocked if the lease expires before a renewal commits.
+
+Encrypted configuration streams can now update this same live policy through trusted library APIs. Automatic network distribution, remote edit requests, and protected node pairing are still pending; ordinary CLI/MCP messages remain local.
 
 ## Files, retries, and limits
 

@@ -1,4 +1,5 @@
-//! Native MLS persistence proof. Not connected to RPC or remote transport.
+//! Native MLS persistence. Configuration authority can share the live RPC store;
+//! encrypted agent-message delivery and remote transport remain separate work.
 //!
 //! Callers are trusted daemon code, never MCP agents. Node authentication here
 //! does not grant permission to communicate as an agent. Initial authority and
@@ -121,95 +122,7 @@ impl<'a> EncryptedEndpoint<'a> {
     }
 
     pub fn open(home: &Path, identity: &'a NodeIdentity) -> Result<Self> {
-        crate::config::private_dir(home)?;
-        let path = home.join("mls.sqlite3");
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-        let metadata = fs::symlink_metadata(&path)?;
-        ensure!(
-            metadata.is_file()
-                && !metadata.file_type().is_symlink()
-                && metadata.permissions().mode() & 0o077 == 0,
-            "MLS database must be a private regular file"
-        );
-        let mut db = Connection::open(path)?;
-        db.busy_timeout(std::time::Duration::from_secs(5))?;
-        let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        ensure!(matches!(version, 0..=3), "unsupported MLS database version");
-        db.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
-        )?;
-        SqliteStorageProvider::<JsonCodec, _>::new(&mut db).run_migrations()?;
-        let schema = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        schema.execute_batch(
-            "
-          CREATE TABLE IF NOT EXISTS authority (
-            singleton INTEGER PRIMARY KEY CHECK(singleton=1), anchor BLOB NOT NULL,
-            checkpoint BLOB NOT NULL, state BLOB NOT NULL, node TEXT NOT NULL, key BLOB NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS key_packages (id TEXT PRIMARY KEY, bytes BLOB NOT NULL);
-          CREATE TABLE IF NOT EXISTS outbox (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-            group_id BLOB NOT NULL, request_hash BLOB NOT NULL, bytes BLOB NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS inbox (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT, group_id BLOB NOT NULL,
-            sender TEXT NOT NULL, id TEXT NOT NULL, body BLOB NOT NULL,
-            UNIQUE(group_id,sender,id)
-          );
-          CREATE TABLE IF NOT EXISTS receipts (
-            wire_hash BLOB PRIMARY KEY, group_id BLOB NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS streams (
-            group_id BLOB PRIMARY KEY, writer TEXT NOT NULL, writer_key BLOB NOT NULL,
-            head INTEGER NOT NULL, head_hash BLOB NOT NULL, origin_hash BLOB NOT NULL,
-            roster_hash BLOB NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS stream_outbox (
-            id TEXT PRIMARY KEY, group_id BLOB NOT NULL, sequence INTEGER NOT NULL,
-            packet BLOB NOT NULL, UNIQUE(group_id,sequence)
-          );
-          CREATE TABLE IF NOT EXISTS stream_seen (
-            group_id BLOB NOT NULL, sequence INTEGER NOT NULL, digest BLOB NOT NULL,
-            PRIMARY KEY(group_id,sequence)
-          );
-          CREATE TABLE IF NOT EXISTS stream_pending (
-            group_id BLOB NOT NULL, sequence INTEGER NOT NULL, digest BLOB NOT NULL,
-            packet BLOB NOT NULL, PRIMARY KEY(group_id,sequence)
-          );
-          CREATE TABLE IF NOT EXISTS authority_history (revision INTEGER PRIMARY KEY, state BLOB NOT NULL);
-          INSERT OR IGNORE INTO authority_history SELECT json_extract(checkpoint,'$.revision'),state FROM authority;
-          CREATE TABLE IF NOT EXISTS configuration_streams (
-            group_id BLOB PRIMARY KEY, grant BLOB NOT NULL, revision INTEGER NOT NULL,
-            state_hash BLOB NOT NULL, offset INTEGER NOT NULL DEFAULT 0
-          );
-          CREATE TABLE IF NOT EXISTS configuration_fragments (
-            group_id BLOB PRIMARY KEY, revision INTEGER NOT NULL, digest BLOB NOT NULL,
-            total INTEGER NOT NULL, bytes BLOB NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS configuration_requests (id TEXT PRIMARY KEY, group_id BLOB NOT NULL);
-          PRAGMA user_version=3;",
-        )?;
-        let has_purpose = {
-            let mut columns = schema.prepare("PRAGMA table_info(streams)")?;
-            columns
-                .query_map([], |row| row.get::<_, String>(1))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .iter()
-                .any(|column| column == "purpose")
-        };
-        if !has_purpose {
-            schema.execute_batch("ALTER TABLE streams ADD COLUMN purpose TEXT NOT NULL DEFAULT 'data' CHECK(purpose IN ('data','configuration'));")?;
-        }
-        schema.commit()?;
+        let db = open_database(home, "mls.sqlite3")?;
         Ok(Self { db, identity })
     }
 
@@ -220,20 +133,7 @@ impl<'a> EncryptedEndpoint<'a> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO authority VALUES(1,?1,?2,?3,?4,?5)",
-            params![
-                serde_json::to_vec(state.anchor())?,
-                serde_json::to_vec(state.checkpoint())?,
-                state.signed().encode()?,
-                self.identity.id(),
-                self.identity.public_key().as_slice()
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO authority_history VALUES(?1,?2)",
-            params![state.checkpoint().revision, state.signed().encode()?],
-        )?;
+        initialize_authority(&tx, self.identity, state)?;
         tx.commit()?;
         Ok(())
     }
@@ -418,7 +318,7 @@ fn reject_ordered_group(db: &Connection, group: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn authority(db: &Connection, signer: &NodeIdentity) -> Result<VerifiedState> {
+pub(crate) fn authority(db: &Connection, signer: &NodeIdentity) -> Result<VerifiedState> {
     let (anchor, checkpoint, state, node, key): (Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>) = db
         .query_row(
         "SELECT anchor,checkpoint,state,node,key FROM authority WHERE singleton=1",
@@ -1003,7 +903,7 @@ fn validate_ordered_transition(
     Ok(())
 }
 
-fn persist_authority(
+pub(crate) fn persist_authority(
     db: &Connection,
     identity: &NodeIdentity,
     state: &VerifiedState,
@@ -1022,6 +922,21 @@ fn persist_authority(
             state.signed().encode()?
         ],
     )?;
+    let runtime: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata')",
+        [],
+        |row| row.get(0),
+    )?;
+    if runtime {
+        let initialized: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='signed_authority')",
+            [],
+            |row| row.get(0),
+        )?;
+        if initialized {
+            crate::runtime::queue_projection(db)?;
+        }
+    }
     // A retired writer can never drain its queue again. Release its pending
     // ciphertext in this same authority transaction so it cannot consume the
     // endpoint's receive quota after revocation or signing-key replacement.
@@ -1058,5 +973,128 @@ fn persist_authority(
             }
         }
     }
+    Ok(())
+}
+
+/// Shared runtime database: authority, MLS state, and local RPC queues.
+pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
+    crate::config::private_dir(home)?;
+    let path = home.join(filename);
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(&path)?;
+    ensure!(
+        metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.permissions().mode() & 0o077 == 0,
+        "MLS database must be a private regular file"
+    );
+    let mut db = Connection::open(path)?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    ensure!(matches!(version, 0..=3), "unsupported MLS database version");
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
+    // The original RPC proof used this name for a messages index.
+    // Free it before the MLS inbox table is introduced in the same database.
+    let legacy_index: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='inbox' AND tbl_name='messages')",
+            [], |row| row.get(0),
+        )?;
+    if legacy_index {
+        db.execute_batch("DROP INDEX inbox;")?;
+    }
+    SqliteStorageProvider::<JsonCodec, _>::new(&mut db).run_migrations()?;
+    let schema = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    schema.execute_batch(
+            "
+          CREATE TABLE IF NOT EXISTS authority (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1), anchor BLOB NOT NULL,
+            checkpoint BLOB NOT NULL, state BLOB NOT NULL, node TEXT NOT NULL, key BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS key_packages (id TEXT PRIMARY KEY, bytes BLOB NOT NULL);
+          CREATE TABLE IF NOT EXISTS outbox (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+            group_id BLOB NOT NULL, request_hash BLOB NOT NULL, bytes BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS inbox (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT, group_id BLOB NOT NULL,
+            sender TEXT NOT NULL, id TEXT NOT NULL, body BLOB NOT NULL,
+            UNIQUE(group_id,sender,id)
+          );
+          CREATE TABLE IF NOT EXISTS receipts (
+            wire_hash BLOB PRIMARY KEY, group_id BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS streams (
+            group_id BLOB PRIMARY KEY, writer TEXT NOT NULL, writer_key BLOB NOT NULL,
+            head INTEGER NOT NULL, head_hash BLOB NOT NULL, origin_hash BLOB NOT NULL,
+            roster_hash BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS stream_outbox (
+            id TEXT PRIMARY KEY, group_id BLOB NOT NULL, sequence INTEGER NOT NULL,
+            packet BLOB NOT NULL, UNIQUE(group_id,sequence)
+          );
+          CREATE TABLE IF NOT EXISTS stream_seen (
+            group_id BLOB NOT NULL, sequence INTEGER NOT NULL, digest BLOB NOT NULL,
+            PRIMARY KEY(group_id,sequence)
+          );
+          CREATE TABLE IF NOT EXISTS stream_pending (
+            group_id BLOB NOT NULL, sequence INTEGER NOT NULL, digest BLOB NOT NULL,
+            packet BLOB NOT NULL, PRIMARY KEY(group_id,sequence)
+          );
+          CREATE TABLE IF NOT EXISTS authority_history (revision INTEGER PRIMARY KEY, state BLOB NOT NULL);
+          INSERT OR IGNORE INTO authority_history SELECT json_extract(checkpoint,'$.revision'),state FROM authority;
+          CREATE TABLE IF NOT EXISTS configuration_streams (
+            group_id BLOB PRIMARY KEY, grant BLOB NOT NULL, revision INTEGER NOT NULL,
+            state_hash BLOB NOT NULL, offset INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE TABLE IF NOT EXISTS configuration_fragments (
+            group_id BLOB PRIMARY KEY, revision INTEGER NOT NULL, digest BLOB NOT NULL,
+            total INTEGER NOT NULL, bytes BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS configuration_requests (id TEXT PRIMARY KEY, group_id BLOB NOT NULL);
+          PRAGMA user_version=3;",
+        )?;
+    let has_purpose = {
+        let mut columns = schema.prepare("PRAGMA table_info(streams)")?;
+        columns
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "purpose")
+    };
+    if !has_purpose {
+        schema.execute_batch("ALTER TABLE streams ADD COLUMN purpose TEXT NOT NULL DEFAULT 'data' CHECK(purpose IN ('data','configuration'));")?;
+    }
+    schema.commit()?;
+    Ok(db)
+}
+
+pub(crate) fn initialize_authority(
+    db: &Connection,
+    identity: &NodeIdentity,
+    state: &VerifiedState,
+) -> Result<()> {
+    db.execute(
+        "INSERT INTO authority VALUES(1,?1,?2,?3,?4,?5)",
+        params![
+            serde_json::to_vec(state.anchor())?,
+            serde_json::to_vec(state.checkpoint())?,
+            state.signed().encode()?,
+            identity.id(),
+            identity.public_key().as_slice()
+        ],
+    )?;
+    db.execute(
+        "INSERT INTO authority_history VALUES(?1,?2)",
+        params![state.checkpoint().revision, state.signed().encode()?],
+    )?;
     Ok(())
 }
