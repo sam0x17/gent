@@ -5,6 +5,7 @@ use gent_crypto::files::{FileGrant, seal};
 use gent_protocol::file_objects::Manifest;
 use zeroize::Zeroizing;
 mod host;
+mod retention;
 
 const FILE_UNAVAILABLE: &str = "file unavailable";
 
@@ -23,6 +24,7 @@ pub(super) fn schema(db: &mut Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS message_file_proofs (
             message TEXT PRIMARY KEY REFERENCES messages(id), digest TEXT NOT NULL);",
     )?;
+    retention::schema(db)?;
     Ok(())
 }
 
@@ -63,7 +65,8 @@ impl StoreSession<'_> {
         let paths = host::Folders::open(self.home, &who.id)?;
         Ok(
             json!({"import_directory":paths.import_path,"export_directory":paths.export_path,
-            "max_file_bytes":gent_crypto::files::MAX_FILE_BYTES}),
+            "max_file_bytes":gent_crypto::files::MAX_FILE_BYTES,
+            "handoff_retention":"unchanged imported/exported copies are cleaned after file expiry; save lasting files elsewhere"}),
         )
     }
 
@@ -78,12 +81,9 @@ impl StoreSession<'_> {
         // Validate metadata before any caller-selected filesystem operation.
         host::basename(name)?;
         let paths = host::Folders::open(self.home, &who.id)?;
-        let bytes = paths.read(name)?;
-        let fingerprint = hash(&serde_json::to_string(&json!([
-            name,
-            media_type,
-            format!("{:x}", Sha256::digest(&bytes))
-        ]))?);
+        let (bytes, stamp) = paths.read(name)?;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let fingerprint = hash(&serde_json::to_string(&json!([name, media_type, digest]))?);
         let previous: Option<(String, String)> = self
             .db
             .query_row(
@@ -97,9 +97,10 @@ impl StoreSession<'_> {
                 previous == fingerprint,
                 "request_id already used with different content"
             );
-            return Ok(
-                json!({"file":self.accessible_file(who,&id)?.descriptor(),"duplicate":true}),
-            );
+            let grant = self.accessible_file(who, &id)?;
+            let expiry = self.objects()?.status(&id)?.expires_at;
+            retention::track(self.db, &who.id, "", name, &stamp, &digest, expiry)?;
+            return Ok(json!({"file":grant.descriptor(),"duplicate":true,"cleanup_after":expiry}));
         }
         let sealed = seal(name, media_type, &bytes)?;
         let expiry = self.timestamp as u64 + crate::file_objects::MAX_RETENTION_SECONDS;
@@ -117,7 +118,8 @@ impl StoreSession<'_> {
             "INSERT INTO file_imports VALUES(?1,?2,?3,?4)",
             params![who.id, request, fingerprint, descriptor.id],
         )?;
-        Ok(json!({"file":descriptor,"duplicate":false}))
+        retention::track(self.db, &who.id, "", name, &stamp, &digest, expiry)?;
+        Ok(json!({"file":descriptor,"duplicate":false,"cleanup_after":expiry}))
     }
 
     pub(super) fn file_status(&self, who: &Agent, id: &str) -> Result<Value> {
@@ -133,8 +135,18 @@ impl StoreSession<'_> {
         let grant = self.accessible_file(who, id)?;
         let bytes = self.objects()?.read(id)?;
         let paths = host::Folders::open(self.home, &who.id)?;
-        let path = paths.write(grant.descriptor(), &bytes)?;
-        Ok(json!({"file":grant.descriptor(),"path":path}))
+        let (path, stamp) = paths.write(grant.descriptor(), &bytes)?;
+        let expiry = self.objects()?.status(id)?.expires_at;
+        retention::track(
+            self.db,
+            &who.id,
+            id,
+            &grant.descriptor().name,
+            &stamp,
+            &grant.descriptor().sha256,
+            expiry,
+        )?;
+        Ok(json!({"file":grant.descriptor(),"path":path,"cleanup_after":expiry}))
     }
 
     pub(super) fn seal_attachments(

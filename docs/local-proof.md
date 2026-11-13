@@ -373,7 +373,7 @@ Every committed owner edit or renewal wakes publication immediately. Connected r
 
 For local CLI hosts, call `gent_file_paths`, copy the actual file into the returned `import_directory`, and call `gent_file_import` with its basename, media type, and request UUID. Use the returned file ID in `file_ids` on send/reply or relay tools. Each file can be up to 32 MiB. Gent seals fresh objects for every new message or forward; identical request retries retain their original IDs and bytes.
 
-Received messages include descriptors in `attachments`. Call `gent_file_status` until ready during an authorized interaction, then `gent_file_export`. Use the returned path with the host's file or image tools. The path is local to the daemon machine. Files are verified before export; an existing file with different contents is never overwritten. Staged and exported plaintext remains until the user or an authorized host removes it. Gent checks current file/message permissions on every access.
+Received messages include descriptors in `attachments`. Call `gent_file_status` until ready during an authorized interaction, then `gent_file_export`. Use the returned path with the host's file or image tools. The path is local to the daemon machine. Files are verified before export; an existing file with different contents is never overwritten. Imported and exported handoff copies are temporary, with a `cleanup_after` timestamp in the tool result. Save lasting files elsewhere. Gent checks current file/message permissions on every access.
 
 Small files can use `{ "name": "image.png", "media_type": "image/png", "data_base64": "..." }` in `files`, with a combined 1 MiB decoded limit. Supported inline images also produce MCP image blocks. Native attachment images require export before inspection. Files from agents remain untrusted input.
 
@@ -389,6 +389,27 @@ GENT_TEST_RELAY_TOKEN_FILE=/absolute/private/relay.key \
 cargo test -p gent-daemon --test remote --locked \
   wrangler_dispatches_agent_attachments_with_native_files_and_restart -- --ignored
 ```
+
+## File storage and cleanup
+
+These commands use local owner authority and do not start inference:
+
+```sh
+gent files
+gent files status --json
+gent files clean --dry-run
+gent files clean
+```
+
+Status reports encrypted object counts, quota reservations, stored ciphertext bytes, tracked plaintext handoff copies, and files needing attention. Database sizes describe logical pages and reusable space in the whole endpoint database; they exclude WAL and other files. Handoff sizes reflect recorded snapshots, not a filesystem-wide measurement. Changed and untracked files can consume additional space.
+
+Gent records successfully imported/exported handoff copies and their file-expiry deadlines. Maintenance runs at startup and every 15 minutes, removing up to eight expired copies per pass. Imported sources normally expire after seven days; message-bound exports expire with their exchange. Reimporting the same unchanged source extends that copy's deadline to the latest import expiry. Cleanup also reaps expired/abandoned encrypted objects. `clean` runs one batch immediately; repeat it while `more_due` is nonzero. `--dry-run` previews the batch without removing files or changing retention records.
+
+Cleanup compares file identity, size, timestamps, and content hash. It preserves changed or replaced files, refuses links and unsafe directories, and never traverses recursively. A stable `.gent-clean-UUID.tmp` recovery name allows the next pass to recover interrupted work. A new file at the original path is left alone. Status lists paths and possible recovery paths for preserved/blocked copies; inspect those locally before moving or removing them. They are retried after 15 minutes.
+
+Files that predate this ledger, unimported outbox files, and exports left by a failed ledger commit remain untracked and require user/host cleanup. Empty folders and abandoned export-writing temporary files also remain. Cleanup does not prune messages, import retry records, or encrypted stream history, and does not guarantee physical erasure from SQLite, WAL, backups, or open file handles. The state directory still assumes a trusted OS user.
+
+Run `python3 scripts/smoke_file_retention.py target/debug/gent` to exercise the real CLI, MCP tools, 2 MiB files, dry-run, cleanup, and startup recovery using temporary state. It advances only fixture deadlines and preserves the source outside Gent's handoff folders. The same proof passes on Linux and macOS without model calls or a relay.
 
 ## Remaining integration work
 

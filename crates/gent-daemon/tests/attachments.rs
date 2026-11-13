@@ -8,6 +8,8 @@ use std::{
     path::PathBuf,
 };
 use uuid::Uuid;
+#[path = "attachments/retention.rs"]
+mod retention;
 
 fn ok(response: Response) -> Value {
     match response {

@@ -135,6 +135,8 @@ Additional command families should follow the same grammar as their functionalit
 | --- | --- |
 | `gent agents` | List agents the caller may discover in the selected cluster. |
 | `gent agent show <agent>` | Show permitted identity, location, availability, MCP/host capabilities, and connection security mode. |
+| `gent files [status]` | Show local encrypted storage usage, tracked handoff copies, cleanup issues, and retained record counts under owner authority. |
+| `gent files clean [--dry-run]` | Reap expired encrypted objects and process one bounded batch of expired handoff copies. Preserve changed, replaced, and untracked files; `--dry-run` previews without deleting. |
 | `gent message send <agent> [text] [--file <path>]` | Send text, files, screenshots, or images under the caller's authority; allow repeated `--file` arguments and messages without files. |
 | `gent message reply <message-id> [text] [--file <path>]` | Reply within an authorized exchange, with optional files. |
 | `gent message status <message-id>` | Show authenticated delivery and response state available to the caller. |

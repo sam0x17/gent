@@ -187,6 +187,8 @@ impl Store {
     /// The owner daemon renews its lease without requiring an agent turn.
     /// Agent RPCs never bypass expiry or trigger a renewal themselves.
     pub fn maintain(&mut self) -> Result<()> {
+        // Local cleanup remains available after membership/lease loss.
+        self.clean_files()?;
         let timestamp = now() as u64;
         let tx = self
             .db
@@ -385,6 +387,8 @@ impl StoreSession<'_> {
                 }).collect::<Vec<_>>()))
             }
             OwnerOp::Agents => Ok(serde_json::to_value(self.all_agents()?)?),
+            OwnerOp::FilesStatus => self.files_status(),
+            OwnerOp::FilesClean { dry_run } => self.files_clean(dry_run),
             OwnerOp::Providers => {
                 let mut providers = BTreeMap::<String, Vec<Agent>>::new();
                 for agent in self.all_agents()? {

@@ -1,3 +1,4 @@
+mod files;
 mod hooks;
 mod integration;
 mod managed_file;
@@ -72,6 +73,11 @@ enum Command {
     Agents,
     /// List enrolled nodes; remote presence is currently unknown.
     Nodes,
+    /// Inspect local file storage and clean expired handoff copies.
+    Files {
+        #[command(subcommand)]
+        command: Option<FilesCommand>,
+    },
     /// Inspect or revoke a registration.
     Agent {
         #[command(subcommand)]
@@ -96,6 +102,16 @@ enum Command {
     Relay {
         #[command(subcommand)]
         command: Option<RelayCommand>,
+    },
+}
+#[derive(Subcommand)]
+enum FilesCommand {
+    Status,
+    /// Clean one bounded batch of expired, unchanged handoff copies and encrypted objects.
+    Clean {
+        /// Preview the batch without removing files or storage records.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 #[derive(Subcommand)]
@@ -338,6 +354,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         return Ok(());
     }
+    let files_output = matches!(&cli.command, Some(Command::Files { .. }));
     let output = match cli.command {
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
@@ -381,6 +398,13 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Providers { .. }) => owner(&home, OwnerOp::Providers).await?,
         Some(Command::Agents) => owner(&home, OwnerOp::Agents).await?,
         Some(Command::Nodes) => owner(&home, OwnerOp::Nodes).await?,
+        Some(Command::Files { command }) => {
+            let action = match command.unwrap_or(FilesCommand::Status) {
+                FilesCommand::Status => OwnerOp::FilesStatus,
+                FilesCommand::Clean { dry_run } => OwnerOp::FilesClean { dry_run },
+            };
+            owner(&home, action).await?
+        }
         Some(Command::Agent {
             command: AgentCommand::Revoke { agent },
         }) => owner(&home, OwnerOp::Revoke { agent_id: agent }).await?,
@@ -543,6 +567,8 @@ async fn execute(cli: Cli) -> Result<()> {
     };
     if cli.json {
         println!("{}", serde_json::to_string(&output)?);
+    } else if files_output {
+        files::print_report(&output);
     } else {
         println!("{}", serde_json::to_string_pretty(&output)?);
     }

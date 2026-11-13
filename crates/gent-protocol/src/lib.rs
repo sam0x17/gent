@@ -358,6 +358,10 @@ pub enum OwnerOp {
     Nodes,
     Agents,
     Providers,
+    FilesStatus,
+    FilesClean {
+        dry_run: bool,
+    },
     RelayGrants,
     RelayAttachments,
     SetPolicy {

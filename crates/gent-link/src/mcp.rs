@@ -35,7 +35,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_file_import",
-            "Import a regular file from this agent's import_directory by basename, up to 32 MiB. Returns a file ID usable in file_ids on send, reply, relay_send, or relay_respond. Keep source bytes unchanged for identical request_id retries.",
+            "Import a regular file from this agent's import_directory by basename, up to 32 MiB. Returns a file ID usable in file_ids on send, reply, relay_send, or relay_respond. Keep source bytes unchanged for identical request_id retries. Gent cleans unchanged handoff copies after cleanup_after; save lasting files elsewhere.",
             json!({"request_id":{"type":"string","format":"uuid"},"name":{"type":"string","maxLength":128},"media_type":{"type":"string","maxLength":128}}),
             vec!["request_id", "name", "media_type"],
         ),
@@ -47,7 +47,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_file_export",
-            "Verify and export an authorized complete file into this agent's export_directory. Returns a local path for host file or image tools. Check gent_file_status while pending. Existing files with different bytes are never overwritten.",
+            "Verify and export an authorized complete file into this agent's export_directory. Returns a local path for host file or image tools and cleanup_after for this temporary copy. Check gent_file_status while pending. Existing files with different bytes are never overwritten. Save lasting files outside the handoff folder.",
             json!({"file_id":{"type":"string","format":"uuid"}}),
             vec!["file_id"],
         ),
