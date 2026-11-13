@@ -25,9 +25,12 @@ def main():
     parser.add_argument('--host-binary', type=Path, help='Host executable when it is not on PATH')
     parser.add_argument('--automatic-binding', action='store_true',
                         help='Use host conversation metadata and the generated hook configuration')
+    parser.add_argument('--installed-binding', action='store_true',
+                        help='Install into isolated config files and launch using those files (implies --automatic-binding)')
     parser.add_argument('--use-host-config', action='store_true',
                         help='Codex: retain the configured model provider; disable configured MCP servers/plugins for this run')
     args = parser.parse_args()
+    args.automatic_binding |= args.installed_binding
     repository = Path(__file__).resolve().parents[1]
     binary = (args.binary or repository / 'target/debug/gent').resolve()
     host_binary = str(args.host_binary.resolve()) if args.host_binary else ('codex' if args.host == 'codex' else 'claude')
@@ -71,6 +74,7 @@ def main():
     settings = {'disableAllHooks': True}
     if args.automatic_binding:
         launch = base[1:] + ['mcp', 'serve', '--host', args.host]
+    installed = root / 'host-config'
     def turn(prompt, label, session=None, fork=False):
         if args.host == 'codex':
             command = [host_binary, 'exec', '--json', '--skip-git-repo-check',
@@ -104,8 +108,8 @@ def main():
                        '--setting-sources', '', '--strict-mcp-config', '--tools', '',
                        '--disable-slash-commands', '--no-chrome', '--permission-mode', 'dontAsk',
                        '--allowedTools', 'mcp__gent__*', '--max-budget-usd', '1',
-                       '--settings', json.dumps(settings),
-                       '--mcp-config', json.dumps({'mcpServers': {'gent': {'type': 'stdio', 'command': str(binary), 'args': launch}}})]
+                       '--settings', str(installed / 'settings.json') if args.installed_binding else json.dumps(settings),
+                       '--mcp-config', str(installed / '.claude.json') if args.installed_binding else json.dumps({'mcpServers': {'gent': {'type': 'stdio', 'command': str(binary), 'args': launch}}})]
             if session:
                 command += ['--resume', session]
                 if fork:
@@ -158,6 +162,13 @@ def main():
 
     try:
         cli('cluster', 'new', 'synthetic-host-proof', '--local')
+        if args.installed_binding:
+            cli('integration', 'install', args.host, '--config-dir', str(installed))
+            if args.host == 'codex':
+                import tomllib
+                entry = tomllib.loads((installed / 'config.toml').read_text())['mcp_servers']['gent']
+                assert entry['command'] == str(binary)
+                launch = entry['args']
         if args.automatic_binding and args.host == 'claude-code':
             settings = cli('integration', 'config', args.host)['settings']
         daemon = start()
@@ -230,7 +241,8 @@ def main():
             assert next(agent for agent in current if agent['id'] == host_id)['name'] == 'host-proof'
         report = {'host': args.host, 'host_session': session, 'agent_id': host_id,
                   'result': 'passed', 'scope': ('host metadata binding' if args.automatic_binding else 'explicit per-session binding') + '; local Unix transport',
-                  'reply_text': reply['text'], 'other_session': other_session, 'fork_agent': fork_id}
+                  'reply_text': reply['text'], 'other_session': other_session, 'fork_agent': fork_id,
+                  'installed_config': str(installed) if args.installed_binding else None}
         (root / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
         print(f'PASS: {args.host} registration, same-session resume, restart inbox, image interpretation, file reply and acknowledgment', flush=True)
         if args.automatic_binding:

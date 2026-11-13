@@ -52,6 +52,8 @@ enum Command {
         #[command(subcommand)]
         command: integration::Command,
     },
+    /// Show user-scope Gent installation for supported hosts.
+    Integrations,
     /// List host labels announced by registered agents.
     Providers {
         #[command(subcommand)]
@@ -315,6 +317,13 @@ async fn execute(cli: Cli) -> Result<()> {
             return Ok(());
         }
         Some(Command::Integration { command }) => integration::execute(&home, command)?,
+        Some(Command::Integrations) => integration::execute(
+            &home,
+            integration::Command::Status {
+                host: None,
+                config_dir: None,
+            },
+        )?,
         Some(Command::Providers { .. }) => owner(&home, OwnerOp::Providers).await?,
         Some(Command::Agents) => owner(&home, OwnerOp::Agents).await?,
         Some(Command::Nodes) => owner(&home, OwnerOp::Nodes).await?,

@@ -119,7 +119,7 @@ gent integration config codex
 gent integration config claude-code
 ```
 
-These commands print JSON configuration fragments containing absolute Gent executable and state paths. They do not edit host settings. For Codex, translate the returned `mcp_servers.gent` fields into a `[mcp_servers.gent]` table in the host's `config.toml`. For Claude Code, merge `mcpServers.gent` into its MCP configuration and merge `settings.hooks.PreToolUse` into its settings. Preserve existing entries. Keep the MCP server name `gent`, which the generated Claude hook matches. Automatic installation and removal of these entries remain pending.
+These commands print JSON configuration fragments containing absolute Gent executable and state paths. They do not edit host settings. For Codex, translate the returned `mcp_servers.gent` fields into a `[mcp_servers.gent]` table in the host's `config.toml`. For Claude Code, merge `mcpServers.gent` into its MCP configuration and merge `settings.hooks.PreToolUse` into its settings. Preserve existing entries. Keep the MCP server name `gent`, which the generated Claude hook matches. The installer below applies these entries directly.
 
 Both fragments launch the same stdio server with `gent mcp serve --host codex` or `--host claude-code`. Do not combine `--host` with `--binding`. The host selects a persistent credential outside model-visible tool arguments. Gent stores credentials under the private `host-bindings` directory, scoped to node, cluster, host, and conversation. Reconnecting restores that chat's registration and inbox; a fork gets a different binding. Concurrent MCP processes cannot hold the same conversation binding. One MCP connection can hold up to 128 distinct bindings before it must reconnect.
 
@@ -138,6 +138,41 @@ python3 scripts/prove_host.py --host claude-code --automatic-binding
 ```
 
 The latter two consume model usage in synthetic conversations and retain private proof files. Add `--host-binary /absolute/path/to/host` when the executable is not on PATH. Codex's `--use-host-config` test option retains the machine's existing configured model access while disabling unrelated MCP servers and plugins for that invocation. No permanent host settings or existing conversations are edited.
+
+## Install host integrations
+
+With a configured Gent node, install either or both hosts:
+
+```sh
+gent integration install codex
+gent integration install claude-code
+gent integrations
+gent integration status codex
+gent integration uninstall claude-code
+```
+
+`gent integration remove` aliases `uninstall`. `status` without a host inspects both. Installation writes the common MCP server and, for Claude Code, its required identity hook. The daemon must be running when an agent calls Gent. Reopen the host session or restart its Gent MCP connection after changing installation. Skills, shell hooks, and automatic model wake/resume remain separate work.
+
+Codex uses `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`. Claude Code uses `~/.claude.json` for its user MCP entry and `~/.claude/settings.json` for its hook. When `CLAUDE_CONFIG_DIR` is set, both `.claude.json` and `settings.json` live inside that directory. `--config-dir PATH` on install, status, or uninstall selects an explicit host directory with those same override semantics. Use the same directory for subsequent operations. Gent state is independently selected by `--home` or `GENT_HOME`.
+
+The installer preserves unrelated configuration values, TOML comments, and surrounding JSON text. Reinstalling is idempotent; running a new Gent executable updates its recorded command and hook paths. Existing file modes are retained, and new files are private. It refuses malformed documents, duplicate JSON keys, symlinked or hard-linked target files, shared write access, a foreign `gent` entry, or changes to a managed entry. Even an identical manually configured entry is unowned: preserve it elsewhere and remove it before using the installer. It does not add tool approvals or re-enable disabled Claude hooks. Project settings and managed policies can still override or block these user settings.
+
+Each host directory contains a private `.gent-HOST.json` ownership/recovery record and `.gent-HOST.lock`. The record contains generated Gent paths and the previous/desired installation, without snapshots of account, model, or other host settings. Keep these sidecars while the integration is installed. A lock coordinates Gent installers, including different Gent homes targeting the same host. A second home must first uninstall through the recorded home. Uninstall retains Gent identities, bindings, inboxes, and host conversations; empty configuration containers and ownership sidecars may remain.
+
+All target documents are checked before an update. Gent writes and syncs a pending record, then atomically replaces each configuration file. An interrupted multi-file edit reports `recovery_pending`; rerunning install or uninstall finishes it using the latest documents, preserving unrelated intervening edits. An altered managed entry stops recovery for manual resolution. Status never completes recovery or creates files. Gent detects changes before each file replacement, but host applications do not honor its lock: close other settings editors during installation, since their writes can still race the final rename.
+
+Status reports `absent`, `configured`, `conflict`, `hooks_disabled`, or `recovery_pending`. A parsed status result exits 0; read/validation failures and failed mutations exit 1. The combined listing includes per-host read failures as `error`. `configured` means the recorded user entries match, not that the daemon, a project override, hook trust, or a GUI application has been verified. The output separately reports whether the recorded binary exists and whether the integration belongs to the selected Gent home.
+
+Python 3.11 or newer drives the isolated installation and binding checks:
+
+```sh
+python3 scripts/smoke_install.py
+python3 scripts/smoke_host_bindings.py target/debug/gent
+python3 scripts/prove_host.py --host codex --installed-binding
+python3 scripts/prove_host.py --host claude-code --installed-binding
+```
+
+The first script runs concurrent installers and checks discovery with each host's `mcp get gent`; use `--codex` and `--claude` for executable paths. The second launches installed server entries and the installed Claude hook through live MCP/RPC. The final two consume model usage. Claude loads the installed files through per-run flags; Codex reads the installed entry into per-run overrides, preserving its existing authentication location. Native config discovery is checked separately by the first script. These tests use temporary host configuration directories and leave real host settings unchanged. They do not establish interactive or GUI support.
 
 ## Grant communication as the local owner
 
@@ -249,6 +284,6 @@ Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per ex
 
 ## Remaining integration work
 
-Codex and Claude Code have explicit and host-metadata binding proofs on both OSes. Persistent host setup, interactive conversation transitions, and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
+Codex and Claude Code have explicit and host-metadata binding proofs on both OSes. Interactive conversation transitions and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Invite-based pairing, GitHub login, remote connectors, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, and generic MCP messaging use the local development relay. A visual iteration involving real models across machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
+Invite-based pairing, GitHub login, remote connectors, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, and generic MCP messaging use the local development relay. A visual iteration involving real models across machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.

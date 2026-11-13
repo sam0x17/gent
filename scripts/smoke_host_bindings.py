@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import uuid
 from smoke_mcp import Client, PNG
 
@@ -22,7 +23,10 @@ def main():
             return subprocess.run(base + list(args), text=True, capture_output=True, timeout=15, **kwargs)
 
         def connect(host):
-            configuration = json.loads(cli('integration', 'config', host, check=True).stdout)
+            directory = Path(folder) / host
+            cli('integration', 'install', host, '--config-dir', str(directory), check=True)
+            configuration = (tomllib.loads((directory / 'config.toml').read_text()) if host == 'codex'
+                             else json.loads((directory / '.claude.json').read_text()))
             spec = configuration['mcp_servers' if host == 'codex' else 'mcpServers']['gent']
             client = Client([spec['command'], *spec['args']], client_name='codex-mcp-client' if host == 'codex' else host)
             clients.append(client)
@@ -51,8 +55,8 @@ def main():
             assert codex.call('gent_identity', meta=a)[0]['agent']['id'] == aid
 
             claude = connect('claude-code')
-            settings = json.loads(cli('integration', 'config', 'claude-code', check=True).stdout)
-            hook = settings['settings']['hooks']['PreToolUse'][0]['hooks'][0]['command']
+            settings = json.loads((Path(folder) / 'claude-code/settings.json').read_text())
+            hook = settings['hooks']['PreToolUse'][0]['hooks'][0]['command']
 
             def call(session, tool, arguments=None, agent=None):
                 arguments = arguments or {}
@@ -87,6 +91,10 @@ def main():
                 'tool_name': 'mcp__gent__gent_register', 'tool_input': {'name': 'retry', 'provider': 'claude-code'}, 'hook_event_name': 'PreToolUse'}), check=True)
             claude.call('gent_register', {'name': 'retry', 'provider': 'claude-code'}, error=True, meta={'claudecode/toolUseId': use})
             print('PASS: per-call chat/subagent isolation, missing metadata/hook rejection, duplicate connection lock, reconnect, image visibility, and revocation')
+            for host in ('codex', 'claude-code'):
+                cli('integration', 'uninstall', host, '--config-dir', str(Path(folder) / host), check=True)
+            assert (home / 'host-bindings').is_dir()
+            print('PASS: installed MCP configuration and hook, idempotent installation, and removal retaining bindings')
         finally:
             for client in clients:
                 client.close()

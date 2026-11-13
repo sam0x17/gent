@@ -1,5 +1,6 @@
 //! Host metadata selects credentials outside model-controlled tool arguments.
 //! The local host and OS user are trusted; this is not remote authentication.
+mod install;
 use anyhow::{Context, Result, ensure};
 use clap::{Subcommand, ValueEnum};
 use fs2::FileExt;
@@ -20,7 +21,7 @@ const TICKET_TTL: u64 = 600;
 const MAX_TICKETS: usize = 4096;
 const MAX_BINDINGS: usize = 128;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Host {
     Codex,
@@ -43,6 +44,18 @@ impl Host {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Inspect user-scope installation without changing settings.
+    Status {
+        host: Option<Host>,
+        /// Host config directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
+        #[arg(long, requires = "host")]
+        config_dir: Option<PathBuf>,
+    },
+    /// Install the MCP connection and required conversation identity hook.
+    Install(install::Args),
+    /// Remove Gent-managed host entries, retaining conversations and Gent state.
+    #[command(alias = "remove")]
+    Uninstall(install::Args),
     /// Print MCP configuration and any required host hooks; does not edit settings.
     Config { host: Host },
     /// Receive a host's PreToolUse event on stdin. For host configuration only.
@@ -52,6 +65,9 @@ pub enum Command {
 
 pub fn execute(home: &Path, command: Command) -> Result<Value> {
     match command {
+        Command::Status { host, config_dir } => install::status(home, host, config_dir),
+        Command::Install(args) => install::change(home, args, true),
+        Command::Uninstall(args) => install::change(home, args, false),
         Command::Config { host } => configuration(home, host),
         Command::Hook { host } => {
             ensure!(
@@ -78,6 +94,10 @@ fn configuration(home: &Path, host: Host) -> Result<Value> {
     let home = fs::canonicalize(home).context("initialize this Gent node first")?;
     config::load(&home)?;
     let binary = fs::canonicalize(std::env::current_exe()?)?;
+    render_configuration(&home, &binary, host)
+}
+
+fn render_configuration(home: &Path, binary: &Path, host: Host) -> Result<Value> {
     let binary = binary
         .to_str()
         .context("Gent executable path must be UTF-8")?;
