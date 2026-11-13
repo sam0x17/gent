@@ -190,7 +190,7 @@ Claude Code requires the generated `PreToolUse` hook for every Gent tool call. T
 
 Handoffs expire after ten minutes, with up to 4,096 retained per node/cluster/Claude scope. Expired records are pruned on later hook calls. They contain no plaintext message, file bytes, raw session ID, or credential. Binding credentials persist independently. Host labels and metadata are trusted only on this local, owner-configured stdio connection; they are not remote authentication. Agents with arbitrary filesystem access still share the trusted OS user's authority.
 
-The same-connection protocol proof simulates session and subagent changes. The real-host proof exercises separate concurrent CLI chats, resume, forks, and a queued image round trip. Interactive `/clear`, in-process `/resume`, live subagent execution, and GUI surfaces still require their own real-host tests. Claude's startup environment alone is insufficient for these transitions, so Gent uses the per-call hook even for CLI sessions.
+The same-connection protocol proof simulates session and subagent changes. Separate real-host proofs exercise concurrent CLI chats, resume, forks, queued images, interactive `/clear` and in-process `/resume`. The [child-agent proof](#real-child-agents) exercises native spawning and resumption. GUI surfaces still require separate tests. Claude's startup environment alone is insufficient for these transitions, so Gent uses the per-call hook even for CLI sessions.
 
 ```sh
 python3 scripts/smoke_host_bindings.py target/debug/gent
@@ -244,7 +244,26 @@ python3 scripts/prove_interactive.py --host claude-code
 
 On Linux and macOS, `/clear` produces a separate agent with an empty directory and inbox. `/resume ORIGINAL_SESSION` restores the original identity and its pending image in the same CLI process; exact file bytes and the receipt are checked. Claude keeps one MCP process and changes session bindings through its per-call hook; Codex reconnects MCP during these transitions. The driver waits for tool discovery before submitting its first prompt. It retains synthetic evidence in a private temporary directory; the host may also retain the synthetic sessions and workspace-trust metadata. Existing conversations and saved MCP configuration remain unchanged.
 
-Use `--host-binary PATH` for a nondefault CLI. Codex keeps the current provider configuration. A provider with its own configured `experimental_bearer_token` can use `--provider-token-auth` to bypass the TUI's separate ChatGPT login gate for this invocation, without changing saved authentication. The scripts reject dotted MCP/plugin names because Codex's CLI treats override path segments literally. Interactive subagents, identity transfer, automatic wake-up, and GUI/web/mobile flows still need separate proofs.
+Use `--host-binary PATH` for a nondefault CLI. Codex keeps the current provider configuration. A provider with its own configured `experimental_bearer_token` can use `--provider-token-auth` to bypass the TUI's separate ChatGPT login gate for this invocation, without changing saved authentication. The scripts reject dotted MCP/plugin names because Codex's CLI treats override path segments literally. Identity transfer, automatic wake-up, and GUI/web/mobile flows still need separate proofs.
+
+## Real child agents
+
+The opt-in proof consumes model usage through the installed hosts and requires Python 3.11 or newer:
+
+```sh
+python3 scripts/prove_subagents.py --host codex
+python3 scripts/prove_subagents.py --host claude-code
+```
+
+Use `--host-binary PATH` for a nondefault CLI and `--binary PATH` for a different Gent build. The runner creates private temporary Gent state, uses the current host authentication/provider, disables unrelated tools, and leaves saved host settings unchanged. Codex uses medium reasoning. Claude uses low effort, a temporary `gent-worker` definition and Gent's generated identity hook. Every host turn has a five-minute timeout; Claude also has a $2 per-invocation budget. Synthetic conversations, transcripts and proof state remain for inspection; the daemon and fixture peer stop on exit.
+
+Each real parent spawns two real children. All three register separate Gent identities and initially see empty directories. Only the parent and child-a receive permission to communicate with a fixture peer. The harness queues different private text markers with a PNG, restarts the daemon, and resumes the original parent and children in a new host process. Each permitted agent acknowledges and replies with its own exact text/files, using an ID allocated to its scope by `gent_request_ids`. Child-b's directory and inbox remain empty. Finally, child-a is revoked; its identity call fails while the parent and sibling retain their original identities.
+
+The audit matches actual MCP traffic against native host records and rejects tools outside Gent and native child lifecycle operations. Codex's exact synthetic rollouts establish child ancestry and executed tool calls; Claude's native task events, per-call hooks and tool-use IDs establish the corresponding scopes. A final `report.json` says `passed` only after both protocol assertions and this audit succeed. Model summaries alone cannot pass the proof. It passes on Linux with Codex 0.167.2 and Claude Code 2.1.323, and on macOS with Codex 0.167.0 and Claude Code 2.1.311.
+
+`--register-only` stops after registration. Continue that completed phase with `--root PATH`. After all protocol phases complete, `--root PATH --audit-only` rechecks retained evidence without starting a host or daemon. Preserve a failed partial turn and start a fresh proof; the runner refuses to overwrite its transcript or silently replay acknowledged messages.
+
+This checks Gent identities, discovery and tool access. Native hosts can copy parent context into children and return child reports to parents, including message contents. Gent does not isolate that host-controlled context. These deliberately scheduled CLI turns also do not establish automatic wake-up, TUI-specific child controls, or GUI support.
 
 ## Grant communication as the local owner
 
@@ -467,7 +486,7 @@ Use `--edit-storage` to queue ten large policies while the owner is offline, res
 
 ## Remaining integration work
 
-Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. Authenticated import/export tools now pass native, generic MCP, and real-model proofs without putting large base64 payloads in model context. Actual subagent execution and GUI/hosted file access remain to be tested. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
+Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. The separate child-agent harness checks native spawning, resumption and isolated revocation. Authenticated import/export tools now pass native, generic MCP, and real-model proofs without putting large base64 payloads in model context. GUI/hosted file access remains to be tested. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
 Invite-based pairing, GitHub login, and hosted remote connectors remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, generic MCP messaging, real-model visual revision, and persistent relay turns use the local development relay. Shared agent guidance is bundled through MCP instructions. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
 
