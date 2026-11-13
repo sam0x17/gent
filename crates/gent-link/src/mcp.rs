@@ -9,6 +9,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
+mod binding;
 
 #[derive(Clone)]
 enum Credentials {
@@ -283,13 +284,23 @@ impl ServerHandler for GentMcp {
     }
 }
 
-pub async fn run(home: PathBuf, binding_path: Option<PathBuf>, host: Option<Host>) -> Result<()> {
-    config::load(&home)?;
+pub async fn run(
+    home: PathBuf,
+    binding_path: Option<PathBuf>,
+    host: Option<Host>,
+    explicit_context: bool,
+) -> Result<()> {
+    let cfg = config::load(&home)?;
     let mut guard = None;
     let credentials = if let Some(host) = host {
+        anyhow::ensure!(
+            explicit_context,
+            "host bindings require a pinned --home or --cluster; use gent integration install to configure the host"
+        );
         Credentials::Host(Arc::new(Mutex::new(Bindings::new(&home, host)?)))
     } else if let Some(path) = binding_path {
         // A binding file is selected outside the model by the owner/host per conversation.
+        let existing = crate::managed_file::Snapshot::read(&path)?.text.is_some();
         let credential = config::binding(&path)?;
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -297,6 +308,7 @@ pub async fn run(home: PathBuf, binding_path: Option<PathBuf>, host: Option<Host
             .open(&path)?;
         file.try_lock_exclusive()
             .context("binding is already in use by another MCP connection")?;
+        binding::pin(&path, &cfg, &credential, !existing || explicit_context)?;
         guard = Some(file);
         Credentials::Fixed(credential)
     } else {

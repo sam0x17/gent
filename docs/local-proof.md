@@ -121,7 +121,7 @@ Configure the host to launch the following command, with absolute paths to the b
 gent --home /absolute/private/state mcp serve --binding /absolute/private/state/bindings/chat-a.key
 ```
 
-Gent creates the binding file when absent. The owner or host must choose a different binding file for every conversation. The file is a credential; never paste its contents into a chat or tool argument. A second active MCP process cannot lock the same binding. Reusing the file after that process exits reconnects to the same agent and pending inbox. Without `--binding` or `--host`, each MCP process gets a fresh ephemeral identity.
+Gent creates the binding file when absent. The owner or host must choose a different binding file for every conversation. The file is a credential; never paste its contents into a chat or tool argument. A second active MCP process cannot lock the same binding. Reusing the file after that process exits reconnects to the same agent and pending inbox. A private `chat-a.key.scope.json` sidecar pins its cluster, node and credential digest; retain it with the binding. Another cluster cannot reuse that binding after a default-context switch. An existing binding without a scope needs its original `--home` or `--cluster` once to establish the pin. Without `--binding` or `--host`, each MCP process gets a fresh ephemeral identity.
 
 A host-wide MCP configuration may be shared by multiple chats. Use the host binding mode below for supported hosts. A fixed `--binding` in shared configuration gives every chat the same credential; changing the display name does not create another identity.
 
@@ -208,7 +208,7 @@ gent integration config claude-code
 
 These commands print JSON configuration fragments containing absolute Gent executable and state paths. They do not edit host settings. For Codex, translate the returned `mcp_servers.gent` fields into a `[mcp_servers.gent]` table in the host's `config.toml`. For Claude Code, merge `mcpServers.gent` into its MCP configuration and merge `settings.hooks.PreToolUse` into its settings. Preserve existing entries. Keep the MCP server name `gent`, which the generated Claude hook matches. The installer below applies these entries directly.
 
-Both fragments launch the same stdio server with `gent mcp serve --host codex` or `--host claude-code`. Do not combine `--host` with `--binding`. The host selects a persistent credential outside model-visible tool arguments. Gent stores credentials under the private `host-bindings` directory, scoped to node, cluster, host, and conversation. Reconnecting restores that chat's registration and inbox; a fork gets a different binding. Concurrent MCP processes cannot hold the same conversation binding. One MCP connection can hold up to 128 distinct bindings before it must reconnect.
+Both fragments launch the same stdio server with an explicit physical `--home` and `mcp serve --host codex` or `--host claude-code`. Host mode requires a pinned `--home` or `--cluster`; installed entries supply it. Do not combine `--host` with `--binding`. The host selects a persistent credential outside model-visible tool arguments. Gent stores credentials under the private `host-bindings` directory, scoped to node, cluster, host, and conversation. Reconnecting restores that chat's registration and inbox; a fork gets a different binding. Concurrent MCP processes cannot hold the same conversation binding. One MCP connection can hold up to 128 distinct bindings before it must reconnect.
 
 Codex supplies `threadId` in each tool call's protocol metadata. Gent uses that field, which was observed in the tested CLI versions; it does not fall back to `sessionId`, since related threads can share a session tree. Calls without a valid thread ID fail. Existing explicit bindings remain available for hosts without verified metadata support.
 
@@ -372,6 +372,29 @@ The builder renders a small code-native status card and sends SVG source plus a 
 The harness schedules host turns and grants test permissions; it does not inject peer replies or attachments into prompts. Codex uses its read-only shell sandbox for the renderer; Claude permits the renderer command through a Bash prefix rule. Prompts restrict shell use to the renderer, and recorded commands match that restriction. Unrelated configured MCP servers and plugins are disabled. This proof uses a 160 x 100 graphic and inline base64. It establishes a small visual exchange, not arbitrary application editing, large attachments, automatic host wake-up, or persistent relay mode.
 
 The bundled [agent guidance](../crates/gent-link/skills/gent/SKILL.md) is advertised through MCP server instructions. It covers returned agent IDs, retry IDs, receipt semantics, file bytes, polling, and the current relay limits. Messaging grants do not authorize policy changes or confer human authority.
+
+## Local cluster profiles
+
+`gent clusters` (also `gent cluster list`) lists local profiles without contacting a daemon or account service. Register an already initialized directory with `gent cluster add PATH`. This records its cluster ID, node ID and absolute directory; it neither joins a remote cluster nor copies state. For a separate local development cluster:
+
+```sh
+gent --home ~/.gent/clusters/scratch cluster new scratch --local
+gent --home ~/.gent/clusters/scratch daemon install
+gent cluster add ~/.gent/clusters/scratch
+gent clusters
+gent cluster switch scratch
+gent --cluster CLUSTER_UUID agents
+```
+
+The primary directory must already be initialized. `gent cluster switch ID_OR_UNIQUE_NAME` changes the default for subsequent CLI commands. Without an argument it offers a numbered terminal picker; JSON and non-terminal invocations require the argument. `--cluster` selects one profile for a command without changing the default. Names follow each profile's current display label; ambiguous names require an ID. Missing, replaced, linked or mismatched selected state produces an error, without falling back to another cluster. Listing reports unavailable profiles so the user can select a remaining valid one.
+
+Registration upgrades the primary `~/.gent/config.toml` to version 2 and stores the local registry under `[contexts]`. It retains the original cluster's `[node]`, `[cluster]` and policy at that path, with its original keys and database. Additional profiles keep their own config, keys, queues, account sessions and daemon service in their recorded directories. `gent config path` returns the selected profile's configuration path. The registry allows 128 profiles, including the original, and never enters encrypted cluster configuration sync. Configuration writes share `config.lock`; daemon projections preserve the latest selection even if they loaded an older file before a switch.
+
+Switching leaves existing daemons, agents, inboxes, relay attachments and installed host entries in their original cluster. Each profile currently runs its own service. Installed service/MCP/hook commands pass an explicit physical `--home`; those runtime entry points keep interpreting it as that fixed directory. Ordinary CLI commands use that directory's selected context. Use `--cluster CLUSTER_UUID` to override selection explicitly, including for runtime commands. An unpinned new ephemeral MCP connection selects the default once at launch. Existing fixed bindings reject a reconnect into another cluster; installed Codex and Claude entries remain pinned across reconnects and daemon restarts.
+
+Guided creation and enrollment of additional profiles from the primary directory remain unfinished. For now, initialize or enroll a separate `--home` directory with the existing setup commands, then register it with `cluster add`. Registration does not move credentials or share logins between profiles. A single daemon supervising several profiles and profile removal remain future work.
+
+Run `python3 scripts/prove_contexts.py target/debug/gent` for the opt-in native-service proof. It creates two isolated systemd/launchd services, installs MCP entries in temporary host directories, switches contexts with a PNG queued, reconnects both synthetic host clients, checks binding isolation, restarts both services, and exercises the terminal picker. Cleanup removes its services and host entries. It makes no model calls and uses no account service or network relay.
 
 ## Configuration administration
 

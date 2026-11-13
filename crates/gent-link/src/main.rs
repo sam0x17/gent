@@ -1,5 +1,6 @@
 mod auth;
 mod cluster;
+mod contexts;
 mod files;
 mod hooks;
 mod integration;
@@ -29,6 +30,9 @@ struct Cli {
     /// State directory (default: ~/.gent). Use a separate directory for experiments.
     #[arg(long, global = true)]
     home: Option<PathBuf>,
+    /// Use a registered cluster for this command without changing the default.
+    #[arg(long = "cluster", global = true)]
+    context: Option<String>,
     /// Machine-readable output.
     #[arg(long, global = true)]
     json: bool,
@@ -50,6 +54,8 @@ enum Command {
         #[command(subcommand)]
         command: Option<ClusterCommand>,
     },
+    /// List local cluster profiles and the selected CLI context.
+    Clusters,
     /// Install, control, or inspect the local daemon.
     Daemon {
         #[command(subcommand)]
@@ -171,6 +177,16 @@ enum RelayCommand {
 }
 #[derive(Subcommand)]
 enum ClusterCommand {
+    /// Register an initialized local directory; does not join or move an agent.
+    Add {
+        directory: PathBuf,
+    },
+    /// Change the default CLI context; running agents and daemons keep their cluster.
+    Switch {
+        cluster: Option<String>,
+    },
+    /// List registered local cluster profiles.
+    List,
     /// Create a service cluster after gent auth login, or a local development cluster.
     New {
         name: String,
@@ -392,11 +408,57 @@ async fn execute(cli: Cli) -> Result<()> {
     let request_id = cli
         .request_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let home = cli
+    // Installed services and MCP entries already pass an explicit physical
+    // --home. Preserve that binding, including after a service/host restart.
+    let explicit_context = cli.home.is_some() || cli.context.is_some();
+    let pinned_runtime = cli.home.is_some()
+        && matches!(
+            &cli.command,
+            Some(
+                Command::Daemon {
+                    command: Some(DaemonCommand::Run)
+                } | Command::Mcp { .. }
+                    | Command::Integration {
+                        command: integration::Command::Hook { .. }
+                    }
+                    | Command::Cluster {
+                        command: Some(ClusterCommand::PairingServe)
+                    }
+            )
+        );
+    let root = cli
         .home
         .or_else(|| std::env::var_os("GENT_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".gent")))
         .context("cannot locate home; pass --home")?;
+    let context_output = match &cli.command {
+        Some(
+            Command::Clusters
+            | Command::Cluster {
+                command: Some(ClusterCommand::List),
+            },
+        ) => Some(contexts::list(&root)?),
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Add { directory }),
+        }) => Some(contexts::add(&root, directory)?),
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Switch { cluster }),
+        }) => Some(contexts::switch(&root, cluster.clone(), !cli.json)?),
+        _ => None,
+    };
+    if let Some(value) = context_output {
+        if cli.json {
+            println!("{}", serde_json::to_string(&value)?);
+        } else {
+            contexts::print(&value);
+        }
+        return Ok(());
+    }
+    let home = if pinned_runtime && cli.context.is_none() {
+        root
+    } else {
+        contexts::resolve(&root, cli.context.as_deref())?
+    };
     if let Some(Command::Auth { command }) = cli.command {
         let status_only = matches!(command, None | Some(auth::Command::Status));
         let output = auth::execute(&home, command.unwrap_or(auth::Command::Status)).await?;
@@ -494,11 +556,12 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Some(Command::Cluster { .. }) => owner(&home, OwnerOp::Status).await?,
         Some(Command::Daemon { .. } | Command::Auth { .. }) => unreachable!(),
+        Some(Command::Clusters) => unreachable!(),
         Some(Command::Hooks { .. } | Command::Completions { .. }) => unreachable!(),
         Some(Command::Mcp {
             command: McpCommand::Serve { binding, host },
         }) => {
-            mcp::run(home, binding, host).await?;
+            mcp::run(home, binding, host, explicit_context).await?;
             return Ok(());
         }
         Some(Command::Integration { command }) => integration::execute(&home, command)?,

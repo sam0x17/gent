@@ -40,6 +40,56 @@ pub struct Config {
     pub extra: BTreeMap<String, toml::Value>,
 }
 
+/// Machine-local selection only. These records never enter signed authority.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Contexts {
+    pub version: u32,
+    pub active_cluster: String,
+    pub profiles: BTreeMap<String, ContextProfile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextProfile {
+    pub home: PathBuf,
+    pub node_id: String,
+}
+
+impl Contexts {
+    pub const LIMIT: usize = 128;
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.version == 1 && !self.profiles.is_empty() && self.profiles.len() <= Self::LIMIT,
+            "invalid cluster profile registry"
+        );
+        ensure!(
+            self.profiles.contains_key(&self.active_cluster),
+            "active cluster is missing from the profile registry"
+        );
+        let mut homes = std::collections::BTreeSet::new();
+        for (cluster, profile) in &self.profiles {
+            for id in [cluster, &profile.node_id] {
+                ensure!(
+                    uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == *id),
+                    "invalid cluster profile identity"
+                );
+            }
+            let text = profile
+                .home
+                .to_str()
+                .context("profile path must be UTF-8")?;
+            ensure!(
+                profile.home.is_absolute()
+                    && !text.chars().any(char::is_control)
+                    && homes.insert(profile.home.clone()),
+                "cluster profiles require distinct absolute directories"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
@@ -201,9 +251,89 @@ pub(crate) fn load_for_runtime(home: &Path) -> Result<Config> {
 }
 pub fn save(home: &Path, config: &Config) -> Result<()> {
     config.validate()?;
-    write_private(&path(home), toml::to_string_pretty(config)?.as_bytes())
+    private_dir(home)?;
+    let _lock = configuration_lock(home)?;
+    let mut next = config.clone();
+    // A daemon may have loaded its projection before a concurrent switch.
+    // Preserve the latest local registry inside the shared filesystem lock.
+    if path(home).exists() {
+        let previous = load_for_runtime(home)?;
+        if let Some(contexts) = previous.contexts()? {
+            ensure!(
+                previous.cluster.id == next.cluster.id && previous.node.id == next.node.id,
+                "cannot replace the identity of a registered cluster profile"
+            );
+            next.set_contexts(contexts)?;
+        }
+    }
+    next.validate()?;
+    write_private(&path(home), toml::to_string_pretty(&next)?.as_bytes())
+}
+
+/// Serialize local settings edits with daemon projections. The closure reads
+/// the latest file under the same lock used by save, so two edits cannot merge
+/// stale copies of the registry. This does not change signed cluster policy.
+pub fn edit_local<T>(home: &Path, edit: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
+    let _lock = configuration_lock(home)?;
+    let mut config = load_for_runtime(home)?;
+    let result = edit(&mut config)?;
+    config.validate_local()?;
+    write_private(&path(home), toml::to_string_pretty(&config)?.as_bytes())?;
+    Ok(result)
+}
+
+fn configuration_lock(home: &Path) -> Result<fs::File> {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match state_lock(home, "config.lock") {
+            Ok(lock) => return Ok(lock),
+            Err(error)
+                if error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::WouldBlock)
+                }) =>
+            {
+                ensure!(
+                    std::time::Instant::now() < until,
+                    "configuration is busy; retry the command"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 impl Config {
+    pub fn contexts(&self) -> Result<Option<Contexts>> {
+        self.extra
+            .get("contexts")
+            .cloned()
+            .map(|value| -> Result<Contexts> {
+                let contexts: Contexts = value
+                    .try_into()
+                    .context("invalid cluster profile registry")?;
+                contexts.validate()?;
+                let own = contexts
+                    .profiles
+                    .get(&self.cluster.id)
+                    .context("original cluster profile is missing")?;
+                ensure!(
+                    own.node_id == self.node.id,
+                    "original node does not match its profile"
+                );
+                Ok(contexts)
+            })
+            .transpose()
+    }
+    pub fn set_contexts(&mut self, contexts: Contexts) -> Result<()> {
+        contexts.validate()?;
+        self.extra
+            .insert("contexts".into(), toml::Value::try_from(contexts)?);
+        self.version = 2;
+        self.contexts()?;
+        Ok(())
+    }
     pub fn validate(&self) -> Result<()> {
         self.validate_local()?;
         label(&self.node.name)?;
@@ -211,8 +341,17 @@ impl Config {
         gent_crypto::validate_policy(&self.policy)?;
         Ok(())
     }
-    fn validate_local(&self) -> Result<()> {
-        ensure!(self.version == 1, "unsupported configuration version");
+    /// Check routing and identity without rejecting an unapplied shared-policy
+    /// edit. Live policy authority comes from the verified daemon database.
+    pub fn validate_local(&self) -> Result<()> {
+        ensure!(
+            matches!(self.version, 1 | 2),
+            "unsupported configuration version"
+        );
+        ensure!(
+            self.contexts()?.is_some() == (self.version == 2),
+            "configuration version does not match its profile registry"
+        );
         ensure!(
             self.cluster.local_only || self.relay.is_some(),
             "a service cluster requires a configured relay"
