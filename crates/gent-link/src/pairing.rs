@@ -17,13 +17,24 @@ use tokio::{
 
 #[derive(Args)]
 #[command(
-    after_help = "Example: gent cluster join CLUSTER_UUID --via sam@owner-host --name laptop\nSSH host keys must already be trusted. The owner daemon must be running."
+    after_help = "Invitation: gent cluster join --invite-file /private/laptop.gent-invite --name laptop\nSSH: gent cluster join CLUSTER_UUID --via sam@owner-host --name laptop\nTransfer invitation files privately; SSH host keys must already be trusted. The owner daemon must be running."
 )]
 pub struct JoinArgs {
-    cluster: String,
+    #[arg(required_unless_present = "invite_file")]
+    cluster: Option<String>,
     /// SSH destination of an existing owner node (for example sam@studio).
+    #[arg(
+        long,
+        required_unless_present = "invite_file",
+        conflicts_with = "invite_file"
+    )]
+    via: Option<String>,
+    /// Private invitation received through a trusted channel; pairing uses the relay.
     #[arg(long)]
-    via: String,
+    invite_file: Option<PathBuf>,
+    /// Replace a staged invitation while preserving its original node identity.
+    #[arg(long = "continue", requires = "invite_file")]
+    continue_invitation: bool,
     /// Friendly name of this new node.
     #[arg(long)]
     name: String,
@@ -53,11 +64,14 @@ fn shell_word(word: &str) -> Result<String> {
     Ok(format!("'{}'", word.replace('\'', "'\"'\"'")))
 }
 fn remote_command(args: &JoinArgs) -> Result<Command> {
+    let via = args
+        .via
+        .as_deref()
+        .context("SSH joining requires --via HOST")?;
     ensure!(
-        !args.via.is_empty()
-            && !args.via.starts_with('-')
-            && args
-                .via
+        !via.is_empty()
+            && !via.starts_with('-')
+            && via
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || b"@._-:[]".contains(&c)),
         "invalid SSH destination; use a host alias or user@host"
@@ -85,7 +99,7 @@ fn remote_command(args: &JoinArgs) -> Result<Command> {
         "-o",
         "ClearAllForwardings=yes",
         "--",
-        &args.via,
+        via,
         &words.join(" "),
     ]);
     command
@@ -172,11 +186,31 @@ impl Peer for Remote {
 }
 
 pub async fn join(home: &Path, args: JoinArgs) -> Result<Value> {
+    if let Some(file) = &args.invite_file {
+        ensure!(
+            args.remote_home.is_none()
+                && args.relay_endpoint.is_none()
+                && args.remote_gent == "gent",
+            "invitation joins do not accept SSH paths or relay overrides"
+        );
+        return crate::invitations::join(
+            home,
+            file,
+            args.cluster.as_deref(),
+            &args.name,
+            args.continue_invitation,
+        )
+        .await;
+    }
+    let cluster = args
+        .cluster
+        .as_deref()
+        .context("SSH joining requires a cluster ID")?;
     let mut peer = Remote {
         home: crate::managed_file::normalize(home)?,
         service: None,
         command: remote_command(&args)?,
-        cluster: args.cluster.clone(),
+        cluster: cluster.into(),
         child: None,
         input: None,
         output: None,
@@ -184,7 +218,7 @@ pub async fn join(home: &Path, args: JoinArgs) -> Result<Value> {
     let result = pairing::join(
         home,
         Options {
-            cluster: &args.cluster,
+            cluster,
             name: &args.name,
             relay_endpoint: args.relay_endpoint.as_deref(),
         },
@@ -262,8 +296,10 @@ mod tests {
     #[test]
     fn ssh_arguments_preserve_remote_paths_and_require_authentication() {
         let mut args = JoinArgs {
-            cluster: "cluster".into(),
-            via: "sam@studio".into(),
+            cluster: Some("cluster".into()),
+            via: Some("sam@studio".into()),
+            invite_file: None,
+            continue_invitation: false,
             name: "laptop".into(),
             remote_gent: "/tmp/gent's bin/$(touch injected)".into(),
             remote_home: Some("/tmp/private home".into()),
@@ -282,7 +318,7 @@ mod tests {
             &"'/tmp/gent'\"'\"'s bin/$(touch injected)' --home '/tmp/private home' cluster pairing-serve"
         );
         for bad in ["-oProxyCommand=evil", "host;touch file", "host\nother"] {
-            args.via = bad.into();
+            args.via = Some(bad.into());
             assert!(remote_command(&args).is_err());
         }
     }

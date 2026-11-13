@@ -116,6 +116,58 @@ fn enroll_request(
 }
 
 #[test]
+fn local_rpc_requires_owner_authority_and_listing_excludes_invitation_secrets() {
+    let mut fixture = Fixture::new();
+    let create = InvitationOp::Create {
+        request_id: Uuid::now_v7().to_string(),
+        can_configure: true,
+        continuation: None,
+    };
+    assert!(
+        fixture
+            .store
+            .execute(Request::Owner {
+                credential: "wrong".into(),
+                action: OwnerOp::Invitation {
+                    action: create.clone()
+                }
+            })
+            .is_err()
+    );
+    let invoke = |fixture: &mut Fixture, action| {
+        fixture.store.execute(Request::Owner {
+            credential: fixture.credential.clone(),
+            action: OwnerOp::Invitation { action },
+        })
+    };
+    let result = invoke(&mut fixture, create.clone()).unwrap();
+    let bytes = STANDARD
+        .decode(result["private_invitation"].as_str().unwrap())
+        .unwrap();
+    let invitation = Invitation::decode(&bytes).unwrap();
+    assert_eq!(invoke(&mut fixture, create).unwrap(), result);
+    let id = invitation.offer().offer.id.clone();
+    let listing = invoke(&mut fixture, InvitationOp::List).unwrap();
+    assert_eq!(listing["invitations"][0]["phase"], "draft");
+    assert_eq!(listing["invitations"][0].as_object().unwrap().len(), 5);
+    assert!(!listing.to_string().contains("private_invitation"));
+    invoke(&mut fixture, InvitationOp::Activate { id: id.clone() }).unwrap();
+    invoke(&mut fixture, InvitationOp::Revoke { id: id.clone() }).unwrap();
+    assert!(invoke(&mut fixture, InvitationOp::Activate { id: id.clone() }).is_err());
+    assert_eq!(
+        invoke(&mut fixture, InvitationOp::List).unwrap()["invitations"][0]["phase"],
+        "revoked"
+    );
+    let expired = Uuid::new_v7(uuid::Timestamp::from_unix(
+        uuid::NoContext,
+        now() as u64 - 901,
+        0,
+    ))
+    .to_string();
+    invoke(&mut fixture, InvitationOp::Revoke { id: expired }).unwrap();
+}
+
+#[test]
 fn creation_is_owner_only_durable_idempotent_and_keeps_activation_separate() {
     let mut fixture = Fixture::new();
     let request = Uuid::now_v7().to_string();

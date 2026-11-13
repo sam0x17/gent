@@ -204,6 +204,13 @@ impl Store {
         {
             return self.pair(&cluster_id, action);
         }
+        if let Request::Owner {
+            credential,
+            action: OwnerOp::Invitation { action },
+        } = request
+        {
+            return self.manage_invitation(&credential, action);
+        }
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -485,7 +492,7 @@ impl StoreSession<'_> {
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
-            OwnerOp::Pair { .. } => {
+            OwnerOp::Pair { .. } | OwnerOp::Invitation { .. } => {
                 anyhow::bail!("pairing must use its owner-authenticated entry point")
             }
             OwnerOp::Status => Ok(

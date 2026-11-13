@@ -92,6 +92,9 @@ fn candidate() -> Result<String> {
 pub(crate) fn transport_candidate() -> Result<String> {
     credential("gent_t1")
 }
+pub(crate) fn invitation_candidate() -> Result<String> {
+    credential("gent_j1")
+}
 fn credential(prefix: &str) -> Result<String> {
     let secret = random()?
         .iter()
@@ -269,6 +272,111 @@ impl Service {
             clusters.iter().any(|c| c.id == id && c.role == "owner"),
             "the signed-in account does not own this service cluster"
         );
+        Ok(())
+    }
+    pub async fn register_invitation(
+        &self,
+        offer: &gent_crypto::invitation::SignedOffer,
+    ) -> Result<()> {
+        use gent_protocol::service::invitations::{Record, Registration};
+        let offer = &offer.offer;
+        self.check_invitation_service(&offer.service)?;
+        let (status, value) = response(
+            self.request(
+                Method::PUT,
+                &format!(
+                    "v1/clusters/{}/invitations/{}",
+                    offer.anchor.cluster_id, offer.id
+                ),
+            )?
+            .bearer_auth(&self.saved.token)
+            .json(&Registration {
+                owner_node_id: offer.issuer_id.clone(),
+                routing_hash: offer
+                    .routing_digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+                expires_at: offer.expires_at,
+            }),
+        )
+        .await?;
+        let record: Record = serde_json::from_value(success(status, value)?)
+            .map_err(|_| anyhow::anyhow!("invalid invitation registration response"))?;
+        ensure!(
+            record.id == offer.id
+                && record.cluster_id == offer.anchor.cluster_id
+                && record.owner_node_id == offer.issuer_id
+                && record.expires_at == offer.expires_at,
+            "invitation registration scope changed"
+        );
+        Ok(())
+    }
+    pub fn check_invitation_service(
+        &self,
+        binding: &gent_crypto::invitation::ServiceBinding,
+    ) -> Result<()> {
+        binding.validate()?;
+        ensure!(
+            self.origin()? == origin(&binding.account_origin)?
+                && self.session.account_id == binding.account_id,
+            "sign into the invitation's Gent service and account before continuing"
+        );
+        Ok(())
+    }
+    pub async fn exchange_invitation(
+        &self,
+        invitation: &gent_crypto::invitation::Invitation,
+        token: &str,
+    ) -> Result<()> {
+        use gent_protocol::service::invitations::{Exchange, Scope, Side};
+        let offer = &invitation.offer().offer;
+        self.check_invitation_service(&offer.service)?;
+        let (status, value) = response(
+            self.request(
+                Method::POST,
+                &format!("v1/invitations/{}/session", offer.id),
+            )?
+            .bearer_auth(&self.saved.token)
+            .json(&Exchange {
+                routing_secret: invitation
+                    .expose_routing_secret()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+                join_token: token.into(),
+            }),
+        )
+        .await?;
+        let scope: Scope = serde_json::from_value(success(status, value)?)
+            .map_err(|_| anyhow::anyhow!("invalid invitation session response"))?;
+        ensure!(
+            scope.invitation_id == offer.id
+                && scope.cluster_id == offer.anchor.cluster_id
+                && scope.owner_node_id == offer.issuer_id
+                && scope.side == Side::Join
+                && scope.deadline == offer.expires_at
+                && scope.expires_at <= scope.deadline
+                && scope.expires_at > now()?,
+            "invitation session scope changed or expired"
+        );
+        Ok(())
+    }
+    pub async fn revoke_invitation(&self, cluster: &str, id: &str) -> Result<()> {
+        ensure!(
+            uuid::Uuid::parse_str(cluster).is_ok_and(|u| u.to_string() == cluster)
+                && gent_protocol::service::invitations::issued_at(id).is_some(),
+            "invalid invitation identity"
+        );
+        let (status, value) = response(
+            self.request(
+                Method::DELETE,
+                &format!("v1/clusters/{cluster}/invitations/{id}"),
+            )?
+            .bearer_auth(&self.saved.token),
+        )
+        .await?;
+        success(status, value)?;
         Ok(())
     }
     pub async fn transport_session(&self, token: &str) -> Result<Option<TransportSession>> {

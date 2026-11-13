@@ -3,6 +3,7 @@ mod cluster;
 mod files;
 mod hooks;
 mod integration;
+mod invitations;
 mod managed_file;
 mod mcp;
 mod pairing;
@@ -42,7 +43,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<auth::Command>,
     },
-    /// Create or inspect the cluster. Hosted enrollment is not available in this proof.
+    /// Create, join, or inspect a cluster.
     Cluster {
         #[command(subcommand)]
         command: Option<ClusterCommand>,
@@ -180,8 +181,15 @@ enum ClusterCommand {
     Status,
     /// Renew the locally held owner-signed configuration lease.
     Renew,
-    /// Join through an SSH-authenticated owner node; keys stay on their own machines.
+    /// Join with a private invitation file or through a trusted SSH owner node.
     Join(pairing::JoinArgs),
+    /// Create a private invitation for one new node; the owner daemon must be online.
+    Invite(invitations::InviteArgs),
+    /// List or revoke this owner's invitations.
+    Invitations {
+        #[command(subcommand)]
+        command: Option<invitations::Command>,
+    },
     /// Private stdio protocol used by cluster join over SSH.
     #[command(hide = true)]
     PairingServe,
@@ -436,6 +444,12 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Cluster {
             command: Some(ClusterCommand::Join(args)),
         }) => pairing::join(&home, args).await?,
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Invite(args)),
+        }) => invitations::create(&home, args).await?,
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Invitations { command }),
+        }) => invitations::execute(&home, command.unwrap_or(invitations::Command::List)).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::PairingServe),
         }) => {

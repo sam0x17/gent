@@ -998,6 +998,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "fs2",
+ "gent-crypto",
  "gent-daemon",
  "gent-protocol",
  "getrandom 0.4.3",
@@ -1006,12 +1007,14 @@ dependencies = [
  "rmcp",
  "rustix",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
  "toml_edit",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

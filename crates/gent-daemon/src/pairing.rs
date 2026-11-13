@@ -119,6 +119,11 @@ pub trait Peer {
         async { Ok(()) }
     }
     fn call(&mut self, action: PairingOp) -> impl Future<Output = Result<Value>>;
+    /// Called with the committed node while setup and daemon locks are held.
+    /// A receipt failure must not invalidate an already-published installation.
+    fn published(&mut self, _node: &NodeIdentity, _name: &str) -> impl Future<Output = Result<()>> {
+        async { Ok(()) }
+    }
     fn prepare_service(&mut self, _service: &ServiceRelay) -> impl Future<Output = Result<()>> {
         async { anyhow::bail!("this pairing client does not support service enrollment") }
     }
@@ -384,6 +389,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
             peer.provision_service(&home, &home, &service).await?;
         }
         cleanup_published(&home, &local_node);
+        peer.published(&local_node, &config.node.name).await?;
         return Ok(
             json!({"joined":true,"already_joined":true,"node":config.node,"cluster":config.cluster}),
         );
@@ -419,6 +425,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
         if let Some(service) = &service {
             peer.provision_service(&home, &home, service).await?;
         }
+        peer.published(&pending.node, &config.node.name).await?;
         return Ok(
             json!({"joined":true,"node":config.node,"cluster":config.cluster,"configuration_relay":true,"next":"gent daemon install"}),
         );
@@ -562,6 +569,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     }
     config::save(&pending.runtime, &config)?;
     let config = publication::publish(&home, &pending)?;
+    peer.published(&pending.node, &config.node.name).await?;
     let result = json!({"joined":true,"node":config.node,"cluster":config.cluster,"configuration_relay":config.relay.is_some(),"next":["gent","--home",home,"daemon","run"]});
     // Cleanup failure does not turn a committed installation into a failed join.
     let _ = fs::remove_dir_all(&pending.dir);

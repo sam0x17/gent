@@ -396,6 +396,27 @@ pub enum OwnerOp {
         cluster_id: String,
         action: PairingOp,
     },
+    /// Local owner administration; private invitation material is never an agent tool.
+    Invitation {
+        action: InvitationOp,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InvitationOp {
+    Create {
+        request_id: String,
+        can_configure: bool,
+        continuation: Option<String>,
+    },
+    Activate {
+        id: String,
+    },
+    Revoke {
+        id: String,
+    },
+    List,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

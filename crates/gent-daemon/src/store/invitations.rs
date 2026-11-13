@@ -159,13 +159,13 @@ pub struct Session {
 
 /// A bounded encrypted request, distinct from owner RPC. UUIDv4 operation IDs
 /// are scoped to this invitation; retries must preserve their complete input.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Invocation {
     pub id: String,
     pub action: Action,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     Pair { action: PairingOp },
@@ -207,6 +207,57 @@ fn canonical_v4(value: &str) -> Result<Uuid> {
 }
 
 impl Store {
+    pub(super) fn manage_invitation(
+        &mut self,
+        credential: &str,
+        action: InvitationOp,
+    ) -> Result<Value> {
+        self.invitation_owner(credential)?;
+        match action {
+            InvitationOp::Create {
+                request_id,
+                can_configure,
+                continuation,
+            } => {
+                let bytes = self.create_invitation(
+                    credential,
+                    &request_id,
+                    can_configure,
+                    continuation.as_deref(),
+                )?;
+                Ok(json!({"private_invitation": STANDARD.encode(bytes.as_slice())}))
+            }
+            InvitationOp::Activate { id } => {
+                self.activate_invitation(credential, &id)?;
+                Ok(json!({"id":id,"active":true}))
+            }
+            InvitationOp::Revoke { id } => {
+                self.revoke_invitation(credential, &id)?;
+                Ok(json!({"id":id,"revoked":true}))
+            }
+            InvitationOp::List => {
+                let _lock = config::state_lock(&self.home, "invitation.lock")?;
+                observe(&self.db, now() as u64)?;
+                let mut query = self
+                    .db
+                    .prepare("SELECT id FROM invitations ORDER BY id LIMIT 129")?;
+                let ids = query
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                ensure!(
+                    ids.len() <= MAX_INVITATIONS as usize,
+                    "invalid invitation journal size"
+                );
+                let records = ids.iter().map(|id| {
+                    let row = record(&self.db, id)?;
+                    Ok(json!({"id":id,"phase":row.phase,"expires_at":row.offer.offer.expires_at,
+                        "can_configure":row.offer.offer.can_configure,"node":row.claim}))
+                }).collect::<Result<Vec<_>>>()?;
+                Ok(json!({"invitations":records}))
+            }
+        }
+    }
+
     /// Local scheduling metadata only. No private offer material leaves Store.
     /// This rechecks current native authority even when service access survives.
     pub(crate) fn invitation_jobs(&mut self) -> Result<Vec<SignedOffer>> {
@@ -453,14 +504,19 @@ impl Store {
     }
     pub fn revoke_invitation(&mut self, credential: &str, id: &str) -> Result<()> {
         self.invitation_owner(credential)?;
+        let issued =
+            gent_protocol::service::invitations::issued_at(id).context("invalid invitation ID")?;
         let _lock = config::state_lock(&self.home, "invitation.lock")?;
-        observe(&self.db, now() as u64)?;
+        let timestamp = observe(&self.db, now() as u64)?;
         let tx = self.db.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE invitations SET phase='revoked',secret=NULL WHERE id=?1",
             [id],
         )?;
-        ensure!(changed == 1, "invitation unavailable");
+        ensure!(
+            changed == 1 || timestamp >= issued + gent_crypto::invitation::OFFER_LIFETIME,
+            "invitation unavailable"
+        );
         tx.execute(
             "DELETE FROM invitation_operations WHERE invitation=?1",
             [id],
