@@ -8,17 +8,14 @@ use crate::{
 use gent_crypto::{scoped_id, stream::Packet};
 use uuid::Uuid;
 
-const MAX_PENDING: usize = 8192;
 const BATCH: usize = 8;
+pub(super) mod storage;
 
 #[cfg(test)]
 mod tests;
 
 pub(super) fn schema(db: &Connection) -> Result<()> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS mesh_peers(peer TEXT PRIMARY KEY,peer_key BLOB NOT NULL,link TEXT UNIQUE NOT NULL,outgoing BLOB,incoming BLOB);
-        CREATE TABLE IF NOT EXISTS mesh_jobs(id TEXT PRIMARY KEY,body BLOB NOT NULL,done INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,retry_at INTEGER NOT NULL DEFAULT 0,error TEXT);
-        CREATE INDEX IF NOT EXISTS mesh_jobs_pending ON mesh_jobs(done,retry_at);")?;
-    Ok(())
+    storage::schema(db)
 }
 
 fn link_id(state: &VerifiedState, a: &str, b: &str) -> Result<Uuid> {
@@ -114,29 +111,7 @@ impl StoreSession<'_> {
         if !envelope.current(&self.state)? {
             return Ok(());
         }
-        let id = envelope.id().to_string();
-        let body = serde_json::to_vec(&envelope)?;
-        if let Some(saved) = self
-            .db
-            .query_row("SELECT body FROM mesh_jobs WHERE id=?1", [&id], |r| {
-                r.get::<_, Vec<u8>>(0)
-            })
-            .optional()?
-        {
-            ensure!(saved == body, "conflicting mesh signal");
-            return Ok(());
-        }
-        let count: usize =
-            self.db
-                .query_row("SELECT COUNT(*) FROM mesh_jobs WHERE done=0", [], |r| {
-                    r.get(0)
-                })?;
-        ensure!(count < MAX_PENDING, "pending mesh queue is full");
-        self.db.execute(
-            "INSERT INTO mesh_jobs(id,body) VALUES(?1,?2)",
-            params![id, body],
-        )?;
-        Ok(())
+        storage::admit(self.db, &envelope)
     }
     fn queue_mesh(&self, route: &str, envelope: MeshEnvelope) -> Result<()> {
         let id = scoped_id(
@@ -201,15 +176,14 @@ impl Store {
                 self.offer_mesh(&state, writer, &peer)?;
             }
         }
-        let jobs = self.db.prepare("SELECT id,body,attempts,error FROM mesh_jobs WHERE done=0 AND retry_at<=?1 ORDER BY retry_at,rowid LIMIT ?2")?
-            .query_map(params![now(),BATCH], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,u32>(2)?,r.get::<_,Option<String>>(3)?)))?
+        let jobs = self.db.prepare("SELECT id,body,attempts,error,fingerprint FROM mesh_jobs WHERE done=0 AND retry_at<=?1 ORDER BY retry_at,rowid LIMIT ?2")?
+            .query_map(params![now(),BATCH], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,u32>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<Vec<u8>>>(4)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (id, body, attempts, previous) in jobs {
-            let result = serde_json::from_slice(&body)
-                .map_err(anyhow::Error::from)
+        for (id, body, attempts, previous, fingerprint) in jobs {
+            let result = storage::decode(&id, &body, fingerprint.as_deref())
                 .and_then(|envelope| self.process_mesh(&id, envelope));
             if let Err(error) = result {
-                let error = error.to_string();
+                let error = storage::error_text(error.to_string());
                 if previous.as_ref() != Some(&error) {
                     eprintln!("Gent peer setup waiting: {error}");
                 }
@@ -282,10 +256,9 @@ impl Store {
         let state = self.identity.state(&self.db)?;
         state.require_fresh(now() as u64)?;
         if !envelope.current(&state)? {
-            self.db.execute(
-                "UPDATE mesh_jobs SET done=1,error='peer revoked or key replaced' WHERE id=?1",
-                [id],
-            )?;
+            let tx = self.db.unchecked_transaction()?;
+            storage::finish(&tx, id, Some("peer revoked or key replaced"))?;
+            tx.commit()?;
             return Ok(());
         }
         if self.identity.owner.is_some() {
@@ -293,7 +266,7 @@ impl Store {
             let target = envelope.target.clone();
             self.network_session(&tx, self.identity.state(&tx)?)
                 .queue_mesh(&target, envelope)?;
-            tx.execute("UPDATE mesh_jobs SET done=1,error=NULL WHERE id=?1", [id])?;
+            storage::finish(&tx, id, None)?;
             tx.commit()?;
             self.sync_wakeup.notify_one();
             return Ok(());
@@ -339,7 +312,7 @@ impl Store {
                     },
                 )?;
                 save_group(&tx, peer, "outgoing", packet.group())?;
-                tx.execute("UPDATE mesh_jobs SET done=1,error=NULL WHERE id=?1", [id])?;
+                storage::finish(&tx, id, None)?;
                 tx.commit()?;
             }
             MeshSignal::Welcome { packet } => {
@@ -357,7 +330,7 @@ impl Store {
                     "mesh authority changed"
                 );
                 save_group(&tx, peer, "incoming", packet.group())?;
-                tx.execute("UPDATE mesh_jobs SET done=1,error=NULL WHERE id=?1", [id])?;
+                storage::finish(&tx, id, None)?;
                 tx.commit()?;
             }
         }

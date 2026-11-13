@@ -149,12 +149,13 @@ fn clean(db: &Connection, timestamp: i64, dry_run: bool) -> Result<Value> {
     )?;
     let sent = network::retention::clean(db, timestamp, dry_run)?;
     let edits = configuration::storage::clean(db, dry_run)?;
+    let mesh = mesh::storage::clean(db, dry_run)?;
     Ok(
         json!({"dry_run":dry_run,"exchanges_removed":groups,"messages_removed":messages,
         "payload_bytes_removed":payload_bytes,"outbound_events_cancelled":cancelled,
         "import_retries_removed":imports_removed,"relay_attachments_removed":attachments.len(),
         "legacy_exchanges_deferred":deferred,"more_exchanges_due":if dry_run {due.saturating_sub(groups)} else {due},
-        "exchange_batch_limit":BATCH,"sent_event_retries_removed":sent,"configuration_edits":edits}),
+        "exchange_batch_limit":BATCH,"sent_event_retries_removed":sent,"configuration_edits":edits,"mesh_jobs":mesh}),
     )
 }
 
@@ -194,7 +195,8 @@ impl StoreSession<'_> {
             "queued_events":events,"queued_event_bytes":event_bytes,"queued_cancellations":cancellations,
             "network":network::retention::status(self.db,self.timestamp)?,
             "configuration_edits":configuration::storage::status(self.db)?,
-            "scope":"Gent messages, agent retries, node event queues and configuration edits; encrypted streams, signed authority history, and provider histories are separate"}),
+            "mesh_jobs":mesh::storage::status(self.db)?,
+            "scope":"Gent messages, agent retries, node event queues, configuration edits and peer setup jobs; encrypted streams, signed authority history, and provider histories are separate"}),
         )
     }
 }

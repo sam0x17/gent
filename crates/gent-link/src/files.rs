@@ -111,6 +111,14 @@ pub fn print_history(value: &Value) {
             edits["body_bytes_removed"],
             edits["more_due"]
         );
+        let mesh = &value["mesh_jobs"];
+        println!(
+            "Peer setup jobs {}: {} ({} body bytes removed); completed bodies remaining: {}. Retry records retained.",
+            if dry_run { "to compact" } else { "compacted" },
+            mesh["records_compacted"],
+            mesh["body_bytes_removed"],
+            mesh["more_due"]
+        );
     } else {
         println!(
             "Gent messages: {} / {}; payload bytes: {} / {}.",
@@ -164,6 +172,17 @@ pub fn print_history(value: &Value) {
             edits["max_reserved_bytes"],
             edits["pending"],
             edits["legacy_records"]
+        );
+        let mesh = &value["mesh_jobs"];
+        println!(
+            "Peer setup jobs: {} / {}; pending: {} / {}; reserved bytes: {} / {}; completed bodies: {}.",
+            mesh["records"],
+            mesh["max_records"],
+            mesh["pending"],
+            mesh["max_pending"],
+            mesh["reserved_bytes"],
+            mesh["max_reserved_bytes"],
+            mesh["completed_bodies_due"]
         );
         println!(
             "Encrypted streams, signed authority history, and provider histories are separate. Preview: gent history clean --dry-run"

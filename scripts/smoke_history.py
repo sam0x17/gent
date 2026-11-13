@@ -92,6 +92,7 @@ def main():
             human = cli('history', structured=False)
             assert 'Gent messages: 3 / 8192' in human
             assert 'Configuration edit retries:' in human and 'legacy bodies:' in human
+            assert 'Peer setup jobs: 0 / 65536' in human
             assert 'Retry records retained.' in cli('history', 'clean', '--dry-run', structured=False)
             cli('files', 'clean')
             preview = cli('history', 'clean', '--dry-run')

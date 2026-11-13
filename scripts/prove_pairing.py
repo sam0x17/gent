@@ -85,6 +85,20 @@ else:
 '''
 
 
+MESH_STORAGE = r'''
+import hashlib,json,pathlib,sqlite3,sys
+path=pathlib.Path(sys.argv[1])/'state.sqlite3'
+with sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True) as db:
+    rows=db.execute('SELECT id,body,done,fingerprint FROM mesh_jobs ORDER BY id').fetchall()
+    assert len(rows)>=2
+    digest=hashlib.sha256()
+    for request,body,done,fingerprint in rows:
+        assert done==1 and body==b'' and len(fingerprint)==32
+        digest.update(request.encode()+fingerprint)
+    print(json.dumps({'records':len(rows),'retry_digest':digest.hexdigest()}))
+'''
+
+
 def wait_for(check, timeout=30):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -346,6 +360,23 @@ def main():
                 peer_node = json.loads(remote(peer_cli + ['node']).stdout)['id']
                 wait_for(lambda: any(n['id'] == peer_node and n['data_link'] for n in cli('nodes')))
                 wait_for(lambda: len(cli('agents')) == 3 and len(json.loads(remote(peer_cli + ['agents']).stdout)) == 3)
+                history_commands = (cli,
+                    lambda *args: json.loads(remote(owner + list(args)).stdout),
+                    lambda *args: json.loads(remote(peer_cli + list(args)).stdout))
+                for command in history_commands:
+                    wait_for(lambda: command('history')['mesh_jobs']['pending'] == 0)
+                    usage = command('history')['mesh_jobs']
+                    assert usage['records'] >= 2 and usage['completed_bodies_due'] == 0
+                    assert usage['max_records'] == 65536 and usage['max_pending'] == 8192
+                    assert usage['max_reserved_bytes'] == 128 * 1024 * 1024
+                    assert command('history', 'clean', '--dry-run')['mesh_jobs']['records_compacted'] == 0
+
+                def mesh_storage():
+                    return [json.loads(subprocess.check_output(['python3', '-c', MESH_STORAGE, str(home)], text=True)),
+                            json.loads(remote(['python3', '-c', MESH_STORAGE, owner_home]).stdout),
+                            json.loads(remote(['python3', '-c', MESH_STORAGE, peer_home]).stdout)]
+
+                mesh_before = mesh_storage()
                 remote(owner + ['permission', 'allow', aid, cid, '--permission', 'enumerate', 'send'])
                 remote(owner + ['permission', 'allow', cid, aid, '--permission', 'enumerate', 'receive'])
                 wait_for(lambda: any(agent['id'] == cid for agent in a.call('gent_agents')[0]))
@@ -369,6 +400,8 @@ def main():
                 assert any(part['type'] == 'image' and part['data'] == PNG for part in raw['content'])
                 unseen = remote(['python3', '-c', 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]+"/state.sqlite3"); print(db.execute("SELECT COUNT(*) FROM messages WHERE id IN (?,?)",sys.argv[2:]).fetchone()[0])', owner_home, sent['message_id'], direct_reply['message_id']]).stdout.strip()
                 assert unseen == '0'
+                assert mesh_storage() == mesh_before
+                print('PASS: three-node compact peer setup jobs, history diagnostics, retained retry fingerprints, and direct delivery after owner shutdown and joined-node restart')
                 print('PASS: direct joined Linux-Mac MCP image/reply/receipt, owner offline, peer restart, and no owner message copy')
             if args.event_storage:
                 def advance_event_clocks():

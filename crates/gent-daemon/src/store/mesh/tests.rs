@@ -2,6 +2,9 @@ use super::*;
 use crate::pairing::{self, Peer};
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "storage_tests.rs"]
+mod storage_tests;
+
 struct OwnerPeer<'a>(&'a mut Store, String);
 impl Peer for OwnerPeer<'_> {
     async fn call(&mut self, action: PairingOp) -> Result<Value> {
