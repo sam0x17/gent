@@ -2,9 +2,9 @@
 
 The development implementation connects local and directly paired remote agents through the same stdio MCP tools. It has no model API clients or provider catalog. Unknown host labels work without adding Gent code. The daemon owns identity, policy, and durable delivery; each host retains inference and its broader conversation history.
 
-This proof runs on macOS and Linux. Agent messages and attachments stay in the trusted user's local SQLite database. An optional development relay carries end-to-end encrypted configuration, agent announcements, messages, and files between SSH-paired nodes; there is no hosted account or production service yet. Other software running as the same user can access endpoint state and credentials. Do not treat an agent with unrestricted shell access as isolated from the operating-system user.
+This proof runs on macOS and Linux. Agent messages and attachments stay in the trusted user's local SQLite database. An optional development relay carries end-to-end encrypted configuration, agent announcements, messages, and files between SSH-paired nodes. A separate account and service-relay prototype runs through local Workers; no production service is deployed. Other software running as the same user can access endpoint state and credentials. Do not treat an agent with unrestricted shell access as isolated from the operating-system user.
 
-The source CLI also has [recoverable first-owner service setup](service-setup.md), tested against a local account Worker on both OSes. This does not establish a deployed service or service-backed joining of additional nodes.
+The source CLI also has [recoverable service setup](service-setup.md), tested against local Workers with independent credentials for owner and joined nodes. Additional nodes can join through a trusted SSH owner account or a [private invitation file](invitation-enrollment.md). These local proofs do not establish deployed service access or real GitHub consent.
 
 ## Build and verify
 
@@ -79,7 +79,7 @@ The daemon can now use an individual node credential from the account service in
 
 `wrangler_transports_actual_encrypted_configuration` accepts an optional `GENT_TEST_RELAY_PEER_TOKEN_FILE` pointing to the second endpoint's private credential. `wrangler_transports_encrypted_file_objects_with_endpoint_restart` also accepts a service node credential through its existing private token-file parameter. The private harness issues these fixture credentials and runs the real Workers; the public tests do not create service accounts themselves.
 
-These are transport component proofs. The service node labels are fixture IDs, and trusted test code distributes the cryptographic state. The CLI does not yet provision or renew service node credentials, enroll hosted nodes or migrate a development cluster to the service. SSH development pairing continues to require its shared development token and cannot copy a service credential to another node.
+These two tests are transport component proofs: service node labels are fixture IDs, and trusted test code distributes the cryptographic state. Separate CLI proofs now provision actual node IDs and independent credentials through owner setup and SSH or private-file enrollment. `gent cluster connect` reconnects an installed node after credential loss or expiry while preserving its signing identity. Development-cluster migration and hosted agent enrollment remain unfinished. SSH development pairing uses its shared development token; service-backed joins provision each node's own credential.
 
 ## Daemon services
 
@@ -512,7 +512,7 @@ Use `--edit-storage` to queue ten large policies while the owner is offline, res
 
 Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. The separate child-agent harness checks native spawning, resumption and isolated revocation. Authenticated import/export tools now pass native, generic MCP, and real-model proofs without putting large base64 payloads in model context. GUI/hosted file access remains to be tested. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Invite-based pairing and hosted remote connectors remain to be implemented. Account login passes the fixture proofs above; real GitHub consent and deployed service access remain unverified. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, generic MCP messaging, real-model visual revision, and persistent relay turns use the local development relay. Shared agent guidance is bundled through MCP instructions. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
+Private-file invitation pairing is implemented; its [enrollment notes](invitation-enrollment.md) distinguish the tested paths and remaining acceptance work. Hosted remote connectors remain unfinished. Account login passes the fixture proofs above; real GitHub consent and deployed service access remain unverified. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, generic MCP messaging, real-model visual revision, and persistent relay turns have local development-relay proofs. Separate service-relay tests cover scoped credentials and native CLI enrollment. Shared agent guidance is bundled through MCP instructions. The [CLI design](cli.md) and [registration design](providers.md) describe the interfaces and remaining work.
 
 ## Real-agent relay proof
 

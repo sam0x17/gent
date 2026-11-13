@@ -322,7 +322,7 @@ async fn provision(
                 .enroll(&setup.cluster_id, &setup.node_id, &credential.token)
                 .await
                 .with_context(|| if credential.session_hash == service.session_hash() {
-                    "could not provision this node; retry gent cluster connect"
+                    "could not provision this node; rerun the original setup or join command"
                 } else {
                     "pending credential belongs to an earlier sign-in; retry after its 15-minute admission window closes"
                 })?
@@ -349,7 +349,7 @@ async fn provision(
 }
 
 /// The caller holds final-home daemon/service locks and this login's lock. The
-/// staged runtime already has an SSH-approved node-only signing identity.
+/// staged runtime already has an owner-approved node-only signing identity.
 pub(crate) async fn provision_joined(
     runtime: &Path,
     home: &Path,

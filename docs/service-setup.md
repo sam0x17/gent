@@ -1,8 +1,8 @@
 # Service cluster setup
 
-The source build can provision an owner and join additional nodes through a trusted SSH channel against a configured Gent account service. The public account and messaging services are not deployed yet. Real GitHub consent and invitation enrollment remain unfinished.
+The source build can provision an owner and join additional nodes through private-file invitations or a trusted SSH channel against a configured Gent account service. The public account and messaging services are not deployed yet. Real GitHub consent remains unverified.
 
-The [invitation enrollment design](invitation-enrollment.md) describes the next stage. Commands shown there are proposals; use the SSH procedure below for the current build.
+The [invitation enrollment guide](invitation-enrollment.md) documents the implemented commands, protected file transfer, expiry and interrupted-join recovery.
 
 For a configured service:
 
@@ -19,6 +19,25 @@ Use `gent auth login --service https://YOUR_ACCOUNT_ORIGIN` for an alternate dep
 
 `--local` retains the independent development setup. Existing development or SSH-paired clusters are not automatically converted to service transport. They can have compacted mailbox history that requires a separate migration procedure.
 
+## Add another machine with an invitation
+
+Sign into the same Gent service and GitHub account on both machines. With the owner daemon running, create a private invitation file:
+
+```sh
+gent cluster invite --out /private/path/laptop.gent-invite
+```
+
+Transfer that file through an independently trusted channel. On the new machine:
+
+```sh
+gent cluster join --invite-file /private/path/laptop.gent-invite --name laptop
+gent daemon install
+```
+
+The file expires after 15 minutes. Its secrets authenticate the native encrypted enrollment channel; the service cannot supply a replacement trust anchor. Each node gets its own transport credential and keeps its signing key locally. New nodes may edit configuration by default; create the invitation with `--no-configure` for messaging-only membership.
+
+Rerun the original command after an interruption. An expired or revoked offer requires an explicit replacement and `--continue`; see the invitation guide before replacing a partially completed join. `gent cluster invitations` lists offers, and `gent cluster invitations revoke INVITATION_ID` closes admission without removing membership already granted.
+
 ## Add another machine through SSH
 
 On the new machine, sign into the same Gent service and GitHub account as the owner:
@@ -33,7 +52,7 @@ The owner's daemon must be running and its SSH host key already trusted. Use `--
 
 An owner configured by the earlier source build may lack the new local `[service]` metadata. Stop its daemon, run `gent cluster connect`, then start it again before accepting service joins. This adds metadata from its pinned setup record without changing keys or relay storage.
 
-SSH protects the trust anchor, signed enrollment request, configuration grants and key packages. The joining machine creates its signing key locally; the owner signs its membership. Service snapshots carry account/relay metadata and omit the owner's relay credential. The CLI checks its own account session and cluster ownership before requesting enrollment, then provisions a separate transport credential under that session using the actual joined node ID. The owner signing key stays on the owner. This initial single-user implementation requires the same account on each machine; invitation and multi-user enrollment need separate authorization work.
+SSH protects the trust anchor, signed enrollment request, configuration grants and key packages. The joining machine creates its signing key locally; the owner signs its membership. Service snapshots carry account/relay metadata and omit the owner's relay credential. The CLI checks its own account session and cluster ownership before requesting enrollment, then provisions a separate transport credential under that session using the actual joined node ID. The owner signing key stays on the owner. Both SSH and invitation enrollment currently require the same account on each machine; multi-user enrollment needs separate authorization work.
 
 Joining preserves the existing `auth/` directory and the inodes of service, daemon and login lock files. Cryptographic state and pending credential admission remain in a private sibling directory named `~/.gent.joining`. Once ready, an immutable manifest records each runtime file's length and SHA-256 digest. Publication copies verified private files without overwriting conflicts and publishes `config.toml` last. A retry resumes partial publication from the same staged bytes. Temporary copy files stay in the staging directory. Completed publication removes staging copies; a later join retry can finish cleanup after an interruption.
 
@@ -68,4 +87,4 @@ Credentials expire with their issuing account session, currently after 30 days. 
 
 `scripts/prove_setup.py` runs against the private repository's real local account Worker and synthetic GitHub provider. Its forwarding proxy interrupts responses after database commits. The proof covers durable identity, publication before/after configuration, lost reservation and enrollment responses, process termination, competing setup/logout, credential publication conflicts, missing-state and file-link rejection, account pinning, user-service installation, daemon exclusion, credential replacement and permanent retirement. It checks both Linux systemd and Mac launchd through deliberate SSH testing.
 
-The first-owner setup proof does not exercise relay ciphertext delivery. The private account harness's `--relay --pairing` mode runs `scripts/prove_pairing.py` between Linux and the Mac Studio with separate fixture account sessions. It checks service records against real node IDs, different node credentials, encrypted configuration and MCP image/file/reply delivery, restarts, and joined-node credential replacement after logout. Its account sessions are supplied by the synthetic provider fixture; independent CLI login tests cover the browser/device flows. Separate native service-relay proofs cover maximum-size 32 MiB encrypted files. Real GitHub authorization, hosted deployment, invitation enrollment and lost-state recovery still precede daily use.
+The first-owner setup proof does not exercise relay ciphertext delivery. The private account harness's `--relay --pairing` mode runs `scripts/prove_pairing.py` between Linux and the Mac Studio with separate fixture account sessions. It checks service records against real node IDs, different node credentials, encrypted configuration and MCP image/file/reply delivery, restarts, and joined-node credential replacement after logout. Its account sessions are supplied by the synthetic provider fixture; independent CLI login tests cover the browser/device flows. Separate native service-relay proofs cover maximum-size 32 MiB encrypted files. The invitation guide records the distinct private-file enrollment proofs. Real GitHub authorization, hosted deployment and lost-state recovery still precede daily use.
