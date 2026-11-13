@@ -79,3 +79,41 @@ def exercise_authority_history(cli, owner_cli, applied, restart, wait_for):
     assert changed['state'] == 'applied'
     wait_for(lambda: applied(changed['revision']))
     print('PASS: 80 signed revisions, bounded full-history retention, retired configuration retry metadata, released join pins, both daemon restarts, and remote configuration edit after compaction', flush=True)
+
+
+ADVANCE_EVENT_CLOCK = r'''
+import pathlib,sqlite3,sys
+with sqlite3.connect(pathlib.Path(sys.argv[1])/'state.sqlite3') as db:
+    db.execute('UPDATE request_clock SET floor=floor+?', (9*86400,))
+'''
+
+
+def exercise_event_retention(cli, owner_cli, advance, restart, wait_for):
+    commands = (cli, owner_cli)
+    before = []
+    for command in commands:
+        wait_for(lambda: command('history')['queued_events'] == 0)
+        status = command('history')['network']
+        assert status['sent_retries'] > 0 and status['legacy_sent_retries'] == 0
+        assert status['sent_retries_due'] == 0 and status['announcement_watermarks'] > 0
+        before.append(status)
+    # Only disposable request clocks advance. System time and signed authority
+    # are unchanged. This final proof makes no further agent calls afterward.
+    advance()
+    for command in commands:
+        status = command('history')['network']
+        due = status['sent_retries_due']
+        assert due > 0
+        preview = command('history', 'clean', '--dry-run')
+        assert preview['sent_event_retries_removed'] == min(due, 256)
+        assert command('history')['network']['sent_retries_due'] == due
+        cleaned = command('history', 'clean')
+        assert cleaned['sent_event_retries_removed'] == min(due, 256)
+    restart()
+    for command, previous in zip(commands, before):
+        wait_for(lambda: command('history')['network']['sent_retries_due'] == 0)
+        status = command('history')['network']
+        assert status['traffic']['data']['retry_slots'] == 0
+        assert status['sent_retries'] == previous['traffic']['control']['retry_slots']
+        assert status['announcement_watermarks'] == previous['announcement_watermarks']
+    print('PASS: two-machine sent-event retention, bounded CLI preview/cleanup, startup cleanup, persisted registration generations, and preserved control retries', flush=True)

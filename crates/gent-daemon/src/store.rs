@@ -679,7 +679,7 @@ impl StoreSession<'_> {
                 )?;
                 let sender = self.get_agent(&message.sender)?;
                 if sender.node_id != self.identity.node.id() {
-                    self.receipt(&sender.node_id, &message_id, true)?;
+                    self.receipt(&sender.node_id, &message_id, true, message.expires_at)?;
                 }
                 Ok(json!({"acknowledged":true}))
             }

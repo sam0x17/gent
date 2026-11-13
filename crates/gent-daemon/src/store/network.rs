@@ -6,6 +6,7 @@ use crate::{
 use gent_crypto::{SignedLegacyAgentBinding, scoped_id};
 use uuid::Uuid;
 
+pub(super) mod retention;
 #[cfg(test)]
 mod tests;
 
@@ -18,6 +19,7 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
       CREATE TABLE IF NOT EXISTS network_partial(group_id BLOB PRIMARY KEY,id TEXT NOT NULL,digest BLOB NOT NULL,total INTEGER NOT NULL,body BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS network_rejections(message TEXT PRIMARY KEY);")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS messages_exchange_sender ON messages(json_extract(payload,'$.exchange_id'),sender);")?;
+    retention::schema(db)?;
     Ok(())
 }
 
@@ -145,6 +147,16 @@ impl StoreSession<'_> {
         event: Event,
         subject: Option<&str>,
     ) -> Result<()> {
+        self.queue_expiring(peer, id, event, subject, None)
+    }
+    fn queue_expiring(
+        &self,
+        peer: &str,
+        id: Uuid,
+        event: Event,
+        subject: Option<&str>,
+        receipt_expires: Option<i64>,
+    ) -> Result<()> {
         let key: Vec<u8> = self
             .db
             .query_row(
@@ -168,27 +180,7 @@ impl StoreSession<'_> {
         } else {
             active_peer(&self.state, peer, &key, self.timestamp)?;
         }
-        if self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM network_sent WHERE id=?1)",
-            [id.to_string()],
-            |r| r.get::<_, bool>(0),
-        )? {
-            return Ok(());
-        }
-        let body = serde_json::to_vec(&Record {
-            version: 1,
-            authority: self.state.checkpoint().clone(),
-            event,
-        })?;
-        ensure!(
-            body.len() <= MAX_RECORD_BYTES,
-            "node event exceeds transport record limit"
-        );
-        self.db.execute(
-            "INSERT OR IGNORE INTO network_events(id,peer,body,subject) VALUES(?1,?2,?3,?4)",
-            params![id.to_string(), peer, body, subject],
-        )?;
-        Ok(())
+        self.enqueue_event(peer, id, event, subject, receipt_expires)
     }
     pub(super) fn announce(&self, id: &str) -> Result<()> {
         let peers = self
@@ -243,12 +235,26 @@ impl StoreSession<'_> {
             Some(&message.id),
         )
     }
-    pub(super) fn receipt(&self, peer: &str, message: &str, delivered: bool) -> Result<()> {
+    pub(super) fn receipt(
+        &self,
+        peer: &str,
+        message: &str,
+        delivered: bool,
+        expires: i64,
+    ) -> Result<()> {
+        let timestamp = requests::clock(self.db, self.timestamp)?;
+        if expires
+            .checked_add(history::RETENTION)
+            .context("receipt retention overflow")?
+            <= timestamp
+        {
+            return Ok(());
+        }
         let id = scoped_id(
             b"gent/receipt-event/v1\0",
             &[peer.as_bytes(), message.as_bytes(), &[u8::from(delivered)]],
         );
-        self.queue(
+        self.queue_expiring(
             peer,
             id,
             Event::Receipt {
@@ -256,6 +262,7 @@ impl StoreSession<'_> {
                 delivered,
             },
             None,
+            Some(expires),
         )
     }
     fn import_registration(&self, node: &str, incoming: &Registration) -> Result<()> {
@@ -448,9 +455,26 @@ impl StoreSession<'_> {
                     message.created_at,
                     message.expires_at,
                     self.timestamp,
-                )? || !self.deliverable(&message)?
-                {
-                    return self.receipt(peer, &message.id, false);
+                )? {
+                    // An inadmissible ID must not create fresh receipt work;
+                    // otherwise rewritten timestamps could extend its lifetime.
+                    return Ok(());
+                }
+                if !self.deliverable(&message)? {
+                    let expires = if requests::issued(&request_id).is_none() {
+                        // Legacy IDs contain no admission timestamp. A denied
+                        // old message can be rewritten during the fixed upgrade
+                        // grace; retain its receipt beyond that entire window.
+                        let until: i64 = self.db.query_row(
+                            "SELECT legacy_until FROM request_clock WHERE singleton=1",
+                            [],
+                            |r| r.get(0),
+                        )?;
+                        message.expires_at.max(until)
+                    } else {
+                        message.expires_at
+                    };
+                    return self.receipt(peer, &message.id, false, expires);
                 }
                 self.validate_relay_message(&message)?;
                 if let Some(parent_id) = &message.reply_to {
@@ -790,10 +814,7 @@ impl Store {
         // cursor write fails, retrying returns that exact packet without a ratchet step.
         let tx = self.db.unchecked_transaction()?;
         if cancelled || end == body.len() {
-            tx.execute(
-                "INSERT OR IGNORE INTO network_sent VALUES(?1)",
-                [id.to_string()],
-            )?;
+            retention::finish(&tx, id)?;
             tx.execute("DELETE FROM network_events WHERE id=?1", [id.to_string()])?;
         } else {
             tx.execute(

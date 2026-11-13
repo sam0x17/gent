@@ -19,7 +19,8 @@ import uuid
 from urllib.parse import urlparse
 from smoke_mcp import Client, PNG
 from relay_checks import exercise_turns
-from transport_checks import RESTORE_COPIES, exercise_storage, exercise_authority_history
+from transport_checks import (RESTORE_COPIES, ADVANCE_EVENT_CLOCK, exercise_storage,
+                              exercise_authority_history, exercise_event_retention)
 
 
 PREPARE = r'''
@@ -111,8 +112,11 @@ def main():
     parser.add_argument('--file-objects', action='store_true', help='Also prove native files through authenticated MCP and separate ciphertext storage')
     parser.add_argument('--transport-storage', action='store_true', help='Also prove bounded packet/retry storage, replay evidence, compaction, and startup cleanup')
     parser.add_argument('--configuration-storage', action='store_true', help='Also prove signed configuration history compaction across both machines and restarts')
+    parser.add_argument('--event-storage', action='store_true', help='Finally advance disposable request clocks to prove node event retry cleanup')
     parser.add_argument('--remote-relay-port', type=int, default=18789)
     args = parser.parse_args()
+    if args.event_storage and args.remote_join_helper:
+        parser.error('--event-storage cannot be combined with --remote-join-helper')
     url = urlparse(args.relay_url)
     assert url.scheme == 'http' and url.hostname == '127.0.0.1' and url.port
     assert args.remote_binary.startswith('/') and 1024 <= args.remote_relay_port < 65536
@@ -240,7 +244,7 @@ def main():
 
             exercise_turns(a, b, attached['attachment']['id'], files, wait_for, restart_relay_nodes)
             print('PASS: two-machine ordered relay turns, PNG forwarding, restart recovery, cancellation, final outcomes, and exact retries')
-            if args.transport_storage or args.configuration_storage:
+            if args.transport_storage or args.configuration_storage or args.event_storage:
                 def owner_cli(*command):
                     return json.loads(remote(owner + list(command)).stdout)
 
@@ -355,6 +359,14 @@ def main():
                 unseen = remote(['python3', '-c', 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]+"/state.sqlite3"); print(db.execute("SELECT COUNT(*) FROM messages WHERE id IN (?,?)",sys.argv[2:]).fetchone()[0])', owner_home, sent['message_id'], direct_reply['message_id']]).stdout.strip()
                 assert unseen == '0'
                 print('PASS: direct joined Linux-Mac MCP image/reply/receipt, owner offline, peer restart, and no owner message copy')
+            if args.event_storage:
+                def advance_event_clocks():
+                    subprocess.run(['python3', '-c', ADVANCE_EVENT_CLOCK, str(home)], check=True)
+                    remote(['python3', '-c', ADVANCE_EVENT_CLOCK, owner_home])
+                exercise_event_retention(cli, owner_cli, advance_event_clocks, restart_relay_nodes, wait_for)
+                for text in (subprocess.check_output([binary, '--home', str(home), 'history'], text=True),
+                             remote([args.remote_binary, '--home', owner_home, 'history']).stdout):
+                    assert 'data node queue:' in text and 'Sent event retries:' in text
             print('PASS: two-machine pairing, encrypted MCP images/replies/receipts, remote permission edits and renaming, idempotent requests, offline owner recovery, and administration revocation')
             print(f'Configuration applied in {config_latency * 1000:.0f} ms, including the SSH owner command; observation made no daemon requests')
         finally:

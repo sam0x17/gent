@@ -1,7 +1,7 @@
 //! Retire whole expired exchanges only after new requests/replays are inadmissible.
 use super::*;
 
-const RETENTION: i64 = 7 * 24 * 60 * 60;
+pub(super) const RETENTION: i64 = 7 * 24 * 60 * 60;
 const BATCH: usize = 8;
 const MAX_MESSAGES: u64 = 8192;
 const MAX_MESSAGE_BYTES: u64 = 256 * 1024 * 1024;
@@ -147,12 +147,13 @@ fn clean(db: &Connection, timestamp: i64, dry_run: bool) -> Result<Value> {
         [timestamp - RETENTION],
         |r| r.get(0),
     )?;
+    let sent = network::retention::clean(db, timestamp, dry_run)?;
     Ok(
         json!({"dry_run":dry_run,"exchanges_removed":groups,"messages_removed":messages,
         "payload_bytes_removed":payload_bytes,"outbound_events_cancelled":cancelled,
         "import_retries_removed":imports_removed,"relay_attachments_removed":attachments.len(),
         "legacy_exchanges_deferred":deferred,"more_exchanges_due":if dry_run {due.saturating_sub(groups)} else {due},
-        "exchange_batch_limit":BATCH}),
+        "exchange_batch_limit":BATCH,"sent_event_retries_removed":sent}),
     )
 }
 
@@ -190,7 +191,8 @@ impl StoreSession<'_> {
             "message_retention_after_expiry_seconds":RETENTION,"new_request_lifetime_seconds":requests::LIFETIME,
             "request_clock":self.timestamp,"legacy_remote_admission_until":legacy_until,
             "queued_events":events,"queued_event_bytes":event_bytes,"queued_cancellations":cancellations,
-            "scope":"Gent messages and agent retries; encrypted stream, configuration, and provider histories are separate"}),
+            "network":network::retention::status(self.db,self.timestamp)?,
+            "scope":"Gent messages, agent retries and node event queues; encrypted stream, configuration, and provider histories are separate"}),
         )
     }
 }

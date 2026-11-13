@@ -99,6 +99,10 @@ pub fn print_history(value: &Value) {
             value["legacy_exchanges_deferred"],
             value["more_exchanges_due"]
         );
+        println!(
+            "Sent node-event retry records removed: {}.",
+            value["sent_event_retries_removed"]
+        );
     } else {
         println!(
             "Gent messages: {} / {}; payload bytes: {} / {}.",
@@ -118,6 +122,27 @@ pub fn print_history(value: &Value) {
         println!(
             "Queued events: {} ({} bytes), including {} cancellations.",
             value["queued_events"], value["queued_event_bytes"], value["queued_cancellations"]
+        );
+        let network = &value["network"];
+        for class in ["data", "control"] {
+            let usage = &network["traffic"][class];
+            println!(
+                "{class} node queue: {} / {} events; {} / {} bytes; {} / {} retry slots.",
+                usage["queued_events"],
+                usage["max_queued_events"],
+                usage["queued_bytes"],
+                usage["max_queued_bytes"],
+                usage["retry_slots"],
+                usage["max_retry_slots"]
+            );
+        }
+        println!(
+            "Sent event retries: {} ({} legacy, {} due). Registration generation records: {} / {}.",
+            network["sent_retries"],
+            network["legacy_sent_retries"],
+            network["sent_retries_due"],
+            network["announcement_watermarks"],
+            network["max_announcement_watermarks"]
         );
         println!(
             "Message history: seven days after expiry. New request IDs: UUIDv7, first use within 24 hours."

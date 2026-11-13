@@ -2,6 +2,8 @@ use super::*;
 use crate::pairing::{self, Peer};
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "retention_tests.rs"]
+mod retention_tests;
 #[path = "retries.rs"]
 mod retries;
 
@@ -397,18 +399,14 @@ async fn pruned_remote_request_cannot_return_with_original_or_rewritten_timestam
             0
         );
     }
-    let body: Vec<u8> = pair.stores[1]
-        .db
-        .query_row("SELECT body FROM network_events", [], |r| r.get(0))
-        .unwrap();
-    let record: Record = serde_json::from_slice(&body).unwrap();
-    assert!(matches!(
-        record.event,
-        Event::Receipt {
-            delivered: false,
-            ..
-        }
-    ));
+    assert_eq!(
+        pair.stores[1]
+            .db
+            .query_row("SELECT COUNT(*) FROM network_events", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
