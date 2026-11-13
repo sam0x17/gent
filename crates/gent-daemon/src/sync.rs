@@ -26,9 +26,9 @@ pub(crate) struct Stream {
 }
 
 #[derive(Clone)]
-struct Relay {
-    client: Client,
-    origin: Url,
+pub(crate) struct Relay {
+    pub(crate) client: Client,
+    pub(crate) origin: Url,
     authorization: header::HeaderValue,
 }
 #[derive(Deserialize)]
@@ -44,7 +44,7 @@ struct Stored {
 }
 
 impl Relay {
-    fn open(settings: &config::RelayConfig, home: &std::path::Path) -> Result<Self> {
+    pub(crate) fn open(settings: &config::RelayConfig, home: &std::path::Path) -> Result<Self> {
         let origin = settings.validate()?;
         let credential =
             zeroize::Zeroizing::new(config::read_private(&home.join(&settings.credential_file))?);
@@ -135,7 +135,7 @@ impl Relay {
     }
 }
 
-async fn bounded(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+pub(crate) async fn bounded(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     ensure!(
         response.content_length().is_none_or(|n| n <= limit as u64),
         "relay response too large"

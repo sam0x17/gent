@@ -2,6 +2,7 @@
 pub mod config;
 pub mod encrypted;
 pub mod file_objects;
+pub mod file_transport;
 pub mod messages;
 pub mod pairing;
 pub mod replica;

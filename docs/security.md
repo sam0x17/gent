@@ -258,7 +258,7 @@ Six runtime tests inject enqueue, fragment-cursor, and recipient-import failures
 
 ## Encrypted file objects
 
-`gent-crypto::files` and `gent-daemon::file_objects` provide the encryption and endpoint-storage components for larger attachments. They are library APIs for trusted daemon code. The live messaging tools still use inline files with a combined 1 MiB limit. File-object transport, agent-scoped grants, and MCP/native file access are the next integration work.
+`gent-crypto::files` and `gent-daemon::file_objects` provide the encryption and endpoint-storage components for larger attachments. `gent-daemon::file_transport::FileRelay` transfers their ciphertext through a development Worker with D1 reservations and R2 storage. These are library APIs for trusted daemon code. The live messaging tools still use inline files with a combined 1 MiB limit. Agent-scoped grants, automatic dispatch, and MCP/native file access are the next integration work.
 
 Each new `seal` call generates an independent UUIDv4 object ID and a random 256-bit key, including when forwarding identical bytes. RustCrypto ChaCha20-Poly1305 encrypts chunks of up to 256 KiB. Its 96-bit nonce is eight zero bytes followed by the chunk index as a big-endian 32-bit integer. The API seals an immutable object once; it does not allow callers to encrypt different plaintext under an existing key and index. Retries must reuse saved ciphertext and its grant. An empty file has one authenticated empty chunk.
 
@@ -266,7 +266,7 @@ Every chunk authenticates the complete manifest, chunk count, and index. The AAD
 
 The public `FileDescriptor` contains only the ID, basename, media type, byte length, and integrity hash. `FileGrant` contains the key and manifest, has no `Debug` or `Serialize` implementation, and requires explicit private encoding. Its versioned JSON parser rejects unknown or duplicated fields, invalid manifests, oversized grants, and malformed keys without echoing secret parser input. Grants are intended for protected local state and encrypted message records. Their possession alone does not authorize agent access. Names, types, hashes, and keys must never be sent as object-storage metadata.
 
-The storage API operates within the caller's SQLite transaction so file reservation, ciphertext, and an enclosing message can commit together. Receiving an authenticated grant reserves the complete expected ciphertext size before accepting chunks. Each incoming chunk is authenticated before storage; duplicates must match exactly. Downloads may arrive out of order and resume after reopening the database. Complete reads require the full verified file. Upload acknowledgments persist separately and mean service storage only. A lost relay copy can be uploaded again using identical ciphertext.
+The storage API operates within the caller's SQLite transaction so file reservation, ciphertext, and an enclosing message can commit together. Receiving an authenticated grant reserves the complete expected ciphertext size before accepting chunks. Each incoming chunk is authenticated before storage; duplicates must match exactly. Downloads may arrive out of order and resume after reopening the database. Complete reads require the full verified file. Upload acknowledgments persist separately and mean service storage only. A lost relay copy can be uploaded again using identical ciphertext. The public storage manifest can be reconstructed from saved chunks and the original deadline after restart, without exporting the private grant.
 
 | Endpoint storage limit | Value |
 | --- | --- |
@@ -278,11 +278,40 @@ The storage API operates within the caller's SQLite transaction so file reservat
 | Incomplete object lifetime | At most one hour from its local reservation |
 | Complete object retention | Caller-selected deadline, at most seven days from its local reservation |
 
-Exact retries cannot change stored keys, manifests, deadlines, or ciphertext. Expired or abandoned objects become inaccessible before cleanup runs. Explicit deletion and cleanup remove their grants and chunks together and release logical quota. These limits bound this component's live objects, not SQLite/WAL file sizes, old backups, message history, or service storage. Cleanup scheduling and remote retention remain integration work. Private key buffers and successful decrypted buffers are zeroized on drop; forensic erasure of all temporary copies, database pages, and backups is not established.
+Exact retries cannot change stored keys, manifests, deadlines, or ciphertext. Expired or abandoned objects become inaccessible before cleanup runs. Explicit deletion and cleanup remove their grants and chunks together and release logical quota. These limits bound this component's live objects, not SQLite/WAL file sizes, old backups, or message history. Endpoint cleanup scheduling remains integration work; the development relay has its own durable cleanup alarm described below. Private key buffers and successful decrypted buffers are zeroized on drop; forensic erasure of all temporary copies, database pages, and backups is not established.
 
-Six crypto tests and nine storage tests cover empty and maximum-size files, manifest/key/chunk substitution, malformed grants, whole-file integrity, restart recovery, upload retry, atomic rollback with an enclosing message, concurrent reservations, quotas, expiry, deletion, missing chunks, and schema versions. Three committed vectors also match Python `cryptography` independently, including a nonzero chunk nonce and an empty file. Reproduce them with `python3 scripts/file_object_vectors.py --check` in an environment with that package installed.
+Seven crypto tests and nine storage tests cover empty and maximum-size files, manifest/key/chunk substitution, malformed grants, whole-file integrity, restart recovery, upload retry, atomic rollback with an enclosing message, concurrent reservations, quotas, expiry, deletion, missing chunks, schema versions, and separation of public ciphertext metadata from private metadata. Three committed vectors also match Python `cryptography` independently, including a nonzero chunk nonce and an empty file. Reproduce them with `python3 scripts/file_object_vectors.py --check` in an environment with that package installed.
 
-The next integration must bind file IDs to authenticated agents and messages, recheck current policy for retrieval and forwarding, persist retry IDs with the chosen immutable objects, and encrypt grants before dispatch. It must derive deadlines from the original authorized transfer; deleting an object must not let a replay acquire a new lifetime. It also needs bounded ciphertext-only relay object routes, transfer and cleanup scheduling, and native host file-input/output proofs. No larger-file delivery or host-access claim follows from these component tests.
+The next integration must bind file IDs to authenticated agents and messages, recheck current policy for retrieval and forwarding, persist retry IDs with the chosen immutable objects, and encrypt grants before dispatch. It must derive deadlines from the original authorized transfer; deleting an object must not let a replay acquire a new lifetime. Automatic transfer/endpoint cleanup and native host file-input/output proofs remain. The transport tests use trusted fixture handoffs for keys and do not establish agent permission enforcement or host file access.
+
+### File-object relay protocol
+
+All object routes require the development relay credential. IDs are canonical UUIDv4 strings. The public manifest contains `version: 1`, an ordered `chunks` array of `{bytes, sha256}` entries covering ciphertext and its AEAD tags, and `expires_at`. It contains no filename, media type, plaintext hash, agent identity, or key. File sizes, opaque IDs, ciphertext hashes, deadlines, and access timing remain visible to the service.
+
+| Request | Behavior |
+| --- | --- |
+| `PUT /v1/objects/{id}` | Reserve the complete object using its public manifest; exact retries preserve the deadline and progress. |
+| `GET /v1/objects/{id}` | Return the manifest, sorted uploaded indices, `complete` hint, and fixed `upload_until` deadline. |
+| `PUT /v1/objects/{id}/{index}` | Store the exact reserved ciphertext chunk; conflicting bytes fail. |
+| `GET /v1/objects/{id}/{index}` | Retrieve a stored chunk as `application/octet-stream`, with caching disabled. |
+| `DELETE /v1/objects/{id}` | Retire the object and remove its R2 chunks; repeated deletion is safe. |
+
+D1 reserves up to 128 active or deleting objects and 256 MiB of ciphertext, including AEAD tags, in the shared development realm. SQL enforces these aggregate limits. Manifests are bounded to 16 KiB and chunks to 256 KiB plus a tag. An incomplete reservation lasts at most one hour; its overall expiry is at most seven days from creation. Neither deadline extends on retry. Completed objects can be repaired with identical ciphertext until their original expiry.
+
+A Durable Object serializes mutations across D1/R2 awaits. Conditional R2 writes prevent replacement; an existing chunk must match the retry. Progress commits only after R2 acknowledges storage. If that progress write is lost, uploading the same chunk reconstructs it. Expired, abandoned, and deleted objects remain inaccessible. Cleanup retains reserved quota until R2 deletion succeeds, then keeps a tombstone until the original expiry plus one day. At most 4,096 active/deleting/retired records are retained. Durable alarms process cleanup in bounded batches without agent traffic and retry interrupted deletion. This is logical retention, with no forensic-erasure guarantee.
+
+The Rust client shares the existing private-credential, safe-origin, timeout, and no-redirect transport setup. It bounds response bodies, validates progress shape, compares reservation acknowledgments to the original manifest, and verifies chunk lengths and ciphertext hashes. The private grant's AEAD and whole-file hash still establish content authenticity. Relay progress never grants agent access or proves delivery. Two client tests reject malformed progress, changed manifests, corrupt/oversized responses, and redirects that could forward credentials. Two protocol tests cover framing and progress bounds.
+
+An opt-in native test transfers a 32 MiB object and an empty file through the local Rust Worker on Linux and macOS. It reopens sender and receiver databases, reconstructs the original public manifest, retries a lost upload acknowledgment, resumes partial downloads, and verifies the decrypted bytes. It is separate from the default test suite:
+
+```sh
+GENT_TEST_RELAY_URL=http://127.0.0.1:18787 \
+GENT_TEST_RELAY_TOKEN_FILE=/absolute/private/relay.key \
+cargo test -p gent-daemon --test file_transport --locked \
+  wrangler_transports_encrypted_file_objects_with_endpoint_restart -- --ignored
+```
+
+The development Worker also passes HTTP tests for conflicting/concurrent uploads, declared and streamed body limits, both aggregate quotas, alarm-driven expiry without HTTP traffic, abandoned uploads, interrupted deletion, and tombstones. Production account/node authorization, storage billing, and dispatch through actual agent messages remain unfinished. This proof creates only local D1/R2 state and does not deploy a messaging service.
 
 ## Boundaries still to implement
 
@@ -360,4 +389,4 @@ Eight installer tests on both OSes cover ownership, unrelated-setting preservati
 
 Five shell-integration tests and real shell process proofs pass on both platforms, including macOS Bash 3.2, Zsh Tab completion, and Fish. Shell setup preserves unrelated startup-file bytes, serializes Gent writers, and refuses changed blocks, linked files, and shared write access. Shell startup only loads PATH/completion; agent identity and permissions remain with the MCP integration and daemon.
 
-The native workspace has 168 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, signer interface, and file-object crypto compile for Wasm; native SQLite storage and crypto runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.
+The native workspace has 173 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, signer interface, and file-object crypto compile for Wasm; native SQLite storage and crypto runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.

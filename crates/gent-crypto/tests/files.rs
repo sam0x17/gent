@@ -99,6 +99,33 @@ fn new_transfers_use_independent_ids_keys_and_ciphertext() {
 }
 
 #[test]
+fn storage_manifest_contains_only_ciphertext_metadata() {
+    let sealed = seal(
+        "private-filename.png",
+        "image/png",
+        b"private image content",
+    )
+    .unwrap();
+    let manifest = sealed.transport_manifest(12345).unwrap();
+    manifest.validate().unwrap();
+    let encoded = serde_json::to_string(&manifest).unwrap();
+    for private in [
+        "private-filename.png",
+        "image/png",
+        "private image content",
+        &sealed.grant().descriptor().sha256,
+    ] {
+        assert!(!encoded.contains(private));
+    }
+    assert_eq!(
+        manifest.ciphertext_bytes(),
+        sealed.grant().ciphertext_bytes()
+    );
+    assert_eq!(manifest.chunks.len(), sealed.chunks().len());
+    assert!(sealed.transport_manifest(0).is_err());
+}
+
+#[test]
 fn every_chunk_binds_its_manifest_position_and_key() {
     let bytes = vec![42; CHUNK_BYTES * 2 + 17];
     let sealed = seal("original.bin", "application/octet-stream", &bytes).unwrap();

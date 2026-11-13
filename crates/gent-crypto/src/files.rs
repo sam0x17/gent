@@ -14,10 +14,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-pub const CHUNK_BYTES: usize = 256 * 1024;
-pub const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
-pub const MAX_CHUNKS: u32 = (MAX_FILE_BYTES / CHUNK_BYTES) as u32;
-pub const TAG_BYTES: usize = 16;
+pub use gent_protocol::file_objects::{CHUNK_BYTES, MAX_CHUNKS, MAX_FILE_BYTES, TAG_BYTES};
 pub const MAX_GRANT_BYTES: usize = 2048;
 
 /// No Debug, Serialize, or public key accessor: exporting a grant must be explicit.
@@ -54,6 +51,27 @@ impl SealedFile {
 
     pub fn chunks(&self) -> &[Vec<u8>] {
         &self.chunks
+    }
+
+    /// The only metadata needed by object storage. Its hashes cover ciphertext.
+    pub fn transport_manifest(
+        &self,
+        expires_at: u64,
+    ) -> Result<gent_protocol::file_objects::Manifest> {
+        let manifest = gent_protocol::file_objects::Manifest {
+            version: 1,
+            chunks: self
+                .chunks
+                .iter()
+                .map(|bytes| gent_protocol::file_objects::Chunk {
+                    bytes: bytes.len() as u32,
+                    sha256: format!("{:x}", Sha256::digest(bytes)),
+                })
+                .collect(),
+            expires_at,
+        };
+        manifest.validate().map_err(anyhow::Error::msg)?;
+        Ok(manifest)
     }
 }
 

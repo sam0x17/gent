@@ -8,6 +8,7 @@
 use anyhow::{Context, Result, ensure};
 use gent_crypto::files::{FileGrant, SealedFile};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 pub const MAX_OBJECTS: u64 = 128;
@@ -283,6 +284,28 @@ impl<'a> Objects<'a> {
     pub fn read(&self, id: &str) -> Result<Zeroizing<Vec<u8>>> {
         self.ready(id)?;
         self.open(id)
+    }
+
+    /// Reconstruct the public storage manifest after restart from saved immutable
+    /// chunks and the original deadline. This never exports a private grant.
+    pub fn transport_manifest(&self, id: &str) -> Result<gent_protocol::file_objects::Manifest> {
+        use gent_protocol::file_objects::{Chunk, Manifest};
+        let grant = self.ready(id)?;
+        let mut chunks = Vec::with_capacity(grant.chunk_count() as usize);
+        for index in 0..grant.chunk_count() {
+            let bytes = self.upload_chunk(id, index)?;
+            chunks.push(Chunk {
+                bytes: bytes.len() as u32,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+            });
+        }
+        let manifest = Manifest {
+            version: 1,
+            chunks,
+            expires_at: self.status(id)?.expires_at,
+        };
+        manifest.validate().map_err(anyhow::Error::msg)?;
+        Ok(manifest)
     }
 
     /// Uploads expose only fully persisted objects, never partial local imports.

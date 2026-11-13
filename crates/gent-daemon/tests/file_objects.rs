@@ -52,6 +52,10 @@ fn sender_restarts_retry_exact_ciphertext_without_duplicate_upload_state() {
     assert_eq!(count(&tx, "file_chunks"), 3);
     assert_eq!(store.pending_uploads(id).unwrap(), [1, 2]);
     assert_eq!(
+        store.transport_manifest(id).unwrap(),
+        sealed.transport_manifest(EXPIRY).unwrap()
+    );
+    assert_eq!(
         store.grant(id).unwrap().encode_private().unwrap(),
         sealed.grant().encode_private().unwrap()
     );
@@ -97,6 +101,7 @@ fn receiver_resumes_out_of_order_chunks_and_verifies_before_reading() {
         assert!(store.read(id).is_err());
         assert!(store.upload_chunk(id, 2).is_err());
         assert!(store.pending_uploads(id).is_err());
+        assert!(store.transport_manifest(id).is_err());
         assert!(store.acknowledge_upload(id, 2).is_err());
         assert!(store.finish(id).is_err());
         tx.commit().unwrap();

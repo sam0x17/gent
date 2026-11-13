@@ -1,6 +1,7 @@
 //! Portable identities, local RPC types, and endpoint permission semantics.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+pub mod file_objects;
 
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
