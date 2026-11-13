@@ -690,6 +690,163 @@ fn pending_node(home: &Path) -> NodeIdentity {
     .unwrap()
 }
 
+#[test]
+fn admitted_attempts_cannot_be_reconstructed_after_restart_or_hello_substitution() {
+    let mut fixture = Fixture::new();
+    let invitation = fixture.issue(true, None);
+    let id = &invitation.offer().offer.id;
+    let (_, hello) = Initiator::start(&invitation, now() as u64).unwrap();
+    assert!(
+        !fixture
+            .store
+            .invitation_attempt_seen(id, &hello.attempt)
+            .unwrap()
+    );
+    let (_pending, _lost_reply) = fixture.store.begin_invitation(id, &hello).unwrap();
+    fixture.reopen();
+    for _ in 0..3 {
+        assert!(
+            fixture
+                .store
+                .invitation_attempt_seen(id, &hello.attempt)
+                .unwrap()
+        );
+        assert!(fixture.store.begin_invitation(id, &hello).is_err());
+    }
+    let (_, mut changed) = Initiator::start(&invitation, now() as u64).unwrap();
+    changed.attempt = hello.attempt;
+    assert!(fixture.store.begin_invitation(id, &changed).is_err());
+    assert_eq!(record(&fixture.store.db, id).unwrap().attempts, 1);
+    let (_, fresh) = Initiator::start(&invitation, now() as u64).unwrap();
+    fixture.store.begin_invitation(id, &fresh).unwrap();
+    assert_eq!(record(&fixture.store.db, id).unwrap().attempts, 2);
+    observe(&fixture.store.db, invitation.offer().offer.expires_at).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .db
+            .query_row("SELECT COUNT(*) FROM invitation_attempts", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn attempt_reservation_and_budget_commit_together_before_exposing_the_reply() {
+    let mut fixture = Fixture::new();
+    let invitation = fixture.issue(true, None);
+    let id = &invitation.offer().offer.id;
+    let (_, mut bad) = Initiator::start(&invitation, now() as u64).unwrap();
+    bad.noise[0] ^= 1;
+    assert!(fixture.store.begin_invitation(id, &bad).is_err());
+    assert!(
+        !fixture
+            .store
+            .invitation_attempt_seen(id, &bad.attempt)
+            .unwrap()
+    );
+    assert_eq!(record(&fixture.store.db, id).unwrap().attempts, 0);
+    for sql in [
+        "CREATE TRIGGER fail_attempt BEFORE INSERT ON invitation_attempts BEGIN SELECT RAISE(ABORT,'injected reservation failure'); END;",
+        "CREATE TRIGGER fail_attempt BEFORE UPDATE OF attempts ON invitations BEGIN SELECT RAISE(ABORT,'injected counter failure'); END;",
+    ] {
+        let (_, hello) = Initiator::start(&invitation, now() as u64).unwrap();
+        fixture.store.db.execute_batch(sql).unwrap();
+        let count = record(&fixture.store.db, id).unwrap().attempts;
+        assert!(fixture.store.begin_invitation(id, &hello).is_err());
+        assert!(
+            !fixture
+                .store
+                .invitation_attempt_seen(id, &hello.attempt)
+                .unwrap()
+        );
+        assert_eq!(record(&fixture.store.db, id).unwrap().attempts, count);
+        fixture
+            .store
+            .db
+            .execute_batch("DROP TRIGGER fail_attempt")
+            .unwrap();
+        fixture.reopen();
+        fixture.store.begin_invitation(id, &hello).unwrap();
+    }
+}
+
+#[test]
+fn competing_stores_admit_the_same_handshake_at_most_once() {
+    let mut fixture = Fixture::new();
+    let invitation = fixture.issue(false, None);
+    let (_, hello) = Initiator::start(&invitation, now() as u64).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let threads: Vec<_> = (0..2)
+        .map(|_| {
+            let home = fixture.home.path().to_owned();
+            let id = invitation.offer().offer.id.clone();
+            let hello = Hello {
+                attempt: hello.attempt.clone(),
+                noise: hello.noise.clone(),
+            };
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let mut store = Store::open(&home).unwrap();
+                barrier.wait();
+                store.begin_invitation(&id, &hello).is_ok()
+            })
+        })
+        .collect();
+    let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(results.iter().filter(|ok| **ok).count(), 1);
+    assert_eq!(
+        record(&fixture.store.db, &invitation.offer().offer.id)
+            .unwrap()
+            .attempts,
+        1
+    );
+}
+
+#[test]
+fn migration_closes_only_legacy_used_offers_and_missing_attempt_journal_fails_closed() {
+    let mut fixture = Fixture::new();
+    let used = fixture.issue(true, None);
+    let unused = fixture.issue(false, None);
+    let (_, hello) = Initiator::start(&used, now() as u64).unwrap();
+    fixture
+        .store
+        .begin_invitation(&used.offer().offer.id, &hello)
+        .unwrap();
+    let keys = fs::read(fixture.home.path().join("identity.key")).unwrap();
+    fixture
+        .store
+        .db
+        .execute_batch("DROP TABLE invitation_attempts; PRAGMA user_version=14;")
+        .unwrap();
+    fixture.reopen();
+    let used_row = record(&fixture.store.db, &used.offer().offer.id).unwrap();
+    assert_eq!(used_row.phase, "revoked");
+    assert!(used_row.secret.is_none());
+    assert_eq!(
+        record(&fixture.store.db, &unused.offer().offer.id)
+            .unwrap()
+            .phase,
+        "issued"
+    );
+    assert_eq!(
+        fs::read(fixture.home.path().join("identity.key")).unwrap(),
+        keys
+    );
+    let (_, hello) = Initiator::start(&unused, now() as u64).unwrap();
+    fixture
+        .store
+        .begin_invitation(&unused.offer().offer.id, &hello)
+        .unwrap();
+    fixture
+        .store
+        .db
+        .execute_batch("DROP TABLE invitation_attempts;")
+        .unwrap();
+    assert!(Store::open(fixture.home.path()).is_err());
+}
+
 #[tokio::test]
 async fn committed_grants_and_links_recover_after_failed_journal_completion() {
     for kind in ["configuration", "data", "accept"] {
@@ -838,7 +995,7 @@ async fn explicit_continuation_recovers_original_node_and_crypto_requests_across
 fn migration_preserves_state_and_refuses_missing_established_invitation_journals() {
     let mut fixture = Fixture::new();
     let keys = fs::read(fixture.home.path().join("identity.key")).unwrap();
-    fixture.store.db.execute_batch("DROP TABLE invitation_operations; DROP TABLE invitations; DROP TABLE invitation_clock; PRAGMA user_version=13;").unwrap();
+    fixture.store.db.execute_batch("DROP TABLE invitation_attempts; DROP TABLE invitation_operations; DROP TABLE invitations; DROP TABLE invitation_clock; PRAGMA user_version=13;").unwrap();
     fixture.reopen();
     assert_eq!(
         fixture
@@ -846,7 +1003,7 @@ fn migration_preserves_state_and_refuses_missing_established_invitation_journals
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
             .unwrap(),
-        14
+        15
     );
     assert_eq!(
         fs::read(fixture.home.path().join("identity.key")).unwrap(),
@@ -895,6 +1052,7 @@ fn invitation_and_handshake_capacity_preserve_retries_revocation_and_expiry_clea
         .store
         .begin_invitation(&invitation.offer().offer.id, &hello)
         .unwrap();
+    let (_, hello) = Initiator::start(&invitation, now() as u64).unwrap();
     assert!(
         fixture
             .store

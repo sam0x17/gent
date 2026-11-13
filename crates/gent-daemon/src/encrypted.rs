@@ -1037,7 +1037,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        matches!(version, 0..=14),
+        matches!(version, 0..=15),
         "unsupported MLS database version"
     );
     crate::storage::configure(&db)?;
@@ -1102,7 +1102,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
           CREATE TABLE IF NOT EXISTS stream_confirmed (
             group_id BLOB PRIMARY KEY,reader TEXT NOT NULL,reader_key BLOB NOT NULL,
             sequence INTEGER NOT NULL,digest BLOB NOT NULL,receipt BLOB NOT NULL);
-          PRAGMA user_version=14;",
+          PRAGMA user_version=15;",
         )?;
     crate::store::invitations::schema(&schema, version)?;
     let has_purpose = {

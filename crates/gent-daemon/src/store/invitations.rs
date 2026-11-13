@@ -39,9 +39,8 @@ pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
             )? == 1,
             "invitation clock is missing; restore this node's state"
         );
-        return Ok(());
-    }
-    db.execute_batch("CREATE TABLE IF NOT EXISTS invitation_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1),floor INTEGER NOT NULL);
+    } else {
+        db.execute_batch("CREATE TABLE IF NOT EXISTS invitation_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1),floor INTEGER NOT NULL);
         INSERT OR IGNORE INTO invitation_clock VALUES(1,0);
         CREATE TABLE IF NOT EXISTS invitations(
           id TEXT PRIMARY KEY,create_request TEXT UNIQUE NOT NULL,intent BLOB NOT NULL CHECK(length(intent)=32),
@@ -56,6 +55,22 @@ pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
           done INTEGER NOT NULL DEFAULT 0 CHECK(done IN (0,1)),group_id BLOB CHECK(length(group_id)<=256),
           PRIMARY KEY(invitation,id));
         CREATE INDEX IF NOT EXISTS invitation_operation_kind ON invitation_operations(invitation,kind);")?;
+    }
+    if previous >= 15 {
+        ensure!(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='invitation_attempts')",
+            [], |r| r.get::<_, bool>(0)
+        )?, "invitation attempt journal is missing; restore this node's state");
+    } else {
+        // Version 14 did not retain attempt IDs. It cannot safely distinguish
+        // old handshakes after an upgrade. Keep membership/keys, but close used
+        // offers; partial joins can use an explicit continuation invitation.
+        db.execute_batch("DELETE FROM invitation_operations WHERE invitation IN (SELECT id FROM invitations WHERE attempts>0);
+            UPDATE invitations SET phase='revoked',secret=NULL WHERE attempts>0;
+            CREATE TABLE IF NOT EXISTS invitation_attempts(
+              invitation TEXT NOT NULL REFERENCES invitations(id) ON DELETE CASCADE,
+              id TEXT NOT NULL CHECK(length(id)=36),PRIMARY KEY(invitation,id));")?;
+    }
     Ok(())
 }
 
@@ -129,6 +144,7 @@ fn observe(db: &Connection, wall: u64) -> Result<u64> {
     // SQLite foreign-key enforcement disabled. Both deletions commit together.
     let tx = db.unchecked_transaction()?;
     tx.execute("DELETE FROM invitation_operations WHERE invitation IN (SELECT id FROM invitations WHERE expires<=?1)", [floor])?;
+    tx.execute("DELETE FROM invitation_attempts WHERE invitation IN (SELECT id FROM invitations WHERE expires<=?1)", [floor])?;
     tx.execute("DELETE FROM invitations WHERE expires<=?1", [floor])?;
     tx.commit()?;
     Ok(floor)
@@ -394,6 +410,11 @@ impl Store {
         let timestamp = observe(&self.db, now() as u64)?;
         let row = record(&self.db, id)?;
         self.invitation_authority(&row, timestamp)?;
+        canonical_v4(&hello.attempt)?;
+        ensure!(
+            !self.invitation_attempt_seen(id, &hello.attempt)?,
+            "invitation attempt already admitted; use a fresh handshake"
+        );
         ensure!(
             row.phase != "draft" && row.attempts < MAX_ATTEMPTS,
             "invitation unavailable or attempt budget exhausted"
@@ -405,11 +426,29 @@ impl Store {
             "invitation private record changed"
         );
         let (pending, reply) = owner.respond(hello, timestamp)?;
-        self.db.execute(
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO invitation_attempts(invitation,id) VALUES(?1,?2)",
+            params![id, hello.attempt],
+        )?;
+        tx.execute(
             "UPDATE invitations SET attempts=attempts+1 WHERE id=?1",
             [id],
         )?;
+        tx.commit()?;
         Ok((PendingSession { pending }, reply))
+    }
+
+    /// Scheduling hint only. Admission rechecks under the invitation lock and
+    /// commits the ID before releasing a handshake response. A lost in-memory
+    /// session must never be reconstructed from an already admitted Hello.
+    pub fn invitation_attempt_seen(&self, id: &str, attempt: &str) -> Result<bool> {
+        canonical_v4(attempt)?;
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM invitation_attempts WHERE invitation=?1 AND id=?2)",
+            params![id, attempt],
+            |r| r.get(0),
+        )?)
     }
     pub fn accept_invitation(
         &mut self,
