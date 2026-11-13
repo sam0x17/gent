@@ -96,7 +96,8 @@ def main():
                     for name in config.get(table, {}):
                         if table == 'mcp_servers' and name == 'gent':
                             continue
-                        command += ['-c', f'{table}.{json.dumps(name)}.enabled=false']
+                        assert '.' not in name, 'host configuration name cannot contain a dot in this proof'
+                        command += ['-c', f'{table}.{name}.enabled=false']
             else:
                 command += ['--ignore-user-config']
             if session:

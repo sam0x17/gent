@@ -201,7 +201,18 @@ python3 scripts/prove_host.py --host codex --installed-binding
 python3 scripts/prove_host.py --host claude-code --installed-binding
 ```
 
-The first script runs concurrent installers and checks discovery with each host's `mcp get gent`; use `--codex` and `--claude` for executable paths. The second launches installed server entries and the installed Claude hook through live MCP/RPC. The final two consume model usage. Claude loads the installed files through per-run flags; Codex reads the installed entry into per-run overrides, preserving its existing authentication location. Native config discovery is checked separately by the first script. These tests use temporary host configuration directories and leave real host settings unchanged. They do not establish interactive or GUI support.
+The first script runs concurrent installers and checks discovery with each host's `mcp get gent`; use `--codex` and `--claude` for executable paths. The second launches installed server entries and the installed Claude hook through live MCP/RPC. The final two consume model usage. Claude loads the installed files through per-run flags; Codex reads the installed entry into per-run overrides, preserving its existing authentication location. Native config discovery is checked separately by the first script. These tests use temporary host configuration directories and leave real host settings unchanged. They do not establish GUI support.
+
+The separate interactive proof uses a real pseudo-terminal and consumes model usage:
+
+```sh
+python3 scripts/prove_interactive.py --host codex
+python3 scripts/prove_interactive.py --host claude-code
+```
+
+On Linux and macOS, `/clear` produces a separate agent with an empty directory and inbox. `/resume ORIGINAL_SESSION` restores the original identity and its pending image in the same CLI process; exact file bytes and the receipt are checked. Claude keeps one MCP process and changes session bindings through its per-call hook; Codex reconnects MCP during these transitions. The driver waits for tool discovery before submitting its first prompt. It retains synthetic evidence in a private temporary directory; the host may also retain the synthetic sessions and workspace-trust metadata. Existing conversations and saved MCP configuration remain unchanged.
+
+Use `--host-binary PATH` for a nondefault CLI. Codex keeps the current provider configuration. A provider with its own configured `experimental_bearer_token` can use `--provider-token-auth` to bypass the TUI's separate ChatGPT login gate for this invocation, without changing saved authentication. The scripts reject dotted MCP/plugin names because Codex's CLI treats override path segments literally. Interactive subagents, identity transfer, automatic wake-up, and GUI/web/mobile flows still need separate proofs.
 
 ## Grant communication as the local owner
 
