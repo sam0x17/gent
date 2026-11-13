@@ -197,6 +197,13 @@ pub(crate) struct Service {
 }
 impl Service {
     pub async fn open(home: &Path) -> Result<Self> {
+        Self::open_pinned(home, None).await
+    }
+
+    pub async fn open_pinned(
+        home: &Path,
+        pin: Option<&gent_daemon::config::ServiceConfig>,
+    ) -> Result<Self> {
         let directory = managed_file::normalize(&home.join("auth"))?;
         managed_file::directory(&directory)?;
         let lock = managed_file::lock(&directory.join("session.lock"))?;
@@ -206,6 +213,16 @@ impl Service {
             saved.phase == Phase::Active,
             "finish gent auth login or gent auth logout before configuring a service cluster"
         );
+        if let Some(pin) = pin {
+            ensure!(
+                origin(&saved.service)? == origin(&pin.origin)?
+                    && saved
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.account_id == pin.account_id),
+                "account login does not match the node removal's pinned service and account"
+            );
+        }
         let client = client()?;
         let session = service_session(&client, &saved)
             .await?
@@ -230,6 +247,28 @@ impl Service {
     }
     pub fn session_hash(&self) -> String {
         format!("{:x}", Sha256::digest(self.saved.token.as_bytes()))
+    }
+    pub async fn revoke_node(&self, cluster: &str, node: &str) -> Result<()> {
+        for id in [cluster, node] {
+            ensure!(
+                uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == id),
+                "invalid node removal identity"
+            );
+        }
+        let (status, _) = response(
+            self.request(
+                Method::DELETE,
+                &format!("v1/clusters/{cluster}/nodes/{node}"),
+            )?
+            .bearer_auth(&self.saved.token),
+        )
+        .await?;
+        ensure!(
+            status == StatusCode::NO_CONTENT,
+            "service node revocation was not confirmed (HTTP {})",
+            status.as_u16()
+        );
+        Ok(())
     }
     fn request(&self, method: Method, path: &str) -> Result<reqwest::RequestBuilder> {
         Ok(self.client.request(method, self.origin()?.join(path)?))

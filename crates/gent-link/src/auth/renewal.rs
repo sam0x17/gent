@@ -129,6 +129,7 @@ pub async fn run_daemon(home: &Path) -> Result<()> {
         biased;
         result = gent_daemon::run(home) => result,
         _ = maintain(home) => unreachable!("maintenance continues until daemon shutdown"),
+        _ = crate::node::maintain(home) => unreachable!("node removals continue until daemon shutdown"),
     }
 }
 

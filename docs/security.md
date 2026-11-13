@@ -42,6 +42,14 @@ These credentials authorize cluster-level ciphertext transport for trusted daemo
 
 Local proofs cover identical-ID isolation, revocation, restarts, notifications and native encrypted transport on Linux and macOS. Guided setup and active-session renewal have separate native/Worker proofs. Production deployment, real GitHub consent, restore reconciliation and aggregate service budgets remain unfinished.
 
+### Coordinated node removal
+
+`gent node remove NODE_UUID` requires the local signing owner and rejects its own node ID and unknown members. The owner commits the signed membership removal, history publication and pending service intent together. Database version 16 retains the target cluster, node, signing key, original removal revision and account/service pin. The journal allows at most 8,192 records, consistent with the signed retired-node limit; exact retries remain available at capacity. An established database refuses to recreate a missing removal journal. Records remain local to the owner and contain no bearer or private signing key.
+
+The CLI and daemon require the original setup, cluster, service and account pins before sending the idempotent service DELETE. The login lock serializes this request with login/logout and session renewal. Only a successful service response advances the local record to `confirmed`; response loss or a failed local write leaves a retryable intent. Service confirmation reports relay access revocation, without claiming peer convergence. The owner daemon scans pending work at startup and every 30 seconds, with a rotating cursor and at most 16 records per pass. A failed request cannot erase the signed removal or its retry record.
+
+Existing streams and agent operations check current signed membership. Once a remaining peer applies the removal, it rejects the retired node's streams and treats its agents as revoked. Other peers retain their independent links. The removed node may never receive its own removal because its service access and configuration grant are no longer valid; offline peers can keep older authority until they synchronize or their signed lease expires. Previously delivered plaintext and admitted service operations cannot be retracted. Owner transfer, key-loss recovery, remote removal delegation and physical deletion of historical ciphertext remain separate work.
+
 ## Keys and signed records
 
 Owner and node keys use Ed25519 through `ed25519-dalek`, with system randomness and strict signature verification. Weak public keys are rejected. A node cannot use the owner key, share another active node's signing key, or reuse a retired key. Owner and node signing-key types have no `Debug` or serialization implementation. Explicit secret export returns a zeroizing buffer for protected endpoint storage.

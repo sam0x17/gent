@@ -1,6 +1,79 @@
 use super::*;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+#[tokio::test]
+async fn node_removal_service_retries_an_uncertain_delete_with_the_same_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("node");
+    let original = session();
+    let (origin, task) = server(vec![
+        (200, json!(original)),
+        (503, json!({"error":"lost_response"})),
+        (200, json!(original)),
+        (204, Value::Null),
+    ])
+    .await;
+    let token = saved(&home, &origin, &original);
+    let pin = ServiceConfig {
+        origin,
+        account_id: original.account_id.clone(),
+    };
+    let cluster = uuid::Uuid::new_v4().to_string();
+    let node = uuid::Uuid::new_v4().to_string();
+    let first = Service::open_pinned(&home, Some(&pin)).await.unwrap();
+    assert!(first.revoke_node(&cluster, &node).await.is_err());
+    drop(first);
+    let second = Service::open_pinned(&home, Some(&pin)).await.unwrap();
+    assert!(second.revoke_node(&cluster, "../different").await.is_err());
+    second.revoke_node(&cluster, &node).await.unwrap();
+    let calls = task.await.unwrap();
+    assert_eq!(calls[1], calls[3]);
+    assert_eq!(
+        calls[1].0,
+        format!("DELETE /v1/clusters/{cluster}/nodes/{node} HTTP/1.1")
+    );
+    assert_eq!(
+        read(&home.join("auth/session.json"))
+            .unwrap()
+            .unwrap()
+            .token,
+        token
+    );
+}
+
+#[tokio::test]
+async fn node_removal_checks_account_and_origin_before_contacting_service() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("node");
+    let original = session();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    saved(&home, &origin, &original);
+    let wrong_account = ServiceConfig {
+        origin: origin.clone(),
+        account_id: uuid::Uuid::new_v4().to_string(),
+    };
+    assert!(
+        Service::open_pinned(&home, Some(&wrong_account))
+            .await
+            .is_err()
+    );
+    let wrong_origin = ServiceConfig {
+        origin: "https://wrong.example".into(),
+        account_id: original.account_id,
+    };
+    assert!(
+        Service::open_pinned(&home, Some(&wrong_origin))
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
 fn session() -> ServiceSession {
     ServiceSession {
         account_id: uuid::Uuid::new_v4().to_string(),

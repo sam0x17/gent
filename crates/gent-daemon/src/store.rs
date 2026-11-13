@@ -25,6 +25,7 @@ mod mesh;
 mod network;
 mod pairing;
 mod relay;
+pub(crate) mod removals;
 mod requests;
 #[cfg(test)]
 mod storage_tests;
@@ -550,6 +551,14 @@ impl StoreSession<'_> {
                 Ok(
                     json!({"applied":true,"revision":self.state.checkpoint().revision,"node_id":node_id,"can_configure":allow}),
                 )
+            }
+            OwnerOp::RemoveNode { node_id } => self.remove_node(&node_id),
+            OwnerOp::NodeRemovals {
+                after,
+                pending_only,
+            } => self.node_removals(after.as_deref(), pending_only),
+            OwnerOp::ConfirmNodeRemoval { node_id, revision } => {
+                self.confirm_node_removal(&node_id, revision)
             }
             OwnerOp::SetPolicy { policy } => {
                 let disk = config::load_for_runtime(self.home)?;

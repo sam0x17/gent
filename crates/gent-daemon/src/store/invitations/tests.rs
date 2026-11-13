@@ -1055,7 +1055,7 @@ fn migration_preserves_state_and_refuses_missing_established_invitation_journals
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
             .unwrap(),
-        15
+        16
     );
     assert_eq!(
         fs::read(fixture.home.path().join("identity.key")).unwrap(),

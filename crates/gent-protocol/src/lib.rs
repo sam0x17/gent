@@ -363,6 +363,18 @@ pub enum OwnerOp {
         node_id: String,
         allow: bool,
     },
+    /// Local signing-owner administration, never exposed as an agent tool.
+    RemoveNode {
+        node_id: String,
+    },
+    NodeRemovals {
+        after: Option<String>,
+        pending_only: bool,
+    },
+    ConfirmNodeRemoval {
+        node_id: String,
+        revision: u64,
+    },
     Status,
     Nodes,
     Agents,

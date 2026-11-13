@@ -398,6 +398,22 @@ gent config requests
 
 The CLI waits about five seconds before returning a still-queued request. Its eventual state is `applied` with a revision or `rejected` with a reason. An identical retry returns the original result; different content under the same UUID fails. A rejected request stays rejected even if the owner later restores its grant; submit new intent under a new UUID. Retrying `config apply` or a permission command requires the same complete proposal, including any policy loaded from TOML. Accepted incoming revisions can replace local TOML edits, so submit intended changes promptly and inspect the request status.
 
+## Removing a node
+
+On the signing owner, select the node ID from `gent nodes`:
+
+```sh
+gent node remove NODE_UUID
+gent node removals
+gent node removals --pending
+```
+
+Removal retires the node ID and signing key in the signed cluster configuration. The same database transaction records any service revocation still needed. Connected peers receive the signed update through configuration sync. The CLI then requests service revocation using the original account and service. The owner daemon retries pending service work at startup and every 30 seconds, in batches of at most 16. Keep it running to complete an offline removal.
+
+`membership_removed: true` means the owner committed the signed removal. `service_status` is `pending`, `confirmed`, or `not_configured` for a node without an account service. A pending service step returns exit code 3 with its error and retry guidance. Run the same `gent node remove NODE_UUID` command again after a connection failure; it preserves the original revision, including when the service committed but its response was lost. Listing is read-only and returns up to 100 records, with a `next` cursor accepted by `--after`.
+
+Service confirmation does not establish that every peer has received the signed update. Offline peers can retain old authority until sync or lease expiry, and removal cannot retract delivered history or plaintext. Already admitted service requests may finish. Shared-token development relays have no per-node service revocation. This command requires the local owner signing key; delegated configuration administrators and MCP agents cannot invoke it. Removing the owner itself requires an owner-transfer mechanism, which is not implemented.
+
 ## Development configuration relay
 
 Adding a relay URL alone does not enroll a node or establish a stream. Use SSH pairing above, or the trusted Rust enrollment APIs in transport test fixtures. Joined nodes store their own signing key and verified bootstrap state in `identity.key`, without the owner's signing secret. Configuration proposals require a signed administration grant and established data streams to the owner.

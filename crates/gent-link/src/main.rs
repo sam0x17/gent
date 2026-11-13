@@ -6,6 +6,7 @@ mod integration;
 mod invitations;
 mod managed_file;
 mod mcp;
+mod node;
 mod pairing;
 mod service;
 mod setup;
@@ -242,6 +243,15 @@ enum AgentCommand {
 }
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Remove another node from signed membership and revoke its service access (owner only).
+    Remove { node: String },
+    /// List durable removal progress. Confirmation refers to service access, not peer sync.
+    Removals {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        pending: bool,
+    },
     /// Grant or revoke configuration management on an enrolled node (owner only).
     Admin {
         #[command(subcommand)]
@@ -424,6 +434,24 @@ async fn execute(cli: Cli) -> Result<()> {
         return Ok(());
     }
     let files_output = matches!(&cli.command, Some(Command::Files { .. }));
+    if let Some(Command::Node {
+        command: Some(NodeCommand::Remove { node }),
+    }) = cli.command
+    {
+        let output = node::remove(&home, node).await?;
+        println!(
+            "{}",
+            if cli.json {
+                serde_json::to_string(&output)?
+            } else {
+                serde_json::to_string_pretty(&output)?
+            }
+        );
+        if output["service_status"] == "pending" {
+            std::process::exit(3);
+        }
+        return Ok(());
+    }
     let history_output = matches!(&cli.command, Some(Command::History { .. }));
     let transport_output = matches!(&cli.command, Some(Command::Transport { .. }));
     let cluster_setup_output = matches!(
@@ -541,6 +569,21 @@ async fn execute(cli: Cli) -> Result<()> {
             };
             owner(&home, OwnerOp::DelegateConfiguration { node_id, allow }).await?
         }
+        Some(Command::Node {
+            command: Some(NodeCommand::Removals { after, pending }),
+        }) => {
+            owner(
+                &home,
+                OwnerOp::NodeRemovals {
+                    after,
+                    pending_only: pending,
+                },
+            )
+            .await?
+        }
+        Some(Command::Node {
+            command: Some(NodeCommand::Remove { .. }),
+        }) => unreachable!(),
         Some(Command::Node {
             command: Some(NodeCommand::Name { command: None }),
         }) => {
