@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-gent-crypto = { path = "../gent-crypto", features = ["mls"] }
+gent-crypto = { path = "../gent-crypto", features = ["mls", "invitation"] }
 gent-protocol = { path = "../gent-protocol" }
 anyhow.workspace = true
 base64.workspace = true

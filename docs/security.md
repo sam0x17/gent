@@ -85,7 +85,7 @@ The joining machine saves its own key, the authenticated owner pin, and request 
 
 The owner must have a configured relay before enrollment. Development pairing copies its shared synthetic relay credential over SSH into a separate private file. Service-backed pairing sends only account/relay metadata and provisions the joining node's own credential after checking its account and cryptographic identity. Neither mode exports the owner signing key or local RPC credential. First bootstrap trusts the SSH-authenticated endpoint's verified snapshot; subsequent installed state cannot be replaced by a new snapshot. A replaced owner pin is rejected on resume. Real GitHub consent, invitation-based pairing, owner-key replacement, and recovery from an old whole-endpoint backup remain separate work.
 
-The [invitation design](invitation-enrollment.md) records the proposed encrypted channel, single-node claim, restricted dispatcher, and restart rules for enrollment without SSH. Its CLI and protocol are not implemented. An invitation must never expose the current owner-privileged pairing RPC directly.
+The [invitation component](invitation-enrollment.md) now implements signed offers, channel-bound node claims and a bounded Noise transport in `gent-crypto`. Owner responses require a successful admission callback after claim verification. The callback's durable single-use checks, restricted dispatcher, service routes and CLI remain unfinished. An invitation must never expose the current owner-privileged pairing RPC directly. The component's secret buffers and DH primitive use zeroization, but Snow's internal cipher/handshake state does not provide comprehensive secret-memory erasure.
 
 ## Revisions, expiry, and revocation
 

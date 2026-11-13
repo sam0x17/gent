@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 mod agents;
 pub use agents::*;
+#[cfg(feature = "invitation")]
+pub mod invitation;
 
 pub type Digest = [u8; 32];
 pub type PublicKey = [u8; 32];

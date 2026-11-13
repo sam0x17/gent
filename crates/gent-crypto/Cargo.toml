@@ -7,6 +7,7 @@ publish.workspace = true
 
 [features]
 mls = ["dep:openmls_traits"]
+invitation = ["dep:snow", "dep:url", "dep:x25519-dalek"]
 
 [dependencies]
 anyhow.workspace = true
@@ -20,7 +21,10 @@ serde.workspace = true
 serde_json.workspace = true
 serde_jcs.workspace = true
 sha2.workspace = true
+snow = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 uuid.workspace = true
+x25519-dalek = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
