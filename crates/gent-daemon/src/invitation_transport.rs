@@ -18,8 +18,44 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+pub mod joining;
+pub mod owner;
 pub mod wire;
 use wire::Envelope;
+
+/// The claim has been durably accepted, before any pairing operation is sent.
+pub(crate) const CLAIM_RECEIPT: &[u8] = b"gent/invitation/claimed/v1";
+
+#[derive(Debug)]
+struct Refusal(StatusCode);
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invitation relay refused request ({})", self.0)
+    }
+}
+impl std::error::Error for Refusal {}
+#[derive(Debug)]
+struct InvalidMessage;
+impl std::fmt::Display for InvalidMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid invitation relay message")
+    }
+}
+impl std::error::Error for InvalidMessage {}
+fn invalid_message(error: &anyhow::Error) -> bool {
+    error.is::<InvalidMessage>()
+}
+fn status(actual: StatusCode, expected: StatusCode) -> Result<()> {
+    if actual != expected {
+        return Err(Refusal(actual).into());
+    }
+    Ok(())
+}
+fn fatal(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<Refusal>()
+        .is_some_and(|r| !r.0.is_server_error())
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,11 +163,7 @@ impl Mailbox {
             "only the owner may list invitation attempts"
         );
         let response = self.send(self.client.get(self.route("attempts")?)).await?;
-        ensure!(
-            response.status() == StatusCode::OK,
-            "invitation attempt listing failed ({})",
-            response.status()
-        );
+        status(response.status(), StatusCode::OK)?;
         let bytes = bounded(response, 16 * 1024)
             .await
             .map_err(|_| anyhow::anyhow!("invalid invitation attempt listing"))?;
@@ -176,16 +208,16 @@ impl Mailbox {
                     .body(envelope.encode()?),
             )
             .await?;
-        ensure!(
-            response.status() == StatusCode::NO_CONTENT,
-            "invitation upload failed ({})",
-            response.status()
-        );
+        status(response.status(), StatusCode::NO_CONTENT)?;
         Ok(())
     }
     /// Fetch only the peer's direction. A missing entry is an availability hint,
     /// never an instruction to rewind a Noise counter or repeat a side effect.
     pub async fn get(&self, attempt: &str, index: u64) -> Result<Option<Envelope>> {
+        self.get_limit(attempt, index, protocol::MAX_WIRE_BYTES)
+            .await
+    }
+    async fn get_limit(&self, attempt: &str, index: u64, limit: usize) -> Result<Option<Envelope>> {
         let peer = match self.side {
             Side::Owner => Side::Join,
             Side::Join => Side::Owner,
@@ -196,16 +228,16 @@ impl Mailbox {
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        ensure!(
-            response.status() == StatusCode::OK,
-            "invitation fetch failed ({})",
-            response.status()
-        );
-        let bytes = bounded(response, protocol::MAX_WIRE_BYTES)
-            .await
-            .map_err(|_| anyhow::anyhow!("invalid invitation relay response"))?;
+        status(response.status(), StatusCode::OK)?;
+        let bytes = bounded(response, limit).await.map_err(|error| {
+            if error.is::<reqwest::Error>() {
+                anyhow::anyhow!("invitation relay body unavailable")
+            } else {
+                InvalidMessage.into()
+            }
+        })?;
         self.check_time()?;
-        Ok(Some(Envelope::decode(&bytes)?))
+        Ok(Some(Envelope::decode(&bytes).map_err(|_| InvalidMessage)?))
     }
 }
 

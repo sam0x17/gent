@@ -67,6 +67,7 @@ pub async fn run(home: &Path) -> Result<()> {
     let permits = Arc::new(Semaphore::new(32));
     let mut maintenance = tokio::time::interval(Duration::from_secs(15 * 60));
     let sync_task = sync::start(store.clone())?;
+    let invitation_task = invitation_transport::owner::start(store.clone());
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     eprintln!(
         "Gent daemon listening at {} (development build)",
@@ -99,6 +100,7 @@ pub async fn run(home: &Path) -> Result<()> {
         task.abort();
         let _ = task.await;
     }
+    invitation_task.stop().await;
     fs::remove_file(socket)?;
     Ok(())
 }

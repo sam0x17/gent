@@ -207,6 +207,74 @@ fn canonical_v4(value: &str) -> Result<Uuid> {
 }
 
 impl Store {
+    /// Local scheduling metadata only. No private offer material leaves Store.
+    /// This rechecks current native authority even when service access survives.
+    pub(crate) fn invitation_jobs(&mut self) -> Result<Vec<SignedOffer>> {
+        if self.identity.owner.is_none() || self.config.service.is_none() {
+            return Ok(Vec::new());
+        }
+        if !self
+            .db
+            .query_row("SELECT EXISTS(SELECT 1 FROM invitations)", [], |r| {
+                r.get::<_, bool>(0)
+            })?
+        {
+            return Ok(Vec::new());
+        }
+        let _lock = config::state_lock(&self.home, "invitation.lock")?;
+        let timestamp = observe(&self.db, now() as u64)?;
+        let ids = self.db.prepare(
+            "SELECT id FROM invitations WHERE phase IN ('issued','claimed','complete') ORDER BY id LIMIT 129"
+        )?.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        ensure!(
+            ids.len() <= MAX_INVITATIONS as usize,
+            "invalid invitation journal size"
+        );
+        let mut offers = Vec::new();
+        for id in ids {
+            let row = record(&self.db, &id)?;
+            if self.invitation_authority(&row, timestamp).is_ok() {
+                offers.push(row.offer);
+            }
+        }
+        Ok(offers)
+    }
+
+    pub(crate) fn invitation_bearer(&self) -> Result<Zeroizing<String>> {
+        let settings = self
+            .config
+            .relay
+            .as_ref()
+            .context("invitation relay unavailable")?;
+        Ok(Zeroizing::new(config::read_relay_credential(
+            &self.home.join(&settings.credential_file),
+        )?))
+    }
+
+    /// Recheck before sending a cached response, including a completed Finish.
+    /// Revocation cannot retract bytes already released to a network request.
+    pub(crate) fn invitation_live(&mut self, offer: &SignedOffer) -> Result<()> {
+        let _lock = config::state_lock(&self.home, "invitation.lock")?;
+        let timestamp = observe(&self.db, now() as u64)?;
+        let row = record(&self.db, &offer.offer.id)?;
+        self.invitation_authority(&row, timestamp)?;
+        ensure!(
+            row.offer == *offer && matches!(row.phase.as_str(), "issued" | "claimed" | "complete"),
+            "invitation unavailable"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn invitation_claim_receipt(
+        &mut self,
+        session: &mut Session,
+    ) -> Result<Vec<Vec<u8>>> {
+        self.invitation_live(session.channel.offer())?;
+        session
+            .channel
+            .seal(crate::invitation_transport::CLAIM_RECEIPT, now() as u64)
+    }
+
     fn invitation_owner(&self, credential: &str) -> Result<()> {
         ensure!(hash(credential) == self.owner_hash, "unauthorized");
         self.identity.signing_owner()?;

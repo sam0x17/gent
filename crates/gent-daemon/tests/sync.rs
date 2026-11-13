@@ -435,8 +435,21 @@ async fn push_applies_newest_configuration_without_idle_mailbox_polling() {
     wait_watchers(&relay, 2).await;
     let revision = f.set(policy("initial-push"));
     f.wait_revision(revision).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let requests = relay.requests.load(Ordering::SeqCst);
+    // Applying TOML precedes receiver checkpoints and the writer's retirement
+    // round trip. Observe quiescence instead of assuming those finish in 200ms.
+    // This settling interval is shorter than the one-second fallback poll; the
+    // subsequent 1.2-second assertion still detects that polling regression.
+    let requests = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let before = relay.requests.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if relay.requests.load(Ordering::SeqCst) == before {
+                break before;
+            }
+        }
+    })
+    .await
+    .expect("initial push traffic did not settle");
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert_eq!(
         relay.requests.load(Ordering::SeqCst),

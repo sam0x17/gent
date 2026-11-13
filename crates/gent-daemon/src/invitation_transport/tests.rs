@@ -22,13 +22,13 @@ use tokio::{
 };
 use uuid::Uuid;
 
-struct Fixture {
-    _home: tempfile::TempDir,
-    store: Store,
-    invitation: Invitation,
+pub(super) struct Fixture {
+    pub(super) _home: tempfile::TempDir,
+    pub(super) store: Store,
+    pub(super) invitation: Invitation,
 }
 impl Fixture {
-    fn new(origin: &str) -> Self {
+    pub(super) fn new(origin: &str) -> Self {
         let home = tempfile::tempdir().unwrap();
         fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let mut cfg = config::initialize(home.path(), "invitation-wire").unwrap();
@@ -72,7 +72,7 @@ impl Fixture {
         Mailbox::new(self.invitation.offer(), side, &token(side)).unwrap()
     }
 }
-fn token(side: Side) -> String {
+pub(super) fn token(side: Side) -> String {
     format!(
         "{}.{}.{}",
         if side == Side::Owner {
