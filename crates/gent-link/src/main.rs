@@ -1,3 +1,4 @@
+mod auth;
 mod files;
 mod hooks;
 mod integration;
@@ -35,6 +36,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Sign in to Gent's service, inspect the account session, or sign out.
+    Auth {
+        #[command(subcommand)]
+        command: Option<auth::Command>,
+    },
     /// Create or inspect the cluster. Hosted enrollment is not available in this proof.
     Cluster {
         #[command(subcommand)]
@@ -365,6 +371,20 @@ async fn execute(cli: Cli) -> Result<()> {
         .or_else(|| std::env::var_os("GENT_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".gent")))
         .context("cannot locate home; pass --home")?;
+    if let Some(Command::Auth { command }) = cli.command {
+        let status_only = matches!(command, None | Some(auth::Command::Status));
+        let output = auth::execute(&home, command.unwrap_or(auth::Command::Status)).await?;
+        if cli.json {
+            println!("{}", serde_json::to_string(&output)?);
+        } else {
+            auth::print(&output);
+        }
+        if (status_only && output["status"] != "active") || output["status"] == "revocation_pending"
+        {
+            std::process::exit(3);
+        }
+        return Ok(());
+    }
     if let Some(Command::Daemon { command }) = cli.command {
         if matches!(command, Some(DaemonCommand::Run)) {
             gent_daemon::run(&home).await?;
@@ -409,7 +429,7 @@ async fn execute(cli: Cli) -> Result<()> {
             return Ok(());
         }
         Some(Command::Cluster { .. }) => owner(&home, OwnerOp::Status).await?,
-        Some(Command::Daemon { .. }) => unreachable!(),
+        Some(Command::Daemon { .. } | Command::Auth { .. }) => unreachable!(),
         Some(Command::Hooks { .. } | Command::Completions { .. }) => unreachable!(),
         Some(Command::Mcp {
             command: McpCommand::Serve { binding, host },

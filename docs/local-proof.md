@@ -55,7 +55,21 @@ gent cluster
 gent config path
 ```
 
-`--local` is required to create a development cluster. This build supports one local cluster per state directory. For foreground use, run `gent cluster new demo --local` followed by `gent daemon run`; stop it with Ctrl-C or SIGTERM. A restart preserves identities, permissions, and queued messages. GitHub login, guided hosted enrollment, and multi-cluster selection remain future work.
+`--local` is required to create a development cluster. This build supports one local cluster per state directory. For foreground use, run `gent cluster new demo --local` followed by `gent daemon run`; stop it with Ctrl-C or SIGTERM. A restart preserves identities, permissions, and queued messages. Account login has the separate prototype below; guided hosted enrollment and multi-cluster selection remain future work.
+
+## Account login
+
+The CLI implements `gent auth` / `gent auth status`, `gent auth login` and `gent auth logout`. The default account origin, `https://api.gent.link`, is not deployed. These commands require a configured account service and dedicated GitHub OAuth app; they do not create or enroll a local encrypted cluster.
+
+Normal login opens the browser and waits for an ephemeral IPv4 loopback callback. `--no-browser` prints the URL without opening it, retaining the local callback. `--headless` uses GitHub's device-code flow, which SSH sessions select by default. `--service ORIGIN` selects a configured service, allowing HTTPS or loopback HTTP for development. The CLI requests no GitHub scopes and never saves the GitHub token.
+
+Gent saves its own service credential in private `auth/session.json` beneath the selected Gent home. The credential is saved before exchange so a lost response can be recovered by status or a repeated login. Sessions last 30 days. A valid existing session is reused; login and logout preserve existing cluster configuration and encryption keys.
+
+Status is read-only and checks the service before reporting an active session. Offline cached account information is not authenticated. Logout first disables the local credential, then asks the service to revoke it. If offline, it reports `revocation_pending`; retry logout when connected. An interrupted login can also leave revocation pending until its session commits or its 15-minute creation window closes. Pending revocation and inactive/unavailable status exit 3, successful mutations exit 0, and malformed state or other failures exit 1. `--json` provides structured output without credentials.
+
+Native Linux and Mac proofs exercise the actual CLI against a local Rust account Worker backed by D1 and a synthetic GitHub provider. They cover browser callback/state/PKCE validation, device polling and slow-down, private credential storage, rejected links, interrupted-login recovery, offline logout and byte-identical existing cluster files. The browser proof sends the callback over HTTP; it does not launch a GUI browser or exercise real GitHub consent.
+
+`scripts/prove_auth.py` is the public CLI portion of that private service harness. The optional `test-auth-provider` build feature accepts an explicit fixture provider only when both it and the account service are loopback origins. Default builds omit this override. Real GitHub consent, production deployment, service-backed node enrollment and relay authorization remain unverified or unfinished. Service logout currently leaves the separate development relay credential unchanged.
 
 ## Daemon services
 
@@ -310,7 +324,7 @@ The command imports the owner's relay origin and shared development token into p
 
 Interrupted joins retain their node key and progress in a private sibling directory, such as `~/.gent-peer.joining`. Rerun the same command and node name to resume. Gent installs the finished runtime atomically and refuses to overwrite another node or unrelated files. A completed retry reports `already_joined`. Rerunning the join command upgrades an older configuration-only node with data streams and owner-certified legacy agent IDs, preserving existing bindings. A stale unconsumed stream grant gets a fresh key package while preserving node identity; obsolete streams still need eventual pruning. Do not delete pending state to repair an interrupted join, since that would lose its identity.
 
-`gent nodes` lists enrolled node IDs, names, the signed `can_configure` capability, and `data_link` for established encrypted peer links. Remote presence is currently `unknown`; a membership record or established link does not prove another daemon is online. Newly SSH-enrolled nodes receive configuration-management permission. Existing nodes keep their previous grant on join retry, so retrying cannot restore revoked administration. Nodes enrolled by older versions need an explicit owner grant. SSH pairing is implemented; GitHub login and invite-based pairing are pending.
+`gent nodes` lists enrolled node IDs, names, the signed `can_configure` capability, and `data_link` for established encrypted peer links. Remote presence is currently `unknown`; a membership record or established link does not prove another daemon is online. Newly SSH-enrolled nodes receive configuration-management permission. Existing nodes keep their previous grant on join retry, so retrying cannot restore revoked administration. Nodes enrolled by older versions need an explicit owner grant. SSH pairing is implemented; service-backed enrollment and invite-based pairing are pending.
 
 An opt-in proof creates temporary nodes on two machines, pairs through the real CLI, and checks encrypted configuration delivery through a local relay. It registers independent MCP clients, grants permissions from the joined node, transfers images in both directions, verifies scoped replies and recipient acknowledgments, then queues a reply while the receiving daemon is offline and retrieves it after restart. It also checks remote renaming, identical request retries, queued edits surviving owner downtime and source restart, and revoked administration. It needs Python 3.11 or newer, a running loopback development relay, a private token file, and an already trusted SSH host. It makes no model calls and removes its temporary nodes afterward:
 
@@ -488,7 +502,7 @@ Use `--edit-storage` to queue ten large policies while the owner is offline, res
 
 Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. The separate child-agent harness checks native spawning, resumption and isolated revocation. Authenticated import/export tools now pass native, generic MCP, and real-model proofs without putting large base64 payloads in model context. GUI/hosted file access remains to be tested. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Invite-based pairing, GitHub login, and hosted remote connectors remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, generic MCP messaging, real-model visual revision, and persistent relay turns use the local development relay. Shared agent guidance is bundled through MCP instructions. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
+Invite-based pairing and hosted remote connectors remain to be implemented. Account login passes the fixture proofs above; real GitHub consent and deployed service access remain unverified. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, generic MCP messaging, real-model visual revision, and persistent relay turns use the local development relay. Shared agent guidance is bundled through MCP instructions. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
 
 ## Real-agent relay proof
 

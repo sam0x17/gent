@@ -9,6 +9,10 @@ publish.workspace = true
 name = "gent"
 path = "src/main.rs"
 
+[features]
+# Local auth proof only; rejects overrides unless both origins are loopback.
+test-auth-provider = []
+
 [dependencies]
 gent-protocol = { path = "../gent-protocol" }
 gent-daemon = { path = "../gent-daemon" }
@@ -27,6 +31,8 @@ tempfile.workspace = true
 toml_edit = { version = "0.25", features = ["serde"] }
 jsonc-parser = { version = "0.34", features = ["cst"] }
 rustix = { version = "1", features = ["process"] }
+reqwest.workspace = true
+getrandom.workspace = true
 
 [lints]
 workspace = true

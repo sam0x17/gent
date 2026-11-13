@@ -35,7 +35,7 @@ The development build implements `gent cluster join CLUSTER_UUID --via user@owne
 
 Setup must recover from an interrupted step and be safe to rerun. Preserve device identity, existing settings, and unrelated shell configuration. End with a concise status report and the next action, if any.
 
-The current build implements service installation for configured nodes and `gent daemon install --local [NAME]` for initializing a development cluster. GitHub login and hosted enrollment guidance remain pending. [Shell integration](local-proof.md#shell-integration) now supports Zsh, Bash, and Fish independently of enrollment. See [daemon services](local-proof.md#daemon-services) for the tested systemd/launchd commands, startup context, and state preservation. `gent daemon status` exits 3 when stopped or unavailable while still returning structured status; lifecycle failures exit 1, and successful mutations exit 0.
+The current build implements service installation for configured nodes and `gent daemon install --local [NAME]` for initializing a development cluster. Account login has a separate prototype; the installer does not yet guide hosted enrollment. [Shell integration](local-proof.md#shell-integration) now supports Zsh, Bash, and Fish independently of enrollment. See [daemon services](local-proof.md#daemon-services) for the tested systemd/launchd commands, startup context, and state preservation. `gent daemon status` exits 3 when stopped or unavailable while still returning structured status; lifecycle failures exit 1, and successful mutations exit 0.
 
 `gent integration config codex` and `gent integration config claude-code` currently print MCP configuration fragments. The latter includes a required per-call host binding hook. `gent mcp serve --host HOST` selects persistent conversation credentials from host metadata; generic clients can still use explicit `--binding` files. See [host conversation bindings](local-proof.md#host-conversation-bindings) for setup and limitations. `gent integration install`, `status`, and `uninstall` now manage user-scope entries for both CLI hosts; `gent integrations` lists them. See [installation and recovery](local-proof.md#install-host-integrations) for paths, `--config-dir`, ownership, and status semantics. Zsh, Bash, and Fish shell setup is available through `gent hooks install`.
 
@@ -93,7 +93,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | --- | --- |
 | `gent auth` / `gent auth status` | Show the signed-in account and session state without printing credentials. |
 | `gent auth login` | Sign in with GitHub through a browser, with a device-code flow for headless machines. |
-| `gent auth logout` | Revoke the applicable local service sessions and stop using them, preserving encryption identity and local data. |
+| `gent auth logout` | Disable and revoke this installation's service session, preserving encryption identity and local data. Retry if server revocation is pending. |
 | `gent integrations` | Inspect Codex and Claude Code user-scope entries; effective host configuration is not yet verified. |
 | `gent integration status [host]` | Inspect recorded installation, conflicts, or pending recovery without editing files. |
 | `gent integration install <host>` | Install the common MCP server and required Claude identity hook in user settings. Skills and lifecycle hooks remain pending. |
@@ -101,7 +101,11 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent integration remove <host>` | Alias for `gent integration uninstall`. |
 | `gent mcp serve` | Serve the shared MCP interface over stdio, connecting the host's registered agents to the local daemon. |
 
-Service login establishes an account session. Cluster enrollment establishes permission to receive cluster keys and participate as a trusted endpoint. Account login, recovery, or a changed SQL membership record alone cannot grant access to encrypted data. Keep user session and daemon credential lifetimes explicit so logout has predictable behavior.
+The auth commands are implemented as a prototype. `gent auth login --headless` uses GitHub device authorization; SSH sessions select it automatically. `--no-browser` instead prints a browser authorization URL and waits on a local loopback callback. `--service ORIGIN` selects an account service. The default `https://api.gent.link` is not deployed. Both paths pass local fixture proofs on Linux and macOS; real GitHub consent remains unverified. See [account login](local-proof.md#account-login) before trying the commands.
+
+Status checks the service without changing local state and never reports an offline cached identity as authenticated. Status exits 3 when signed out or unavailable. Logout disables the local credential before contacting the service; an offline attempt reports `revocation_pending`, exits 3 and can be retried. Interrupted login can also leave revocation pending until its session commits or the candidate's 15-minute creation window closes. Successful mutations exit 0; malformed state and other failures exit 1. `--json` supports these results without exposing credentials.
+
+Service login establishes an account session. Cluster enrollment establishes permission to receive cluster keys and participate as a trusted endpoint. Account login, recovery, or a changed SQL membership record alone cannot grant access to encrypted data. Service sessions last 30 days. This prototype does not connect account logout or service-cluster retirement to the development relay's separate credentials.
 
 Codex and Claude Code CLI setup have equal priority on macOS and Linux. Report VS Code, desktop, web, and mobile support separately; detecting a provider CLI does not establish that its GUI integration works. Both mobile providers have equal priority, starting with iOS.
 
