@@ -1,5 +1,6 @@
 mod mcp;
 mod pairing;
+mod service;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -13,7 +14,7 @@ use std::path::PathBuf;
     name = "gent",
     version,
     about = "Permissioned communication between agents",
-    after_help = "Local proof setup: gent cluster new demo --local\nStart the daemon: gent daemon run\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
+    after_help = "Local setup: gent daemon install --local demo\nForeground alternative: gent cluster new demo --local && gent daemon run\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
 )]
 struct Cli {
     /// State directory (default: ~/.gent). Use a separate directory for experiments.
@@ -35,7 +36,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<ClusterCommand>,
     },
-    /// Run or inspect the local daemon.
+    /// Install, control, or inspect the local daemon.
     Daemon {
         #[command(subcommand)]
         command: Option<DaemonCommand>,
@@ -93,8 +94,26 @@ enum ClusterCommand {
 }
 #[derive(Subcommand)]
 enum DaemonCommand {
+    /// Run in the foreground; stop with Ctrl-C or SIGTERM.
     Run,
     Status,
+    /// Register and start a systemd user service or macOS LaunchAgent.
+    Install {
+        /// Initialize an unconfigured local development cluster (default name: default).
+        #[arg(long, num_args=0..=1, default_missing_value="default")]
+        local: Option<String>,
+    },
+    /// Stop and remove the service, retaining all Gent state and credentials.
+    #[command(alias = "remove")]
+    Uninstall,
+    Start,
+    Stop,
+    Restart,
+    /// Show recent daemon diagnostics.
+    Logs {
+        #[arg(long, default_value_t=100, value_parser=clap::value_parser!(u32).range(1..=10000))]
+        lines: u32,
+    },
 }
 #[derive(Subcommand)]
 enum McpCommand {
@@ -238,6 +257,23 @@ async fn execute(cli: Cli) -> Result<()> {
         .or_else(|| std::env::var_os("GENT_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".gent")))
         .context("cannot locate home; pass --home")?;
+    if let Some(Command::Daemon { command }) = cli.command {
+        if matches!(command, Some(DaemonCommand::Run)) {
+            gent_daemon::run(&home).await?;
+            return Ok(());
+        }
+        let status_only = matches!(command, None | Some(DaemonCommand::Status));
+        let output = service::execute(&home, command.unwrap_or(DaemonCommand::Status)).await?;
+        if cli.json {
+            println!("{}", serde_json::to_string(&output)?);
+        } else {
+            service::print(&output);
+        }
+        if status_only && output["daemon"]["running"] != true {
+            std::process::exit(3);
+        }
+        return Ok(());
+    }
     let output = match cli.command {
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
@@ -262,13 +298,7 @@ async fn execute(cli: Cli) -> Result<()> {
             return Ok(());
         }
         Some(Command::Cluster { .. }) => owner(&home, OwnerOp::Status).await?,
-        Some(Command::Daemon {
-            command: Some(DaemonCommand::Run),
-        }) => {
-            gent_daemon::run(&home).await?;
-            return Ok(());
-        }
-        Some(Command::Daemon { .. }) => owner(&home, OwnerOp::Status).await?,
+        Some(Command::Daemon { .. }) => unreachable!(),
         Some(Command::Mcp {
             command: McpCommand::Serve { binding },
         }) => {

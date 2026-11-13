@@ -260,6 +260,12 @@ Bootstrap overtaken by node revocation or key replacement is discarded. The disp
 
 Maintenance prepares at most eight peer offers, processes eight due jobs, and installs eight completed links per pass. Pending jobs have a per-node count limit of 8,192, bounded payloads, and retry backoff capped at 32 seconds. While jobs are pending, idle reconciliation pauses are capped at one second; network and processing time can add delay. Setup errors are retained locally for retry and logged when they change. Completed jobs, packages, streams, and ciphertext history are retained. The full mesh grows quadratically with cluster size; large-cluster scaling, pruning, aggregate quotas, and user-facing repair commands remain unfinished. `gent nodes` reports established links separately from remote presence.
 
+## Daemon services
+
+The CLI installs services for the current OS user through systemd or launchd. Service definitions contain executable and state paths; keys and RPC credentials remain in the protected state directory. Definitions must be private regular files owned by that user, with matching Gent metadata and contents. Lifecycle commands reject edited definitions, symlinks, hard links, and files belonging to another state directory. A per-state lock serializes mutations. Authenticated RPC status supplies the daemon PID, which must match the service manager before Gent controls a running daemon. These checks prevent accidental changes to unrelated services; the OS user remains trusted.
+
+Uninstall retains keys, configuration, SQLite queues, and bindings. SIGTERM stops the daemon gracefully. Status extracts selected lifecycle fields from manager output without returning inherited environment values. Logs remain local, in the systemd journal or a private macOS file; macOS log rotation is unfinished. See [daemon services](local-proof.md#daemon-services) for startup/session limits and upgrade behavior.
+
 ## Verification
 
 The authority tests exercise request-key and name substitution, wrong owner/genesis pins, policy tampering, replayed/stale/future/expired enrollment, conflicting revisions, gaps, rollback, key rotation, permanent retirement, canonical wire validation, and restart checkpoints. The replica tests exercise concurrent stale writers, restart/history recovery, expired-history catch-up, file permissions, symlinks, schema-version rejection, and an injected SQLite failure after history insertion but before checkpoint update.
@@ -292,4 +298,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo check -p gent-crypto --features mls --target wasm32-unknown-unknown --locked
 ```
 
-The native workspace has 113 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.
+Four service tests cover literal arguments, definition ownership and integrity, canonical state-directory identity, and manager-output filtering. The opt-in `scripts/prove_service.py` passes against the real Linux systemd user manager and the Mac Studio's headless launchd user domain. It checks repeated installation, start/stop/restart, crash recovery, uninstall/reinstall, file protection, foreground-daemon ownership, graceful shutdown, and preservation of keys and a queued MCP image. Logout/reboot and GUI/headless transitions remain untested.
+
+The native workspace has 117 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.

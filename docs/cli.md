@@ -35,6 +35,8 @@ The development build implements `gent cluster join CLUSTER_UUID --via user@owne
 
 Setup must recover from an interrupted step and be safe to rerun. Preserve device identity, existing settings, and unrelated shell configuration. End with a concise status report and the next action, if any.
 
+The current build implements service installation for configured nodes and `gent daemon install --local [NAME]` for initializing a development cluster. GitHub login, hosted enrollment guidance, and shell-hook setup remain pending. See [daemon services](local-proof.md#daemon-services) for the tested systemd/launchd commands, startup context, and state preservation. `gent daemon status` exits 3 when stopped or unavailable while still returning structured status; lifecycle failures exit 1, and successful mutations exit 0.
+
 ## Nodes and clusters
 
 | Command | Behavior |
@@ -74,7 +76,7 @@ Node status should distinguish connected, disconnected, degraded, and unknown or
 | `gent daemon start` | Start the installed service. |
 | `gent daemon stop` | Stop the service without uninstalling it. |
 | `gent daemon restart` | Restart the service and retain identity and pending work. |
-| `gent daemon logs` | Show local daemon diagnostics with sensitive values redacted. |
+| `gent daemon logs [--lines N]` | Show recent daemon diagnostics from the service journal or private log file. Keep credentials out of diagnostic output. |
 | `gent hooks` / `gent hooks status` | Show Gent shell-hook installation and detected shell support. |
 | `gent hooks install` | Install shell hooks for a supported shell, detecting it where possible. |
 | `gent hooks uninstall` | Remove only the hooks and configuration entries managed by Gent. |

@@ -28,7 +28,7 @@ pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value>
     let operation = async {
         let mut socket = UnixStream::connect(home.join("daemon.sock"))
             .await
-            .context("daemon unavailable; run gent daemon run")?;
+            .context("daemon unavailable; run gent daemon start or gent daemon run")?;
         let mut data = serde_json::to_vec(&request)?;
         data.push(b'\n');
         ensure!(data.len() <= MAX_FRAME_BYTES, "request too large");
@@ -72,6 +72,7 @@ pub async fn run(home: &Path) -> Result<()> {
     let permits = Arc::new(Semaphore::new(32));
     let mut maintenance = tokio::time::interval(Duration::from_secs(15 * 60));
     let sync_task = sync::start(store.clone())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     eprintln!(
         "Gent daemon listening at {} (development build)",
         socket.display()
@@ -79,6 +80,7 @@ pub async fn run(home: &Path) -> Result<()> {
     loop {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break,
+            _=terminate.recv()=>break,
             _=maintenance.tick()=> {
                 let store = store.clone();
                 tokio::task::spawn_blocking(move || {

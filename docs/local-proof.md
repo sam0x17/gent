@@ -41,11 +41,10 @@ Choose a dedicated state directory; Gent creates it with private permissions. Ex
 
 ```sh
 export GENT_HOME="$HOME/.gent-dev"
-gent cluster new demo --local
-gent daemon run
+gent daemon install --local demo
 ```
 
-Keep the daemon running in that terminal. In another terminal, set the same `GENT_HOME` and inspect it:
+This initializes an unconfigured development cluster and starts a service for the current user. On an already configured or SSH-joined node, use `gent daemon install`; it preserves the existing configuration and identity. In another terminal, set the same `GENT_HOME` and inspect it:
 
 ```sh
 export GENT_HOME="$HOME/.gent-dev"
@@ -56,7 +55,37 @@ gent cluster
 gent config path
 ```
 
-`--local` is required to create a development cluster. This build supports one local cluster per state directory. `gent daemon run` runs in the foreground; stop it with Ctrl-C. A restart preserves identities, permissions, and queued messages. Service installation and multi-cluster enrollment are future work.
+`--local` is required to create a development cluster. This build supports one local cluster per state directory. For foreground use, run `gent cluster new demo --local` followed by `gent daemon run`; stop it with Ctrl-C or SIGTERM. A restart preserves identities, permissions, and queued messages. GitHub login, guided hosted enrollment, and multi-cluster selection remain future work.
+
+## Daemon services
+
+```sh
+gent daemon install
+gent daemon status
+gent daemon stop
+gent daemon start
+gent daemon restart
+gent daemon logs --lines 100
+gent daemon uninstall
+```
+
+These are independent lifecycle examples. Install registers and starts a systemd user service on Linux or a LaunchAgent on macOS. It requires an existing configuration unless `--local [NAME]` is supplied, which creates a development cluster only when none is configured. Omitting the optional name uses `default`. Repeating install preserves identities and does not restart an unchanged running service. After upgrading the binary at the same path, use `gent daemon restart` to run the new version. Installing from a different binary path updates the managed definition and restarts the service.
+
+Service names derive from the canonical state directory, so different `--home` directories have independent registrations. `gent daemon status --json` reports the service file, backend, manager state, PID, startup enablement, and authenticated daemon readiness. An established service registration does not prove the daemon is responding. Status exits 0 when the daemon responds and 3 when stopped or unavailable; command failures exit 1. Successful stop and uninstall exit 0. When reachable, existing node, cluster, and authority fields remain available in status output.
+
+Linux definitions live under `$XDG_CONFIG_HOME/systemd/user` or `~/.config/systemd/user`. Startup follows the systemd user manager; remaining active after logout or starting without login depends on the host's linger configuration. Gent does not change linger or install a system-wide service. On macOS, definitions live under `~/Library/LaunchAgents`. Gent uses the current GUI domain when available and otherwise the user's background domain, including SSH sessions. It supports both Aqua and Background session types. Actual logout/reboot and transitions between GUI and headless sessions have not been tested. Systems without an available user service manager can use `gent daemon run`.
+
+Definitions contain the executable and state paths, with no Gent credentials or encryption keys. Gent refuses to overwrite or remove edited, unrelated, shared, symlinked, or hard-linked service files. It also refuses to control a foreground daemon as though it were the installed service. Stop that foreground process before installing the service. Installation and removal preserve unrelated files in the service directory. A per-state lock prevents concurrent lifecycle mutations.
+
+Uninstall stops and removes the service while retaining TOML, keys, SQLite state, bindings, and diagnostics. It is safe to repeat. Linux diagnostics come from the unit's journal; macOS writes a private `daemon.log` in the state directory. `gent daemon logs --lines N` returns recent lines, with macOS reads bounded to the last 2 MiB. Service status extracts lifecycle fields from launchd output without exposing its inherited environment. macOS log rotation remains future work; systemd journal retention follows the host's settings.
+
+The opt-in proof creates a temporary service under the actual user manager, exercises lifecycle and crash recovery, retains a queued MCP PNG across restarts and reinstall, verifies literal paths and service-file protections, and checks that foreground processes remain separate:
+
+```sh
+python3 scripts/prove_service.py target/debug/gent
+```
+
+It uses synthetic agents without model calls. It removes its temporary service and files afterward, retaining the directory if cleanup fails. It passed against the Linux systemd user manager and the Mac Studio's headless launchd user domain. OS-managed journal records and launchd enablement preferences can remain after service removal.
 
 ## Connect an MCP client
 
@@ -195,4 +224,4 @@ Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per ex
 
 Codex and Claude Code pass explicit pairing, session continuity, and a small image round trip on both OSes. Separate concurrent conversations in normal shared host configurations, automatic binding, and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Invite-based pairing, GitHub login, remote connectors, daemon installers, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, and generic MCP messaging use the local development relay. A visual iteration involving real models across machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
+Invite-based pairing, GitHub login, remote connectors, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, and generic MCP messaging use the local development relay. A visual iteration involving real models across machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
