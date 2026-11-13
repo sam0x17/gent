@@ -194,6 +194,13 @@ impl Store {
         // Local cleanup remains available after membership/lease loss.
         self.clean_files()?;
         self.clean_history()?;
+        {
+            let tx = self
+                .db
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            encrypted::ordered::storage::clean(&tx, false)?;
+            tx.commit()?;
+        }
         let timestamp = now() as u64;
         let tx = self
             .db
@@ -396,6 +403,10 @@ impl StoreSession<'_> {
             OwnerOp::FilesClean { dry_run } => self.files_clean(dry_run),
             OwnerOp::HistoryStatus => self.history_status(),
             OwnerOp::HistoryClean { dry_run } => self.history_clean(dry_run),
+            OwnerOp::TransportStatus => encrypted::ordered::storage::status(self.db),
+            OwnerOp::TransportClean { dry_run } => {
+                encrypted::ordered::storage::clean(self.db, dry_run)
+            }
             OwnerOp::Providers => {
                 let mut providers = BTreeMap::<String, Vec<Agent>>::new();
                 for agent in self.all_agents()? {

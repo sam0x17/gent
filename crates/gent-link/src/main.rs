@@ -83,6 +83,11 @@ enum Command {
         #[command(subcommand)]
         command: Option<HistoryCommand>,
     },
+    /// Inspect encrypted transport storage and compact redundant records.
+    Transport {
+        #[command(subcommand)]
+        command: Option<TransportCommand>,
+    },
     /// Inspect or revoke a registration.
     Agent {
         #[command(subcommand)]
@@ -123,6 +128,15 @@ enum FilesCommand {
 enum HistoryCommand {
     Status,
     /// Retire a bounded batch of expired exchanges and inadmissible retry IDs.
+    Clean {
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+#[derive(Subcommand)]
+enum TransportCommand {
+    Status,
+    /// Compact duplicate ciphertext copies and old replay evidence; retain packets for offline peers.
     Clean {
         #[arg(long)]
         dry_run: bool,
@@ -370,6 +384,7 @@ async fn execute(cli: Cli) -> Result<()> {
     }
     let files_output = matches!(&cli.command, Some(Command::Files { .. }));
     let history_output = matches!(&cli.command, Some(Command::History { .. }));
+    let transport_output = matches!(&cli.command, Some(Command::Transport { .. }));
     let output = match cli.command {
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
@@ -426,6 +441,16 @@ async fn execute(cli: Cli) -> Result<()> {
                 match command.unwrap_or(HistoryCommand::Status) {
                     HistoryCommand::Status => OwnerOp::HistoryStatus,
                     HistoryCommand::Clean { dry_run } => OwnerOp::HistoryClean { dry_run },
+                },
+            )
+            .await?
+        }
+        Some(Command::Transport { command }) => {
+            owner(
+                &home,
+                match command.unwrap_or(TransportCommand::Status) {
+                    TransportCommand::Status => OwnerOp::TransportStatus,
+                    TransportCommand::Clean { dry_run } => OwnerOp::TransportClean { dry_run },
                 },
             )
             .await?
@@ -596,6 +621,8 @@ async fn execute(cli: Cli) -> Result<()> {
         files::print_report(&output);
     } else if history_output {
         files::print_history(&output);
+    } else if transport_output {
+        files::print_transport(&output);
     } else {
         println!("{}", serde_json::to_string_pretty(&output)?);
     }

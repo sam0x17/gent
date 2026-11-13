@@ -1,6 +1,7 @@
 //! Directional MLS streams: one writer, authenticated ordering, durable gaps.
 //! Replies use another stream. These APIs are for trusted daemon code only.
 pub mod configuration;
+pub mod storage;
 use super::*;
 use gent_crypto::{Digest, PublicKey, stream::Packet};
 
@@ -16,6 +17,9 @@ pub struct OrderedEndpoint<'a> {
 pub enum Staged {
     Queued,
     Duplicate,
+    /// Older than retained digest evidence. Never queued or decrypted again;
+    /// equality with an original packet is no longer asserted.
+    Retired,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +29,8 @@ pub struct StreamStatus {
     pub pending: usize,
     /// Fetch starting at this position when later packets are buffered.
     pub next: u64,
+    /// Non-origin positions at or below this may have retired digest evidence.
+    pub retired_through: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -281,6 +287,8 @@ impl<'a> OrderedEndpoint<'a> {
                             "MLS packet repeated at a new sequence"
                         );
                         advance(session.db, &packet)?;
+                        storage::received(session.db, &packet)?;
+                        storage::trim_group(session.db, group, packet.sequence())?;
                         session.db.execute(
                             "DELETE FROM stream_pending WHERE group_id=?1 AND sequence=?2",
                             params![group, packet.sequence()],
@@ -313,6 +321,7 @@ impl<'a> OrderedEndpoint<'a> {
                     digest: saved.digest,
                     pending,
                     next: saved.head + 1,
+                    retired_through: saved.head.saturating_sub(storage::RECENT_PACKETS),
                 })
             })
     }
@@ -414,6 +423,7 @@ fn initialize_stream(
         "INSERT INTO stream_seen VALUES(?1,0,?2)",
         params![packet.group(), digest.as_slice()],
     )?;
+    storage::received(session.db, packet)?;
     Ok(())
 }
 
@@ -429,15 +439,22 @@ fn outgoing_request(db: &Connection, id: Uuid) -> Result<Option<Packet>> {
 }
 
 fn save_outgoing(db: &Connection, id: Uuid, packet: &Packet) -> Result<()> {
+    let wire = packet.encode()?;
+    let saved = stream(db, packet.group())?.context("unknown stream")?;
+    storage::capacity(db, &saved.purpose, wire.len())?;
     db.execute(
         "INSERT INTO stream_outbox VALUES(?1,?2,?3,?4)",
-        params![
-            id.to_string(),
-            packet.group(),
-            packet.sequence(),
-            packet.encode()?
-        ],
+        params![id.to_string(), packet.group(), packet.sequence(), wire],
     )?;
+    // Keep the request fingerprint but reconstruct retry bytes from the signed
+    // ordered packet. Both copies and this update share the MLS transaction.
+    ensure!(
+        db.execute(
+            "UPDATE outbox SET bytes=X'' WHERE id=?1 AND group_id=?2",
+            params![id.to_string(), packet.group()]
+        )? == 1,
+        "missing MLS retry record"
+    );
     Ok(())
 }
 
@@ -487,6 +504,7 @@ fn publish_in(
     )?;
     save_outgoing(session.db, outgoing.id, &packet)?;
     advance(session.db, &packet)?;
+    storage::trim_group(session.db, group, packet.sequence())?;
     Ok(packet)
 }
 
@@ -501,6 +519,11 @@ fn stage_in(session: &Session<'_>, packet: &Packet, purpose: Purpose) -> Result<
     if let Some(seen) = seen(session.db, packet.group(), packet.sequence())? {
         ensure!(seen == digest, "conflicting accepted stream history");
         return Ok(Staged::Duplicate);
+    }
+    if packet.sequence() > 0
+        && packet.sequence() <= saved.head.saturating_sub(storage::RECENT_PACKETS)
+    {
+        return Ok(Staged::Retired);
     }
     ensure!(
         packet.sequence() > saved.head && packet.sequence() - saved.head <= MAX_PENDING_DISTANCE,

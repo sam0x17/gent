@@ -430,6 +430,23 @@ An old message may already have encrypted fragments in transit. Cleanup compacts
 
 Run `python3 scripts/smoke_history.py target/debug/gent` for an isolated CLI/MCP proof of ID generation, retained retries, native-file retry retirement, dry-run, cleanup, and restart maintenance. It advances only its temporary database's request clock; it does not change the system clock or use a model or relay.
 
+## Encrypted transport storage
+
+```sh
+gent transport
+gent transport status --json
+gent transport clean --dry-run
+gent transport clean
+```
+
+These owner commands report outgoing data/configuration packet usage, redundant ciphertext copies, and old replay evidence. Data packets have a 65,536-record / 512 MiB cap; configuration packets have an independent 65,536-record / 128 MiB reserve. New publication stops atomically when its class is full. Accepted work stays queued and exact retries still return their original packet. This does not bound the whole database or the relay.
+
+Gent retains a stream's origin and the latest 128 position digests and corresponding wire receipts. Older signed packets are discarded before decryption without claiming they match the original. New ordered sends store ciphertext once; retries reconstruct the original bytes from that packet. On upgrade, maintenance compacts redundant old copies in batches of eight and retires up to 256 old digests and 256 eligible receipt hashes per pass. Run `clean` again when a batch reaches its limit. Startup and 15-minute maintenance also run cleanup. Version-4 storage cannot be opened by older Gent binaries.
+
+Compaction preserves all outbound packets for offline peers. It cannot release a full outgoing packet quota: authenticated receiver checkpoints and outbound retirement remain unfinished. Configuration history, raw MLS groups, application queues, plaintext handoff folders, and total disk usage have separate retention needs. See [the storage and replay rules](security.md#ordered-transport-storage).
+
+Add `--transport-storage` to `scripts/prove_pairing.py` to exercise 70 exchanges between physical nodes through the Worker, retaining more than 128 outgoing positions, replay-window cleanup, owner CLI preview/compaction, exact retry, and automatic startup cleanup of legacy duplicate copies. This uses disposable state and generic MCP clients without model calls.
+
 ## Remaining integration work
 
 Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. Authenticated import/export tools now pass native, generic MCP, and real-model proofs without putting large base64 payloads in model context. Actual subagent execution and GUI/hosted file access remain to be tested. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.

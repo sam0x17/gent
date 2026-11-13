@@ -263,6 +263,7 @@ impl<'a> EncryptedEndpoint<'a> {
         })?;
         rows.map(|row| {
             let (sequence, id, group_id, bytes) = row?;
+            let bytes = ordered::storage::bytes(&self.db, &id, &group_id, bytes)?;
             Ok((
                 sequence,
                 Outgoing {
@@ -480,6 +481,7 @@ fn retry(db: &Connection, id: Uuid, fingerprint: &[u8]) -> Result<Option<Outgoin
     saved
         .map(|(group_id, hash, bytes)| {
             ensure!(hash == fingerprint, "conflicting request ID");
+            let bytes = ordered::storage::bytes(db, &id.to_string(), &group_id, bytes)?;
             Ok(Outgoing {
                 id,
                 group_id,
@@ -521,7 +523,7 @@ fn received(db: &Connection, group_id: &[u8], wire: &[u8]) -> Result<bool> {
 
 fn receipt(db: &Connection, group_id: &[u8], wire: &[u8]) -> Result<()> {
     db.execute(
-        "INSERT INTO receipts VALUES(?1,?2)",
+        "INSERT INTO receipts(wire_hash,group_id) VALUES(?1,?2)",
         params![Sha256::digest(wire).as_slice(), group_id],
     )?;
     Ok(())
@@ -1005,7 +1007,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     let mut db = Connection::open(path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    ensure!(matches!(version, 0..=3), "unsupported MLS database version");
+    ensure!(matches!(version, 0..=4), "unsupported MLS database version");
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
     // The original RPC proof used this name for a messages index.
     // Free it before the MLS inbox table is introduced in the same database.
@@ -1065,7 +1067,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
             total INTEGER NOT NULL, bytes BLOB NOT NULL
           );
           CREATE TABLE IF NOT EXISTS configuration_requests (id TEXT PRIMARY KEY, group_id BLOB NOT NULL);
-          PRAGMA user_version=3;",
+          PRAGMA user_version=4;",
         )?;
     let has_purpose = {
         let mut columns = schema.prepare("PRAGMA table_info(streams)")?;
@@ -1078,6 +1080,16 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     if !has_purpose {
         schema.execute_batch("ALTER TABLE streams ADD COLUMN purpose TEXT NOT NULL DEFAULT 'data' CHECK(purpose IN ('data','configuration'));")?;
     }
+    let receipt_columns = schema
+        .prepare("PRAGMA table_info(receipts)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !receipt_columns.iter().any(|name| name == "stream_sequence") {
+        schema.execute_batch("ALTER TABLE receipts ADD COLUMN stream_sequence INTEGER;")?;
+    }
+    schema.execute_batch(
+        "CREATE INDEX IF NOT EXISTS receipt_stream_sequence ON receipts(group_id,stream_sequence);",
+    )?;
     schema.commit()?;
     Ok(db)
 }

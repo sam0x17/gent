@@ -10,6 +10,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+#[path = "ordered/storage.rs"]
+mod storage;
 
 struct World {
     owner: OwnerKey,
@@ -591,7 +593,7 @@ fn raw_groups_upgrade_storage_but_cannot_be_adopted_into_streams() {
         w.db(1)
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     assert!(w.endpoint(0).create(request, &peers, w.now).is_err());
     let wrapped = w.nodes[0]

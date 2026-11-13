@@ -168,3 +168,13 @@ Distinguish a mobile notification from an agent turn or user response. A notific
 | `gent history clean` | Retire exchanges seven days after expiry and eligible agent retry records. |
 
 All support `--json`. Cleanup runs automatically at startup and every 15 minutes. These owner commands require no model call. Message limits and the UUIDv7 agent-request contract are documented in [message history and retries](local-proof.md#message-history-and-retries); encrypted transport and provider histories are separate.
+
+## Encrypted transport storage (implemented)
+
+| Command | Behavior |
+| --- | --- |
+| `gent transport` / `gent transport status` | Report outgoing packet quotas, duplicate ciphertext bytes, and retired replay evidence. |
+| `gent transport clean --dry-run` | Verify and preview one bounded compaction batch. |
+| `gent transport clean` | Compact redundant ciphertext copies and discard old replay evidence. |
+
+All support `--json` and use local owner authority. Outbound packets remain available for offline peers; this command does not release a full outgoing packet quota. See [encrypted transport storage](local-proof.md#encrypted-transport-storage) for limits, migration, and remaining retirement work.

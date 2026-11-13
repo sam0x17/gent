@@ -1,0 +1,54 @@
+"""Synthetic two-machine transport storage checks used by prove_pairing.py."""
+
+# Restore the redundant ciphertext copies that existed in schema v3. The caller
+# runs this only against disposable proof state; no private values leave Python.
+RESTORE_COPIES = r'''
+import base64,json,pathlib,sqlite3,sys
+with sqlite3.connect(pathlib.Path(sys.argv[1])/'state.sqlite3') as db:
+    rows=db.execute('SELECT id,packet FROM stream_outbox ORDER BY rowid LIMIT 12').fetchall()
+    assert len(rows)==12
+    for request,wire in rows:
+        raw=base64.b64decode(json.loads(wire)['ciphertext'])
+        assert db.execute('UPDATE outbox SET bytes=? WHERE id=?',(raw,request)).rowcount==1
+'''
+
+
+def exercise_storage(a, b, target, cli, owner_cli, restore, restart, wait_for):
+    first = None
+    for index in range(70):
+        request = {'recipient': target, 'request_id': a.request_id(), 'text': f'transport storage {index}'}
+        sent = a.call('gent_send', request)[0]
+        if first is None:
+            first = (request, sent['message_id'])
+
+        def incoming(client, message):
+            return next((m for m in client.call('gent_inbox')[0] if m['id'] == message), None)
+
+        wait_for(lambda: incoming(b, sent['message_id']))
+        assert incoming(b, sent['message_id'])['text'] == request['text']
+        b.call('gent_ack', {'message_id': sent['message_id']})
+        reply = b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': b.request_id(), 'text': f'review {index}'})[0]
+        wait_for(lambda: incoming(a, reply['message_id']))
+        assert incoming(a, reply['message_id'])['text'] == f'review {index}'
+        a.call('gent_ack', {'message_id': reply['message_id']})
+    for command in (cli, owner_cli):
+        status = command('transport', 'status')
+        assert status['outgoing']['data']['packets'] > 128
+        assert status['duplicate_copies'] == status['accepted_digests_due'] == status['wire_receipts_due'] == 0
+    restore()
+    for command in (cli, owner_cli):
+        assert command('transport')['duplicate_copies'] == 12
+        before = command('transport')['outgoing']
+        preview = command('transport', 'clean', '--dry-run')
+        assert preview['duplicate_copies_compacted'] == 8 and preview['retained_packets_removed'] == 0
+        assert command('transport')['duplicate_copies'] == 12
+        cleaned = command('transport', 'clean')
+        assert cleaned['duplicate_copies_compacted'] == 8 and cleaned['duplicate_bytes_removed'] > 0
+        assert command('transport')['duplicate_copies'] == 4
+        assert command('transport')['outgoing']['data']['packets'] >= before['data']['packets']
+    restart()
+    for command in (cli, owner_cli):
+        wait_for(lambda: command('transport')['duplicate_copies'] == 0)
+    assert a.call('gent_send', first[0])[0]['message_id'] == first[1]
+    assert not a.call('gent_inbox')[0] and not b.call('gent_inbox')[0]
+    print('PASS: 70 two-machine exchanges, bounded replay evidence, CLI preview/compaction, startup cleanup, and exact retry after restart', flush=True)

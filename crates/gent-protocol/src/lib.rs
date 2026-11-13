@@ -371,6 +371,10 @@ pub enum OwnerOp {
     HistoryClean {
         dry_run: bool,
     },
+    TransportStatus,
+    TransportClean {
+        dry_run: bool,
+    },
     FilesClean {
         dry_run: bool,
     },

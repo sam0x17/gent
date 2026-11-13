@@ -1,5 +1,54 @@
 use serde_json::Value;
 
+pub fn print_transport(value: &Value) {
+    if let Some(dry_run) = value["dry_run"].as_bool() {
+        println!(
+            "{} {} duplicate ciphertext copies ({} bytes), {} accepted digests, and {} wire receipts.",
+            if dry_run {
+                "Would compact"
+            } else {
+                "Compacted"
+            },
+            value["duplicate_copies_compacted"],
+            value["duplicate_bytes_removed"],
+            value["accepted_digests_removed"],
+            value["wire_receipts_removed"]
+        );
+        println!(
+            "Outbound packets removed: 0. Repeat while a batch reaches its limit ({} copies or {} replay records).",
+            value["copy_batch_limit"], value["replay_batch_limit"]
+        );
+    } else {
+        for purpose in ["data", "configuration"] {
+            let usage = &value["outgoing"][purpose];
+            println!(
+                "{purpose}: {} / {} packets; {} / {} packet bytes.",
+                usage["packets"],
+                usage["max_packets"],
+                usage["packet_bytes"],
+                usage["max_packet_bytes"]
+            );
+        }
+        println!(
+            "Duplicate ciphertext: {} copies ({} bytes). Replay evidence due: {} digests, {} receipts.",
+            value["duplicate_copies"],
+            value["duplicate_bytes"],
+            value["accepted_digests_due"],
+            value["wire_receipts_due"]
+        );
+        println!(
+            "Recent replay evidence: {} positions per stream plus its origin.",
+            value["recent_packets_per_stream"]
+        );
+        println!(
+            "Outbound packets remain for offline peers. Compaction does not release retained packet quota."
+        );
+        println!(
+            "Authority history, raw groups, application queues, plaintext, and total database size are separate."
+        );
+    }
+}
+
 pub fn print_history(value: &Value) {
     if let Some(dry_run) = value["dry_run"].as_bool() {
         println!(

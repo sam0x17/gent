@@ -19,6 +19,7 @@ import uuid
 from urllib.parse import urlparse
 from smoke_mcp import Client, PNG
 from relay_checks import exercise_turns
+from transport_checks import RESTORE_COPIES, exercise_storage
 
 
 PREPARE = r'''
@@ -108,6 +109,7 @@ def main():
     parser.add_argument('--relay-url', default='http://127.0.0.1:18787')
     parser.add_argument('--relay-token-file', required=True)
     parser.add_argument('--file-objects', action='store_true', help='Also prove native files through authenticated MCP and separate ciphertext storage')
+    parser.add_argument('--transport-storage', action='store_true', help='Also prove bounded replay evidence, redundant-copy compaction, and startup cleanup')
     parser.add_argument('--remote-relay-port', type=int, default=18789)
     args = parser.parse_args()
     url = urlparse(args.relay_url)
@@ -237,6 +239,15 @@ def main():
 
             exercise_turns(a, b, attached['attachment']['id'], files, wait_for, restart_relay_nodes)
             print('PASS: two-machine ordered relay turns, PNG forwarding, restart recovery, cancellation, final outcomes, and exact retries')
+            if args.transport_storage:
+                def owner_cli(*command):
+                    return json.loads(remote(owner + list(command)).stdout)
+
+                def restore_copies():
+                    subprocess.run(['python3', '-c', RESTORE_COPIES, str(home)], check=True)
+                    remote(['python3', '-c', RESTORE_COPIES, owner_home])
+
+                exercise_storage(a, b, bid, cli, owner_cli, restore_copies, restart_relay_nodes, wait_for)
             if args.file_objects:
                 import hashlib
                 folders = a.call('gent_file_paths')[0]
