@@ -4,7 +4,8 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::Subcommand;
 use gent_protocol::service::{
-    AuthConfig, CALLBACK_PATH, CodeExchange, ServiceSession, TokenExchange,
+    AuthConfig, CALLBACK_PATH, CodeExchange, ServiceCluster, ServiceSession, TokenExchange,
+    TransportConfig, TransportEnrollment, TransportSession,
 };
 use reqwest::{Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -58,7 +59,7 @@ enum Phase {
     Revoking,
 }
 
-fn origin(value: &str) -> Result<Url> {
+pub(crate) fn origin(value: &str) -> Result<Url> {
     let url = Url::parse(value).context("invalid service origin")?;
     ensure!(
         url.username().is_empty()
@@ -82,15 +83,21 @@ fn random() -> Result<[u8; 32]> {
     getrandom::fill(&mut bytes).context("secure randomness unavailable")?;
     Ok(bytes)
 }
-fn now() -> Result<u64> {
+pub(crate) fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 fn candidate() -> Result<String> {
+    credential("gent_s1")
+}
+pub(crate) fn transport_candidate() -> Result<String> {
+    credential("gent_t1")
+}
+fn credential(prefix: &str) -> Result<String> {
     let secret = random()?
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    Ok(format!("gent_s1.{}.{secret}", now()?))
+    Ok(format!("{prefix}.{}.{secret}", now()?))
 }
 fn read(path: &Path) -> Result<Option<Saved>> {
     let snapshot = Snapshot::read(path)?;
@@ -172,6 +179,122 @@ async fn service_session(client: &Client, saved: &Saved) -> Result<Option<Servic
         serde_json::from_value(success(status, value)?)
             .map_err(|_| anyhow::anyhow!("invalid Gent session response"))?,
     ))
+}
+
+/// Holds the login mutation lock through setup. Account credentials are only
+/// sent to the saved login origin, never to the discovered relay.
+pub(crate) struct Service {
+    _lock: std::fs::File,
+    saved: Saved,
+    client: Client,
+    pub session: ServiceSession,
+}
+impl Service {
+    pub async fn open(home: &Path) -> Result<Self> {
+        let directory = managed_file::normalize(&home.join("auth"))?;
+        managed_file::directory(&directory)?;
+        let lock = managed_file::lock(&directory.join("session.lock"))?;
+        let saved =
+            read(&directory.join("session.json"))?.context("sign in first with gent auth login")?;
+        ensure!(
+            saved.phase == Phase::Active,
+            "finish gent auth login or gent auth logout before configuring a service cluster"
+        );
+        let client = client()?;
+        let session = service_session(&client, &saved)
+            .await?
+            .context("session is no longer active; run gent auth login")?;
+        ensure!(
+            saved
+                .session
+                .as_ref()
+                .is_some_and(|s| s.account_id == session.account_id),
+            "saved account does not match the active session"
+        );
+        Ok(Self {
+            _lock: lock,
+            saved,
+            client,
+            session,
+        })
+    }
+
+    pub fn origin(&self) -> Result<Url> {
+        origin(&self.saved.service)
+    }
+    pub fn session_hash(&self) -> String {
+        format!("{:x}", Sha256::digest(self.saved.token.as_bytes()))
+    }
+    fn request(&self, method: Method, path: &str) -> Result<reqwest::RequestBuilder> {
+        Ok(self.client.request(method, self.origin()?.join(path)?))
+    }
+    pub async fn relay_endpoint(&self) -> Result<String> {
+        let (status, value) = response(
+            self.request(Method::GET, "v1/transport/config")?
+                .bearer_auth(&self.saved.token),
+        )
+        .await?;
+        let config: TransportConfig = serde_json::from_value(success(status, value)?)
+            .map_err(|_| anyhow::anyhow!("invalid relay configuration response"))?;
+        let relay = origin(&config.relay_endpoint)?;
+        ensure!(
+            relay.scheme() == "https" || loopback(&self.origin()?),
+            "an HTTPS account service cannot select an insecure relay"
+        );
+        Ok(relay.into())
+    }
+    pub async fn reserve_cluster(&self, id: &str) -> Result<()> {
+        let (status, value) = response(
+            self.request(Method::PUT, &format!("v1/clusters/{id}"))?
+                .bearer_auth(&self.saved.token),
+        )
+        .await?;
+        let cluster: ServiceCluster = serde_json::from_value(success(status, value)?)
+            .map_err(|_| anyhow::anyhow!("invalid service cluster response"))?;
+        ensure!(
+            cluster.id == id && cluster.role == "owner",
+            "unexpected service cluster"
+        );
+        Ok(())
+    }
+    pub async fn transport_session(&self, token: &str) -> Result<Option<TransportSession>> {
+        let (status, value) = response(
+            self.request(Method::GET, "v1/transport/session")?
+                .bearer_auth(token),
+        )
+        .await?;
+        if status == StatusCode::UNAUTHORIZED {
+            return Ok(None);
+        }
+        Ok(Some(
+            serde_json::from_value(success(status, value)?)
+                .map_err(|_| anyhow::anyhow!("invalid transport session response"))?,
+        ))
+    }
+    /// None means the service's admission window is closed. Only that response
+    /// permits replacing an unconfirmed candidate; a lost response does not.
+    pub async fn enroll(
+        &self,
+        cluster: &str,
+        node: &str,
+        token: &str,
+    ) -> Result<Option<TransportSession>> {
+        let (status, value) = response(
+            self.request(Method::PUT, &format!("v1/clusters/{cluster}/nodes/{node}"))?
+                .bearer_auth(&self.saved.token)
+                .json(&TransportEnrollment {
+                    transport_token: token.into(),
+                }),
+        )
+        .await?;
+        if status == StatusCode::BAD_REQUEST && value["error"] == "transport_candidate_expired" {
+            return Ok(None);
+        }
+        Ok(Some(
+            serde_json::from_value(success(status, value)?)
+                .map_err(|_| anyhow::anyhow!("invalid transport enrollment response"))?,
+        ))
+    }
 }
 
 pub async fn execute(home: &Path, command: Command) -> Result<Value> {

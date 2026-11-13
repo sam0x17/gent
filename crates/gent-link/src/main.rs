@@ -1,4 +1,5 @@
 mod auth;
+mod cluster;
 mod files;
 mod hooks;
 mod integration;
@@ -19,7 +20,7 @@ use std::{io::Write, path::PathBuf};
     name = "gent",
     version,
     about = "Permissioned communication between agents",
-    after_help = "Local setup: gent daemon install --local demo\nForeground alternative: gent cluster new demo --local && gent daemon run\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
+    after_help = "Service setup: gent auth login && gent cluster new demo && gent daemon install\nLocal development: gent daemon install --local demo\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
 )]
 struct Cli {
     /// State directory (default: ~/.gent). Use a separate directory for experiments.
@@ -167,11 +168,15 @@ enum RelayCommand {
 }
 #[derive(Subcommand)]
 enum ClusterCommand {
+    /// Create a service cluster after gent auth login, or a local development cluster.
     New {
         name: String,
         #[arg(long)]
         local: bool,
     },
+    /// Resume service setup or refresh this owner node's revoked/expired credential.
+    /// Stop the daemon first; sign into the original account with gent auth login.
+    Connect,
     Status,
     /// Renew the locally held owner-signed configuration lease.
     Renew,
@@ -405,17 +410,26 @@ async fn execute(cli: Cli) -> Result<()> {
     let files_output = matches!(&cli.command, Some(Command::Files { .. }));
     let history_output = matches!(&cli.command, Some(Command::History { .. }));
     let transport_output = matches!(&cli.command, Some(Command::Transport { .. }));
+    let cluster_setup_output = matches!(
+        &cli.command,
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::New { local: false, .. } | ClusterCommand::Connect)
+        })
+    );
     let output = match cli.command {
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::New { name, local }),
         }) => {
-            ensure!(
-                local,
-                "hosted enrollment is not implemented; --local creates an isolated development cluster"
-            );
-            json!(config::initialize(&home, &name)?)
+            if local {
+                json!(cluster::local(&home, &name)?)
+            } else {
+                cluster::connect(&home, Some(&name)).await?
+            }
         }
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Connect),
+        }) => cluster::connect(&home, None).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Renew),
         }) => configure(&home, &request_id, ConfigurationEdit::Renew).await?,
@@ -637,6 +651,17 @@ async fn execute(cli: Cli) -> Result<()> {
     };
     if cli.json {
         println!("{}", serde_json::to_string(&output)?);
+    } else if cluster_setup_output {
+        println!(
+            "Cluster {} configured on node {}.",
+            output["cluster"]["name"].as_str().unwrap_or(""),
+            output["node"]["name"].as_str().unwrap_or("")
+        );
+        println!(
+            "Cluster ID: {}",
+            output["cluster"]["id"].as_str().unwrap_or("")
+        );
+        println!("Start the daemon with gent daemon install.");
     } else if files_output {
         files::print_report(&output);
     } else if history_output {

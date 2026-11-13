@@ -28,7 +28,7 @@ pub struct Config {
     pub applied_revision: Option<u64>,
     pub node: NodeConfig,
     pub cluster: ClusterConfig,
-    /// Development configuration transport; local settings are never replicated.
+    /// Node-local transport settings are never replicated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayConfig>,
     #[serde(default)]
@@ -189,8 +189,8 @@ impl Config {
     fn validate_local(&self) -> Result<()> {
         ensure!(self.version == 1, "unsupported configuration version");
         ensure!(
-            self.cluster.local_only,
-            "this build supports local proofs only; remote enrollment is not implemented"
+            self.cluster.local_only || self.relay.is_some(),
+            "a service cluster requires a configured relay"
         );
         for value in [&self.node.id, &self.cluster.id] {
             let parsed =
@@ -219,7 +219,17 @@ pub fn initialize(home: &Path, name: &str) -> Result<Config> {
     if path(home).exists() {
         bail!("already configured; existing identity has been preserved");
     }
-    let config = Config {
+    let config = fresh(name)?;
+    binding(&home.join("owner.key"))?;
+    save(home, &config)?;
+    Ok(config)
+}
+
+/// Allocate identities without publishing state. Hosted setup journals this
+/// configuration before any filesystem or service operation can be retried.
+pub fn fresh(name: &str) -> Result<Config> {
+    label(name)?;
+    Ok(Config {
         version: 1,
         applied_revision: None,
         node: NodeConfig {
@@ -237,8 +247,5 @@ pub fn initialize(home: &Path, name: &str) -> Result<Config> {
         relay: None,
         policy: Policy::default(),
         extra: BTreeMap::new(),
-    };
-    binding(&home.join("owner.key"))?;
-    save(home, &config)?;
-    Ok(config)
+    })
 }

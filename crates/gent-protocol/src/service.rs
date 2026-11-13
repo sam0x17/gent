@@ -40,6 +40,14 @@ pub struct AuthConfig {
     pub session_lifetime_seconds: u64,
 }
 
+/// Relay discovery is separate from login so accounts can be available before
+/// their messaging service is deployed.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportConfig {
+    pub relay_endpoint: String,
+}
+
 // No Debug derives: requests carry provider and service credentials.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

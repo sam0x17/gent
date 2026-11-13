@@ -50,6 +50,21 @@ pub struct Store {
     pub(crate) sync_wakeup: Arc<Notify>,
 }
 impl Store {
+    /// Called by offline owner provisioning while holding daemon.lock. Service
+    /// registration cannot turn a joined node into a cryptographic owner.
+    pub fn require_provisioning_owner(&self) -> Result<()> {
+        ensure!(
+            self.identity.owner.is_some(),
+            "service cluster setup requires this cluster's owner signing key"
+        );
+        let state = self.identity.state(&self.db)?;
+        ensure!(
+            state.state().nodes.contains_key(self.identity.node.id()),
+            "this node is no longer enrolled in the cluster"
+        );
+        Ok(())
+    }
+
     pub fn open(home: &Path) -> Result<Self> {
         let config = config::load_for_runtime(home)?;
         let owner_hash = hash(&config::read_private(&home.join("owner.key"))?);

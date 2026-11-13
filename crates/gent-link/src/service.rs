@@ -1,7 +1,7 @@
 //! Per-user service lifecycle. No account/model credentials enter service files.
 mod files;
 mod manager;
-use crate::{DaemonCommand, owner};
+use crate::{DaemonCommand, managed_file, owner};
 use anyhow::{Context, Result, ensure};
 use files::{Platform, Spec};
 use fs2::FileExt;
@@ -207,7 +207,7 @@ pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
     match &action {
         DaemonCommand::Install { local } => {
             if !config::path(&service.home).exists() {
-                local.as_deref().context("no Gent configuration; run gent cluster join or use gent daemon install --local NAME for a development cluster")?;
+                local.as_deref().context("no Gent configuration; run gent auth login and gent cluster new NAME, or use gent daemon install --local NAME for a development cluster")?;
                 config::private_dir(&service.home)?;
             }
         }
@@ -232,12 +232,15 @@ pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
     );
     if let DaemonCommand::Install { local } = &action {
         if !config::path(&service.home).exists() {
+            let _daemon = managed_file::lock(&service.home.join("daemon.lock"))?;
             let name = local
                 .as_deref()
                 .context("Gent configuration disappeared; restore it before installing")?;
             ensure!(
-                fs::read_dir(&service.home)?
-                    .all(|entry| entry.is_ok_and(|e| e.file_name() == "service.lock")),
+                fs::read_dir(&service.home)?.all(|entry| entry.is_ok_and(|e| matches!(
+                    e.file_name().to_str(),
+                    Some("service.lock" | "daemon.lock" | "auth")
+                ))),
                 "state exists without config.toml; restore the configuration before installing"
             );
             config::initialize(&service.home, name)?;

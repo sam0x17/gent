@@ -4,6 +4,8 @@ The development implementation connects local and directly paired remote agents 
 
 This proof runs on macOS and Linux. Agent messages and attachments stay in the trusted user's local SQLite database. An optional development relay carries end-to-end encrypted configuration, agent announcements, messages, and files between SSH-paired nodes; there is no hosted account or production service yet. Other software running as the same user can access endpoint state and credentials. Do not treat an agent with unrestricted shell access as isolated from the operating-system user.
 
+The source CLI also has [recoverable first-owner service setup](service-setup.md), tested against a local account Worker on both OSes. This does not establish a deployed service or service-backed joining of additional nodes.
+
 ## Build and verify
 
 Use Rust 1.98 or newer and Python 3 for the process-level test. Run from this repository's root:
