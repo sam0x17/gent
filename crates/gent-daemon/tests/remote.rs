@@ -356,6 +356,78 @@ fn request_status(pair: &Pair, node: usize, id: &str) -> Value {
         },
     )
 }
+
+#[tokio::test]
+async fn relay_grant_proposals_sync_and_revoke_persistent_cross_node_selection() {
+    use gent_protocol::ConfigurationEdit;
+    let relay = relay::RelayServer::start().await;
+    let mut pair = Pair::new(&relay).await;
+    pair.allow().await;
+    // Wait for directory announcements before the owner resolves grant endpoints.
+    pair.wait(|| ok(pair.agent(0, AgentOp::Agents)).as_array().unwrap().len() == 1)
+        .await;
+    let grant = Uuid::new_v4().to_string();
+    let proposal = OwnerOp::Configure {
+        request_id: grant.clone(),
+        edit: ConfigurationEdit::GrantRelay {
+            grant_id: grant.clone(),
+            intermediary: pair.agents[0].clone(),
+            target: pair.agents[1].clone(),
+            lifetime_seconds: 3600,
+        },
+    };
+    assert_eq!(pair.owner(1, proposal.clone())["state"], "queued");
+    pair.wait(|| request_status(&pair, 1, &grant)["state"] == "applied")
+        .await;
+    assert_eq!(pair.owner(1, proposal)["state"], "applied");
+    for home in &pair.homes {
+        assert!(
+            config::load(home.path())
+                .unwrap()
+                .policy
+                .relay_grants
+                .contains_key(&grant)
+        );
+    }
+    let attach = AgentOp::RelayAttach {
+        target: pair.agents[1].clone(),
+        request_id: Uuid::new_v4().to_string(),
+    };
+    let attached = ok(pair.agent(0, attach.clone()));
+    assert_eq!(attached["state"], "attached");
+    assert_eq!(
+        attached["attachment"]["security_mode"],
+        "encrypted_daemon_link"
+    );
+    pair.reopen(0);
+    assert_eq!(
+        ok(pair.agent(
+            0,
+            AgentOp::RelayStatus {
+                attachment_id: None
+            }
+        ))["attachment"],
+        attached["attachment"]
+    );
+    let revoke = Uuid::new_v4().to_string();
+    pair.owner(
+        1,
+        OwnerOp::Configure {
+            request_id: revoke.clone(),
+            edit: ConfigurationEdit::RevokeRelay {
+                grant_id: grant.clone(),
+            },
+        },
+    );
+    pair.wait(|| request_status(&pair, 1, &revoke)["state"] == "applied")
+        .await;
+    assert_eq!(ok(pair.agent(0, attach))["state"], "revoked");
+    for node in 0..2 {
+        let grants = pair.owner(node, OwnerOp::RelayGrants);
+        assert_eq!(grants["grants"], json!({}));
+        assert_eq!(grants["retired"], json!([grant]));
+    }
+}
 #[tokio::test]
 async fn offline_configuration_requests_survive_restart_and_later_acceptance_wins() {
     let relay = relay::RelayServer::start().await;

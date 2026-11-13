@@ -92,6 +92,28 @@ enum Command {
         #[command(subcommand)]
         command: PermissionCommand,
     },
+    /// Manage time-limited relay grants and inspect stored local attachments.
+    Relay {
+        #[command(subcommand)]
+        command: Option<RelayCommand>,
+    },
+}
+#[derive(Subcommand)]
+enum RelayCommand {
+    Grants,
+    /// Authorize one intermediary to select one target; messaging permissions still apply.
+    Grant {
+        intermediary: String,
+        target: String,
+        #[arg(long, default_value_t=86400, value_parser=clap::value_parser!(u64).range(1..=gent_protocol::MAX_RELAY_GRANT_LIFETIME))]
+        ttl_seconds: u64,
+    },
+    /// Permanently retire a grant ID. Reauthorization uses a new grant.
+    Revoke {
+        grant: String,
+    },
+    /// List up to 100 recent attachments stored on this node.
+    Attachments,
 }
 #[derive(Subcommand)]
 enum ClusterCommand {
@@ -448,6 +470,35 @@ async fn execute(cli: Cli) -> Result<()> {
             .await?
         }
         Some(Command::Config { command: None }) => json!(config::load(&home)?),
+        Some(Command::Relay { command }) => match command.unwrap_or(RelayCommand::Grants) {
+            RelayCommand::Grants => owner(&home, OwnerOp::RelayGrants).await?,
+            RelayCommand::Attachments => owner(&home, OwnerOp::RelayAttachments).await?,
+            RelayCommand::Grant {
+                intermediary,
+                target,
+                ttl_seconds,
+            } => {
+                configure(
+                    &home,
+                    &request_id,
+                    ConfigurationEdit::GrantRelay {
+                        grant_id: request_id.clone(),
+                        intermediary,
+                        target,
+                        lifetime_seconds: ttl_seconds,
+                    },
+                )
+                .await?
+            }
+            RelayCommand::Revoke { grant } => {
+                configure(
+                    &home,
+                    &request_id,
+                    ConfigurationEdit::RevokeRelay { grant_id: grant },
+                )
+                .await?
+            }
+        },
         Some(Command::Permission { command }) => {
             let (actor, peer, permissions, effect) = match command {
                 PermissionCommand::Allow {

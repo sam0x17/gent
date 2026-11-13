@@ -7,6 +7,7 @@ pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 pub const MAX_FRAME_BYTES: usize = 6 * 1024 * 1024;
 pub const MAX_EXCHANGE_MESSAGES: u32 = 32;
 pub const EXCHANGE_TTL_SECONDS: i64 = 24 * 60 * 60;
+pub const MAX_RELAY_GRANT_LIFETIME: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Agent {
@@ -65,6 +66,39 @@ pub struct Policy {
     /// Group membership is owner-managed, never supplied by an agent.
     #[serde(default)]
     pub groups: BTreeMap<String, Vec<String>>,
+    /// Explicit owner authorization to select a target for user relay work.
+    /// Messaging permissions still apply. Empty maps preserve old signed bytes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub relay_grants: BTreeMap<String, RelayGrant>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RelayGrant {
+    pub intermediary: String,
+    pub target: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayAttachment {
+    pub id: String,
+    pub intermediary: String,
+    pub target: String,
+    pub grant_id: String,
+    pub security_mode: RelaySecurityMode,
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub detached: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelaySecurityMode {
+    LocalDaemon,
+    EncryptedDaemonLink,
 }
 
 impl Policy {
@@ -175,6 +209,16 @@ pub enum AgentOp {
     MessageStatus {
         message_id: String,
     },
+    RelayAttach {
+        target: String,
+        request_id: String,
+    },
+    RelayStatus {
+        attachment_id: Option<String>,
+    },
+    RelayDetach {
+        attachment_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -192,6 +236,15 @@ pub enum ConfigurationEdit {
         name: String,
     },
     Renew,
+    GrantRelay {
+        grant_id: String,
+        intermediary: String,
+        target: String,
+        lifetime_seconds: u64,
+    },
+    RevokeRelay {
+        grant_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -212,6 +265,8 @@ pub enum OwnerOp {
     Nodes,
     Agents,
     Providers,
+    RelayGrants,
+    RelayAttachments,
     SetPolicy {
         policy: Policy,
     },

@@ -111,6 +111,26 @@ The host invokes `gent_register` with a display `name` and arbitrary `provider` 
 | `gent_inbox` | Retrieve pending permitted messages and files. |
 | `gent_ack` | Record receipt of a message; this does not claim work is complete. |
 | `gent_message_status` | Inspect queued, delivered, expired, or revoked state. |
+| `gent_relay_attach` | Save a selected target under an owner grant and ordinary message permissions. |
+| `gent_relay_status` | Inspect the current selection or a specific saved attachment. |
+| `gent_relay_detach` | Detach a specific attachment without cancelling messages. |
+
+## Persistent relay selection
+
+The owner can grant one intermediary agent access to select one target:
+
+```sh
+gent relay grant INTERMEDIARY_UUID TARGET_UUID --ttl-seconds 86400
+gent relay grants
+gent relay attachments
+gent relay revoke GRANT_UUID
+```
+
+Both agents must already be registered and known to the signing owner. Grants last one day by default, with a seven-day maximum. They supplement enumeration/send/receive policy; they do not grant those permissions. Authorized joined nodes submit these edits through the existing configuration proposal path. `gent config requests` shows acceptance or rejection. Use the global `--request-id UUID` for an exact CLI retry; that UUID is also the grant ID.
+
+The intermediary calls `gent_relay_attach` with `target` and a fresh `request_id`. Selection persists across daemon and MCP restarts. Selecting a different target detaches the previous attachment atomically. Retrying an older selection returns its saved state and does not reactivate it. Detach names an attachment ID, so delayed control calls cannot detach a later selection. Revoked grant IDs stay retired; a new grant requires a new attachment. Status hides target details if enumeration is revoked. `gent relay attachments` is an owner view of the newest 100 local records.
+
+This is the selection foundation: tool results explicitly report `supports_turns: false`. Attaching sends nothing. Ordered forwarding, durable pending relay turns, completion, and cancellation requests remain unfinished. Forwarded ordinary messages remain attributed to the intermediary, without a claim of human authorship or permission to execute. Security mode currently describes local-daemon or encrypted daemon-to-daemon transport; hosted/web/mobile bridges are not implemented.
 
 ## Shell integration
 

@@ -21,6 +21,7 @@ mod configuration;
 mod mesh;
 mod network;
 mod pairing;
+mod relay;
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -62,6 +63,7 @@ impl Store {
         network::schema(&db)?;
         configuration::schema(&db)?;
         mesh::schema(&db)?;
+        relay::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -366,6 +368,9 @@ impl StoreSession<'_> {
                 }
                 Ok(json!(providers))
             }
+            OwnerOp::RelayGrants => Ok(json!({"grants":self.state.state().policy.relay_grants,
+                "retired":self.state.state().retired_relay_grants,"revision":self.state.checkpoint().revision})),
+            OwnerOp::RelayAttachments => self.relay_attachments(),
             OwnerOp::Configure { request_id, edit } => self.submit_configuration(&request_id, edit),
             OwnerOp::ConfigurationRequests { request_id } => match request_id {
                 Some(id) => self.configuration_status(&id),
@@ -465,6 +470,11 @@ impl StoreSession<'_> {
                     .filter(|other| self.config.policy.visible(&who, other))
                     .collect::<Vec<_>>()
             )),
+            AgentOp::RelayAttach { target, request_id } => {
+                self.relay_attach(&who, &target, &request_id)
+            }
+            AgentOp::RelayStatus { attachment_id } => self.relay_status(&who, attachment_id),
+            AgentOp::RelayDetach { attachment_id } => self.relay_detach(&who, &attachment_id),
             AgentOp::Send {
                 recipient,
                 request_id,

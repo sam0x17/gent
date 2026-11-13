@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use gent_protocol::{Policy, Selector};
+use gent_protocol::{MAX_RELAY_GRANT_LIFETIME, Policy, Selector};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,6 +70,8 @@ pub struct ClusterState {
     pub nodes: BTreeMap<String, NodeMember>,
     pub retired_nodes: BTreeSet<String>,
     pub retired_keys: BTreeSet<PublicKey>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub retired_relay_grants: BTreeSet<String>,
     pub policy: Policy,
 }
 
@@ -297,7 +299,9 @@ fn decode<T: Serialize + DeserializeOwned>(bytes: &[u8], limit: usize) -> Result
 /// Shared validation for TOML proposals and owner-signed policy records.
 pub fn validate_policy(policy: &Policy) -> Result<()> {
     ensure!(
-        policy.rules.len() <= 4096 && policy.groups.len() <= 256,
+        policy.rules.len() <= 4096
+            && policy.groups.len() <= 256
+            && policy.relay_grants.len() <= 1024,
         "policy exceeds limits"
     );
     for (name, members) in &policy.groups {
@@ -321,6 +325,16 @@ pub fn validate_policy(policy: &Policy) -> Result<()> {
             }
         }
     }
+    for (grant_id, grant) in &policy.relay_grants {
+        id(grant_id)?;
+        id(&grant.intermediary)?;
+        id(&grant.target)?;
+        ensure!(
+            grant.intermediary != grant.target,
+            "relay endpoints must differ"
+        );
+        lifetime(grant.issued_at, grant.expires_at, MAX_RELAY_GRANT_LIFETIME)?;
+    }
     Ok(())
 }
 
@@ -340,7 +354,9 @@ impl ClusterState {
             "invalid node count"
         );
         ensure!(
-            self.retired_nodes.len() <= 8192 && self.retired_keys.len() <= 8192,
+            self.retired_nodes.len() <= 8192
+                && self.retired_keys.len() <= 8192
+                && self.retired_relay_grants.len() <= 8192,
             "retirement history exceeds limits"
         );
         let mut keys = BTreeSet::new();
@@ -363,6 +379,19 @@ impl ClusterState {
         }
         for retired in &self.retired_keys {
             public_key(retired)?;
+        }
+        for retired in &self.retired_relay_grants {
+            id(retired)?;
+            ensure!(
+                !self.policy.relay_grants.contains_key(retired),
+                "retired relay grant cannot be restored"
+            );
+        }
+        for grant in self.policy.relay_grants.values() {
+            ensure!(
+                grant.issued_at <= self.issued_at,
+                "relay grant issued after its configuration"
+            );
         }
         validate_policy(&self.policy)
     }
@@ -476,6 +505,7 @@ impl OwnerKey {
             nodes: BTreeMap::from([(first.id.clone(), first.member(node_name)?)]),
             retired_nodes: BTreeSet::new(),
             retired_keys: BTreeSet::new(),
+            retired_relay_grants: BTreeSet::new(),
             policy,
         };
         let signed = self.sign(state)?;
@@ -796,7 +826,10 @@ impl VerifiedState {
                 previous.retired_keys.is_subset(&update.state.retired_keys)
                     && previous
                         .retired_nodes
-                        .is_subset(&update.state.retired_nodes),
+                        .is_subset(&update.state.retired_nodes)
+                    && previous
+                        .retired_relay_grants
+                        .is_subset(&update.state.retired_relay_grants),
                 "retirement history cannot be removed"
             );
             for (node_id, member) in &previous.nodes {
@@ -811,6 +844,15 @@ impl VerifiedState {
                         "replaced key requires retirement"
                     ),
                     _ => {}
+                }
+            }
+            for (id, grant) in &previous.policy.relay_grants {
+                match update.state.policy.relay_grants.get(id) {
+                    Some(next) => ensure!(next == grant, "relay grant identity is immutable"),
+                    None => ensure!(
+                        update.state.retired_relay_grants.contains(id),
+                        "removed relay grant requires retirement"
+                    ),
                 }
             }
             next.signed = update.clone();
@@ -841,6 +883,14 @@ impl VerifiedState {
             .checked_add(MAX_STATE_LIFETIME)
             .context("timestamp overflow")?;
         edit(&mut state)?;
+        for (id, grant) in &self.state().policy.relay_grants {
+            match state.policy.relay_grants.get(id) {
+                Some(next) => ensure!(next == grant, "relay grant identity is immutable"),
+                None => {
+                    state.retired_relay_grants.insert(id.clone());
+                }
+            }
+        }
         owner.sign(state)
     }
 

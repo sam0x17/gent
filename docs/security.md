@@ -111,6 +111,16 @@ The active owner rechecks the origin's current signed capability before acceptin
 
 Results bind the original writer, request ID, and proposal fingerprint. An applied result must reference a checkpoint already verified in local signed history. A response ahead of local authority waits for configuration synchronization. Requests remain queued while the owner is unavailable and survive source restart. Rejected results stay final after a later regrant. The CLI exposes these states through `gent config requests` and `gent config request REQUEST_UUID`. Configuration proposals share ordered data streams with other node traffic; congestion or a stalled stream can delay acceptance. Request and transport histories currently have no pruning or aggregate disk quota.
 
+## Relay grants and saved selection
+
+Signed policy can include time-limited relay grants scoped to one intermediary agent and one target. The owner CLI and authorized joined-node configuration proposals can create or revoke them. Ordinary message permissions remain independently required. Issuance time is set when the signing owner accepts a grant proposal, with a maximum seven-day lifetime. Policy replacement through TOML must also pass these checks.
+
+Grant IDs and endpoints are canonical nonzero UUIDs. A grant's endpoints and timestamps cannot change under its ID. Removed IDs enter a monotonically growing retirement set, and chain verification rejects missing retirements or attempts to reintroduce an ID. Old empty policy/state encodings retain their canonical signed bytes. Nodes must be upgraded before receiving nonempty relay-grant fields; older versions reject unknown fields.
+
+Each local agent has at most one current attachment. Selection, replacement, and the retry record commit in the same RPC transaction. Stable request IDs return the original selection, including its detached, revoked, or expired state. Status rechecks the current grant and permissions and omits target details after enumeration loss. Detach addresses an attachment owned by the authenticated intermediary. A newer grant cannot revive an attachment bound to a retired one. Limits are 1,024 active policy grants, 8,192 retired IDs, and 1,024 historical attachments per agent; pruning and renewal UX remain unfinished.
+
+These grants authorize target selection. Tools report `supports_turns: false`; relay turns and their provenance checks are not yet implemented. No text supplied by an agent becomes authenticated human intent. The attachment's security mode comes from registered node identities and describes only the implemented daemon transport. Existing freshness bounds still apply to revocation while disconnected.
+
 ## MLS messaging proof
 
 The native proof uses [MLS, RFC 9420](https://www.rfc-editor.org/rfc/rfc9420.html), through OpenMLS 0.9.2, RustCrypto 0.6, and OpenMLS SQLite storage 0.3. The ciphersuite is `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`. Gent does not implement its own ratchet. The workspace uses rusqlite 0.37 to share the SQLite storage provider's native library version; the existing daemon and replica tests pass with that version on both OSes. No experimental MLS protocol features or secret-debug features are enabled by Gent.

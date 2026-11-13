@@ -22,6 +22,34 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
         }
         ConfigurationEdit::RenameNode { name } => config::label(name)?,
         ConfigurationEdit::Renew => {}
+        ConfigurationEdit::GrantRelay {
+            grant_id,
+            intermediary,
+            target,
+            lifetime_seconds,
+        } => {
+            let policy = Policy {
+                relay_grants: [(
+                    grant_id.clone(),
+                    RelayGrant {
+                        intermediary: intermediary.clone(),
+                        target: target.clone(),
+                        issued_at: 0,
+                        expires_at: *lifetime_seconds,
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            };
+            gent_crypto::validate_policy(&policy)?;
+        }
+        ConfigurationEdit::RevokeRelay { grant_id } => {
+            let id = Uuid::parse_str(grant_id).context("relay grant ID must be a UUID")?;
+            ensure!(
+                !id.is_nil() && id.to_string() == *grant_id,
+                "invalid relay grant ID"
+            );
+        }
     }
     ensure!(
         serde_json::to_vec(edit)?.len() < crate::messages::MAX_RECORD_BYTES - 4096,
@@ -167,6 +195,42 @@ impl StoreSession<'_> {
                 timestamp,
             ),
             ConfigurationEdit::Renew => self.state.renew(owner, timestamp),
+            ConfigurationEdit::GrantRelay {
+                grant_id,
+                intermediary,
+                target,
+                lifetime_seconds,
+            } => {
+                let actor = self.get_agent(intermediary)?;
+                let peer = self.get_agent(target)?;
+                ensure!(!actor.revoked && !peer.revoked, "relay endpoint is revoked");
+                let mut policy = self.state.state().policy.clone();
+                ensure!(
+                    !policy.relay_grants.contains_key(grant_id),
+                    "relay grant ID already exists"
+                );
+                policy.relay_grants.insert(
+                    grant_id.clone(),
+                    RelayGrant {
+                        intermediary: intermediary.clone(),
+                        target: target.clone(),
+                        issued_at: timestamp,
+                        expires_at: timestamp
+                            .checked_add(*lifetime_seconds)
+                            .context("relay expiry overflow")?,
+                    },
+                );
+                self.state.set_policy(owner, policy, timestamp)
+            }
+            ConfigurationEdit::RevokeRelay { grant_id } => {
+                let mut policy = self.state.state().policy.clone();
+                ensure!(
+                    policy.relay_grants.remove(grant_id).is_some()
+                        || self.state.state().retired_relay_grants.contains(grant_id),
+                    "unknown relay grant ID"
+                );
+                self.state.set_policy(owner, policy, timestamp)
+            }
         }
     }
     pub(super) fn accept_configuration(
@@ -302,8 +366,13 @@ impl StoreSession<'_> {
                 }
             }
         }
-        if let ConfigurationEdit::RenameNode { name } = serde_json::from_slice(&edit)? {
-            status["name"] = name.into();
+        match serde_json::from_slice(&edit)? {
+            ConfigurationEdit::RenameNode { name } => status["name"] = name.into(),
+            ConfigurationEdit::GrantRelay { grant_id, .. }
+            | ConfigurationEdit::RevokeRelay { grant_id } => {
+                status["grant_id"] = grant_id.into();
+            }
+            _ => {}
         }
         Ok(status)
     }

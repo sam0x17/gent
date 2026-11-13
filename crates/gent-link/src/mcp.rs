@@ -74,6 +74,24 @@ fn tools() -> Vec<Tool> {
             json!({"message_id":{"type":"string","format":"uuid"}}),
             vec!["message_id"],
         ),
+        (
+            "gent_relay_attach",
+            "Persist a target agent ID using an active owner relay grant and messaging permissions. Use a fresh UUID request_id; an identical retry preserves the original attachment. This selects a target without sending a message.",
+            json!({"target":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"}}),
+            vec!["target", "request_id"],
+        ),
+        (
+            "gent_relay_status",
+            "Inspect this agent's current attachment, or a specific attachment ID. Target selection persists; queued relay turns are not yet supported. Hidden targets are omitted.",
+            json!({"attachment_id":{"type":"string","format":"uuid"}}),
+            vec![],
+        ),
+        (
+            "gent_relay_detach",
+            "Detach this agent's specified attachment. It does not cancel work already sent, and cannot detach a different current target.",
+            json!({"attachment_id":{"type":"string","format":"uuid"}}),
+            vec!["attachment_id"],
+        ),
     ];
     declarations.into_iter().map(|(name,description,properties,required)|Tool::new_with_raw(name,Some(description.into()),Arc::new(json!({"type":"object","additionalProperties":false,"properties":properties,"required":required}).as_object().unwrap().clone()))).collect()
 }
