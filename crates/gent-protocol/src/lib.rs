@@ -193,6 +193,18 @@ pub struct FilePart {
     pub data_base64: String,
 }
 
+/// Agent-visible attachment metadata. Decryption keys are a separate private
+/// wire type and must never be serialized into an agent RPC or MCP response.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileDescriptor {
+    pub id: String,
+    pub name: String,
+    pub media_type: String,
+    pub byte_length: u64,
+    pub sha256: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Message {

@@ -256,13 +256,41 @@ Records are limited to 2 MiB and split into 256 KiB fragments, keeping encoded p
 
 Six runtime tests inject enqueue, fragment-cursor, and recipient-import failures, cancel partial files, reject foreign agent claims and forged replies/receipts, delay messages until configuration catches up, and bound replies queued by both nodes. Two automatic relay tests cover a 1 MiB file, scoped replies, restart, authenticated acknowledgment, outage, policy changes, and directory tombstones. Two authority tests check ID scoping and legacy-certificate substitution.
 
+## Encrypted file objects
+
+`gent-crypto::files` and `gent-daemon::file_objects` provide the encryption and endpoint-storage components for larger attachments. They are library APIs for trusted daemon code. The live messaging tools still use inline files with a combined 1 MiB limit. File-object transport, agent-scoped grants, and MCP/native file access are the next integration work.
+
+Each new `seal` call generates an independent UUIDv4 object ID and a random 256-bit key, including when forwarding identical bytes. RustCrypto ChaCha20-Poly1305 encrypts chunks of up to 256 KiB. Its 96-bit nonce is eight zero bytes followed by the chunk index as a big-endian 32-bit integer. The API seals an immutable object once; it does not allow callers to encrypt different plaintext under an existing key and index. Retries must reuse saved ciphertext and its grant. An empty file has one authenticated empty chunk.
+
+Every chunk authenticates the complete manifest, chunk count, and index. The AAD starts with `gent/file-chunk/v1\0`, followed by object ID, filename, media type, and lowercase hexadecimal SHA-256; each UTF-8 field has a big-endian 16-bit byte-length prefix. Next are the plaintext byte length as a big-endian 64-bit integer, then count and index as big-endian 32-bit integers. A complete read verifies the whole-file hash as well as each AEAD tag. Swapped, duplicated, truncated, cross-object, and modified chunks fail authentication or completeness checks.
+
+The public `FileDescriptor` contains only the ID, basename, media type, byte length, and integrity hash. `FileGrant` contains the key and manifest, has no `Debug` or `Serialize` implementation, and requires explicit private encoding. Its versioned JSON parser rejects unknown or duplicated fields, invalid manifests, oversized grants, and malformed keys without echoing secret parser input. Grants are intended for protected local state and encrypted message records. Their possession alone does not authorize agent access. Names, types, hashes, and keys must never be sent as object-storage metadata.
+
+The storage API operates within the caller's SQLite transaction so file reservation, ciphertext, and an enclosing message can commit together. Receiving an authenticated grant reserves the complete expected ciphertext size before accepting chunks. Each incoming chunk is authenticated before storage; duplicates must match exactly. Downloads may arrive out of order and resume after reopening the database. Complete reads require the full verified file. Upload acknowledgments persist separately and mean service storage only. A lost relay copy can be uploaded again using identical ciphertext.
+
+| Endpoint storage limit | Value |
+| --- | --- |
+| Plaintext per file | 32 MiB |
+| Chunks per file | 1–128 |
+| Ciphertext per chunk | At most 256 KiB + 16-byte tag |
+| Objects per database, including reservations | 128 |
+| Reserved ciphertext per database | 256 MiB, including tags |
+| Incomplete object lifetime | At most one hour from its local reservation |
+| Complete object retention | Caller-selected deadline, at most seven days from its local reservation |
+
+Exact retries cannot change stored keys, manifests, deadlines, or ciphertext. Expired or abandoned objects become inaccessible before cleanup runs. Explicit deletion and cleanup remove their grants and chunks together and release logical quota. These limits bound this component's live objects, not SQLite/WAL file sizes, old backups, message history, or service storage. Cleanup scheduling and remote retention remain integration work. Private key buffers and successful decrypted buffers are zeroized on drop; forensic erasure of all temporary copies, database pages, and backups is not established.
+
+Six crypto tests and nine storage tests cover empty and maximum-size files, manifest/key/chunk substitution, malformed grants, whole-file integrity, restart recovery, upload retry, atomic rollback with an enclosing message, concurrent reservations, quotas, expiry, deletion, missing chunks, and schema versions. Three committed vectors also match Python `cryptography` independently, including a nonzero chunk nonce and an empty file. Reproduce them with `python3 scripts/file_object_vectors.py --check` in an environment with that package installed.
+
+The next integration must bind file IDs to authenticated agents and messages, recheck current policy for retrieval and forwarding, persist retry IDs with the chosen immutable objects, and encrypt grants before dispatch. It must derive deadlines from the original authorized transfer; deleting an object must not let a replay acquire a new lifetime. It also needs bounded ciphertext-only relay object routes, transfer and cleanup scheduling, and native host file-input/output proofs. No larger-file delivery or host-access claim follows from these component tests.
+
 ## Boundaries still to implement
 
 Key packages contain identity metadata and must travel inside an authenticated, encrypted enrollment or distribution channel. They must not become a plaintext public directory. MLS Welcome messages protect their group information, while ordinary MLS headers still expose opaque group IDs, epochs, sizes, and timing. The surrounding routing protocol must account for this metadata.
 
 Node authentication does not authorize one agent to read another agent's messages. MLS inbox/outbox accessors are for trusted local code. The live RPC path and remote import check signed policy and bind each registration to its authenticated hosting node. Trusted daemons can read records addressed to their node; MCP callers receive only their permitted directory and inbox.
 
-Configuration streams belong only to trusted daemons; messaging streams serve separately authenticated endpoints. Larger-file storage and grants, periodic epoch refresh scheduling, invitation pairing, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before production use.
+Configuration streams belong only to trusted daemons; messaging streams serve separately authenticated endpoints. Larger-file transport and agent grants, periodic epoch refresh scheduling, invitation pairing, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before production use.
 
 ## Automatic peer mesh
 
@@ -332,4 +360,4 @@ Eight installer tests on both OSes cover ownership, unrelated-setting preservati
 
 Five shell-integration tests and real shell process proofs pass on both platforms, including macOS Bash 3.2, Zsh Tab completion, and Fish. Shell setup preserves unrelated startup-file bytes, serializes Gent writers, and refuses changed blocks, linked files, and shared write access. Shell startup only loads PATH/completion; agent identity and permissions remain with the MCP integration and daemon.
 
-The native workspace has 133 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.
+The native workspace has 168 passing default tests on Linux and macOS, plus the opt-in integration proofs described above. The authority crate, configuration grants, packet format, signer interface, and file-object crypto compile for Wasm; native SQLite storage and crypto runtime behavior on Wasm are not covered by that check. Independent protocol review, production transport and authentication tests, invitation pairing, and lost-state recovery tests remain required before production use.

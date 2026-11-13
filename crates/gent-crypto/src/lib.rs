@@ -5,6 +5,7 @@
 //! pairing channel. A relay-provided anchor or rollback of local storage defeats the
 //! trust boundary. Do not upload these plaintext records to a routing service.
 mod authority;
+pub mod files;
 pub mod stream;
 
 pub use authority::*;
