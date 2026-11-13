@@ -21,6 +21,35 @@ struct Pair {
     agents: [String; 2],
 }
 impl Pair {
+    fn relay_attach(&mut self) -> String {
+        let grant = Uuid::new_v4().to_string();
+        self.stores[0]
+            .execute(Request::Owner {
+                credential: config::read_private(&self.homes[0].path().join("owner.key")).unwrap(),
+                action: OwnerOp::Configure {
+                    request_id: grant.clone(),
+                    edit: ConfigurationEdit::GrantRelay {
+                        grant_id: grant,
+                        intermediary: self.agents[0].clone(),
+                        target: self.agents[1].clone(),
+                        lifetime_seconds: 3600,
+                    },
+                },
+            })
+            .unwrap();
+        self.pump();
+        self.agent(
+            0,
+            AgentOp::RelayAttach {
+                target: self.agents[1].clone(),
+                request_id: Uuid::new_v4().to_string(),
+            },
+        )
+        .unwrap()["attachment"]["id"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
     async fn new() -> Self {
         let homes = std::array::from_fn(|_| {
             let home = tempfile::tempdir().unwrap();
@@ -161,6 +190,234 @@ impl Pair {
     fn reopen(&mut self, i: usize) {
         self.stores[i] = Store::open(self.homes[i].path()).unwrap();
     }
+}
+
+#[tokio::test]
+async fn remote_relay_replies_cannot_strip_or_substitute_authenticated_turn_context() {
+    let mut pair = Pair::new().await;
+    let attachment = pair.relay_attach();
+    let turn = pair
+        .agent(
+            0,
+            AgentOp::RelaySend {
+                attachment_id: attachment,
+                request_id: Uuid::new_v4().to_string(),
+                text: "original turn".into(),
+                files: vec![],
+            },
+        )
+        .unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pair.pump();
+    let target = &pair.stores[1];
+    let target_session =
+        target.network_session(&target.db, target.identity.state(&target.db).unwrap());
+    let registration = target_session.registration(&pair.agents[1]).unwrap();
+    let root = target_session.message(&turn).unwrap();
+    for attack in 0..4 {
+        let store = &pair.stores[0];
+        let tx = store.db.unchecked_transaction().unwrap();
+        let mut session = store.network_session(&tx, store.identity.state(&tx).unwrap());
+        let request = Uuid::new_v4().to_string();
+        let mut message = root.clone();
+        message.id = messages::message_id(&pair.agents[1], &request).unwrap();
+        message.sender.clone_from(&root.recipient);
+        message.recipient.clone_from(&root.sender);
+        message.reply_to = Some(root.id.clone());
+        message.relay.as_mut().unwrap().kind = RelayMessageKind::Complete;
+        match attack {
+            0 => message.relay = None,
+            1 => message.relay.as_mut().unwrap().attachment_id = Uuid::new_v4().to_string(),
+            2 => message.relay.as_mut().unwrap().turn_id = Uuid::new_v4().to_string(),
+            _ => message.reply_to = Some(Uuid::new_v4().to_string()),
+        }
+        assert!(
+            session
+                .import_event(
+                    pair.stores[1].identity.node.id(),
+                    Event::Message {
+                        sender: Box::new(registration.clone()),
+                        request_id: request,
+                        message,
+                    }
+                )
+                .is_err()
+        );
+        tx.rollback().unwrap();
+    }
+    let response = AgentOp::RelayRespond {
+        turn_id: turn.clone(),
+        request_id: Uuid::new_v4().to_string(),
+        text: "verified reply".into(),
+        files: vec![],
+        outcome: RelayResponseKind::Complete,
+    };
+    pair.agent(1, response).unwrap();
+    pair.pump();
+    let status = pair
+        .agent(
+            0,
+            AgentOp::RelayTurnStatus {
+                turn_id: turn,
+                after_message_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(status["state"], "completed");
+    assert_eq!(status["responses"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn crossed_cancellation_and_completion_do_not_reopen_or_lose_a_remote_turn() {
+    let mut pair = Pair::new().await;
+    let attachment = pair.relay_attach();
+    let send = AgentOp::RelaySend {
+        attachment_id: attachment.clone(),
+        request_id: Uuid::new_v4().to_string(),
+        text: "work".into(),
+        files: vec![],
+    };
+    let turn = pair.agent(0, send.clone()).unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pair.pump();
+    pair.agent(
+        0,
+        AgentOp::RelayDetach {
+            attachment_id: attachment,
+        },
+    )
+    .unwrap();
+    let cancel = AgentOp::RelayCancel {
+        turn_id: turn.clone(),
+        request_id: Uuid::new_v4().to_string(),
+    };
+    pair.agent(0, cancel.clone()).unwrap();
+    let response = AgentOp::RelayRespond {
+        turn_id: turn.clone(),
+        request_id: Uuid::new_v4().to_string(),
+        text: "already finished".into(),
+        files: vec![],
+        outcome: RelayResponseKind::Complete,
+    };
+    pair.stores[1].db.execute_batch("CREATE TRIGGER fail_relay_outbox BEFORE INSERT ON network_events BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(pair.agent(1, response.clone()).is_err());
+    assert_eq!(
+        pair.agent(1, AgentOp::RelayNext).unwrap()["request"]["id"],
+        turn
+    );
+    pair.stores[1]
+        .db
+        .execute_batch("DROP TRIGGER fail_relay_outbox;")
+        .unwrap();
+    pair.agent(1, response.clone()).unwrap();
+    pair.reopen(0);
+    pair.reopen(1);
+    pair.pump();
+    let status = pair
+        .agent(
+            0,
+            AgentOp::RelayTurnStatus {
+                turn_id: turn.clone(),
+                after_message_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(status["state"], "completed");
+    assert_eq!(status["cancel_requested"], true);
+    assert_eq!(status["responses"][0]["relay"]["kind"], "complete");
+    assert_eq!(pair.agent(1, AgentOp::RelayNext).unwrap(), Value::Null);
+    assert_eq!(pair.agent(0, send).unwrap()["duplicate"], true);
+    assert_eq!(pair.agent(0, cancel).unwrap()["duplicate"], true);
+    assert_eq!(pair.agent(1, response).unwrap()["duplicate"], true);
+    pair.pump();
+    assert_eq!(pair.agent(1, AgentOp::Inbox).unwrap(), json!([]));
+}
+
+#[tokio::test]
+async fn grant_revocation_blocks_relay_turns_before_encryption_and_before_target_work() {
+    let mut pair = Pair::new().await;
+    let attachment = pair.relay_attach();
+    let grant = pair
+        .agent(
+            0,
+            AgentOp::RelayStatus {
+                attachment_id: None,
+            },
+        )
+        .unwrap()["attachment"]["grant_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = pair
+        .agent(
+            0,
+            AgentOp::RelaySend {
+                attachment_id: attachment.clone(),
+                request_id: Uuid::new_v4().to_string(),
+                text: "accepted earlier".into(),
+                files: vec![],
+            },
+        )
+        .unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pair.pump();
+    assert_eq!(
+        pair.agent(1, AgentOp::RelayNext).unwrap()["request"]["id"],
+        first
+    );
+    let queued = pair
+        .agent(
+            0,
+            AgentOp::RelaySend {
+                attachment_id: attachment,
+                request_id: Uuid::new_v4().to_string(),
+                text: "must not encrypt".into(),
+                files: vec![],
+            },
+        )
+        .unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pair.stores[0]
+        .execute(Request::Owner {
+            credential: config::read_private(&pair.homes[0].path().join("owner.key")).unwrap(),
+            action: OwnerOp::Configure {
+                request_id: Uuid::new_v4().to_string(),
+                edit: ConfigurationEdit::RevokeRelay { grant_id: grant },
+            },
+        })
+        .unwrap();
+    pair.pump();
+    assert_eq!(pair.agent(1, AgentOp::RelayNext).unwrap(), Value::Null);
+    assert_eq!(pair.agent(1, AgentOp::Inbox).unwrap(), json!([]));
+    assert_eq!(
+        pair.agent(
+            0,
+            AgentOp::RelayTurnStatus {
+                turn_id: queued.clone(),
+                after_message_id: None
+            }
+        )
+        .unwrap()["state"],
+        "revoked"
+    );
+    assert!(
+        !pair.stores[1]
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1)",
+                [queued],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
 }
 
 #[tokio::test]

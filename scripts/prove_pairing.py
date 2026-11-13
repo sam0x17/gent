@@ -18,6 +18,7 @@ import tomllib
 import uuid
 from urllib.parse import urlparse
 from smoke_mcp import Client, PNG
+from relay_checks import exercise_turns
 
 
 PREPARE = r'''
@@ -217,6 +218,24 @@ def main():
             local_daemon = start_local()
             wait_for(lambda: (home / 'daemon.sock').exists())
             wait_for(lambda: any(m['id'] == queued['message_id'] for m in a.call('gent_inbox')[0]))
+            a.call('gent_ack', {'message_id': queued['message_id']})
+            grant = cli('relay', 'grant', aid, bid)
+            assert grant['state'] == 'applied'
+            attached = a.call('gent_relay_attach', {'target': bid, 'request_id': str(uuid.uuid4())})[0]
+            assert attached['attachment']['security_mode'] == 'encrypted_daemon_link'
+
+            def restart_relay_nodes():
+                nonlocal local_daemon, owner_daemon
+                stop(local_daemon)
+                remote(['python3', '-c', STOP_OWNER, owner_home])
+                stop(owner_daemon)
+                owner_daemon = start_owner()
+                local_daemon = start_local()
+                wait_for(lambda: remote(owner + ['daemon', 'status'], check=False).returncode == 0)
+                wait_for(lambda: subprocess.run(local + ['daemon', 'status'], capture_output=True).returncode == 0)
+
+            exercise_turns(a, b, attached['attachment']['id'], files, wait_for, restart_relay_nodes)
+            print('PASS: two-machine ordered relay turns, PNG forwarding, restart recovery, cancellation, final outcomes, and exact retries')
             rename_id = str(uuid.uuid4())
             renamed = cli('--request-id', rename_id, 'node', 'name', 'set', 'joined-after-edit')
             assert renamed['state'] == 'applied'

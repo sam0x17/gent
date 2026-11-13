@@ -418,12 +418,19 @@ impl StoreSession<'_> {
                 if !self.deliverable(&message)? {
                     return self.receipt(peer, &message.id, false);
                 }
+                self.validate_relay_message(&message)?;
                 if let Some(parent_id) = &message.reply_to {
                     let parent = self.message(parent_id)?;
+                    let cancellation = message
+                        .relay
+                        .as_ref()
+                        .is_some_and(|r| r.kind == RelayMessageKind::Cancel);
                     ensure!(
-                        parent.sender == message.recipient
-                            && parent.recipient == message.sender
-                            && parent.exchange_id == message.exchange_id
+                        (if cancellation {
+                            parent.sender == message.sender && parent.recipient == message.recipient
+                        } else {
+                            parent.sender == message.recipient && parent.recipient == message.sender
+                        }) && parent.exchange_id == message.exchange_id
                             && parent.expires_at == message.expires_at,
                         "reply does not match an accepted exchange"
                     );
@@ -452,10 +459,15 @@ impl StoreSession<'_> {
                     "remote exchange sender limit exceeded"
                 );
                 ensure!(self.db.execute("UPDATE exchanges SET count=count+1 WHERE id=?1 AND count<?2 AND expires_at=?3 AND ((a=?4 AND b=?5) OR (a=?5 AND b=?4))", params![message.exchange_id,MAX_EXCHANGE_MESSAGES,message.expires_at,message.sender,message.recipient])? == 1, "invalid or exhausted remote exchange");
-                let fingerprint = hash(&serde_json::to_string(
-                    &json!({"recipient":message.recipient,"text":message.text,"files":message.files,"reply_to":message.reply_to}),
-                )?);
+                let fingerprint = message_fingerprint(
+                    &message.recipient,
+                    &message.text,
+                    &message.files,
+                    &message.reply_to,
+                    &message.relay,
+                )?;
                 self.db.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES(?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
+                self.record_relay_message(&message)?;
                 Ok(())
             }
         }

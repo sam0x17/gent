@@ -541,6 +541,7 @@ fn legacy_local_database_preserves_agents_messages_and_identities() {
     let a = Uuid::new_v4().to_string();
     let b = Uuid::new_v4().to_string();
     let msg = Message {
+        relay: None,
         id: Uuid::new_v4().to_string(),
         exchange_id: Uuid::new_v4().to_string(),
         sender: a.clone(),

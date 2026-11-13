@@ -300,6 +300,27 @@ struct StoreSession<'a> {
     state: VerifiedState,
     timestamp: i64,
 }
+
+#[derive(Default)]
+struct SendContext {
+    parent: Option<Message>,
+    relay: Option<RelayMessage>,
+}
+
+fn message_fingerprint(
+    recipient: &str,
+    text: &str,
+    files: &[FilePart],
+    reply_to: &Option<String>,
+    relay: &Option<RelayMessage>,
+) -> Result<String> {
+    let mut value = json!({"recipient":recipient,"text":text,"files":files,"reply_to":reply_to});
+    // Preserve exact retry fingerprints for pre-relay messages.
+    if let Some(relay) = relay {
+        value["relay"] = json!(relay);
+    }
+    Ok(hash(&serde_json::to_string(&value)?))
+}
 impl StoreSession<'_> {
     fn decode_agent(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
         Ok(Agent {
@@ -475,12 +496,44 @@ impl StoreSession<'_> {
             }
             AgentOp::RelayStatus { attachment_id } => self.relay_status(&who, attachment_id),
             AgentOp::RelayDetach { attachment_id } => self.relay_detach(&who, &attachment_id),
+            AgentOp::RelaySend {
+                attachment_id,
+                request_id,
+                text,
+                files,
+            } => self.relay_send(&who, &attachment_id, &request_id, text, files),
+            AgentOp::RelayTurnStatus {
+                turn_id,
+                after_message_id,
+            } => self.relay_turn_status(&who, &turn_id, after_message_id.as_deref()),
+            AgentOp::RelayNext => self.relay_next(&who),
+            AgentOp::RelayTurns { after_turn_id } => {
+                self.relay_turns(&who, after_turn_id.as_deref())
+            }
+            AgentOp::RelayRespond {
+                turn_id,
+                request_id,
+                text,
+                files,
+                outcome,
+            } => self.relay_respond(&who, &turn_id, &request_id, (text, files), outcome),
+            AgentOp::RelayCancel {
+                turn_id,
+                request_id,
+            } => self.relay_cancel(&who, &turn_id, &request_id),
             AgentOp::Send {
                 recipient,
                 request_id,
                 text,
                 files,
-            } => self.send(&who, &recipient, &request_id, text, files, None),
+            } => self.send(
+                &who,
+                &recipient,
+                &request_id,
+                text,
+                files,
+                SendContext::default(),
+            ),
             AgentOp::Reply {
                 message_id,
                 request_id,
@@ -489,13 +542,17 @@ impl StoreSession<'_> {
             } => {
                 let parent = self.message(&message_id)?;
                 ensure!(parent.recipient == who.id, UNAVAILABLE);
+                ensure!(parent.relay.is_none(), "use relay_respond for a relay turn");
                 self.send(
                     &who,
                     &parent.sender.clone(),
                     &request_id,
                     text,
                     files,
-                    Some(parent),
+                    SendContext {
+                        parent: Some(parent),
+                        relay: None,
+                    },
                 )
             }
             AgentOp::Inbox => {
@@ -509,7 +566,7 @@ impl StoreSession<'_> {
                     let (payload, acknowledged) = row?;
                     let mut message: Message = serde_json::from_str(&payload)?;
                     message.acknowledged = acknowledged;
-                    if self.deliverable(&message)? {
+                    if self.deliverable(&message)? && self.relay_inbox_visible(&message)? {
                         if inbox.len() >= 50 || bytes + payload.len() > MAX_FRAME_BYTES / 2 {
                             break;
                         }
@@ -581,6 +638,9 @@ impl StoreSession<'_> {
         }
         let a = self.get_agent(&message.sender)?;
         let b = self.get_agent(&message.recipient)?;
+        if !self.relay_authorized(message)? {
+            return Ok(false);
+        }
         Ok(if message.reply_to.is_some() {
             self.config.policy.can_reply(&a, &b)
         } else {
@@ -595,31 +655,14 @@ impl StoreSession<'_> {
         request_id: &str,
         text: String,
         files: Vec<FilePart>,
-        parent: Option<Message>,
+        context: SendContext,
     ) -> Result<Value> {
         uuid::Uuid::parse_str(request_id)
             .context("request_id must be a UUID; reuse it only when retrying the same message")?;
-        ensure!(text.len() <= MAX_TEXT_BYTES, "message text exceeds 64 KiB");
-        ensure!(!text.is_empty() || !files.is_empty(), "message is empty");
-        ensure!(files.len() <= 4, "at most four files per message");
-        let mut total = 0;
-        for file in &files {
-            config::label(&file.name)?;
-            config::label(&file.media_type)?;
-            ensure!(
-                !file.name.contains(['/', '\\']) && file.name != "." && file.name != "..",
-                "filename must be a basename"
-            );
-            let bytes = STANDARD
-                .decode(&file.data_base64)
-                .context("invalid base64 file")?;
-            total += bytes.len();
-            ensure!(total <= MAX_FILE_BYTES, "combined files exceed 1 MiB");
-        }
+        network::validate_contents(&text, &files)?;
+        let SendContext { parent, relay } = context;
         let reply_to = parent.as_ref().map(|p| p.id.clone());
-        let fingerprint = hash(&serde_json::to_string(
-            &json!({"recipient":recipient_id,"text":text,"files":files,"reply_to":reply_to}),
-        )?);
+        let fingerprint = message_fingerprint(recipient_id, &text, &files, &reply_to, &relay)?;
         let existing: Option<(String, String)> = self
             .db
             .query_row(
@@ -662,7 +705,17 @@ impl StoreSession<'_> {
             (parent.exchange_id, expiry)
         } else {
             ensure!(self.config.policy.can_open(sender, &recipient), UNAVAILABLE);
-            (message_id.clone(), timestamp + EXCHANGE_TTL_SECONDS)
+            let mut expiry = timestamp + EXCHANGE_TTL_SECONDS;
+            if let Some(relay) = &relay {
+                let grant = self
+                    .config
+                    .policy
+                    .relay_grants
+                    .get(&relay.grant_id)
+                    .context(UNAVAILABLE)?;
+                expiry = expiry.min(grant.expires_at as i64);
+            }
+            (message_id.clone(), expiry)
         };
         if remote {
             let sent: u32 = self.db.query_row(
@@ -686,7 +739,10 @@ impl StoreSession<'_> {
             created_at: timestamp,
             expires_at,
             acknowledged: false,
+            relay,
         };
+        self.validate_relay_message(&message)?;
+        self.validate_local_relay(&message)?;
         let tx = self.db;
         if message.reply_to.is_none() {
             tx.execute(
@@ -702,6 +758,7 @@ impl StoreSession<'_> {
             "exchange reply limit reached"
         );
         tx.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES (?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,serde_json::to_string(&message)?])?;
+        self.record_relay_message(&message)?;
         if remote {
             self.queue_message(&recipient.node_id, request_id, &message)?;
         }

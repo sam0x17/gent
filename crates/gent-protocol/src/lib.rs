@@ -101,6 +101,35 @@ pub enum RelaySecurityMode {
     EncryptedDaemonLink,
 }
 
+/// Authenticated relay context inside the encrypted message, never inferred
+/// from text. The grant delegates relay access, not human authorship.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RelayMessage {
+    pub attachment_id: String,
+    pub grant_id: String,
+    pub turn_id: String,
+    pub kind: RelayMessageKind,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayMessageKind {
+    Request,
+    Progress,
+    Complete,
+    Cancel,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayResponseKind {
+    Progress,
+    Complete,
+    Cancelled,
+}
+
 impl Policy {
     fn matches(&self, selector: &Selector, subject: &Agent, other: &Agent) -> bool {
         match selector {
@@ -177,6 +206,8 @@ pub struct Message {
     pub created_at: i64,
     pub expires_at: i64,
     pub acknowledged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayMessage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,6 +249,33 @@ pub enum AgentOp {
     },
     RelayDetach {
         attachment_id: String,
+    },
+    RelaySend {
+        attachment_id: String,
+        request_id: String,
+        text: String,
+        #[serde(default)]
+        files: Vec<FilePart>,
+    },
+    RelayTurnStatus {
+        turn_id: String,
+        after_message_id: Option<String>,
+    },
+    RelayTurns {
+        after_turn_id: Option<String>,
+    },
+    RelayNext,
+    RelayRespond {
+        turn_id: String,
+        request_id: String,
+        text: String,
+        #[serde(default)]
+        files: Vec<FilePart>,
+        outcome: RelayResponseKind,
+    },
+    RelayCancel {
+        turn_id: String,
+        request_id: String,
     },
 }
 

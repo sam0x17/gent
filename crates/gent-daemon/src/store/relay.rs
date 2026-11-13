@@ -1,5 +1,5 @@
-//! Persistent target selection. Relay turns are added separately; attaching
-//! never sends a message or asserts that a human authored agent-provided text.
+//! Persistent selection and ordered relay turns. No relay grant asserts that a
+//! human authored agent-provided text or authorizes host execution.
 use super::*;
 use uuid::Uuid;
 
@@ -14,12 +14,447 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
         payload TEXT NOT NULL,
         UNIQUE(intermediary,request_id));
         CREATE UNIQUE INDEX IF NOT EXISTS relay_current
-        ON relay_attachments(intermediary) WHERE detached=0;",
+        ON relay_attachments(intermediary) WHERE detached=0;
+        CREATE TABLE IF NOT EXISTS relay_turns (
+        id TEXT PRIMARY KEY REFERENCES messages(id),
+        intermediary TEXT NOT NULL,
+        target TEXT NOT NULL,
+        attachment TEXT NOT NULL,
+        final_message TEXT REFERENCES messages(id),
+        cancel_message TEXT REFERENCES messages(id),
+        closed_reason TEXT);
+        CREATE INDEX IF NOT EXISTS relay_target_turns ON relay_turns(target)
+          WHERE final_message IS NULL AND closed_reason IS NULL;
+        CREATE INDEX IF NOT EXISTS relay_intermediary_turns ON relay_turns(intermediary);
+        CREATE INDEX IF NOT EXISTS relay_responses ON messages(json_extract(payload,'$.relay.turn_id'),recipient);",
     )?;
     Ok(())
 }
 
 impl StoreSession<'_> {
+    pub(super) fn relay_authorized(&self, message: &Message) -> Result<bool> {
+        let Some(relay) = &message.relay else {
+            return Ok(true);
+        };
+        let Some(grant) = self.config.policy.relay_grants.get(&relay.grant_id) else {
+            return Ok(false);
+        };
+        let (intermediary, target) = match relay.kind {
+            RelayMessageKind::Request | RelayMessageKind::Cancel => {
+                (&message.sender, &message.recipient)
+            }
+            _ => (&message.recipient, &message.sender),
+        };
+        Ok(grant.intermediary == *intermediary
+            && grant.target == *target
+            && grant.issued_at <= message.created_at as u64
+            && grant.issued_at <= self.timestamp as u64
+            && grant.expires_at > self.timestamp as u64
+            && message.expires_at as u64 <= grant.expires_at
+            && self
+                .config
+                .policy
+                .can_open(&self.get_agent(intermediary)?, &self.get_agent(target)?))
+    }
+
+    /// Validate both local and authenticated remote envelopes. Generic replies
+    /// cannot strip relay context, and a response must reference the root turn.
+    pub(super) fn validate_relay_message(&self, message: &Message) -> Result<()> {
+        let Some(relay) = &message.relay else {
+            if let Some(parent) = &message.reply_to {
+                ensure!(
+                    self.message(parent)?.relay.is_none(),
+                    "reply omitted relay context"
+                );
+            }
+            return Ok(());
+        };
+        for id in [&relay.attachment_id, &relay.grant_id, &relay.turn_id] {
+            let parsed = Uuid::parse_str(id)?;
+            ensure!(
+                !parsed.is_nil() && parsed.to_string() == *id,
+                "invalid relay identity"
+            );
+        }
+        ensure!(self.relay_authorized(message)?, UNAVAILABLE);
+        ensure!(
+            message.exchange_id == relay.turn_id,
+            "relay exchange mismatch"
+        );
+        if relay.kind == RelayMessageKind::Request {
+            ensure!(
+                relay.turn_id == message.id && message.reply_to.is_none(),
+                "invalid relay root"
+            );
+        } else {
+            let root = self.relay_root(&relay.turn_id)?;
+            let original = root.relay.as_ref().unwrap();
+            ensure!(
+                message.reply_to.as_deref() == Some(root.id.as_str())
+                    && relay.attachment_id == original.attachment_id
+                    && relay.grant_id == original.grant_id
+                    && message.expires_at == root.expires_at,
+                "relay response belongs to another turn or attachment"
+            );
+            let cancellation = relay.kind == RelayMessageKind::Cancel;
+            ensure!(
+                if cancellation {
+                    message.sender == root.sender && message.recipient == root.recipient
+                } else {
+                    message.sender == root.recipient && message.recipient == root.sender
+                },
+                "relay participants changed"
+            );
+            let (finished, cancelled, closed) = self.relay_turn_flags(&root.id)?;
+            // A cancellation may cross a final reply in flight. Persist it
+            // without reopening the turn or changing the target's outcome.
+            if cancellation {
+                ensure!(
+                    cancelled.is_none(),
+                    "cancellation already requested; retry its original request_id"
+                );
+            } else {
+                ensure!(
+                    finished.is_none() && closed.is_none(),
+                    "relay turn already finished"
+                );
+                if relay.kind == RelayMessageKind::Cancelled {
+                    ensure!(cancelled.is_some(), "no cancellation was requested");
+                }
+                let sent: u32 = self.db.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE sender=?1 AND json_extract(payload,'$.exchange_id')=?2",
+                    params![message.sender,root.id], |r| r.get(0))?;
+                // Reserve the final slot even when many progress updates were
+                // sent. Use the same per-target budget on local/remote turns.
+                let limit =
+                    MAX_EXCHANGE_MESSAGES / 2 - u32::from(relay.kind == RelayMessageKind::Progress);
+                ensure!(
+                    sent < limit,
+                    "relay response limit reached; reserve the last slot for a final outcome"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_local_relay(&self, message: &Message) -> Result<()> {
+        let Some(relay) = &message.relay else {
+            return Ok(());
+        };
+        if relay.kind == RelayMessageKind::Request {
+            let who = self.get_agent(&message.sender)?;
+            let attachment = self.relay_attachment(&who, &relay.attachment_id)?;
+            ensure!(
+                !attachment.detached
+                    && attachment.expires_at > self.timestamp as u64
+                    && attachment.target == message.recipient
+                    && attachment.grant_id == relay.grant_id,
+                "relay attachment is no longer active"
+            );
+        } else if relay.kind == RelayMessageKind::Cancel {
+            let (finished, _, closed) = self.relay_turn_flags(&relay.turn_id)?;
+            ensure!(
+                finished.is_none() && closed.is_none(),
+                "relay turn already finished"
+            );
+        } else {
+            ensure!(
+                self.relay_head(&message.sender)?
+                    .is_some_and(|root| root.id == relay.turn_id),
+                "relay turn is not the target's current turn"
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn record_relay_message(&self, message: &Message) -> Result<()> {
+        let Some(relay) = &message.relay else {
+            return Ok(());
+        };
+        match relay.kind {
+            RelayMessageKind::Request => {
+                self.db.execute(
+                "INSERT INTO relay_turns(id,intermediary,target,attachment) VALUES(?1,?2,?3,?4)",
+                params![message.id,message.sender,message.recipient,relay.attachment_id])?;
+            }
+            RelayMessageKind::Complete | RelayMessageKind::Cancelled => {
+                ensure!(self.db.execute(
+                "UPDATE relay_turns SET final_message=?1 WHERE id=?2 AND final_message IS NULL AND closed_reason IS NULL",
+                params![message.id,relay.turn_id])? == 1, "relay turn already finished");
+            }
+            RelayMessageKind::Cancel => {
+                self.db.execute(
+                    "UPDATE relay_turns SET cancel_message=COALESCE(cancel_message,?1) WHERE id=?2",
+                    params![message.id, relay.turn_id],
+                )?;
+            }
+            RelayMessageKind::Progress => {}
+        }
+        Ok(())
+    }
+
+    fn relay_root(&self, id: &str) -> Result<Message> {
+        let root = self.message(id)?;
+        ensure!(
+            root.relay.as_ref().is_some_and(
+                |relay| relay.kind == RelayMessageKind::Request && relay.turn_id == root.id
+            ),
+            UNAVAILABLE
+        );
+        Ok(root)
+    }
+
+    fn relay_turn_flags(
+        &self,
+        id: &str,
+    ) -> Result<(Option<String>, Option<String>, Option<String>)> {
+        Ok(self.db.query_row(
+            "SELECT final_message,cancel_message,closed_reason FROM relay_turns WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    }
+
+    fn relay_head(&self, target: &str) -> Result<Option<Message>> {
+        loop {
+            let id: Option<String> = self.db.query_row("SELECT id FROM relay_turns WHERE target=?1 AND final_message IS NULL AND closed_reason IS NULL ORDER BY rowid LIMIT 1",
+                [target], |r| r.get(0)).optional()?;
+            let Some(id) = id else {
+                return Ok(None);
+            };
+            let root = self.relay_root(&id)?;
+            let relay = root.relay.as_ref().unwrap();
+            let closed = if root.expires_at <= self.timestamp {
+                Some("expired")
+            } else if !self
+                .config
+                .policy
+                .relay_grants
+                .contains_key(&relay.grant_id)
+            {
+                Some("revoked")
+            } else {
+                None
+            };
+            if let Some(reason) = closed {
+                self.db.execute(
+                    "UPDATE relay_turns SET closed_reason=?1 WHERE id=?2",
+                    params![reason, id],
+                )?;
+                continue;
+            }
+            // Temporary permission blocks pause the head; later turns cannot
+            // overtake it and then overlap when permissions are restored.
+            return Ok(self.deliverable(&root)?.then_some(root));
+        }
+    }
+
+    pub(super) fn relay_inbox_visible(&self, message: &Message) -> Result<bool> {
+        let Some(relay) = &message.relay else {
+            return Ok(true);
+        };
+        Ok(match relay.kind {
+            RelayMessageKind::Request | RelayMessageKind::Cancel => self
+                .relay_head(&message.recipient)?
+                .is_some_and(|root| root.id == relay.turn_id),
+            _ => true,
+        })
+    }
+
+    pub(super) fn relay_send(
+        &mut self,
+        who: &Agent,
+        attachment: &str,
+        request: &str,
+        text: String,
+        files: Vec<FilePart>,
+    ) -> Result<Value> {
+        let attachment = self.relay_attachment(who, attachment)?;
+        let turn_id = crate::messages::message_id(&who.id, request)?;
+        let relay = RelayMessage {
+            attachment_id: attachment.id,
+            grant_id: attachment.grant_id,
+            turn_id: turn_id.clone(),
+            kind: RelayMessageKind::Request,
+        };
+        let mut result = self.send(
+            who,
+            &attachment.target,
+            request,
+            text,
+            files,
+            SendContext {
+                parent: None,
+                relay: Some(relay),
+            },
+        )?;
+        result["turn_id"] = json!(turn_id);
+        Ok(result)
+    }
+
+    pub(super) fn relay_respond(
+        &mut self,
+        who: &Agent,
+        turn: &str,
+        request: &str,
+        content: (String, Vec<FilePart>),
+        outcome: RelayResponseKind,
+    ) -> Result<Value> {
+        let root = self.relay_root(turn)?;
+        ensure!(root.recipient == who.id, UNAVAILABLE);
+        let mut relay = root.relay.clone().unwrap();
+        relay.kind = match outcome {
+            RelayResponseKind::Progress => RelayMessageKind::Progress,
+            RelayResponseKind::Complete => RelayMessageKind::Complete,
+            RelayResponseKind::Cancelled => RelayMessageKind::Cancelled,
+        };
+        self.send(
+            who,
+            &root.sender.clone(),
+            request,
+            content.0,
+            content.1,
+            SendContext {
+                parent: Some(root),
+                relay: Some(relay),
+            },
+        )
+    }
+
+    pub(super) fn relay_cancel(&mut self, who: &Agent, turn: &str, request: &str) -> Result<Value> {
+        let root = self.relay_root(turn)?;
+        ensure!(root.sender == who.id, UNAVAILABLE);
+        let mut relay = root.relay.clone().unwrap();
+        relay.kind = RelayMessageKind::Cancel;
+        self.send(
+            who,
+            &root.recipient.clone(),
+            request,
+            "Cancellation requested.".into(),
+            vec![],
+            SendContext {
+                parent: Some(root),
+                relay: Some(relay),
+            },
+        )
+    }
+
+    pub(super) fn relay_next(&self, who: &Agent) -> Result<Value> {
+        let Some(root) = self.relay_head(&who.id)? else {
+            return Ok(Value::Null);
+        };
+        let (_, cancel, _) = self.relay_turn_flags(&root.id)?;
+        Ok(json!({"request":root,"cancel_requested":cancel.is_some()}))
+    }
+
+    pub(super) fn relay_turn_status(
+        &self,
+        who: &Agent,
+        id: &str,
+        after: Option<&str>,
+    ) -> Result<Value> {
+        let root = self.relay_root(id)?;
+        ensure!(root.sender == who.id, UNAVAILABLE);
+        let target = self.get_agent(&root.recipient)?;
+        if !self.config.policy.visible(who, &target) {
+            return Ok(json!({"turn_id":id,"state":"unavailable"}));
+        }
+        let (finished, cancelled, closed) = self.relay_turn_flags(id)?;
+        let rejected: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM network_rejections WHERE message=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        let state = if root.expires_at <= self.timestamp {
+            "expired"
+        } else if closed.is_some() {
+            closed.as_deref().unwrap()
+        } else if !self
+            .config
+            .policy
+            .relay_grants
+            .contains_key(&root.relay.as_ref().unwrap().grant_id)
+            || rejected
+        {
+            "revoked"
+        } else if !self.relay_authorized(&root)? {
+            "blocked"
+        } else if finished.is_some() {
+            "completed"
+        } else {
+            "pending"
+        };
+        let mut replies = Vec::new();
+        let mut next_after = after.map(str::to_owned);
+        let mut has_more = false;
+        if ["pending", "completed"].contains(&state) {
+            let cursor: i64 = if let Some(after) = after {
+                self.db.query_row(
+                "SELECT rowid FROM messages WHERE id=?1 AND recipient=?2 AND json_extract(payload,'$.relay.turn_id')=?3",
+                params![after,who.id,id], |r| r.get(0)).optional()?.context("invalid relay response cursor")?
+            } else {
+                0
+            };
+            let mut bytes = 0;
+            let mut query = self.db.prepare("SELECT payload,acknowledged FROM messages WHERE recipient=?1 AND json_extract(payload,'$.relay.turn_id')=?2 AND rowid>?3 ORDER BY rowid")?;
+            for row in query.query_map(params![who.id, id, cursor], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+            })? {
+                let (payload, acknowledged) = row?;
+                if bytes + payload.len() > MAX_FRAME_BYTES / 2 {
+                    has_more = true;
+                    break;
+                }
+                let mut message: Message = serde_json::from_str(&payload)?;
+                message.acknowledged = acknowledged;
+                bytes += payload.len();
+                next_after = Some(message.id.clone());
+                replies.push(message);
+            }
+        }
+        Ok(
+            json!({"turn_id":id,"relay":root.relay,"target":target,"state":state,
+            "expires_at":root.expires_at,"received":root.acknowledged,
+            "security_mode":if who.node_id == target.node_id { RelaySecurityMode::LocalDaemon } else { RelaySecurityMode::EncryptedDaemonLink },
+            "cancel_requested":cancelled.is_some(),"final_message_id":finished,
+            "responses":replies,"next_after":next_after,"has_more":has_more}),
+        )
+    }
+
+    pub(super) fn relay_turns(&self, who: &Agent, after: Option<&str>) -> Result<Value> {
+        let cursor: i64 = if let Some(after) = after {
+            self.db
+                .query_row(
+                    "SELECT rowid FROM relay_turns WHERE id=?1 AND intermediary=?2",
+                    params![after, who.id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .context("invalid relay turn cursor")?
+        } else {
+            0
+        };
+        let ids = self.db.prepare("SELECT id FROM relay_turns WHERE intermediary=?1 AND rowid>?2 ORDER BY rowid LIMIT 51")?
+            .query_map(params![who.id,cursor], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more = ids.len() > 50;
+        let mut turns = Vec::new();
+        let mut next_after = after.map(str::to_owned);
+        for id in ids.into_iter().take(50) {
+            let root = self.relay_root(&id)?;
+            let target = self.get_agent(&root.recipient)?;
+            if self.config.policy.visible(who, &target) {
+                let (finished, cancelled, closed) = self.relay_turn_flags(&id)?;
+                turns.push(json!({"turn_id":id,"relay":root.relay,"target":target,
+                    "expires_at":root.expires_at,"final_message_id":finished,
+                    "cancel_requested":cancelled.is_some(),"closed_reason":closed}));
+            } else {
+                turns.push(json!({"turn_id":id,"state":"unavailable"}));
+            }
+            next_after = Some(id);
+        }
+        Ok(json!({"turns":turns,"next_after":next_after,"has_more":has_more}))
+    }
+
     fn relay_attachment(&self, who: &Agent, id: &str) -> Result<RelayAttachment> {
         let (payload, detached): (String, bool) = self
             .db
@@ -39,7 +474,7 @@ impl StoreSession<'_> {
         let target = self.get_agent(&attachment.target)?;
         if !self.config.policy.visible(who, &target) {
             return Ok(
-                json!({"attachment_id":attachment.id,"state":"unavailable","supports_turns":false}),
+                json!({"attachment_id":attachment.id,"state":"unavailable","supports_turns":true}),
             );
         }
         let now = self.timestamp as u64;
@@ -61,7 +496,7 @@ impl StoreSession<'_> {
         } else {
             "attached"
         };
-        Ok(json!({"attachment":attachment,"target":target,"state":state,"supports_turns":false}))
+        Ok(json!({"attachment":attachment,"target":target,"state":state,"supports_turns":true}))
     }
 
     pub(super) fn relay_attach(

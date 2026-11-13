@@ -82,7 +82,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_relay_status",
-            "Inspect this agent's current attachment, or a specific attachment ID. Target selection persists; queued relay turns are not yet supported. Hidden targets are omitted.",
+            "Inspect this agent's current attachment, or a specific attachment ID. Selection persists across restarts; use gent_relay_turns to recover pending work. Hidden targets are omitted.",
             json!({"attachment_id":{"type":"string","format":"uuid"}}),
             vec![],
         ),
@@ -91,6 +91,42 @@ fn tools() -> Vec<Tool> {
             "Detach this agent's specified attachment. It does not cancel work already sent, and cannot detach a different current target.",
             json!({"attachment_id":{"type":"string","format":"uuid"}}),
             vec!["attachment_id"],
+        ),
+        (
+            "gent_relay_send",
+            "Forward one new turn to a saved attachment. Preserve the user's text and file bytes. A fresh UUID request_id creates work; an identical retry never resends it or changes its original target. The message remains attributed to this intermediary, without proof of human authorship.",
+            json!({"attachment_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file}}),
+            vec!["attachment_id", "request_id", "text"],
+        ),
+        (
+            "gent_relay_turns",
+            "Recover this intermediary's durable turn IDs across all attachments, including detached targets. Returns up to 50 in creation order. Pass next_after as after_turn_id for the next page. This does not submit work.",
+            json!({"after_turn_id":{"type":"string","format":"uuid"}}),
+            vec![],
+        ),
+        (
+            "gent_relay_turn_status",
+            "Check one of this intermediary's turns without resubmitting it. Responses and files retain their original target. Pending survives timeouts and restarts; completed means the target reported a final outcome. Pass next_after as after_message_id to read more responses when has_more is true.",
+            json!({"turn_id":{"type":"string","format":"uuid"},"after_message_id":{"type":"string","format":"uuid"}}),
+            vec!["turn_id"],
+        ),
+        (
+            "gent_relay_next",
+            "As a target, retrieve your first unfinished relay turn and any cancellation request. It remains current after acknowledgment and across restarts. Process relay turns in this order and use gent_relay_respond to report progress or a final outcome.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "gent_relay_respond",
+            "As the target, respond to your current relay turn with text and optional files. Use progress while work remains; complete to finish; cancelled only after handling a cancellation request. A final outcome advances the queue. Reuse request_id only for an identical retry. Normal host execution approvals still apply.",
+            json!({"turn_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"outcome":{"type":"string","enum":["progress","complete","cancelled"]}}),
+            vec!["turn_id", "request_id", "text", "outcome"],
+        ),
+        (
+            "gent_relay_cancel",
+            "Request cancellation of a specific pending turn, including after detach. This does not prove that host execution stopped and does not finish the turn. Inspect its subsequent target response. Reuse request_id only for an identical retry.",
+            json!({"turn_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"}}),
+            vec!["turn_id", "request_id"],
         ),
     ];
     declarations.into_iter().map(|(name,description,properties,required)|Tool::new_with_raw(name,Some(description.into()),Arc::new(json!({"type":"object","additionalProperties":false,"properties":properties,"required":required}).as_object().unwrap().clone()))).collect()
@@ -184,8 +220,17 @@ impl ServerHandler for GentMcp {
         Ok(match result {
             Ok(value) => {
                 let mut content = vec![ContentBlock::text(value.to_string())];
-                if operation == "inbox" {
-                    for message in value.as_array().into_iter().flatten() {
+                if matches!(operation, "inbox" | "relay_next" | "relay_turn_status") {
+                    let messages: Vec<&Value> = match operation {
+                        "relay_next" => value.get("request").into_iter().collect(),
+                        "relay_turn_status" => value["responses"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .collect(),
+                        _ => value.as_array().into_iter().flatten().collect(),
+                    };
+                    for message in messages {
                         for file in message["files"].as_array().into_iter().flatten() {
                             if let (Some(mime), Some(data)) =
                                 (file["media_type"].as_str(), file["data_base64"].as_str())

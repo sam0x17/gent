@@ -22,6 +22,44 @@ struct Fixture {
     agents: [String; 3],
 }
 impl Fixture {
+    fn start_turn(&mut self, target: usize) -> (String, AgentOp, String) {
+        self.grant(target, 3600);
+        let attached = ok(self.agent(0, self.attach(target)));
+        let id = attached["attachment"]["id"].as_str().unwrap().to_owned();
+        let send = AgentOp::RelaySend {
+            attachment_id: id.clone(),
+            request_id: Uuid::new_v4().to_string(),
+            text: "  exact user text\n".into(),
+            files: vec![FilePart {
+                name: "reference.txt".into(),
+                media_type: "text/plain".into(),
+                data_base64: "aGVsbG8=".into(),
+            }],
+        };
+        let turn = ok(self.agent(0, send.clone()))["turn_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        (id, send, turn)
+    }
+    fn turn(&mut self, turn: &str) -> Value {
+        ok(self.agent(
+            0,
+            AgentOp::RelayTurnStatus {
+                turn_id: turn.into(),
+                after_message_id: None,
+            },
+        ))
+    }
+    fn respond(turn: &str, outcome: RelayResponseKind) -> AgentOp {
+        AgentOp::RelayRespond {
+            turn_id: turn.into(),
+            request_id: Uuid::new_v4().to_string(),
+            text: "target response".into(),
+            files: vec![],
+            outcome,
+        }
+    }
     fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
         fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -116,6 +154,346 @@ impl Fixture {
 }
 
 #[test]
+fn turns_preserve_content_attribution_and_pending_work_through_switch_and_restart() {
+    let mut f = Fixture::new();
+    f.allow();
+    let (attachment, send, turn) = f.start_turn(1);
+    let next = ok(f.agent(1, AgentOp::RelayNext));
+    assert_eq!(next["request"]["id"], turn);
+    assert_eq!(next["request"]["text"], "  exact user text\n");
+    assert_eq!(next["request"]["files"][0]["data_base64"], "aGVsbG8=");
+    ok(f.agent(
+        1,
+        AgentOp::Ack {
+            message_id: turn.clone(),
+        },
+    ));
+    assert_eq!(ok(f.agent(1, AgentOp::Inbox)), json!([]));
+    assert_eq!(f.turn(&turn)["state"], "pending");
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext))["request"]["id"], turn);
+    assert!(matches!(
+        f.agent(
+            1,
+            AgentOp::Reply {
+                message_id: turn.clone(),
+                request_id: Uuid::new_v4().to_string(),
+                text: "bypass completion protocol".into(),
+                files: vec![]
+            }
+        ),
+        Response::Error(_)
+    ));
+    assert!(matches!(
+        f.agent(
+            2,
+            AgentOp::RelayTurnStatus {
+                turn_id: turn.clone(),
+                after_message_id: None
+            }
+        ),
+        Response::Error(_)
+    ));
+    assert!(matches!(
+        f.agent(2, Fixture::respond(&turn, RelayResponseKind::Complete)),
+        Response::Error(_)
+    ));
+    f.grant(2, 3600);
+    let other = ok(f.agent(0, f.attach(2)));
+    f.store = Store::open(f.home.path()).unwrap();
+    assert_eq!(ok(f.agent(0, send.clone()))["duplicate"], true);
+    let mut changed = send.clone();
+    if let AgentOp::RelaySend { text, .. } = &mut changed {
+        text.push('!');
+    }
+    assert!(matches!(f.agent(0, changed.clone()), Response::Error(_)));
+    if let AgentOp::RelaySend { request_id, .. } = &mut changed {
+        *request_id = Uuid::new_v4().to_string();
+    }
+    assert!(matches!(f.agent(0, changed), Response::Error(_)));
+    let progress = Fixture::respond(&turn, RelayResponseKind::Progress);
+    ok(f.agent(1, progress.clone()));
+    assert_eq!(f.turn(&turn)["state"], "pending");
+    let final_action = Fixture::respond(&turn, RelayResponseKind::Complete);
+    let completed = ok(f.agent(1, final_action.clone()));
+    assert_eq!(ok(f.agent(1, final_action))["duplicate"], true);
+    assert_eq!(ok(f.agent(1, progress))["duplicate"], true);
+    assert!(matches!(
+        f.agent(1, Fixture::respond(&turn, RelayResponseKind::Progress)),
+        Response::Error(_)
+    ));
+    let status = f.turn(&turn);
+    assert_eq!(status["state"], "completed");
+    assert_eq!(status["target"]["id"], f.agents[1]);
+    assert_eq!(status["relay"]["attachment_id"], attachment);
+    assert_eq!(status["final_message_id"], completed["message_id"]);
+    assert_eq!(status["responses"].as_array().unwrap().len(), 2);
+    assert_eq!(f.status(None)["attachment"], other["attachment"]);
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext)), Value::Null);
+}
+
+#[test]
+fn multiple_intermediaries_share_one_durable_target_queue_and_cancellation_is_explicit() {
+    let mut f = Fixture::new();
+    f.allow();
+    let (attachment, _, first) = f.start_turn(1);
+    assert_eq!(
+        f.edit(ConfigurationEdit::GrantRelay {
+            grant_id: Uuid::new_v4().to_string(),
+            intermediary: f.agents[2].clone(),
+            target: f.agents[1].clone(),
+            lifetime_seconds: 3600
+        })["state"],
+        "applied"
+    );
+    let attach = ok(f.agent(2, f.attach(1)));
+    let second = ok(f.agent(
+        2,
+        AgentOp::RelaySend {
+            attachment_id: attach["attachment"]["id"].as_str().unwrap().into(),
+            request_id: Uuid::new_v4().to_string(),
+            text: "second intermediary".into(),
+            files: vec![],
+        },
+    ))["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let inbox = ok(f.agent(1, AgentOp::Inbox));
+    assert_eq!(inbox.as_array().unwrap().len(), 1);
+    assert_eq!(inbox[0]["id"], first);
+    assert!(matches!(
+        f.agent(1, Fixture::respond(&second, RelayResponseKind::Complete)),
+        Response::Error(_)
+    ));
+    assert!(matches!(
+        f.agent(1, Fixture::respond(&first, RelayResponseKind::Cancelled)),
+        Response::Error(_)
+    ));
+    ok(f.agent(
+        0,
+        AgentOp::RelayDetach {
+            attachment_id: attachment,
+        },
+    ));
+    assert_eq!(
+        ok(f.agent(1, AgentOp::RelayNext))["cancel_requested"],
+        false
+    );
+    let cancel = AgentOp::RelayCancel {
+        turn_id: first.clone(),
+        request_id: Uuid::new_v4().to_string(),
+    };
+    ok(f.agent(0, cancel.clone()));
+    assert_eq!(f.turn(&first)["state"], "pending");
+    f.store = Store::open(f.home.path()).unwrap();
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext))["cancel_requested"], true);
+    ok(f.agent(1, Fixture::respond(&first, RelayResponseKind::Cancelled)));
+    assert_eq!(ok(f.agent(0, cancel))["duplicate"], true);
+    assert_eq!(f.turn(&first)["state"], "completed");
+    assert_eq!(f.turn(&first)["responses"][0]["relay"]["kind"], "cancelled");
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext))["request"]["id"], second);
+}
+
+#[test]
+fn relay_turn_and_final_reply_commit_atomically_with_retry_records() {
+    let mut f = Fixture::new();
+    f.allow();
+    f.grant(1, 3600);
+    let attached = ok(f.agent(0, f.attach(1)));
+    let send = AgentOp::RelaySend {
+        attachment_id: attached["attachment"]["id"].as_str().unwrap().into(),
+        request_id: Uuid::new_v4().to_string(),
+        text: "atomic turn".into(),
+        files: vec![],
+    };
+    f.db().execute_batch("CREATE TRIGGER fail_turn BEFORE INSERT ON relay_turns BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(matches!(f.agent(0, send.clone()), Response::Error(_)));
+    assert_eq!(
+        f.db()
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    f.db().execute_batch("DROP TRIGGER fail_turn;").unwrap();
+    let turn = ok(f.agent(0, send))["turn_id"].as_str().unwrap().to_owned();
+    let reply = Fixture::respond(&turn, RelayResponseKind::Complete);
+    f.db().execute_batch("CREATE TRIGGER fail_finish BEFORE UPDATE ON relay_turns BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(matches!(f.agent(1, reply.clone()), Response::Error(_)));
+    assert_eq!(f.turn(&turn)["responses"], json!([]));
+    assert_eq!(f.turn(&turn)["state"], "pending");
+    f.db().execute_batch("DROP TRIGGER fail_finish;").unwrap();
+    ok(f.agent(1, reply.clone()));
+    assert_eq!(ok(f.agent(1, reply))["duplicate"], true);
+    assert_eq!(f.turn(&turn)["responses"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn response_pages_preserve_files_and_revocation_hides_stored_content() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let mut f = Fixture::new();
+    f.allow();
+    let (_, _, turn) = f.start_turn(1);
+    let data = STANDARD.encode(vec![0xa5; MAX_FILE_BYTES]);
+    for index in 0..3 {
+        ok(f.agent(
+            1,
+            AgentOp::RelayRespond {
+                turn_id: turn.clone(),
+                request_id: Uuid::new_v4().to_string(),
+                text: format!("image {index}"),
+                files: vec![FilePart {
+                    name: "image.png".into(),
+                    media_type: "image/png".into(),
+                    data_base64: data.clone(),
+                }],
+                outcome: RelayResponseKind::Progress,
+            },
+        ));
+    }
+    let page = f.turn(&turn);
+    assert_eq!(page["responses"].as_array().unwrap().len(), 2);
+    assert_eq!(page["responses"][0]["files"][0]["data_base64"], data);
+    assert_eq!(page["has_more"], true);
+    let next = ok(f.agent(
+        0,
+        AgentOp::RelayTurnStatus {
+            turn_id: turn.clone(),
+            after_message_id: Some(page["next_after"].as_str().unwrap().into()),
+        },
+    ));
+    assert_eq!(next["responses"].as_array().unwrap().len(), 1);
+    assert_eq!(next["has_more"], false);
+    let grant = page["relay"]["grant_id"].as_str().unwrap();
+    f.edit(ConfigurationEdit::RevokeRelay {
+        grant_id: grant.into(),
+    });
+    assert_eq!(f.turn(&turn)["state"], "revoked");
+    assert_eq!(f.turn(&turn)["responses"], json!([]));
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext)), Value::Null);
+    f.grant(1, 3600);
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext)), Value::Null);
+    let mut policy = f.current_policy();
+    policy.rules.clear();
+    f.policy(policy);
+    assert_eq!(f.turn(&turn), json!({"turn_id":turn,"state":"unavailable"}));
+}
+
+#[test]
+fn relay_history_recovers_turn_ids_and_response_budget_reserves_completion() {
+    let mut f = Fixture::new();
+    f.allow();
+    let (attachment, _, first) = f.start_turn(1);
+    for _ in 0..50 {
+        ok(f.agent(
+            0,
+            AgentOp::RelaySend {
+                attachment_id: attachment.clone(),
+                request_id: Uuid::new_v4().to_string(),
+                text: "follow-up".into(),
+                files: vec![],
+            },
+        ));
+    }
+    f.store = Store::open(f.home.path()).unwrap();
+    let history = ok(f.agent(
+        0,
+        AgentOp::RelayTurns {
+            after_turn_id: None,
+        },
+    ));
+    assert_eq!(history["turns"].as_array().unwrap().len(), 50);
+    assert_eq!(history["turns"][0]["turn_id"], first);
+    assert_eq!(history["has_more"], true);
+    let rest = ok(f.agent(
+        0,
+        AgentOp::RelayTurns {
+            after_turn_id: Some(history["next_after"].as_str().unwrap().into()),
+        },
+    ));
+    assert_eq!(rest["turns"].as_array().unwrap().len(), 1);
+    assert_eq!(rest["has_more"], false);
+    assert!(matches!(
+        f.agent(
+            2,
+            AgentOp::RelayTurns {
+                after_turn_id: Some(first.clone())
+            }
+        ),
+        Response::Error(_)
+    ));
+    for _ in 0..15 {
+        ok(f.agent(1, Fixture::respond(&first, RelayResponseKind::Progress)));
+    }
+    assert!(matches!(
+        f.agent(1, Fixture::respond(&first, RelayResponseKind::Progress)),
+        Response::Error(_)
+    ));
+    ok(f.agent(
+        0,
+        AgentOp::RelayCancel {
+            turn_id: first.clone(),
+            request_id: Uuid::new_v4().to_string(),
+        },
+    ));
+    assert!(matches!(
+        f.agent(
+            0,
+            AgentOp::RelayCancel {
+                turn_id: first.clone(),
+                request_id: Uuid::new_v4().to_string()
+            }
+        ),
+        Response::Error(_)
+    ));
+    ok(f.agent(1, Fixture::respond(&first, RelayResponseKind::Cancelled)));
+    assert_eq!(f.turn(&first)["responses"].as_array().unwrap().len(), 16);
+    assert_ne!(ok(f.agent(1, AgentOp::RelayNext))["request"]["id"], first);
+}
+
+#[test]
+fn temporary_permission_block_does_not_let_later_turns_overtake_the_head() {
+    let mut f = Fixture::new();
+    f.allow();
+    let (_, _, first) = f.start_turn(1);
+    assert_eq!(
+        f.edit(ConfigurationEdit::GrantRelay {
+            grant_id: Uuid::new_v4().to_string(),
+            intermediary: f.agents[2].clone(),
+            target: f.agents[1].clone(),
+            lifetime_seconds: 3600
+        })["state"],
+        "applied"
+    );
+    let attachment = ok(f.agent(2, f.attach(1)))["attachment"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    ok(f.agent(
+        2,
+        AgentOp::RelaySend {
+            attachment_id: attachment,
+            request_id: Uuid::new_v4().to_string(),
+            text: "later".into(),
+            files: vec![],
+        },
+    ));
+    let saved = f.current_policy();
+    let mut blocked = saved.clone();
+    blocked.rules.push(Rule {
+        actor: Selector::Agent(f.agents[0].clone()),
+        peer: Selector::Agent(f.agents[1].clone()),
+        permission: Permission::Send,
+        effect: Effect::Deny,
+    });
+    f.policy(blocked);
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext)), Value::Null);
+    assert_eq!(ok(f.agent(1, AgentOp::Inbox)), json!([]));
+    assert_eq!(f.turn(&first)["state"], "blocked");
+    f.policy(saved);
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext))["request"]["id"], first);
+}
+
+#[test]
 fn relay_selection_needs_both_owner_grant_and_ordinary_permissions() {
     let mut f = Fixture::new();
     f.grant(1, 3600);
@@ -154,7 +532,7 @@ fn relay_selection_needs_both_owner_grant_and_ordinary_permissions() {
     let attached = ok(f.agent(0, f.attach(1)));
     assert_eq!(attached["state"], "attached");
     assert_eq!(attached["attachment"]["security_mode"], "local_daemon");
-    assert_eq!(attached["supports_turns"], false);
+    assert_eq!(attached["supports_turns"], true);
     assert_eq!(ok(f.agent(1, AgentOp::Inbox)), json!([]));
 }
 
@@ -229,7 +607,7 @@ fn attachments_are_isolated_and_hidden_targets_disappear_from_status() {
     f.policy(policy);
     assert_eq!(
         f.status(Some(id)),
-        json!({"attachment_id":id,"state":"unavailable","supports_turns":false})
+        json!({"attachment_id":id,"state":"unavailable","supports_turns":true})
     );
     let detached = ok(f.agent(
         0,
@@ -239,7 +617,7 @@ fn attachments_are_isolated_and_hidden_targets_disappear_from_status() {
     ));
     assert_eq!(
         detached,
-        json!({"attachment_id":id,"state":"unavailable","supports_turns":false})
+        json!({"attachment_id":id,"state":"unavailable","supports_turns":true})
     );
 }
 
@@ -302,10 +680,26 @@ fn expired_grant_blocks_new_selection_and_expires_persisted_selection() {
     let action = f.attach(1);
     let a = ok(f.agent(0, action.clone()));
     let expiry = a["attachment"]["expires_at"].as_i64().unwrap();
+    let sent = ok(f.agent(
+        0,
+        AgentOp::RelaySend {
+            attachment_id: a["attachment"]["id"].as_str().unwrap().into(),
+            request_id: Uuid::new_v4().to_string(),
+            text: "expires with grant".into(),
+            files: vec![],
+        },
+    ));
+    let turn = sent["turn_id"].as_str().unwrap();
     while now() < expiry {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert_eq!(f.status(None)["state"], "expired");
     assert_eq!(ok(f.agent(0, action))["state"], "expired");
     assert!(matches!(f.agent(0, f.attach(1)), Response::Error(_)));
+    assert_eq!(f.turn(turn)["state"], "expired");
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext)), Value::Null);
+    assert!(matches!(
+        f.agent(1, Fixture::respond(turn, RelayResponseKind::Complete)),
+        Response::Error(_)
+    ));
 }

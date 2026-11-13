@@ -14,7 +14,7 @@ cargo test --workspace --locked
 python3 scripts/smoke_mcp.py target/debug/gent
 ```
 
-The smoke test starts a daemon and three independent MCP clients in a temporary directory. It checks registration, hidden peers, default-deny permissions, image bytes and MCP image content blocks, scoped replies, duplicate suppression, restart recovery, and revocation. It makes no model calls and removes its test state afterward. These checks passed on Linux x86_64 and macOS arm64.
+The smoke test starts a daemon and three independent MCP clients in a temporary directory. It checks registration, hidden peers, default-deny permissions, image bytes and MCP image content blocks, scoped replies, duplicate suppression, restart recovery, and revocation. It also checks relay grants, ordered turns, progress, cancellation, and final responses with images through the public tools. It makes no model calls and removes its test state afterward. These checks passed on Linux x86_64 and macOS arm64. The SSH pairing proof additionally passes those relay turns across the two physical machines through the local Worker, including both daemon restarts.
 
 Separate real-host tests pass for Codex and Claude Code CLIs on both OSes using explicit bindings and host-supplied conversation metadata. Each host registers a synthetic conversation, resumes after a daemon restart, retrieves and identifies an image, and replies with identical file bytes. The host-metadata proof also checks concurrent chats using the same connector configuration and isolation after a fork. Automatic idle wake/resume remains untested.
 
@@ -114,6 +114,12 @@ The host invokes `gent_register` with a display `name` and arbitrary `provider` 
 | `gent_relay_attach` | Save a selected target under an owner grant and ordinary message permissions. |
 | `gent_relay_status` | Inspect the current selection or a specific saved attachment. |
 | `gent_relay_detach` | Detach a specific attachment without cancelling messages. |
+| `gent_relay_send` | Forward one turn to the explicitly selected attachment. |
+| `gent_relay_turns` | Recover this intermediary's turn IDs across all attachments. |
+| `gent_relay_turn_status` | Retrieve status and paged responses with files without resending. |
+| `gent_relay_next` | Retrieve the target's first unfinished relay turn. |
+| `gent_relay_respond` | Report progress or a final complete/cancelled outcome. |
+| `gent_relay_cancel` | Request cancellation of a specific pending turn. |
 
 ## Persistent relay selection
 
@@ -130,7 +136,13 @@ Both agents must already be registered and known to the signing owner. Grants la
 
 The intermediary calls `gent_relay_attach` with `target` and a fresh `request_id`. Selection persists across daemon and MCP restarts. Selecting a different target detaches the previous attachment atomically. Retrying an older selection returns its saved state and does not reactivate it. Detach names an attachment ID, so delayed control calls cannot detach a later selection. Revoked grant IDs stay retired; a new grant requires a new attachment. Status hides target details if enumeration is revoked. `gent relay attachments` is an owner view of the newest 100 local records.
 
-This is the selection foundation: tool results explicitly report `supports_turns: false`. Attaching sends nothing. Ordered forwarding, durable pending relay turns, completion, and cancellation requests remain unfinished. Forwarded ordinary messages remain attributed to the intermediary, without a claim of human authorship or permission to execute. Security mode currently describes local-daemon or encrypted daemon-to-daemon transport; hosted/web/mobile bridges are not implemented.
+Attaching sends nothing. Tool results report `supports_turns: true`. `gent_relay_send` forwards text and files under a stable request ID and returns a `turn_id`. Status checks never resubmit work. `gent_relay_turns` recovers saved turn IDs, including those from detached or replaced attachments. Its pages contain 50 entries; use `next_after` as `after_turn_id` to continue. `gent_relay_turn_status` returns responses with a bounded page size; continue with `after_message_id` when `has_more` is true. Both IDs and replies retain the original target after a switch.
+
+The target receives turns in its daemon's durable arrival order, shared by all intermediaries. `gent_relay_next` keeps returning the first unfinished turn even after acknowledgment. The ordinary inbox also omits later relay turns. `gent_relay_respond` reports `progress`, `complete`, or `cancelled`; only a final outcome advances the queue. Each turn permits 16 target responses, reserving the final slot for completion. A temporary permission block pauses the head. Expired turns and permanently revoked grants leave the queue; already running host work is not forcibly stopped.
+
+`gent_relay_cancel` requests cancellation without detaching or marking work complete. The target must handle it and report its outcome. Cancellation can cross an already completed response in flight without changing that outcome. Detach, a tool timeout, or a restart does not cancel pending work. After uncertain host execution, reconcile with the host's actual work state before replaying consequential actions. Gent persists message delivery and protocol state; it does not guarantee exactly-once host execution.
+
+Forwarded messages remain attributed to the intermediary, without a claim of human authorship or permission to execute. Security mode currently describes local-daemon or encrypted daemon-to-daemon transport; hosted/web/mobile bridges are not implemented. File limits remain four attachments totaling 1 MiB decoded per message.
 
 ## Shell integration
 

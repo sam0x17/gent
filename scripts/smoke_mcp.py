@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import uuid
+from relay_checks import exercise_turns
 
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGP4z/AfK2IYWhIA0ad/gXfwoGMAAAAASUVORK5CYII="
@@ -129,10 +130,25 @@ def main():
             assert grant_id in json.loads(cli("relay", "grants"))["grants"]
             attached = a.call("gent_relay_attach", attachment_request)[0]
             attachment_id = attached["attachment"]["id"]
-            assert attached["state"] == "attached" and attached["supports_turns"] is False
+            assert attached["state"] == "attached" and attached["supports_turns"] is True
             assert a.call("gent_relay_attach", attachment_request)[0] == attached
             outsider.call("gent_relay_status", {"attachment_id": attachment_id}, error=True)
             assert json.loads(cli("relay", "attachments"))[0]["id"] == attachment_id
+
+            def wait_for(check):
+                deadline = time.monotonic() + 15
+                while not check():
+                    assert time.monotonic() < deadline, "relay turn timed out"
+                    time.sleep(.05)
+
+            def restart_relay_daemon():
+                nonlocal daemon
+                daemon.send_signal(signal.SIGINT)
+                assert daemon.wait(timeout=5) == 0
+                daemon.stderr.close()
+                daemon = start_daemon()
+
+            exercise_turns(a, b, attachment_id, attempt["files"], wait_for, restart_relay_daemon)
             a.call("gent_send", dict(attempt, sender=bid), error=True)
             a.call("gent_register", {"name": "a", "provider": "a", "node_id": "forged"}, error=True)
             sent = a.call("gent_send", attempt)[0]
@@ -176,7 +192,7 @@ def main():
             credential = (home / "bindings" / "a.key").read_text()
             assert credential not in json.dumps(a.call("gent_identity"))
             assert os.stat(home / "bindings" / "a.key").st_mode & 0o077 == 0
-            print("PASS: MCP registration, isolation, permissions, replies, image bytes, deduplication, restart recovery, relay selection/grants, and revocation")
+            print("PASS: MCP registration, isolation, permissions, replies, image bytes, deduplication, restart recovery, ordered relay turns/cancellation, grants, and revocation")
         finally:
             for client in clients:
                 client.close()
