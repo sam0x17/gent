@@ -3,6 +3,7 @@
 //! Callers are trusted daemon code, never MCP agents. Node authentication here
 //! does not grant permission to communicate as an agent. Initial authority and
 //! expected group membership must come from authenticated local state.
+pub mod ordered;
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gent_crypto::{Checkpoint, NodeIdentity, SignedState, TrustAnchor, VerifiedState};
@@ -137,13 +138,14 @@ impl<'a> EncryptedEndpoint<'a> {
         let mut db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        ensure!(matches!(version, 0 | 1), "unsupported MLS database version");
+        ensure!(matches!(version, 0..=2), "unsupported MLS database version");
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
         )?;
         SqliteStorageProvider::<JsonCodec, _>::new(&mut db).run_migrations()?;
         db.execute_batch(
             "
+          BEGIN IMMEDIATE;
           CREATE TABLE IF NOT EXISTS authority (
             singleton INTEGER PRIMARY KEY CHECK(singleton=1), anchor BLOB NOT NULL,
             checkpoint BLOB NOT NULL, state BLOB NOT NULL, node TEXT NOT NULL, key BLOB NOT NULL
@@ -161,7 +163,25 @@ impl<'a> EncryptedEndpoint<'a> {
           CREATE TABLE IF NOT EXISTS receipts (
             wire_hash BLOB PRIMARY KEY, group_id BLOB NOT NULL
           );
-          PRAGMA user_version=1;",
+          CREATE TABLE IF NOT EXISTS streams (
+            group_id BLOB PRIMARY KEY, writer TEXT NOT NULL, writer_key BLOB NOT NULL,
+            head INTEGER NOT NULL, head_hash BLOB NOT NULL, origin_hash BLOB NOT NULL,
+            roster_hash BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS stream_outbox (
+            id TEXT PRIMARY KEY, group_id BLOB NOT NULL, sequence INTEGER NOT NULL,
+            packet BLOB NOT NULL, UNIQUE(group_id,sequence)
+          );
+          CREATE TABLE IF NOT EXISTS stream_seen (
+            group_id BLOB NOT NULL, sequence INTEGER NOT NULL, digest BLOB NOT NULL,
+            PRIMARY KEY(group_id,sequence)
+          );
+          CREATE TABLE IF NOT EXISTS stream_pending (
+            group_id BLOB NOT NULL, sequence INTEGER NOT NULL, digest BLOB NOT NULL,
+            packet BLOB NOT NULL, PRIMARY KEY(group_id,sequence)
+          );
+          PRAGMA user_version=2;
+          COMMIT;",
         )?;
         Ok(Self { db, identity })
     }
@@ -198,6 +218,37 @@ impl<'a> EncryptedEndpoint<'a> {
                 state.signed().encode()?
             ],
         )?;
+        // A retired writer can never drain its queue again. Release its pending
+        // ciphertext in this same authority transaction so it cannot consume the
+        // endpoint's receive quota after revocation or signing-key replacement.
+        let own_active = state
+            .state()
+            .nodes
+            .get(self.identity.id())
+            .is_some_and(|member| member.signing_key == self.identity.public_key());
+        if !own_active {
+            tx.execute("DELETE FROM stream_pending", [])?;
+        } else {
+            let mut query = tx.prepare("SELECT group_id,writer,writer_key FROM streams")?;
+            let rows = query.query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (group, writer, key) = row?;
+                if !state
+                    .state()
+                    .nodes
+                    .get(&writer)
+                    .is_some_and(|member| member.signing_key.as_slice() == key)
+                {
+                    tx.execute("DELETE FROM stream_pending WHERE group_id=?1", [group])?;
+                }
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -207,14 +258,21 @@ impl<'a> EncryptedEndpoint<'a> {
     fn transact<T>(
         &mut self,
         now: u64,
-        operation: impl FnOnce(&Connection, &Provider<'_>, &VerifiedState, &NodeIdentity) -> Result<T>,
+        operation: impl FnOnce(&Session<'_>) -> Result<T>,
     ) -> Result<T> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = authority(&tx, self.identity)?;
         state.authorize_node(self.identity.id(), &self.identity.public_key(), now)?;
-        let result = operation(&tx, &Provider::new(&tx), &state, self.identity)?;
+        let session = Session {
+            db: &tx,
+            provider: Provider::new(&tx),
+            state,
+            signer: self.identity,
+            now,
+        };
+        let result = operation(&session)?;
         tx.commit()?;
         Ok(result)
     }
@@ -222,27 +280,7 @@ impl<'a> EncryptedEndpoint<'a> {
     /// Generate once and reuse the same public package on transport retries.
     /// Consumed private key packages are deleted by OpenMLS during successful join.
     pub fn key_package(&mut self, request: Uuid, now: u64) -> Result<Vec<u8>> {
-        ensure!(!request.is_nil(), "nil request ID");
-        self.transact(now, |db, provider, state, signer| {
-            if let Some(bytes) = db
-                .query_row(
-                    "SELECT bytes FROM key_packages WHERE id=?1",
-                    [request.to_string()],
-                    |row| row.get(0),
-                )
-                .optional()?
-            {
-                return Ok(bytes);
-            }
-            let package =
-                KeyPackage::builder().build(SUITE, provider, signer, credential(state, signer)?)?;
-            let bytes = package.key_package().tls_serialize_detached()?;
-            db.execute(
-                "INSERT INTO key_packages VALUES(?1,?2)",
-                params![request.to_string(), bytes],
-            )?;
-            Ok(bytes)
-        })
+        self.transact(now, |session| session.key_package(request))
     }
 
     /// Create a group with an explicit set of approved nodes. The returned Welcome
@@ -253,256 +291,48 @@ impl<'a> EncryptedEndpoint<'a> {
         peers: &[(&str, &[u8])],
         now: u64,
     ) -> Result<Outgoing> {
-        ensure!(
-            !peers.is_empty() && peers.len() < MAX_MEMBERS,
-            "invalid peer count"
-        );
-        for (_, package) in peers {
-            ensure!(
-                package.len() <= MAX_KEY_PACKAGE_BYTES,
-                "key package too large"
-            );
-        }
-        let fingerprint = request_hash("create", &serde_json::to_vec(peers)?);
-        self.transact(now, |db, provider, state, signer| {
-            // Revalidate packages before returning a retry, including revocation.
-            let mut ids = BTreeSet::from([signer.id().to_owned()]);
-            let mut packages = Vec::new();
-            for (expected, wire) in peers {
-                ensure!(ids.insert((*expected).to_owned()), "duplicate group member");
-                let package = KeyPackageIn::tls_deserialize_exact(wire)?
-                    .validate(provider.crypto(), ProtocolVersion::Mls10)?;
-                ensure!(package.ciphersuite() == SUITE, "unsupported ciphersuite");
-                let leaf = package.leaf_node();
-                let node = authenticate(
-                    state,
-                    leaf.credential(),
-                    leaf.signature_key().as_slice(),
-                    now,
-                )?;
-                ensure!(node == *expected, "key package belongs to another node");
-                packages.push(package);
-            }
-            if let Some(packet) = retry(db, request, &fingerprint)? {
-                return Ok(packet);
-            }
-            let config = create_config();
-            let mut group = MlsGroup::new(provider, signer, &config, credential(state, signer)?)?;
-            let (_, welcome, _) = group.add_members(provider, signer, &packages)?;
-            group.merge_pending_commit(provider)?;
-            enqueue(
-                db,
-                request,
-                group.group_id(),
-                &fingerprint,
-                welcome.to_bytes()?,
-            )
-        })
+        self.transact(now, |session| session.create_group(request, peers))
     }
 
     /// The expected roster is a trusted local decision, never a relay assertion.
     pub fn join(&mut self, invitation: &Outgoing, expected: &[&str], now: u64) -> Result<()> {
-        ensure!(
-            !invitation.group_id.is_empty() && invitation.group_id.len() <= 256,
-            "invalid group ID"
-        );
-        let expected = roster(expected)?;
-        let message = decode(&invitation.bytes)?;
-        self.transact(now, |db, provider, state, signer| {
-            ensure!(
-                expected.contains(signer.id()),
-                "own identity missing from expected roster"
-            );
-            if received(db, &invitation.group_id, &invitation.bytes)? {
-                let group = load_group(provider, &invitation.group_id)?;
-                ensure!(
-                    members(state, group.members(), now)? == expected,
-                    "unexpected group roster"
-                );
-                return Ok(());
-            }
-            ensure!(
-                MlsGroup::load(
-                    provider.storage(),
-                    &GroupId::from_slice(&invitation.group_id)
-                )?
-                .is_none(),
-                "group already exists"
-            );
-            let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
-                bail!("expected Welcome");
-            };
-            let staged = StagedWelcome::new_from_welcome(
-                provider,
-                create_config().join_config(),
-                welcome,
-                None,
-            )?;
-            ensure!(
-                staged.group_context().group_id().as_slice() == invitation.group_id,
-                "wrong group ID"
-            );
-            ensure!(
-                staged.group_context().ciphersuite() == SUITE,
-                "unsupported ciphersuite"
-            );
-            ensure!(
-                members(state, staged.members(), now)? == expected,
-                "unexpected group roster"
-            );
-            staged.into_group(provider)?;
-            receipt(db, &invitation.group_id, &invitation.bytes)?;
-            Ok(())
+        self.transact(now, |session| {
+            reject_ordered_group(session.db, &invitation.group_id)?;
+            session.join(invitation, expected, None)
         })
     }
 
     /// Idempotent encryption: retrying an ID returns the exact committed wire bytes.
     pub fn send(&mut self, group_id: &[u8], id: Uuid, body: &[u8], now: u64) -> Result<Outgoing> {
-        ensure!(
-            !body.is_empty() && body.len() <= MAX_PAYLOAD_BYTES,
-            "invalid payload size"
-        );
-        let fingerprint = request_hash("send", &serde_json::to_vec(&(group_id, body))?);
-        self.transact(now, |db, provider, state, signer| {
-            let mut group = load_group(provider, group_id)?;
-            members(state, group.members(), now)?;
-            if let Some(packet) = retry(db, id, &fingerprint)? {
-                return Ok(packet);
-            }
-            let envelope = serde_json::to_vec(&Envelope {
-                version: 1,
-                id,
-                body: STANDARD.encode(body),
-            })?;
-            let bytes = group
-                .create_message(provider, signer, &envelope)?
-                .to_bytes()?;
-            enqueue(db, id, group.group_id(), &fingerprint, bytes)
+        self.transact(now, |session| {
+            reject_ordered_group(session.db, group_id)?;
+            session.send(group_id, id, body)
         })
     }
 
     /// Advance the epoch; no previous-epoch secrets are retained in logical state.
     pub fn rotate(&mut self, group_id: &[u8], request: Uuid, now: u64) -> Result<Outgoing> {
-        let fingerprint = request_hash("rotate", group_id);
-        self.transact(now, |db, provider, state, signer| {
-            let mut group = load_group(provider, group_id)?;
-            members(state, group.members(), now)?;
-            if let Some(packet) = retry(db, request, &fingerprint)? {
-                return Ok(packet);
-            }
-            let (commit, _, _) = group
-                .self_update(provider, signer, LeafNodeParameters::default())?
-                .into_contents();
-            group.merge_pending_commit(provider)?;
-            enqueue(
-                db,
-                request,
-                group.group_id(),
-                &fingerprint,
-                commit.to_bytes()?,
-            )
+        self.transact(now, |session| {
+            reject_ordered_group(session.db, group_id)?;
+            session.rotate(group_id, request)
         })
     }
 
     /// Remove every credential no longer authorized by the saved owner state.
     /// A revoked member prevents application sends until this succeeds.
     pub fn remove_revoked(&mut self, group_id: &[u8], request: Uuid, now: u64) -> Result<Outgoing> {
-        let fingerprint = request_hash("remove", group_id);
-        self.transact(now, |db, provider, state, signer| {
-            let mut group = load_group(provider, group_id)?;
-            if let Some(packet) = retry(db, request, &fingerprint)? {
-                return Ok(packet);
-            }
-            let removed: Vec<_> = group
-                .members()
-                .filter(|member| {
-                    authenticate(state, &member.credential, &member.signature_key, now).is_err()
-                })
-                .map(|member| member.index)
-                .collect();
-            ensure!(!removed.is_empty(), "no revoked credentials to remove");
-            let (commit, _, _) = group.remove_members(provider, signer, &removed)?;
-            group.merge_pending_commit(provider)?;
-            members(state, group.members(), now)?;
-            enqueue(
-                db,
-                request,
-                group.group_id(),
-                &fingerprint,
-                commit.to_bytes()?,
-            )
+        self.transact(now, |session| {
+            reject_ordered_group(session.db, group_id)?;
+            session.remove_revoked(group_id, request)
         })
     }
 
     /// Decrypt into the durable local inbox, committing ratchets and receipts in
     /// the same transaction. Replays never create a second inbox entry.
     pub fn receive(&mut self, group_id: &[u8], wire: &[u8], now: u64) -> Result<Received> {
-        let message = decode(wire)?;
-        let MlsMessageBodyIn::PrivateMessage(private) = message.extract() else {
-            bail!("expected encrypted MLS message");
-        };
-        self.transact(now, |db, provider, state, _| {
-            let mut group = load_group(provider, group_id)?;
-            if received(db, group_id, wire)? {
-                return Ok(Received::Duplicate);
-            }
-            let before = group.members().collect::<Vec<_>>();
-            let processed = group.process_message(provider, ProtocolMessage::from(private))?;
-            let Sender::Member(index) = processed.sender() else {
-                bail!("external sender is not allowed");
-            };
-            let member = before
-                .iter()
-                .find(|member| member.index == *index)
-                .context("sender missing from roster")?;
-            let sender = authenticate(state, &member.credential, &member.signature_key, now)?;
-            let result = match processed.into_content() {
-                ProcessedMessageContent::ApplicationMessage(application) => {
-                    members(state, before.into_iter(), now)?;
-                    let bytes = application.into_bytes();
-                    ensure!(
-                        bytes.len() <= MAX_WIRE_BYTES,
-                        "application envelope too large"
-                    );
-                    let envelope: Envelope = serde_json::from_slice(&bytes)?;
-                    ensure!(
-                        envelope.version == 1 && !envelope.id.is_nil(),
-                        "invalid application envelope"
-                    );
-                    let body = STANDARD.decode(envelope.body)?;
-                    ensure!(
-                        !body.is_empty() && body.len() <= MAX_PAYLOAD_BYTES,
-                        "invalid payload size"
-                    );
-                    db.execute(
-                        "INSERT INTO inbox(group_id,sender,id,body) VALUES(?1,?2,?3,?4)",
-                        params![group_id, sender, envelope.id.to_string(), body],
-                    )?;
-                    Received::Application {
-                        id: envelope.id,
-                        sender,
-                    }
-                }
-                ProcessedMessageContent::StagedCommitMessage(commit) => {
-                    // Existing-group membership additions require a separate approved
-                    // workflow. This proof accepts refreshes and owner revocations only.
-                    let expected = before
-                        .iter()
-                        .filter_map(|member| {
-                            authenticate(state, &member.credential, &member.signature_key, now).ok()
-                        })
-                        .collect::<BTreeSet<_>>();
-                    group.merge_staged_commit(provider, *commit)?;
-                    ensure!(
-                        members(state, group.members(), now)? == expected,
-                        "unapproved membership change"
-                    );
-                    Received::Commit
-                }
-                _ => bail!("standalone MLS proposals are not supported"),
-            };
-            receipt(db, group_id, wire)?;
-            Ok(result)
+        self.transact(now, |session| {
+            reject_ordered_group(session.db, group_id)?;
+            session.receive(group_id, wire, None)
         })
     }
 
@@ -564,6 +394,16 @@ impl<'a> EncryptedEndpoint<'a> {
         })
         .collect()
     }
+}
+
+fn reject_ordered_group(db: &Connection, group: &[u8]) -> Result<()> {
+    let ordered: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM streams WHERE group_id=?1)",
+        [group],
+        |row| row.get(0),
+    )?;
+    ensure!(!ordered, "use the ordered stream interface for this group");
+    Ok(())
 }
 
 fn authority(db: &Connection, signer: &NodeIdentity) -> Result<VerifiedState> {
@@ -747,5 +587,357 @@ fn receipt(db: &Connection, group_id: &[u8], wire: &[u8]) -> Result<()> {
         "INSERT INTO receipts VALUES(?1,?2)",
         params![Sha256::digest(wire).as_slice(), group_id],
     )?;
+    Ok(())
+}
+
+struct Session<'a> {
+    db: &'a Connection,
+    provider: Provider<'a>,
+    state: VerifiedState,
+    signer: &'a NodeIdentity,
+    now: u64,
+}
+impl Session<'_> {
+    fn key_package(&self, request: Uuid) -> Result<Vec<u8>> {
+        let db = self.db;
+        let provider = &self.provider;
+        let state = &self.state;
+        let signer = self.signer;
+        ensure!(!request.is_nil(), "nil request ID");
+        if let Some(bytes) = db
+            .query_row(
+                "SELECT bytes FROM key_packages WHERE id=?1",
+                [request.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+        {
+            return Ok(bytes);
+        }
+        let package =
+            KeyPackage::builder().build(SUITE, provider, signer, credential(state, signer)?)?;
+        let bytes = package.key_package().tls_serialize_detached()?;
+        db.execute(
+            "INSERT INTO key_packages VALUES(?1,?2)",
+            params![request.to_string(), bytes],
+        )?;
+        Ok(bytes)
+    }
+    fn create_group(&self, request: Uuid, peers: &[(&str, &[u8])]) -> Result<Outgoing> {
+        let db = self.db;
+        let provider = &self.provider;
+        let state = &self.state;
+        let signer = self.signer;
+        let now = self.now;
+        ensure!(
+            !peers.is_empty() && peers.len() < MAX_MEMBERS,
+            "invalid peer count"
+        );
+        for (_, package) in peers {
+            ensure!(
+                package.len() <= MAX_KEY_PACKAGE_BYTES,
+                "key package too large"
+            );
+        }
+        let fingerprint = request_hash("create", &serde_json::to_vec(peers)?);
+        // Revalidate packages before returning a retry, including revocation.
+        let mut ids = BTreeSet::from([signer.id().to_owned()]);
+        let mut packages = Vec::new();
+        for (expected, wire) in peers {
+            ensure!(ids.insert((*expected).to_owned()), "duplicate group member");
+            let package = KeyPackageIn::tls_deserialize_exact(wire)?
+                .validate(provider.crypto(), ProtocolVersion::Mls10)?;
+            ensure!(package.ciphersuite() == SUITE, "unsupported ciphersuite");
+            let leaf = package.leaf_node();
+            let node = authenticate(
+                state,
+                leaf.credential(),
+                leaf.signature_key().as_slice(),
+                now,
+            )?;
+            ensure!(node == *expected, "key package belongs to another node");
+            packages.push(package);
+        }
+        if let Some(packet) = retry(db, request, &fingerprint)? {
+            return Ok(packet);
+        }
+        let config = create_config();
+        let mut group = MlsGroup::new(provider, signer, &config, credential(state, signer)?)?;
+        let (_, welcome, _) = group.add_members(provider, signer, &packages)?;
+        group.merge_pending_commit(provider)?;
+        enqueue(
+            db,
+            request,
+            group.group_id(),
+            &fingerprint,
+            welcome.to_bytes()?,
+        )
+    }
+    fn join(&self, invitation: &Outgoing, expected: &[&str], writer: Option<&str>) -> Result<()> {
+        let db = self.db;
+        let provider = &self.provider;
+        let state = &self.state;
+        let signer = self.signer;
+        let now = self.now;
+        ensure!(
+            !invitation.group_id.is_empty() && invitation.group_id.len() <= 256,
+            "invalid group ID"
+        );
+        let expected = roster(expected)?;
+        let message = decode(&invitation.bytes)?;
+        ensure!(
+            expected.contains(signer.id()),
+            "own identity missing from expected roster"
+        );
+        if received(db, &invitation.group_id, &invitation.bytes)? {
+            ensure!(
+                writer.is_none(),
+                "cannot adopt a previously used raw MLS group"
+            );
+            let group = load_group(provider, &invitation.group_id)?;
+            ensure!(
+                members(state, group.members(), now)? == expected,
+                "unexpected group roster"
+            );
+            return Ok(());
+        }
+        ensure!(
+            MlsGroup::load(
+                provider.storage(),
+                &GroupId::from_slice(&invitation.group_id)
+            )?
+            .is_none(),
+            "group already exists"
+        );
+        let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
+            bail!("expected Welcome");
+        };
+        let staged = StagedWelcome::new_from_welcome(
+            provider,
+            create_config().join_config(),
+            welcome,
+            None,
+        )?;
+        ensure!(
+            staged.group_context().group_id().as_slice() == invitation.group_id,
+            "wrong group ID"
+        );
+        ensure!(
+            staged.group_context().ciphersuite() == SUITE,
+            "unsupported ciphersuite"
+        );
+        ensure!(
+            members(state, staged.members(), now)? == expected,
+            "unexpected group roster"
+        );
+        if let Some(writer) = writer {
+            let creator = staged.welcome_sender()?;
+            ensure!(
+                authenticate(
+                    state,
+                    creator.credential(),
+                    creator.signature_key().as_slice(),
+                    now
+                )? == writer,
+                "Welcome creator is not the stream writer"
+            );
+        }
+        staged.into_group(provider)?;
+        receipt(db, &invitation.group_id, &invitation.bytes)?;
+        Ok(())
+    }
+    fn send(&self, group_id: &[u8], id: Uuid, body: &[u8]) -> Result<Outgoing> {
+        let db = self.db;
+        let provider = &self.provider;
+        let state = &self.state;
+        let signer = self.signer;
+        let now = self.now;
+        ensure!(
+            !body.is_empty() && body.len() <= MAX_PAYLOAD_BYTES,
+            "invalid payload size"
+        );
+        let fingerprint = request_hash("send", &serde_json::to_vec(&(group_id, body))?);
+        let mut group = load_group(provider, group_id)?;
+        members(state, group.members(), now)?;
+        if let Some(packet) = retry(db, id, &fingerprint)? {
+            return Ok(packet);
+        }
+        let envelope = serde_json::to_vec(&Envelope {
+            version: 1,
+            id,
+            body: STANDARD.encode(body),
+        })?;
+        let bytes = group
+            .create_message(provider, signer, &envelope)?
+            .to_bytes()?;
+        enqueue(db, id, group.group_id(), &fingerprint, bytes)
+    }
+    fn rotate(&self, group_id: &[u8], request: Uuid) -> Result<Outgoing> {
+        let db = self.db;
+        let provider = &self.provider;
+        let state = &self.state;
+        let signer = self.signer;
+        let now = self.now;
+        let fingerprint = request_hash("rotate", group_id);
+        let mut group = load_group(provider, group_id)?;
+        members(state, group.members(), now)?;
+        if let Some(packet) = retry(db, request, &fingerprint)? {
+            return Ok(packet);
+        }
+        let (commit, _, _) = group
+            .self_update(provider, signer, LeafNodeParameters::default())?
+            .into_contents();
+        group.merge_pending_commit(provider)?;
+        enqueue(
+            db,
+            request,
+            group.group_id(),
+            &fingerprint,
+            commit.to_bytes()?,
+        )
+    }
+    fn remove_revoked(&self, group_id: &[u8], request: Uuid) -> Result<Outgoing> {
+        let db = self.db;
+        let provider = &self.provider;
+        let state = &self.state;
+        let signer = self.signer;
+        let now = self.now;
+        let fingerprint = request_hash("remove", group_id);
+        let mut group = load_group(provider, group_id)?;
+        if let Some(packet) = retry(db, request, &fingerprint)? {
+            return Ok(packet);
+        }
+        let removed: Vec<_> = group
+            .members()
+            .filter(|member| {
+                authenticate(state, &member.credential, &member.signature_key, now).is_err()
+            })
+            .map(|member| member.index)
+            .collect();
+        ensure!(!removed.is_empty(), "no revoked credentials to remove");
+        let (commit, _, _) = group.remove_members(provider, signer, &removed)?;
+        group.merge_pending_commit(provider)?;
+        members(state, group.members(), now)?;
+        enqueue(
+            db,
+            request,
+            group.group_id(),
+            &fingerprint,
+            commit.to_bytes()?,
+        )
+    }
+    fn receive(&self, group_id: &[u8], wire: &[u8], writer: Option<&str>) -> Result<Received> {
+        let db = self.db;
+        let provider = &self.provider;
+        let state = &self.state;
+        let now = self.now;
+        let message = decode(wire)?;
+        let MlsMessageBodyIn::PrivateMessage(private) = message.extract() else {
+            bail!("expected encrypted MLS message");
+        };
+        let mut group = load_group(provider, group_id)?;
+        if received(db, group_id, wire)? {
+            return Ok(Received::Duplicate);
+        }
+        let before = group.members().collect::<Vec<_>>();
+        let processed = group.process_message(provider, ProtocolMessage::from(private))?;
+        let Sender::Member(index) = processed.sender() else {
+            bail!("external sender is not allowed");
+        };
+        let member = before
+            .iter()
+            .find(|member| member.index == *index)
+            .context("sender missing from roster")?;
+        let sender = authenticate(state, &member.credential, &member.signature_key, now)?;
+        if let Some(writer) = writer {
+            ensure!(sender == writer, "MLS sender is not the stream writer");
+        }
+        let result = match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(application) => {
+                // Directional backlog may predate another recipient's removal.
+                // Its sender and the local receiver must still be authorized;
+                // sends under a group containing revoked members remain blocked.
+                if writer.is_none() {
+                    members(state, before.into_iter(), now)?;
+                }
+                let bytes = application.into_bytes();
+                ensure!(
+                    bytes.len() <= MAX_WIRE_BYTES,
+                    "application envelope too large"
+                );
+                let envelope: Envelope = serde_json::from_slice(&bytes)?;
+                ensure!(
+                    envelope.version == 1 && !envelope.id.is_nil(),
+                    "invalid application envelope"
+                );
+                let body = STANDARD.decode(envelope.body)?;
+                ensure!(
+                    !body.is_empty() && body.len() <= MAX_PAYLOAD_BYTES,
+                    "invalid payload size"
+                );
+                db.execute(
+                    "INSERT INTO inbox(group_id,sender,id,body) VALUES(?1,?2,?3,?4)",
+                    params![group_id, sender, envelope.id.to_string(), body],
+                )?;
+                Received::Application {
+                    id: envelope.id,
+                    sender,
+                }
+            }
+            ProcessedMessageContent::StagedCommitMessage(commit) => {
+                // Existing-group membership additions require a separate approved
+                // workflow. This proof accepts refreshes and owner revocations only.
+                let expected = before
+                    .iter()
+                    .filter_map(|member| {
+                        authenticate(state, &member.credential, &member.signature_key, now).ok()
+                    })
+                    .collect::<BTreeSet<_>>();
+                group.merge_staged_commit(provider, *commit)?;
+                if writer.is_some() {
+                    validate_ordered_transition(state, &before, group.members().collect(), now)?;
+                } else {
+                    ensure!(
+                        members(state, group.members(), now)? == expected,
+                        "unapproved membership change"
+                    );
+                }
+                Received::Commit
+            }
+            _ => bail!("standalone MLS proposals are not supported"),
+        };
+        receipt(db, group_id, wire)?;
+        Ok(result)
+    }
+}
+
+// A buffered refresh can precede a later owner revocation. Accept that historical
+// refresh without letting it add members, replace signing keys, or remove an
+// authorized node. Sending still requires every current member to be authorized.
+fn validate_ordered_transition(
+    state: &VerifiedState,
+    before: &[Member],
+    after: Vec<Member>,
+    now: u64,
+) -> Result<()> {
+    let mut keys = BTreeSet::new();
+    for member in &after {
+        ensure!(
+            keys.insert(&member.signature_key)
+                && before
+                    .iter()
+                    .any(|old| old.signature_key == member.signature_key
+                        && old.credential == member.credential),
+            "unapproved stream membership change"
+        );
+    }
+    for member in before {
+        if !keys.contains(&member.signature_key) {
+            ensure!(
+                authenticate(state, &member.credential, &member.signature_key, now).is_err(),
+                "cannot remove an authorized stream member"
+            );
+        }
+    }
     Ok(())
 }

@@ -349,6 +349,19 @@ impl OwnerKey {
 }
 
 impl NodeIdentity {
+    /// Authenticate an opaque packet and its position in a directional stream.
+    pub fn sign_stream_packet(
+        &self,
+        group: &[u8],
+        sequence: u64,
+        previous: Digest,
+        ciphertext: &[u8],
+    ) -> Result<crate::stream::Packet> {
+        let mut packet = crate::stream::Packet::unsigned(group, sequence, previous, ciphertext);
+        packet.signature = self.key.sign(&packet.signing_input()?).to_bytes().to_vec();
+        Ok(packet)
+    }
+
     pub fn generate() -> Result<Self> {
         Ok(Self {
             id: uuid::Uuid::new_v4().to_string(),

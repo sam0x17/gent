@@ -916,6 +916,7 @@ name = "gent-crypto"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "ed25519-dalek 3.0.0",
  "gent-protocol",
  "getrandom 0.4.3",
