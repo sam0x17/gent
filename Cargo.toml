@@ -29,6 +29,7 @@ serde_jcs = "0.2"
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 toml = "0.9"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"

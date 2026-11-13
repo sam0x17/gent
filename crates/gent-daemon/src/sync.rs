@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Notify, task::JoinHandle, time::Instant};
+mod notifications;
 
 const MAX_FRAME: usize = 1024 * 1024;
 type SharedStore = Arc<Mutex<Store>>;
@@ -28,6 +29,7 @@ pub(crate) struct Stream {
 struct Relay {
     client: Client,
     origin: Url,
+    authorization: header::HeaderValue,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,14 +51,18 @@ impl Relay {
         let mut value = header::HeaderValue::from_str(&format!("Bearer {}", credential.as_str()))?;
         value.set_sensitive(true);
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, value);
+        headers.insert(header::AUTHORIZATION, value.clone());
         let client = Client::builder()
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(5))
             .build()?;
-        Ok(Self { client, origin })
+        Ok(Self {
+            client,
+            origin,
+            authorization: value,
+        })
     }
     fn route(&self, group: &[u8], sequence: Option<u64>) -> Result<Url> {
         let mut path = format!("v1/mailboxes/{}", URL_SAFE_NO_PAD.encode(group));
@@ -234,6 +240,7 @@ pub fn start(store: SharedStore) -> Result<Option<JoinHandle<()>>> {
 }
 
 async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>) {
+    let push = notifications::Listener::start(relay.clone(), wakeup.clone());
     let mut retries = BTreeMap::<Vec<u8>, Retry>::new();
     let mut transferred = BTreeMap::<Vec<u8>, u64>::new();
     let mut cursor = 0usize;
@@ -300,11 +307,18 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>) {
             }
             previous_error = error.clone().into();
         }
-        let pause = if progressed {
+        let mut pause = if progressed {
             Duration::from_millis(10)
         } else {
-            Duration::from_secs(1)
+            push.reconcile_after()
         };
+        if let Some(retry) = retries
+            .values()
+            .map(|r| r.at.saturating_duration_since(Instant::now()))
+            .min()
+        {
+            pause = pause.min(retry);
+        }
         tokio::select! {
             _ = wakeup.notified() => {}
             _ = tokio::time::sleep(pause) => {}

@@ -14,6 +14,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import tomllib
 import uuid
 from urllib.parse import urlparse
 from smoke_mcp import Client, PNG
@@ -113,6 +114,11 @@ def main():
             result = subprocess.run(local + list(command), check=True, capture_output=True, text=True, timeout=40)
             return json.loads(result.stdout)
 
+        def applied(revision):
+            # Read the projection directly. An RPC status request wakes local
+            # sync and would mask a broken push notification path in this proof.
+            return tomllib.loads((home / 'config.toml').read_text())['applied_revision'] == revision
+
         try:
             setup = json.loads(remote(['python3', '-c', PREPARE], json.dumps({'binary': args.remote_binary, 'relay': f'http://127.0.0.1:{args.remote_relay_port}', 'token': token})).stdout)
             owner_home = setup['home']
@@ -135,8 +141,11 @@ def main():
             wait_for(lambda: (home / 'daemon.sock').exists())
             nodes = cli('nodes')
             assert len(nodes) == 2 and len({n['id'] for n in nodes}) == 2
+            time.sleep(1.2)
+            started = time.monotonic()
             changed = json.loads(remote(owner + ['node', 'name', 'set', 'owner-after-join']).stdout)
-            wait_for(lambda: cli('cluster')['authority']['revision'] == changed['revision'])
+            wait_for(lambda: applied(changed['revision']))
+            config_latency = time.monotonic() - started
             assert next(n for n in cli('nodes') if n['id'] == setup['node'])['name'] == 'owner-after-join'
             assert cli('node', 'name') == 'joining-machine'
             stop(local_daemon)
@@ -144,7 +153,7 @@ def main():
             changed = json.loads(remote(owner + ['node', 'name', 'set', 'owner-while-peer-offline']).stdout)
             local_daemon = start_local()
             wait_for(lambda: (home / 'daemon.sock').exists())
-            wait_for(lambda: cli('cluster')['authority']['revision'] == changed['revision'])
+            wait_for(lambda: applied(changed['revision']))
             assert next(n for n in cli('nodes') if n['id'] == setup['node'])['name'] == 'owner-while-peer-offline'
             a = Client(local + ['mcp', 'serve', '--binding', str(home / 'visual.key')])
             clients.append(a)
@@ -157,7 +166,7 @@ def main():
             assert a.call('gent_agents')[0] == b.call('gent_agents')[0] == []
             remote(owner + ['permission', 'allow', aid, bid, '--permission', 'enumerate', 'send'])
             granted = json.loads(remote(owner + ['permission', 'allow', bid, aid, '--permission', 'enumerate', 'receive']).stdout)
-            wait_for(lambda: cli('cluster')['authority']['revision'] == granted['revision'])
+            wait_for(lambda: applied(granted['revision']))
             wait_for(lambda: len(a.call('gent_agents')[0]) == 1)
             files = [{'name': 'visual.png', 'media_type': 'image/png', 'data_base64': PNG}]
             attempt = {'recipient': bid, 'request_id': str(uuid.uuid4()), 'text': 'review this image', 'files': files}
@@ -184,6 +193,7 @@ def main():
             wait_for(lambda: (home / 'daemon.sock').exists())
             wait_for(lambda: any(m['id'] == queued['message_id'] for m in a.call('gent_inbox')[0]))
             print('PASS: two-machine SSH pairing, encrypted configuration sync, MCP images in both directions, scoped replies, authenticated receipts, and offline catch-up')
+            print(f'Configuration applied in {config_latency * 1000:.0f} ms, including the SSH owner command; observation made no daemon requests')
         finally:
             for client in clients:
                 client.close()

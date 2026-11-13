@@ -1,3 +1,4 @@
+use futures_util::{SinkExt, StreamExt};
 use gent_daemon::config;
 use serde_json::json;
 use std::{
@@ -10,7 +11,12 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    sync::broadcast,
     task::JoinHandle,
+};
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
 };
 struct Task(JoinHandle<()>);
 impl Drop for Task {
@@ -19,11 +25,24 @@ impl Drop for Task {
     }
 }
 pub type Mailboxes = Arc<Mutex<BTreeMap<String, Vec<Vec<u8>>>>>;
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub enum Notice {
+    Changed,
+    Close,
+    Text(String),
+}
 pub struct RelayServer {
     pub endpoint: String,
     pub token: String,
     pub mode: Arc<AtomicUsize>,
     pub data: Mailboxes,
+    #[allow(dead_code)]
+    pub notices: broadcast::Sender<Notice>,
+    #[allow(dead_code)]
+    pub watching: Arc<AtomicUsize>,
+    #[allow(dead_code)]
+    pub requests: Arc<AtomicUsize>,
     _task: Task,
 }
 impl RelayServer {
@@ -33,12 +52,17 @@ impl RelayServer {
         let token = config::secret();
         let mode = Arc::new(AtomicUsize::new(0));
         let data = Mailboxes::default();
+        let (notices, _) = broadcast::channel(128);
+        let watching = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (n, w, r) = (notices.clone(), watching.clone(), requests.clone());
         let (t, m, d) = (token.clone(), mode.clone(), data.clone());
         let task = tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
                 let (t, m, d) = (t.clone(), m.clone(), d.clone());
+                let (n, w, r) = (n.clone(), w.clone(), r.clone());
                 tokio::spawn(async move {
-                    serve(socket, t, m, d).await;
+                    serve(socket, t, m, d, n, w, r).await;
                 });
             }
         });
@@ -47,17 +71,29 @@ impl RelayServer {
             token,
             mode,
             data,
+            notices,
+            watching,
+            requests,
             _task: Task(task),
         }
     }
 }
-async fn serve(mut socket: TcpStream, token: String, mode: Arc<AtomicUsize>, data: Mailboxes) {
+async fn serve(
+    mut socket: TcpStream,
+    token: String,
+    mode: Arc<AtomicUsize>,
+    data: Mailboxes,
+    notices: broadcast::Sender<Notice>,
+    watching: Arc<AtomicUsize>,
+    requests: Arc<AtomicUsize>,
+) {
     let mut reader = BufReader::new(&mut socket);
     let mut line = String::new();
     reader.read_line(&mut line).await.unwrap();
     let request: Vec<_> = line.split_whitespace().map(str::to_owned).collect();
     let mut length = 0;
     let mut authorized = false;
+    let mut websocket_key = None;
     loop {
         line.clear();
         reader.read_line(&mut line).await.unwrap();
@@ -65,6 +101,9 @@ async fn serve(mut socket: TcpStream, token: String, mode: Arc<AtomicUsize>, dat
             break;
         }
         let (name, value) = line.split_once(':').unwrap();
+        if name.eq_ignore_ascii_case("sec-websocket-key") {
+            websocket_key = Some(value.trim().to_owned());
+        }
         if name.eq_ignore_ascii_case("content-length") {
             length = value.trim().parse().unwrap();
         }
@@ -76,12 +115,49 @@ async fn serve(mut socket: TcpStream, token: String, mode: Arc<AtomicUsize>, dat
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await.unwrap();
     drop(reader);
+    if request[1] == "/v1/watch" && authorized && ![1, 4].contains(&mode.load(Ordering::SeqCst)) {
+        let key = websocket_key.unwrap();
+        let accept = derive_accept_key(key.as_bytes());
+        let mut receiver = notices.subscribe();
+        socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
+        let mut socket = WebSocketStream::from_raw_socket(socket, Role::Server, None).await;
+        struct Watching(Arc<AtomicUsize>);
+        impl Drop for Watching {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        watching.fetch_add(1, Ordering::SeqCst);
+        let _watching = Watching(watching);
+        socket
+            .send(Message::text(r#"{"version":1,"event":"ready"}"#))
+            .await
+            .unwrap();
+        loop {
+            let message = tokio::select! {
+                notice = receiver.recv() => match notice {
+                    Ok(Notice::Changed) => Message::text(r#"{"version":1,"event":"changed"}"#),
+                    Ok(Notice::Text(text)) => Message::text(text),
+                    _ => { let _ = socket.close(None).await; break; }
+                },
+                frame = socket.next() => match frame {
+                    Some(Ok(Message::Text(text))) if text == "gent-ping-v1" && mode.load(Ordering::SeqCst) != 1 => Message::text("gent-pong-v1"),
+                    _ => break,
+                }
+            };
+            if socket.send(message).await.is_err() {
+                break;
+            }
+        }
+        return;
+    }
+    requests.fetch_add(1, Ordering::SeqCst);
     let (status, response) = {
         let parts: Vec<_> = request[1].split('/').collect();
         let mut data = data.lock().unwrap();
         if !authorized {
             (401, vec![])
-        } else if mode.load(Ordering::SeqCst) == 1 {
+        } else if request[1] == "/v1/watch" || mode.load(Ordering::SeqCst) == 1 {
             (503, vec![])
         } else if parts.len() == 4 {
             let next = if mode.load(Ordering::SeqCst) == 3 {
@@ -117,6 +193,9 @@ async fn serve(mut socket: TcpStream, token: String, mode: Arc<AtomicUsize>, dat
             }
         }
     };
+    if request[0] == "PUT" && status == 200 && mode.load(Ordering::SeqCst) != 5 {
+        let _ = notices.send(Notice::Changed);
+    }
     let header = format!(
         "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         response.len()

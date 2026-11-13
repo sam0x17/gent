@@ -310,3 +310,126 @@ async fn wrangler_transports_actual_encrypted_configuration() {
     let _receiver = f.start(1);
     f.wait_revision(latest).await;
 }
+
+async fn wait_watchers(relay: &RelayServer, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while relay.watching.load(Ordering::SeqCst) != expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("notification connections did not settle");
+}
+
+#[tokio::test]
+async fn push_applies_newest_configuration_without_idle_mailbox_polling() {
+    let relay = RelayServer::start().await;
+    let f = Fixture::new(&relay.endpoint, &relay.token);
+    let _source = f.start(0);
+    let _receiver = f.start(1);
+    wait_watchers(&relay, 2).await;
+    let revision = f.set(policy("initial-push"));
+    f.wait_revision(revision).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let requests = relay.requests.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(
+        relay.requests.load(Ordering::SeqCst),
+        requests,
+        "idle push connection must not poll mailboxes every second"
+    );
+    f.set(policy("replaced"));
+    let newest = f.set(policy("newest-push"));
+    tokio::time::timeout(Duration::from_secs(2), f.wait_revision(newest))
+        .await
+        .expect("configuration waited for periodic reconciliation");
+    assert_eq!(
+        config::load(f.homes[1].path()).unwrap().policy.groups,
+        policy("newest-push").groups
+    );
+    drop(_receiver);
+    wait_watchers(&relay, 1).await;
+    drop(_source);
+    wait_watchers(&relay, 0).await;
+}
+
+#[tokio::test]
+async fn reconnect_reconciles_packets_whose_notifications_were_lost() {
+    let relay = RelayServer::start().await;
+    let f = Fixture::new(&relay.endpoint, &relay.token);
+    let _source = f.start(0);
+    let _receiver = f.start(1);
+    wait_watchers(&relay, 2).await;
+    let initial = f.set(policy("before-lost-hint"));
+    f.wait_revision(initial).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let count = relay
+        .data
+        .lock()
+        .unwrap()
+        .values()
+        .map(Vec::len)
+        .sum::<usize>();
+    relay.mode.store(5, Ordering::SeqCst); // HTTP works; push hints are dropped.
+    let next = f.set(policy("stored-without-hint"));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while relay
+            .data
+            .lock()
+            .unwrap()
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+            <= count
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        config::load(f.homes[1].path()).unwrap().applied_revision,
+        Some(initial)
+    );
+    relay.notices.send(relay::Notice::Close).unwrap();
+    relay.mode.store(0, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(5), f.wait_revision(next))
+        .await
+        .unwrap();
+    wait_watchers(&relay, 2).await;
+}
+
+#[tokio::test]
+async fn invalid_push_cannot_change_authority_and_polling_recovers_without_websockets() {
+    let relay = RelayServer::start().await;
+    let f = Fixture::new(&relay.endpoint, &relay.token);
+    let _source = f.start(0);
+    let _receiver = f.start(1);
+    wait_watchers(&relay, 2).await;
+    let initial = f.set(policy("verified-only"));
+    f.wait_revision(initial).await;
+    for invalid in [
+        r#"{"version":1,"event":"changed","revision":99999}"#.to_owned(),
+        "x".repeat(2048),
+    ] {
+        relay.mode.store(4, Ordering::SeqCst); // Disable replacement push channels.
+        relay.notices.send(relay::Notice::Text(invalid)).unwrap();
+        wait_watchers(&relay, 0).await;
+        assert_eq!(
+            config::load(f.homes[1].path()).unwrap().applied_revision,
+            Some(initial)
+        );
+        relay.mode.store(0, Ordering::SeqCst);
+        wait_watchers(&relay, 2).await;
+    }
+    relay.mode.store(4, Ordering::SeqCst);
+    relay.notices.send(relay::Notice::Close).unwrap();
+    wait_watchers(&relay, 0).await;
+    let next = f.set(policy("fallback"));
+    tokio::time::timeout(Duration::from_secs(5), f.wait_revision(next))
+        .await
+        .unwrap();
+    drop(_source);
+    drop(_receiver);
+    wait_watchers(&relay, 0).await;
+}
