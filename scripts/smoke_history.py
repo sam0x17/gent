@@ -89,7 +89,10 @@ def main():
             live = {'request_id': a.request_id(), 'recipient': bid, 'text': 'live work'}
             live_id = a.call('gent_send', live)[0]['message_id']
             assert cli('history')['messages'] == 3
-            assert 'Gent messages: 3 / 8192' in cli('history', structured=False)
+            human = cli('history', structured=False)
+            assert 'Gent messages: 3 / 8192' in human
+            assert 'Configuration edit retries:' in human and 'legacy bodies:' in human
+            assert 'Retry records retained.' in cli('history', 'clean', '--dry-run', structured=False)
             cli('files', 'clean')
             preview = cli('history', 'clean', '--dry-run')
             assert preview['messages_removed'] == 2 and preview['import_retries_removed'] == 1

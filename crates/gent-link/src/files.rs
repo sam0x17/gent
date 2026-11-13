@@ -103,6 +103,14 @@ pub fn print_history(value: &Value) {
             "Sent node-event retry records removed: {}.",
             value["sent_event_retries_removed"]
         );
+        let edits = &value["configuration_edits"];
+        println!(
+            "Configuration edits {}: {} ({} body bytes removed); legacy bodies remaining: {}. Retry records retained.",
+            if dry_run { "to compact" } else { "compacted" },
+            edits["records_compacted"],
+            edits["body_bytes_removed"],
+            edits["more_due"]
+        );
     } else {
         println!(
             "Gent messages: {} / {}; payload bytes: {} / {}.",
@@ -147,8 +155,18 @@ pub fn print_history(value: &Value) {
         println!(
             "Message history: seven days after expiry. New request IDs: UUIDv7, first use within 24 hours."
         );
+        let edits = &value["configuration_edits"];
         println!(
-            "Encrypted stream, configuration, and provider histories are separate. Preview: gent history clean --dry-run"
+            "Configuration edit retries: {} / {}; reserved bytes: {} / {}; pending results: {}; legacy bodies: {}.",
+            edits["records"],
+            edits["max_records"],
+            edits["reserved_bytes"],
+            edits["max_reserved_bytes"],
+            edits["pending"],
+            edits["legacy_records"]
+        );
+        println!(
+            "Encrypted streams, signed authority history, and provider histories are separate. Preview: gent history clean --dry-run"
         );
     }
 }

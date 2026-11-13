@@ -4,9 +4,10 @@ use crate::messages::{EditResult, Event};
 use gent_crypto::{SignedConfigurationGrant, SignedState, scoped_id};
 use uuid::Uuid;
 
+pub(super) mod storage;
+
 pub(super) fn schema(db: &Connection) -> Result<()> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS configuration_edits(origin TEXT NOT NULL,id TEXT NOT NULL,writer TEXT NOT NULL,fingerprint TEXT NOT NULL,edit BLOB NOT NULL,result BLOB,PRIMARY KEY(origin,id));")?;
-    Ok(())
+    storage::schema(db)
 }
 fn validate(edit: &ConfigurationEdit) -> Result<()> {
     match edit {
@@ -132,15 +133,14 @@ impl StoreSession<'_> {
                 "node lacks configuration-management grant; grant it on the owner node"
             );
             let writer = self.configuration_writer()?;
-            self.db.execute(
-                "INSERT INTO configuration_edits VALUES(?1,?2,?3,?4,?5,NULL)",
-                params![
-                    origin,
-                    id,
-                    writer,
-                    fingerprint(&edit)?,
-                    serde_json::to_vec(&edit)?
-                ],
+            storage::insert(
+                self.db,
+                &origin,
+                id,
+                &writer,
+                &fingerprint(&edit)?,
+                &edit,
+                None,
             )?;
             self.queue(
                 &writer,
@@ -265,19 +265,17 @@ impl StoreSession<'_> {
                     }
                 }
                 Err(error) => EditResult::Rejected {
-                    reason: error.to_string(),
+                    reason: storage::rejection_reason(error.to_string()),
                 },
             };
-            self.db.execute(
-                "INSERT INTO configuration_edits VALUES(?1,?2,?3,?4,?5,?6)",
-                params![
-                    origin,
-                    id,
-                    self.identity.node.id(),
-                    fingerprint,
-                    serde_json::to_vec(&edit)?,
-                    serde_json::to_vec(&result)?
-                ],
+            storage::insert(
+                self.db,
+                origin,
+                &id,
+                self.identity.node.id(),
+                &fingerprint,
+                &edit,
+                Some(&serde_json::to_vec(&result)?),
             )?;
             result
         };
@@ -326,10 +324,14 @@ impl StoreSession<'_> {
                 );
             }
             EditResult::Rejected { reason } => {
-                ensure!(reason.len() <= 1024, "configuration rejection too large")
+                ensure!(
+                    reason.len() <= storage::MAX_REASON_BYTES,
+                    "configuration rejection too large"
+                )
             }
         }
         let encoded = serde_json::to_vec(&result)?;
+        storage::result_size(&encoded)?;
         ensure!(
             previous.is_none_or(|saved| saved == encoded),
             "configuration result changed"
@@ -341,12 +343,12 @@ impl StoreSession<'_> {
         Ok(())
     }
     pub(super) fn configuration_status(&self, id: &str) -> Result<Value> {
-        let (writer, edit, result): (String, Vec<u8>, Option<Vec<u8>>) = self
+        let (writer, edit, result, compact): (String, Vec<u8>, Option<Vec<u8>>, bool) = self
             .db
             .query_row(
-                "SELECT writer,edit,result FROM configuration_edits WHERE origin=?1 AND id=?2",
+                "SELECT writer,edit,result,compact FROM configuration_edits WHERE origin=?1 AND id=?2",
                 params![self.identity.node.id(), id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?
             .context("unknown configuration request")?;
@@ -364,14 +366,7 @@ impl StoreSession<'_> {
                 }
             }
         }
-        match serde_json::from_slice(&edit)? {
-            ConfigurationEdit::RenameNode { name } => status["name"] = name.into(),
-            ConfigurationEdit::GrantRelay { grant_id, .. }
-            | ConfigurationEdit::RevokeRelay { grant_id } => {
-                status["grant_id"] = grant_id.into();
-            }
-            _ => {}
-        }
+        storage::describe(&edit, compact, &mut status)?;
         Ok(status)
     }
     pub(super) fn configuration_requests(&self) -> Result<Value> {

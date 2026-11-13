@@ -11,7 +11,9 @@ import os
 from pathlib import Path
 import shlex
 import signal
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
@@ -19,6 +21,7 @@ import uuid
 from urllib.parse import urlparse
 from smoke_mcp import Client, PNG
 from relay_checks import exercise_turns
+import edit_storage_checks
 from transport_checks import (RESTORE_COPIES, ADVANCE_EVENT_CLOCK, exercise_storage,
                               exercise_authority_history, exercise_event_retention)
 
@@ -82,8 +85,8 @@ else:
 '''
 
 
-def wait_for(check):
-    end = time.monotonic() + 30
+def wait_for(check, timeout=30):
+    end = time.monotonic() + timeout
     while time.monotonic() < end:
         if check():
             return
@@ -113,6 +116,7 @@ def main():
     parser.add_argument('--transport-storage', action='store_true', help='Also prove bounded packet/retry storage, replay evidence, compaction, and startup cleanup')
     parser.add_argument('--configuration-storage', action='store_true', help='Also prove signed configuration history compaction across both machines and restarts')
     parser.add_argument('--event-storage', action='store_true', help='Finally advance disposable request clocks to prove node event retry cleanup')
+    parser.add_argument('--edit-storage', action='store_true', help='Also prove compact configuration edits and migration while the owner is offline')
     parser.add_argument('--remote-relay-port', type=int, default=18789)
     args = parser.parse_args()
     if args.event_storage and args.remote_join_helper:
@@ -244,7 +248,7 @@ def main():
 
             exercise_turns(a, b, attached['attachment']['id'], files, wait_for, restart_relay_nodes)
             print('PASS: two-machine ordered relay turns, PNG forwarding, restart recovery, cancellation, final outcomes, and exact retries')
-            if args.transport_storage or args.configuration_storage or args.event_storage:
+            if args.transport_storage or args.configuration_storage or args.event_storage or args.edit_storage:
                 def owner_cli(*command):
                     return json.loads(remote(owner + list(command)).stdout)
 
@@ -304,6 +308,7 @@ def main():
             remote(['python3', '-c', STOP_OWNER, owner_home])
             stop(owner_daemon)
             owner_daemon = None
+            edit_cases = edit_storage_checks.queue_edits(home, cli) if args.edit_storage else []
             pending_id = str(uuid.uuid4())
             pending = cli('--request-id', pending_id, 'node', 'name', 'set', 'pending-while-owner-offline')
             assert pending['state'] == 'queued' and not pending['applied']
@@ -312,10 +317,16 @@ def main():
             local_daemon = start_local()
             wait_for(lambda: (home / 'daemon.sock').exists())
             assert cli('config', 'request', pending_id)['state'] == 'queued'
+            if args.edit_storage:
+                edit_storage_checks.after_restart(cli, edit_cases, wait_for)
             owner_daemon = start_owner()
             wait_for(lambda: remote(owner + ['daemon', 'status'], check=False).returncode == 0)
+            if args.edit_storage:
+                edit_storage_checks.wait_for_results(cli, edit_cases, wait_for)
             wait_for(lambda: cli('config', 'request', pending_id)['state'] == 'applied')
             assert cli('node', 'name') == 'pending-while-owner-offline'
+            if args.edit_storage:
+                edit_storage_checks.completed(home, cli, owner_cli, edit_cases)
             node = cli('node')['id']
             revoked = json.loads(remote(owner + ['node', 'admin', 'revoke', node]).stdout)
             wait_for(lambda: applied(revoked['revision']))
@@ -370,6 +381,11 @@ def main():
             print('PASS: two-machine pairing, encrypted MCP images/replies/receipts, remote permission edits and renaming, idempotent requests, offline owner recovery, and administration revocation')
             print(f'Configuration applied in {config_latency * 1000:.0f} ms, including the SSH owner command; observation made no daemon requests')
         finally:
+            if sys.exc_info()[0] is not None:
+                diagnostics = Path(tempfile.mkdtemp(prefix='gent-pairing-failure-'))
+                for log in Path(folder).glob('*.log'):
+                    shutil.copy2(log, diagnostics / log.name)
+                print(f'Proof daemon logs retained at {diagnostics}', flush=True)
             for client in clients:
                 client.close()
             stop(local_daemon)

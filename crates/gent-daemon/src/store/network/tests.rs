@@ -2,6 +2,8 @@ use super::*;
 use crate::pairing::{self, Peer};
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "configuration_storage_tests.rs"]
+mod configuration_storage_tests;
 #[path = "retention_tests.rs"]
 mod retention_tests;
 #[path = "retries.rs"]
