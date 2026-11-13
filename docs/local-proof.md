@@ -16,7 +16,7 @@ python3 scripts/smoke_mcp.py target/debug/gent
 
 The smoke test starts a daemon and three independent MCP clients in a temporary directory. It checks registration, hidden peers, default-deny permissions, image bytes and MCP image content blocks, scoped replies, duplicate suppression, restart recovery, and revocation. It makes no model calls and removes its test state afterward. These checks passed on Linux x86_64 and macOS arm64.
 
-Separate real-host tests passed for Codex and Claude Code CLIs on both OSes using explicit per-conversation binding files. Each host registered a synthetic conversation, resumed that same conversation after a daemon restart, retrieved and identified an image, and replied with identical file bytes. These tests establish that workflow only; they do not establish automatic pairing, shared host configuration isolation, or idle wake/resume.
+Separate real-host tests pass for Codex and Claude Code CLIs on both OSes using explicit bindings and host-supplied conversation metadata. Each host registers a synthetic conversation, resumes after a daemon restart, retrieves and identifies an image, and replies with identical file bytes. The host-metadata proof also checks concurrent chats using the same connector configuration and isolation after a fork. Automatic idle wake/resume remains untested.
 
 To run those tests with an already authenticated host:
 
@@ -95,9 +95,9 @@ Configure the host to launch the following command, with absolute paths to the b
 gent --home /absolute/private/state mcp serve --binding /absolute/private/state/bindings/chat-a.key
 ```
 
-Gent creates the binding file when absent. The owner or host must choose a different binding file for every conversation. The file is a credential; never paste its contents into a chat or tool argument. A second active MCP process cannot lock the same binding. Reusing the file after that process exits reconnects to the same agent and pending inbox. Without `--binding`, each MCP process gets a fresh ephemeral identity.
+Gent creates the binding file when absent. The owner or host must choose a different binding file for every conversation. The file is a credential; never paste its contents into a chat or tool argument. A second active MCP process cannot lock the same binding. Reusing the file after that process exits reconnects to the same agent and pending inbox. Without `--binding` or `--host`, each MCP process gets a fresh ephemeral identity.
 
-A host-wide MCP configuration may be shared by multiple chats. One binding in that shared configuration does not establish per-chat isolation. Automatic binding in Codex and Claude Code is still an integration proof; use explicit, separate configurations for each conversation as in the tested workflow. Merely supplying different agent names does not create separate identities on one authenticated connection.
+A host-wide MCP configuration may be shared by multiple chats. Use the host binding mode below for supported hosts. A fixed `--binding` in shared configuration gives every chat the same credential; changing the display name does not create another identity.
 
 The host invokes `gent_register` with a display `name` and arbitrary `provider` label, then calls `gent_identity` to inspect its location. The daemon supplies its node and agent IDs. Registration does not grant messaging or discovery rights. The same tools work regardless of whether the host runs a cloud model or a local model.
 
@@ -111,6 +111,33 @@ The host invokes `gent_register` with a display `name` and arbitrary `provider` 
 | `gent_inbox` | Retrieve pending permitted messages and files. |
 | `gent_ack` | Record receipt of a message; this does not claim work is complete. |
 | `gent_message_status` | Inspect queued, delivered, expired, or revoked state. |
+
+## Host conversation bindings
+
+```sh
+gent integration config codex
+gent integration config claude-code
+```
+
+These commands print JSON configuration fragments containing absolute Gent executable and state paths. They do not edit host settings. For Codex, translate the returned `mcp_servers.gent` fields into a `[mcp_servers.gent]` table in the host's `config.toml`. For Claude Code, merge `mcpServers.gent` into its MCP configuration and merge `settings.hooks.PreToolUse` into its settings. Preserve existing entries. Keep the MCP server name `gent`, which the generated Claude hook matches. Automatic installation and removal of these entries remain pending.
+
+Both fragments launch the same stdio server with `gent mcp serve --host codex` or `--host claude-code`. Do not combine `--host` with `--binding`. The host selects a persistent credential outside model-visible tool arguments. Gent stores credentials under the private `host-bindings` directory, scoped to node, cluster, host, and conversation. Reconnecting restores that chat's registration and inbox; a fork gets a different binding. Concurrent MCP processes cannot hold the same conversation binding. One MCP connection can hold up to 128 distinct bindings before it must reconnect.
+
+Codex supplies `threadId` in each tool call's protocol metadata. Gent uses that field, which was observed in the tested CLI versions; it does not fall back to `sessionId`, since related threads can share a session tree. Calls without a valid thread ID fail. Existing explicit bindings remain available for hosts without verified metadata support.
+
+Claude Code requires the generated `PreToolUse` hook for every Gent tool call. The hook receives the current session, optional subagent ID, and tool-use ID from Claude. It writes a private handoff containing hashes and a timestamp. The MCP server matches the tool-use ID and exact call contents before selecting the credential. Missing, expired, or conflicting handoffs fail without falling back to the previous chat. The hook does not grant permission or add model instructions. Disabling it makes Gent calls fail; another hook rewriting Gent's arguments can also invalidate the handoff.
+
+Handoffs expire after ten minutes, with up to 4,096 retained per node/cluster/Claude scope. Expired records are pruned on later hook calls. They contain no plaintext message, file bytes, raw session ID, or credential. Binding credentials persist independently. Host labels and metadata are trusted only on this local, owner-configured stdio connection; they are not remote authentication. Agents with arbitrary filesystem access still share the trusted OS user's authority.
+
+The same-connection protocol proof simulates session and subagent changes. The real-host proof exercises separate concurrent CLI chats, resume, forks, and a queued image round trip. Interactive `/clear`, in-process `/resume`, live subagent execution, and GUI surfaces still require their own real-host tests. Claude's startup environment alone is insufficient for these transitions, so Gent uses the per-call hook even for CLI sessions.
+
+```sh
+python3 scripts/smoke_host_bindings.py target/debug/gent
+python3 scripts/prove_host.py --host codex --automatic-binding
+python3 scripts/prove_host.py --host claude-code --automatic-binding
+```
+
+The latter two consume model usage in synthetic conversations and retain private proof files. Add `--host-binary /absolute/path/to/host` when the executable is not on PATH. Codex's `--use-host-config` test option retains the machine's existing configured model access while disabling unrelated MCP servers and plugins for that invocation. No permanent host settings or existing conversations are edited.
 
 ## Grant communication as the local owner
 
@@ -222,6 +249,6 @@ Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per ex
 
 ## Remaining integration work
 
-Codex and Claude Code pass explicit pairing, session continuity, and a small image round trip on both OSes. Separate concurrent conversations in normal shared host configurations, automatic binding, and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
+Codex and Claude Code have explicit and host-metadata binding proofs on both OSes. Persistent host setup, interactive conversation transitions, and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
 Invite-based pairing, GitHub login, remote connectors, host setup helpers, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, and generic MCP messaging use the local development relay. A visual iteration involving real models across machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.

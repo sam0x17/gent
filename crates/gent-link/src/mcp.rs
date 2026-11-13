@@ -1,15 +1,25 @@
+use crate::integration::{Bindings, Host};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use gent_daemon::{config, request};
 use gent_protocol::{AgentOp, Request};
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, model::*, service::RequestContext};
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+
+#[derive(Clone)]
+enum Credentials {
+    Fixed(String),
+    Host(Arc<Mutex<Bindings>>),
+}
 
 #[derive(Clone)]
 struct GentMcp {
     home: PathBuf,
-    credential: String,
+    credentials: Credentials,
 }
 
 fn tools() -> Vec<Tool> {
@@ -71,7 +81,7 @@ fn tools() -> Vec<Tool> {
 impl ServerHandler for GentMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Call gent_register for this conversation before other Gent tools. Use gent_inbox to check messages. Credentials are bound to this MCP process, never tool arguments. This build supports a local proof only; it cannot reach remote nodes.")
+            .with_instructions("Call gent_register for this conversation before other Gent tools. Use gent_inbox to check messages. The host connection determines identity; credentials and session selectors are never tool arguments. Discovery, sends, receipt, and replies follow cluster permissions. Connected nodes exchange encrypted messages and files; remote delivery requires configured transport.")
     }
 
     async fn list_tools(
@@ -89,20 +99,55 @@ impl ServerHandler for GentMcp {
     async fn call_tool(
         &self,
         call: CallToolRequestParams,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let Some(operation) = call.name.strip_prefix("gent_") else {
             return Err(ErrorData::invalid_params("unknown tool", None));
         };
-        if self.get_tool(&call.name).is_none() {
-            return Err(ErrorData::invalid_params("unknown tool", None));
-        }
-        let mut arguments = call.arguments.unwrap_or_default();
-        if arguments.contains_key("op") {
+        let tool = self
+            .get_tool(&call.name)
+            .ok_or_else(|| ErrorData::invalid_params("unknown tool", None))?;
+        let properties = tool.input_schema["properties"]
+            .as_object()
+            .expect("tool properties are an object");
+        if call
+            .arguments
+            .as_ref()
+            .is_some_and(|arguments| arguments.keys().any(|key| !properties.contains_key(key)))
+        {
             return Ok(
-                CallToolResult::error(vec![ContentBlock::text("unexpected op argument")]).into(),
+                CallToolResult::error(vec![ContentBlock::text("unexpected tool argument")]).into(),
             );
         }
+        let credential = match &self.credentials {
+            Credentials::Fixed(credential) => credential.clone(),
+            Credentials::Host(bindings) => {
+                let info = context.peer.peer_info();
+                // MCP 2026-07-28 carries client information on each request;
+                // older peers negotiate it during initialize.
+                let client = context
+                    .meta
+                    .client_info()
+                    .or_else(|| info.as_ref().map(|i| i.client_info.clone()));
+                let client = client.as_ref().map(|i| i.name.as_str()).unwrap_or_default();
+                let meta = serde_json::to_value(&context.meta).expect("MCP metadata serializes");
+                let arguments = Value::Object(call.arguments.clone().unwrap_or_default());
+                match bindings
+                    .lock()
+                    .expect("host bindings lock poisoned")
+                    .credential(client, &meta, &call.name, &arguments)
+                {
+                    Ok(credential) => credential,
+                    Err(error) => {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(
+                            error.to_string(),
+                        )])
+                        .into());
+                    }
+                }
+            }
+        };
+        let mut arguments = call.arguments.unwrap_or_default();
         arguments.insert("op".into(), Value::String(operation.into()));
         let action = match serde_json::from_value::<AgentOp>(Value::Object(arguments)) {
             Ok(action) => action,
@@ -113,14 +158,7 @@ impl ServerHandler for GentMcp {
                 .into());
             }
         };
-        let result = request(
-            &self.home,
-            Request::Agent {
-                credential: self.credential.clone(),
-                action,
-            },
-        )
-        .await;
+        let result = request(&self.home, Request::Agent { credential, action }).await;
         Ok(match result {
             Ok(value) => {
                 let mut content = vec![ContentBlock::text(value.to_string())];
@@ -147,10 +185,12 @@ impl ServerHandler for GentMcp {
     }
 }
 
-pub async fn run(home: PathBuf, binding_path: Option<PathBuf>) -> Result<()> {
+pub async fn run(home: PathBuf, binding_path: Option<PathBuf>, host: Option<Host>) -> Result<()> {
     config::load(&home)?;
     let mut guard = None;
-    let credential = if let Some(path) = binding_path {
+    let credentials = if let Some(host) = host {
+        Credentials::Host(Arc::new(Mutex::new(Bindings::new(&home, host)?)))
+    } else if let Some(path) = binding_path {
         // A binding file is selected outside the model by the owner/host per conversation.
         let credential = config::binding(&path)?;
         let file = std::fs::OpenOptions::new()
@@ -160,14 +200,14 @@ pub async fn run(home: PathBuf, binding_path: Option<PathBuf>) -> Result<()> {
         file.try_lock_exclusive()
             .context("binding is already in use by another MCP connection")?;
         guard = Some(file);
-        credential
+        Credentials::Fixed(credential)
     } else {
         eprintln!(
             "Gent: ephemeral registration; use a distinct --binding file per conversation for reconnect continuity."
         );
-        config::secret()
+        Credentials::Fixed(config::secret())
     };
-    let service = GentMcp { home, credential }
+    let service = GentMcp { home, credentials }
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;

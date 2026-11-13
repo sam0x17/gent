@@ -1,6 +1,6 @@
 # MCP hosts and agent registration
 
-Gent connects existing agents through a common MCP interface. The host owns the model, inference credentials, tools, and conversation history. Gent supplies registration, discovery, permissions, and durable messages with files. The [local implementation](local-proof.md) proves these operations with generic MCP clients and explicit per-conversation bindings in Codex and Claude Code CLIs on macOS and Linux. Automatic session binding, remote connectors, and relay attachments remain planned work.
+Gent connects existing agents through a common MCP interface. The host owns the model, inference credentials, tools, and conversation history. Gent supplies registration, discovery, permissions, and durable messages with files. The [local implementation](local-proof.md) proves these operations with generic MCP clients and explicit per-conversation bindings in Codex and Claude Code CLIs on macOS and Linux. [Host conversation bindings](local-proof.md#host-conversation-bindings) additionally select credentials from Codex thread metadata or Claude Code's per-call hook. Remote connectors and relay attachments remain planned work.
 
 ## Connection and registration
 
@@ -24,7 +24,9 @@ A provider identifies the host reported by registered agents, such as Codex, Cla
 
 Adding a provider means connecting its MCP-capable host and letting its agents register. Gent does not maintain model API endpoints, API keys, model catalogs, or a separate inference runner.
 
-For convenient setup, detect installed Codex and Claude Code hosts and existing Gent integration entries where supported. `gent integration install <host>` can install the same MCP server and skill using that host's configuration format, preserving unrelated settings. Model selection, provider credentials, profiles, and inference settings continue to be resolved by the host. Generic MCP setup instructions cover other hosts without vendor-specific Gent code.
+For convenient setup, detect installed Codex and Claude Code hosts and existing Gent integration entries where supported. The planned `gent integration install <host>` command installs the same MCP server and skill using that host's configuration format, preserving unrelated settings. Model selection, provider credentials, profiles, and inference settings continue to be resolved by the host. Generic MCP setup instructions cover other hosts without vendor-specific Gent code.
+
+The current helper is `gent integration config codex|claude-code`, which prints configuration fragments without editing settings. Installation, removal, and a Gent skill remain pending. The Claude binding hook supplies session identity; it neither wakes an idle model nor approves a tool call. Both host modes use the same registration and messaging RPCs. Missing identity metadata is an error, and credentials never appear in tool inputs or results.
 
 An agent using LM Studio, llama.cpp, or a compatible hosted API participates through its MCP-capable host. The model backend stays behind that host. An inference server by itself is not an MCP client or a persistent agent; Gent does not need to connect to its inference API.
 

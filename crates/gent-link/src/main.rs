@@ -1,3 +1,4 @@
+mod integration;
 mod mcp;
 mod pairing;
 mod service;
@@ -45,6 +46,11 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    /// Configure a host's MCP connection and conversation binding.
+    Integration {
+        #[command(subcommand)]
+        command: integration::Command,
     },
     /// List host labels announced by registered agents.
     Providers {
@@ -121,6 +127,9 @@ enum McpCommand {
         /// Owner/host-selected private credential file, unique per conversation.
         #[arg(long)]
         binding: Option<PathBuf>,
+        /// Select credentials using host-supplied conversation metadata.
+        #[arg(long, value_enum, conflicts_with = "binding")]
+        host: Option<integration::Host>,
     },
 }
 #[derive(Subcommand)]
@@ -300,11 +309,12 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Cluster { .. }) => owner(&home, OwnerOp::Status).await?,
         Some(Command::Daemon { .. }) => unreachable!(),
         Some(Command::Mcp {
-            command: McpCommand::Serve { binding },
+            command: McpCommand::Serve { binding, host },
         }) => {
-            mcp::run(home, binding).await?;
+            mcp::run(home, binding, host).await?;
             return Ok(());
         }
+        Some(Command::Integration { command }) => integration::execute(&home, command)?,
         Some(Command::Providers { .. }) => owner(&home, OwnerOp::Providers).await?,
         Some(Command::Agents) => owner(&home, OwnerOp::Agents).await?,
         Some(Command::Nodes) => owner(&home, OwnerOp::Nodes).await?,

@@ -37,6 +37,8 @@ Setup must recover from an interrupted step and be safe to rerun. Preserve devic
 
 The current build implements service installation for configured nodes and `gent daemon install --local [NAME]` for initializing a development cluster. GitHub login, hosted enrollment guidance, and shell-hook setup remain pending. See [daemon services](local-proof.md#daemon-services) for the tested systemd/launchd commands, startup context, and state preservation. `gent daemon status` exits 3 when stopped or unavailable while still returning structured status; lifecycle failures exit 1, and successful mutations exit 0.
 
+`gent integration config codex` and `gent integration config claude-code` currently print MCP configuration fragments. The latter includes a required per-call host binding hook. `gent mcp serve --host HOST` selects persistent conversation credentials from host metadata; generic clients can still use explicit `--binding` files. See [host conversation bindings](local-proof.md#host-conversation-bindings) for setup and limitations. Host integration installation/removal and shell hooks remain pending.
+
 ## Nodes and clusters
 
 | Command | Behavior |

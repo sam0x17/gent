@@ -21,10 +21,10 @@ PNG = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGP4z/AfK2IYWhIA0
 
 
 class Client:
-    def __init__(self, command):
+    def __init__(self, command, client_name="gent-generic-proof"):
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
         self.counter = 0
-        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "gent-generic-proof", "version": "1"}})
+        self.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": client_name, "version": "1"}})
         self.write({"jsonrpc": "2.0", "method": "notifications/initialized"})
         declared = self.rpc("tools/list", {})["result"]["tools"]
         assert "gent_register" in {tool["name"] for tool in declared}
@@ -49,8 +49,11 @@ class Client:
                     return response
         raise AssertionError("no matching response")
 
-    def call(self, name, arguments=None, error=False):
-        response = self.rpc("tools/call", {"name": name, "arguments": arguments or {}})
+    def call(self, name, arguments=None, error=False, meta=None):
+        params = {"name": name, "arguments": arguments or {}}
+        if meta is not None:
+            params['_meta'] = meta
+        response = self.rpc("tools/call", params)
         if error:
             assert "error" in response or response.get("result", {}).get("isError"), response
             return response
