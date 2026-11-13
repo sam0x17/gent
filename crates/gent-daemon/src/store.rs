@@ -267,7 +267,7 @@ impl Store {
         let mut endpoint =
             encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
         let timestamp = now() as u64;
-        endpoint.next_configuration(group, uuid::Uuid::new_v4(), timestamp)?;
+        endpoint.prepare_configuration(group, None, timestamp)?;
         Ok(())
     }
 

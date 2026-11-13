@@ -181,16 +181,29 @@ impl OrderedEndpoint<'_> {
         now: u64,
     ) -> Result<Option<Packet>> {
         ensure!(!request.is_nil(), "nil request ID");
+        self.prepare_configuration(group, Some(request), now)
+    }
+
+    /// Daemon publication commits its allocated ID with the fragment and cursor.
+    pub(crate) fn prepare_configuration(
+        &mut self,
+        group: &[u8],
+        request: Option<Uuid>,
+        now: u64,
+    ) -> Result<Option<Packet>> {
         // Already accepted signed history must remain publishable after lease
         // expiry, including when its quota is preventing an owner renewal.
         // The recovery grant and current saved node/key membership still apply.
         self.inner.transact_mode(now, true, |session| {
             let saved = checked_stream(session, group, Purpose::Configuration)?;
             ensure!(saved.writer == session.signer.id(), "only the configuration writer can publish");
-            let prior: Option<Vec<u8>> = session.db.query_row("SELECT group_id FROM configuration_requests WHERE id=?1", [request.to_string()], |row| row.get(0)).optional()?;
-            if let Some(prior) = prior {
-                ensure!(prior == group, "conflicting configuration request ID");
-                return Ok(Some(outgoing_request(session.db, request)?.context("missing configuration packet")?));
+            if let Some(request) = request {
+                let prior: Option<Vec<u8>> = session.db.query_row("SELECT group_id FROM configuration_requests WHERE id=?1", [request.to_string()], |row| row.get(0)).optional()?;
+                if let Some(prior) = prior {
+                    ensure!(prior == group, "conflicting configuration request ID");
+                    return Ok(Some(outgoing_request(session.db, request)?.context("missing configuration packet")?));
+                }
+                ensure!(!requests::managed(request), "transport request is unallocated or retired; it cannot publish configuration");
             }
             let cursor = progress(session.db, group)?;
             let revision = cursor.revision.checked_add(1).context("revision overflow")?;
@@ -202,6 +215,10 @@ impl OrderedEndpoint<'_> {
             let end = (cursor.offset + MAX_FRAGMENT_BYTES).min(wire.len());
             let fragment = Fragment { version:1, revision, digest:Sha256::digest(&wire).into(), total:wire.len(), offset:cursor.offset, data:STANDARD.encode(&wire[cursor.offset..end]) };
             let body = serde_json::to_vec(&fragment)?;
+            let request = match request {
+                Some(request) => request,
+                None => requests::allocate(session.db, group, &body, None)?,
+            };
             let packet = publish_in(session, group, Purpose::Configuration, |session| session.send(group, request, &body))?;
             let (revision,hash,offset) = if end == wire.len() { (revision, checkpoint.state_hash,0) } else { (cursor.revision,cursor.hash,end) };
             session.db.execute("UPDATE configuration_streams SET revision=?1,state_hash=?2,offset=?3 WHERE group_id=?4", params![revision,hash.as_slice(),offset,group])?;

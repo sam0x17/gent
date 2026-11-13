@@ -192,13 +192,14 @@ impl<'a> OrderedEndpoint<'a> {
     pub(crate) fn send_checked(
         &mut self,
         group: &[u8],
-        id: Uuid,
+        fragment: (Uuid, usize, bool),
         body: &[u8],
         now: u64,
         check: impl FnOnce(&Connection, &VerifiedState) -> Result<()>,
     ) -> Result<Packet> {
         self.inner.transact(now, |session| {
             check(session.db, &session.state)?;
+            let id = requests::allocate(session.db, group, body, Some(fragment))?;
             publish_in(session, group, Purpose::Data, |session| {
                 session.send(group, id, body)
             })

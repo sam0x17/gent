@@ -30,6 +30,20 @@ fn active_peer(state: &VerifiedState, peer: &str, key: &[u8], timestamp: i64) ->
     Ok(())
 }
 
+/// Recheck the selected queue position in the encryption transaction. A stale
+/// selection must not allocate another ID after a completed request was pruned.
+fn check_cursor(db: &Connection, group: &[u8], fragment: (Uuid, usize, bool)) -> Result<()> {
+    let current: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM network_events e
+        JOIN network_links l ON l.peer=e.peer WHERE l.outgoing=?1 AND e.id=?2
+        AND e.offset=?3 AND e.cancelled=?4 AND e.rowid=(SELECT MIN(rowid) FROM network_events WHERE peer=e.peer))",
+        params![group,fragment.0.to_string(),fragment.1,fragment.2], |r| r.get(0))?;
+    ensure!(
+        current,
+        "outgoing fragment cursor changed before encryption"
+    );
+    Ok(())
+}
+
 impl StoreSession<'_> {
     pub(super) fn remote_ready(&self) -> Result<bool> {
         if self.config.relay.is_none() {
@@ -756,11 +770,12 @@ impl Store {
         let mut endpoint = OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
         endpoint.send_checked(
             group,
-            messages::packet_id(id, offset, cancelled),
+            (id, offset, cancelled),
             &serde_json::to_vec(&frame)?,
             now() as u64,
             |db, state| {
                 self.data_peer(db, group, true)?;
+                check_cursor(db, group, (id, offset, cancelled))?;
                 if !cancelled && let Some(subject) = &subject {
                     let session = self.network_session(db, state.clone());
                     ensure!(

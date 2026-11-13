@@ -32,10 +32,12 @@ def exercise_storage(a, b, target, cli, owner_cli, restore, restart, wait_for):
         assert incoming(a, reply['message_id'])['text'] == f'review {index}'
         a.call('gent_ack', {'message_id': reply['message_id']})
     for command in (cli, owner_cli):
-        wait_for(lambda: command('transport')['retired_packet_tombstones'] > 128)
         wait_for(lambda: command('transport')['outgoing']['data']['packets'] < 32)
+        wait_for(lambda: command('transport')['outgoing']['data']['retry_records'] < 32)
         status = command('transport', 'status')
         assert status['confirmed_streams'] > 0
+        assert status['retired_packet_tombstones'] == 0
+        assert status['outgoing']['data']['retry_records'] == status['outgoing']['data']['packets']
         assert status['duplicate_copies'] == status['accepted_digests_due'] == status['wire_receipts_due'] == 0
     restore()
     for command in (cli, owner_cli):
@@ -53,7 +55,7 @@ def exercise_storage(a, b, target, cli, owner_cli, restore, restart, wait_for):
         wait_for(lambda: command('transport')['duplicate_copies'] == 0)
     assert a.call('gent_send', first[0])[0]['message_id'] == first[1]
     assert not a.call('gent_inbox')[0] and not b.call('gent_inbox')[0]
-    print('PASS: 70 two-machine exchanges, authenticated packet retirement, bounded replay evidence, CLI preview/compaction, startup cleanup, and exact agent retry after restart', flush=True)
+    print('PASS: 70 two-machine exchanges, authenticated packet and retry-metadata retirement, bounded replay evidence, CLI preview/compaction, startup cleanup, and exact agent retry after restart', flush=True)
 
 
 def exercise_authority_history(cli, owner_cli, applied, restart, wait_for):
@@ -64,6 +66,7 @@ def exercise_authority_history(cli, owner_cli, applied, restart, wait_for):
     wait_for(lambda: applied(revision))
     for command in (cli, owner_cli):
         wait_for(lambda: command('transport')['authority_history']['pending_join_pins'] == 0)
+        wait_for(lambda: command('transport')['outgoing']['configuration']['allocated_retry_records'] == 0)
         while command('transport', 'clean')['authority_records_compacted']:
             pass
         history = command('transport')['authority_history']
@@ -75,4 +78,4 @@ def exercise_authority_history(cli, owner_cli, applied, restart, wait_for):
     changed = cli('node', 'name', 'set', 'after-history-compaction')
     assert changed['state'] == 'applied'
     wait_for(lambda: applied(changed['revision']))
-    print('PASS: 80 signed revisions, bounded full-history retention, released join pins, both daemon restarts, and remote configuration edit after compaction', flush=True)
+    print('PASS: 80 signed revisions, bounded full-history retention, retired configuration retry metadata, released join pins, both daemon restarts, and remote configuration edit after compaction', flush=True)

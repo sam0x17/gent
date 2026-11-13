@@ -4,8 +4,12 @@
 //! Callers are trusted daemon code, never MCP agents. Node authentication here
 //! does not grant permission to communicate as an agent. Initial authority and
 //! expected group membership must come from authenticated local state.
+//! New caller-selected operation IDs use UUIDv4 or deterministic UUIDv8. UUIDv7
+//! is reserved for daemon allocations; unknown UUIDv7 IDs cannot initiate work.
+//! Retained legacy retries remain valid regardless of UUID version.
 pub mod history;
 pub mod ordered;
+mod requests;
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gent_crypto::{Checkpoint, NodeIdentity, SignedState, TrustAnchor, VerifiedState};
@@ -487,6 +491,9 @@ fn retry(db: &Connection, id: Uuid, fingerprint: &[u8]) -> Result<Option<Outgoin
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
+    if saved.is_none() {
+        requests::admit(db, id, fingerprint)?;
+    }
     saved
         .map(|(group_id, hash, bytes)| {
             ensure!(hash == fingerprint, "conflicting request ID");
@@ -563,6 +570,10 @@ impl Session<'_> {
         {
             return Ok(bytes);
         }
+        ensure!(
+            !requests::managed(request),
+            "UUIDv7 transport IDs cannot create key packages"
+        );
         let package =
             KeyPackage::builder().build(SUITE, provider, signer, credential(state, signer)?)?;
         let bytes = package.key_package().tls_serialize_detached()?;
@@ -1023,7 +1034,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     let mut db = Connection::open(path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    ensure!(matches!(version, 0..=6), "unsupported MLS database version");
+    ensure!(matches!(version, 0..=7), "unsupported MLS database version");
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
     // The original RPC proof used this name for a messages index.
     // Free it before the MLS inbox table is introduced in the same database.
@@ -1086,7 +1097,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
           CREATE TABLE IF NOT EXISTS stream_confirmed (
             group_id BLOB PRIMARY KEY,reader TEXT NOT NULL,reader_key BLOB NOT NULL,
             sequence INTEGER NOT NULL,digest BLOB NOT NULL,receipt BLOB NOT NULL);
-          PRAGMA user_version=6;",
+          PRAGMA user_version=7;",
         )?;
     let has_purpose = {
         let mut columns = schema.prepare("PRAGMA table_info(streams)")?;
@@ -1110,6 +1121,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
         "CREATE INDEX IF NOT EXISTS receipt_stream_sequence ON receipts(group_id,stream_sequence);",
     )?;
     history::schema(&schema, version)?;
+    requests::schema(&schema)?;
     schema.commit()?;
     Ok(db)
 }

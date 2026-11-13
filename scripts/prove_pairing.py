@@ -109,7 +109,7 @@ def main():
     parser.add_argument('--relay-url', default='http://127.0.0.1:18787')
     parser.add_argument('--relay-token-file', required=True)
     parser.add_argument('--file-objects', action='store_true', help='Also prove native files through authenticated MCP and separate ciphertext storage')
-    parser.add_argument('--transport-storage', action='store_true', help='Also prove bounded replay evidence, redundant-copy compaction, and startup cleanup')
+    parser.add_argument('--transport-storage', action='store_true', help='Also prove bounded packet/retry storage, replay evidence, compaction, and startup cleanup')
     parser.add_argument('--configuration-storage', action='store_true', help='Also prove signed configuration history compaction across both machines and restarts')
     parser.add_argument('--remote-relay-port', type=int, default=18789)
     args = parser.parse_args()
@@ -256,6 +256,7 @@ def main():
                 remote_human = remote([args.remote_binary, '--home', owner_home, 'transport']).stdout
                 for text in (human, remote_human):
                     assert 'Signed configurations:' in text and 'Accepted digests:' in text
+                    assert 'data retry records:' in text and 'configuration retry records:' in text
                     assert 'Verified checkpoints release confirmed packet capacity.' in text
             if args.file_objects:
                 import hashlib

@@ -22,11 +22,21 @@ pub fn print_transport(value: &Value) {
             value["authority_bytes_removed"]
         );
         println!(
+            "Confirmed transport retry records removed: {}.",
+            value["transport_requests_removed"]
+        );
+        println!(
             "Repeat cleanup while a batch reaches its limit; pending sends and joins keep required history."
         );
     } else {
         for purpose in ["data", "configuration"] {
             let usage = &value["outgoing"][purpose];
+            println!(
+                "{purpose} retry records: {} / {} ({} daemon allocations).",
+                usage["retry_records"],
+                usage["max_retry_records"],
+                usage["allocated_retry_records"]
+            );
             println!(
                 "{purpose}: {} / {} packets; {} / {} packet bytes.",
                 usage["packets"],
@@ -67,7 +77,7 @@ pub fn print_transport(value: &Value) {
             "Unconfirmed packets remain for offline peers. Verified checkpoints release confirmed packet capacity."
         );
         println!(
-            "Accepted digests, retry records, raw groups, application queues, plaintext, and total database size have separate retention needs."
+            "Legacy retries count against admission limits. Accepted authority digests, event deduplication, raw groups, plaintext, and total database size have separate retention needs."
         );
     }
 }

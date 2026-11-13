@@ -152,32 +152,48 @@ fn protected(db: &Connection) -> Result<String> {
                 );
             }
         }
+        let mut query = db.prepare("SELECT r.id FROM transport_requests r JOIN network_events e
+            ON r.event=e.id AND r.offset=e.offset JOIN
+            (SELECT peer,MIN(rowid) AS first FROM network_events GROUP BY peer) h ON e.rowid=h.first")?;
+        for row in query.query_map([], |r| r.get::<_, String>(0))? {
+            ids.push(row?);
+        }
     }
     Ok(serde_json::to_string(&ids)?)
 }
 
-/// Preserve origin packets and retry tombstones. Arbitrary transport request IDs
-/// cannot yet be forgotten safely; a retired request must never re-encrypt work.
-pub(crate) fn retire(db: &Connection, dry_run: bool) -> Result<(usize, u64)> {
+/// Preserve origins and legacy tombstones. Allocated IDs can be forgotten because
+/// an unknown UUIDv7 cannot start another operation through any MLS request API.
+pub(crate) fn retire(db: &Connection, dry_run: bool) -> Result<(usize, u64, usize)> {
     let protected = protected(db)?;
     let rows = db
         .prepare(
-            "SELECT o.id,length(o.packet)+COALESCE(length(r.bytes),0) FROM stream_outbox o
+            "SELECT o.id,length(o.packet)+COALESCE(length(r.bytes),0),t.id IS NOT NULL FROM stream_outbox o
         JOIN stream_confirmed c USING(group_id) LEFT JOIN outbox r ON r.id=o.id
-        WHERE o.sequence>0 AND o.sequence<=c.sequence AND length(o.packet)>0
+        LEFT JOIN transport_requests t ON t.id=o.id
+        WHERE o.sequence>0 AND o.sequence<=c.sequence AND (length(o.packet)>0 OR t.id IS NOT NULL)
           AND o.id NOT IN (SELECT value FROM json_each(?1)) ORDER BY o.rowid LIMIT 256",
         )?
         .query_map([protected], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?, r.get::<_, bool>(2)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut bytes = 0;
-    for (id, size) in &rows {
+    let mut requests = 0;
+    for (id, size, managed) in &rows {
         bytes += size;
+        requests += usize::from(*managed);
         if !dry_run {
-            db.execute("UPDATE stream_outbox SET packet=X'' WHERE id=?1", [id])?;
-            db.execute("UPDATE outbox SET bytes=X'' WHERE id=?1", [id])?;
+            if *managed {
+                db.execute("DELETE FROM configuration_requests WHERE id=?1", [id])?;
+                db.execute("DELETE FROM stream_outbox WHERE id=?1", [id])?;
+                db.execute("DELETE FROM outbox WHERE id=?1", [id])?;
+                db.execute("DELETE FROM transport_requests WHERE id=?1", [id])?;
+            } else {
+                db.execute("UPDATE stream_outbox SET packet=X'' WHERE id=?1", [id])?;
+                db.execute("UPDATE outbox SET bytes=X'' WHERE id=?1", [id])?;
+            }
         }
     }
-    Ok((rows.len(), bytes))
+    Ok((rows.len(), bytes, requests))
 }

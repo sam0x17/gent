@@ -246,8 +246,8 @@ async fn receiver_checkpoints_retire_only_verified_history_and_restore_lost_rela
     tokio::time::timeout(Duration::from_secs(10), async {
         while !db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM stream_outbox WHERE length(packet)=0)",
-                [],
+                "SELECT NOT EXISTS(SELECT 1 FROM stream_outbox WHERE group_id=?1 AND sequence=?2)",
+                rusqlite::params![packet.group(), packet.sequence()],
                 |r| r.get::<_, bool>(0),
             )
             .unwrap()

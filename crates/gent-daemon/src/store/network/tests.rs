@@ -2,6 +2,9 @@ use super::*;
 use crate::pairing::{self, Peer};
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "retries.rs"]
+mod retries;
+
 struct OwnerPeer<'a>(&'a mut Store, String);
 impl Peer for OwnerPeer<'_> {
     async fn call(&mut self, action: PairingOp) -> Result<Value> {
@@ -231,6 +234,19 @@ async fn retired_partial_message_cancels_after_restart_even_if_fragment_cursor_r
         }
         let packet = pair.stores[0].data_outgoing(&group, next).unwrap().unwrap();
         pair.stores[1].data_receive(&packet).unwrap();
+        let receipt = pair.stores[1].transport_receipt(&group, false).unwrap();
+        pair.stores[0]
+            .transport_confirm(&group, false, Some(&receipt))
+            .unwrap();
+        let retained: bool = pair.stores[0]
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM stream_outbox WHERE group_id=?1 AND sequence=?2)",
+                params![&group, next],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, failed_cursor);
         assert_eq!(
             pair.stores[1]
                 .db
@@ -246,7 +262,36 @@ async fn retired_partial_message_cancels_after_restart_even_if_fragment_cursor_r
         assert_eq!(offset, if failed_cursor { 0 } else { FRAGMENT_BYTES });
         pair.reopen(0);
         pair.reopen(1);
+        pair.stores[0].db.execute_batch("CREATE TRIGGER fail_cancel BEFORE DELETE ON network_events BEGIN SELECT RAISE(ABORT,'cancel cursor failure'); END;").unwrap();
+        assert!(pair.stores[0].data_prepare(&group).is_err());
+        let cancel = pair.stores[0]
+            .data_outgoing(&group, next + 1)
+            .unwrap()
+            .unwrap();
+        pair.stores[1].data_receive(&cancel).unwrap();
+        let receipt = pair.stores[1].transport_receipt(&group, false).unwrap();
+        pair.stores[0]
+            .transport_confirm(&group, false, Some(&receipt))
+            .unwrap();
+        pair.stores[0]
+            .db
+            .execute_batch("DROP TRIGGER fail_cancel")
+            .unwrap();
         pair.pump();
+        pair.stores[0]
+            .transport_confirm(&group, false, Some(&receipt))
+            .unwrap();
+        assert_eq!(
+            pair.stores[0]
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM transport_requests WHERE group_id=?1",
+                    [&group],
+                    |r| r.get::<_, u64>(0),
+                )
+                .unwrap(),
+            0
+        );
         assert_eq!(
             pair.stores[1]
                 .db
@@ -824,15 +869,16 @@ async fn checkpoints_preserve_pending_send_cursors_and_do_not_acknowledge_agents
     pair.stores[0]
         .transport_confirm(&group, false, Some(&receipt))
         .unwrap();
-    let retained: Vec<u8> = pair.stores[0]
+    let retained: Option<Vec<u8>> = pair.stores[0]
         .db
         .query_row(
             "SELECT packet FROM stream_outbox WHERE group_id=?1 AND sequence=?2",
             params![&group, next],
             |r| r.get(0),
         )
+        .optional()
         .unwrap();
-    assert!(retained.is_empty());
+    assert!(retained.is_none());
     pair.pump();
     assert_eq!(
         pair.agent(1, AgentOp::Inbox).unwrap()[0]["id"],

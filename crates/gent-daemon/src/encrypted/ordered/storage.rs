@@ -10,6 +10,7 @@ const DATA_PACKETS: u64 = 65536;
 const DATA_BYTES: u64 = 512 * 1024 * 1024;
 const CONFIGURATION_PACKETS: u64 = 65536;
 const CONFIGURATION_BYTES: u64 = 128 * 1024 * 1024;
+const REQUESTS_PER_PURPOSE: u64 = 131072;
 
 pub(super) fn capacity(db: &Connection, purpose: &str, bytes: usize) -> Result<()> {
     let (count, used): (u64, u64) = db.query_row(
@@ -19,6 +20,15 @@ pub(super) fn capacity(db: &Connection, purpose: &str, bytes: usize) -> Result<(
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let (max_count, max_bytes) = limits(purpose)?;
+    let requests: u64 = db.query_row(
+        "SELECT COUNT(*) FROM stream_outbox o JOIN streams s USING(group_id) WHERE s.purpose=?1",
+        [purpose],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        requests < REQUESTS_PER_PURPOSE,
+        "{purpose} transport retry metadata quota exhausted; inspect gent transport status; legacy retry records cannot be discarded safely"
+    );
     ensure!(
         count < max_count && used.saturating_add(bytes as u64) <= max_bytes,
         "{purpose} transport history quota exhausted; inspect gent transport status; waiting for authenticated receiver checkpoints may release capacity"
@@ -91,7 +101,7 @@ pub(super) fn trim_group(db: &Connection, group: &[u8], head: u64) -> Result<()>
 /// Stream heads and application state are unchanged.
 pub(crate) fn clean(db: &Connection, dry_run: bool) -> Result<Value> {
     let (authority_records, authority_bytes) = super::super::history::clean(db, dry_run)?;
-    let (retired, retired_bytes) = confirmation::retire(db, dry_run)?;
+    let (retired, retired_bytes, requests) = confirmation::retire(db, dry_run)?;
     let copies = db
         .prepare(
             "SELECT o.id,o.group_id,o.bytes FROM outbox o JOIN stream_outbox s ON s.id=o.id
@@ -143,7 +153,7 @@ pub(crate) fn clean(db: &Connection, dry_run: bool) -> Result<Value> {
         json!({"dry_run":dry_run,"authority_records_compacted":authority_records,"authority_bytes_removed":authority_bytes,"duplicate_copies_compacted":copies.len(),"duplicate_bytes_removed":removed_bytes,
         "accepted_digests_removed":seen.len(),"wire_receipts_removed":receipts.len(),
         "copy_batch_limit":COPY_BATCH,"replay_batch_limit":CLEAN_BATCH,
-        "retained_packets_removed":retired,"retained_packet_bytes_removed":retired_bytes,"retirement_batch_limit":256}),
+        "retained_packets_removed":retired,"retained_packet_bytes_removed":retired_bytes,"transport_requests_removed":requests,"retirement_batch_limit":256}),
     )
 }
 
@@ -157,7 +167,11 @@ pub(crate) fn status(db: &Connection) -> Result<Value> {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let (max_count, max_bytes) = limits(purpose)?;
-        classes.insert(purpose.into(),json!({"packets":count,"packet_bytes":bytes,"max_packets":max_count,"max_packet_bytes":max_bytes}));
+        let (requests, allocated): (u64,u64) = db.query_row("SELECT COUNT(*),COUNT(t.id) FROM stream_outbox o
+            JOIN streams s USING(group_id) LEFT JOIN transport_requests t ON t.id=o.id WHERE s.purpose=?1",
+            [purpose], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        classes.insert(purpose.into(),json!({"packets":count,"packet_bytes":bytes,"max_packets":max_count,"max_packet_bytes":max_bytes,
+            "retry_records":requests,"allocated_retry_records":allocated,"max_retry_records":REQUESTS_PER_PURPOSE}));
     }
     let (copies, copy_bytes): (u64, u64) = db.query_row(
         "SELECT COUNT(*),COALESCE(SUM(length(o.bytes)),0)
@@ -179,7 +193,7 @@ pub(crate) fn status(db: &Connection) -> Result<Value> {
         json!({"authority_history":super::super::history::status(db)?,"confirmed_streams":confirmed,"retired_packet_tombstones":retired,"outgoing":classes,"duplicate_copies":copies,"duplicate_bytes":copy_bytes,
         "accepted_digests":digests,"accepted_digests_due":due,"ordered_wire_receipts":receipts,"wire_receipts_due":receipts_due,
         "recent_packets_per_stream":RECENT_PACKETS,
-        "scope":"Ordered transport and full configuration records; unconfirmed packets remain for offline peers. Accepted authority digests, retry tombstones, raw groups, application queues, plaintext, and total database size have separate retention needs."}),
+        "scope":"Ordered packets, retry metadata and full configuration records; unconfirmed packets remain for offline peers. Legacy retry records are retained and count against admission limits. Accepted authority digests, event deduplication, raw groups, plaintext, and total database size have separate retention needs."}),
     )
 }
 
@@ -212,5 +226,32 @@ mod tests {
         assert!(capacity(&db, "data", DATA_BYTES as usize - 1).is_err());
         assert!(capacity(&db, "configuration", CONFIGURATION_BYTES as usize - 2).is_err());
         assert!(capacity(&db, "data", usize::MAX).is_err());
+    }
+
+    #[test]
+    fn legacy_tombstones_count_against_metadata_quota_with_separate_configuration_capacity() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE streams(group_id BLOB,purpose TEXT);
+            CREATE TABLE stream_outbox(group_id BLOB,packet BLOB);
+            INSERT INTO streams VALUES(X'01','data'),(X'02','configuration');",
+        )
+        .unwrap();
+        db.execute(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?1)
+            INSERT INTO stream_outbox SELECT X'01',X'' FROM n",
+            [REQUESTS_PER_PURPOSE - 1],
+        )
+        .unwrap();
+        capacity(&db, "data", 1).unwrap();
+        db.execute("INSERT INTO stream_outbox VALUES(X'01',X'')", [])
+            .unwrap();
+        assert!(
+            capacity(&db, "data", 1)
+                .unwrap_err()
+                .to_string()
+                .contains("retry metadata quota")
+        );
+        capacity(&db, "configuration", 1).unwrap();
     }
 }

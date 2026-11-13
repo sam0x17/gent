@@ -121,7 +121,7 @@ fn version_four_upgrade_preserves_unconfirmed_history() {
         w.db(0)
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
 }
 
