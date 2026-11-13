@@ -1,5 +1,6 @@
 //! Directional MLS streams: one writer, authenticated ordering, durable gaps.
 //! Replies use another stream. These APIs are for trusted daemon code only.
+pub mod configuration;
 use super::*;
 use gent_crypto::{Digest, PublicKey, stream::Packet};
 
@@ -26,7 +27,22 @@ pub struct StreamStatus {
     pub next: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    Data,
+    Configuration,
+}
+impl Purpose {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Data => "data",
+            Self::Configuration => "configuration",
+        }
+    }
+}
+
 struct Stream {
+    purpose: String,
     writer: String,
     key: PublicKey,
     head: u64,
@@ -67,6 +83,13 @@ impl<'a> OrderedEndpoint<'a> {
             );
             let welcome = session.create_group(request, peers)?;
             if let Some(saved) = saved {
+                ensure!(
+                    stream(session.db, saved.group())?
+                        .context("unknown stream")?
+                        .purpose
+                        == Purpose::Data.name(),
+                    "wrong stream purpose"
+                );
                 return Ok(saved);
             }
             let packet =
@@ -115,7 +138,8 @@ impl<'a> OrderedEndpoint<'a> {
             packet.verify(&key)?;
             if let Some(saved) = stream(session.db, packet.group())? {
                 ensure!(
-                    saved.writer == writer
+                    saved.purpose == Purpose::Data.name()
+                        && saved.writer == writer
                         && saved.key == key
                         && saved.origin == packet.digest()?
                         && saved.roster == roster,
@@ -150,104 +174,43 @@ impl<'a> OrderedEndpoint<'a> {
         operation: impl FnOnce(&Session<'_>) -> Result<Outgoing>,
     ) -> Result<Packet> {
         self.inner.transact(now, |session| {
-            let saved = authorized_stream(session, group)?;
-            ensure!(
-                saved.writer == session.signer.id(),
-                "only the stream writer can send or change epochs"
-            );
-            let outgoing = operation(session)?;
-            if let Some(packet) = outgoing_request(session.db, outgoing.id)? {
-                return Ok(packet);
-            }
-            let packet = session.signer.sign_stream_packet(
-                group,
-                saved.head.checked_add(1).context("stream exhausted")?,
-                saved.digest,
-                &outgoing.bytes,
-            )?;
-            save_outgoing(session.db, outgoing.id, &packet)?;
-            advance(session.db, &packet)?;
-            Ok(packet)
+            publish_in(session, group, Purpose::Data, operation)
         })
     }
 
     /// Verify before buffering, including writer authority. No MLS keys advance
     /// here. Duplicate and conflicting sequence slots cannot overwrite each other.
     pub fn stage(&mut self, packet: &Packet, now: u64) -> Result<Staged> {
-        self.inner.transact(now, |session| {
-            let saved = authorized_stream(session, packet.group())?;
-            ensure!(
-                saved.writer != session.signer.id(),
-                "writer cannot receive its own stream"
-            );
-            packet.verify(&saved.key)?;
-            let digest = packet.digest()?;
-            if let Some(seen) = seen(session.db, packet.group(), packet.sequence())? {
-                ensure!(seen == digest, "conflicting accepted stream history");
-                return Ok(Staged::Duplicate);
-            }
-            ensure!(
-                packet.sequence() > saved.head
-                    && packet.sequence() - saved.head <= MAX_PENDING_DISTANCE,
-                "packet outside receive window"
-            );
-            if packet.sequence() == saved.head + 1 {
-                ensure!(
-                    packet.previous() == saved.digest,
-                    "stream predecessor mismatch"
-                );
-            }
-            let pending: Option<Vec<u8>> = session
-                .db
-                .query_row(
-                    "SELECT digest FROM stream_pending WHERE group_id=?1 AND sequence=?2",
-                    params![packet.group(), packet.sequence()],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(pending) = pending {
-                ensure!(pending == digest, "conflicting buffered stream history");
-                return Ok(Staged::Duplicate);
-            }
-            let wire = packet.encode()?;
-            let used: usize = session.db.query_row(
-                "SELECT COALESCE(SUM(length(packet)),0) FROM stream_pending",
-                [],
-                |row| row.get(0),
-            )?;
-            // Keep room for a missing predecessor even when later packets fill
-            // the queue. Draining that contiguous prefix releases the reserve.
-            let capacity = if packet.sequence() == saved.head + 1 {
-                MAX_PENDING_BYTES
-            } else {
-                MAX_PENDING_BYTES - gent_crypto::stream::MAX_PACKET_BYTES
-            };
-            ensure!(
-                used + wire.len() <= capacity,
-                "pending stream storage limit reached"
-            );
-            session.db.execute(
-                "INSERT INTO stream_pending VALUES(?1,?2,?3,?4)",
-                params![packet.group(), packet.sequence(), digest.as_slice(), wire],
-            )?;
-            Ok(Staged::Queued)
-        })
+        self.inner
+            .transact(now, |session| stage_in(session, packet, Purpose::Data))
     }
 
     /// Apply at most `limit` contiguous packets. Each packet commits separately:
     /// a later invalid packet cannot roll back earlier accepted work. Errors leave
     /// the failing packet queued for diagnosis, never skip an authenticated gap.
     pub fn drain(&mut self, group: &[u8], limit: usize, now: u64) -> Result<Vec<Received>> {
+        self.drain_mode(group, limit, now, Purpose::Data)
+    }
+
+    fn drain_mode(
+        &mut self,
+        group: &[u8],
+        limit: usize,
+        now: u64,
+        purpose: Purpose,
+    ) -> Result<Vec<Received>> {
         ensure!((1..=128).contains(&limit), "invalid drain limit");
         let mut applied = Vec::new();
         for _ in 0..limit {
-            let result = self.inner.transact(now, |session| {
-                let saved = authorized_stream(session, group)?;
-                ensure!(
-                    saved.writer != session.signer.id(),
-                    "writer cannot receive its own stream"
-                );
-                let wire: Option<Vec<u8>> = session
+            let result =
+                self.inner
+                    .transact_mode(now, purpose == Purpose::Configuration, |session| {
+                        let saved = checked_stream(session, group, purpose)?;
+                        ensure!(
+                            saved.writer != session.signer.id(),
+                            "writer cannot receive its own stream"
+                        );
+                        let wire: Option<Vec<u8>> = session
                     .db
                     .query_row(
                         "SELECT packet FROM stream_pending WHERE group_id=?1 AND sequence=?2",
@@ -255,29 +218,38 @@ impl<'a> OrderedEndpoint<'a> {
                         |row| row.get(0),
                     )
                     .optional()?;
-                let Some(wire) = wire else {
-                    return Ok(None);
-                };
-                let packet = Packet::decode(&wire)?;
-                packet.verify(&saved.key)?;
-                ensure!(
-                    packet.group() == group
-                        && packet.sequence() == saved.head + 1
-                        && packet.previous() == saved.digest,
-                    "stream predecessor mismatch"
-                );
-                let received = session.receive(group, packet.ciphertext(), Some(&saved.writer))?;
-                ensure!(
-                    received != Received::Duplicate,
-                    "MLS packet repeated at a new sequence"
-                );
-                advance(session.db, &packet)?;
-                session.db.execute(
-                    "DELETE FROM stream_pending WHERE group_id=?1 AND sequence=?2",
-                    params![group, packet.sequence()],
-                )?;
-                Ok(Some(received))
-            })?;
+                        let Some(wire) = wire else {
+                            return Ok(None);
+                        };
+                        let packet = Packet::decode(&wire)?;
+                        packet.verify(&saved.key)?;
+                        ensure!(
+                            packet.group() == group
+                                && packet.sequence() == saved.head + 1
+                                && packet.previous() == saved.digest,
+                            "stream predecessor mismatch"
+                        );
+                        let received = if purpose == Purpose::Configuration {
+                            configuration::receive(
+                                session,
+                                group,
+                                packet.ciphertext(),
+                                &saved.writer,
+                            )?
+                        } else {
+                            session.receive(group, packet.ciphertext(), Some(&saved.writer))?
+                        };
+                        ensure!(
+                            received != Received::Duplicate,
+                            "MLS packet repeated at a new sequence"
+                        );
+                        advance(session.db, &packet)?;
+                        session.db.execute(
+                            "DELETE FROM stream_pending WHERE group_id=?1 AND sequence=?2",
+                            params![group, packet.sequence()],
+                        )?;
+                        Ok(Some(received))
+                    })?;
             match result {
                 Some(received) => applied.push(received),
                 None => break,
@@ -287,20 +259,25 @@ impl<'a> OrderedEndpoint<'a> {
     }
 
     pub fn status(&mut self, group: &[u8], now: u64) -> Result<StreamStatus> {
-        self.inner.transact(now, |session| {
-            let saved = authorized_stream(session, group)?;
-            let pending = session.db.query_row(
-                "SELECT COUNT(*) FROM stream_pending WHERE group_id=?1",
-                [group],
-                |row| row.get(0),
-            )?;
-            Ok(StreamStatus {
-                head: saved.head,
-                digest: saved.digest,
-                pending,
-                next: saved.head + 1,
+        self.status_mode(group, now, Purpose::Data)
+    }
+
+    fn status_mode(&mut self, group: &[u8], now: u64, purpose: Purpose) -> Result<StreamStatus> {
+        self.inner
+            .transact_mode(now, purpose == Purpose::Configuration, |session| {
+                let saved = checked_stream(session, group, purpose)?;
+                let pending = session.db.query_row(
+                    "SELECT COUNT(*) FROM stream_pending WHERE group_id=?1",
+                    [group],
+                    |row| row.get(0),
+                )?;
+                Ok(StreamStatus {
+                    head: saved.head,
+                    digest: saved.digest,
+                    pending,
+                    next: saved.head + 1,
+                })
             })
-        })
     }
 
     /// Durable ciphertext packets; None includes the origin. Recipient transport
@@ -312,9 +289,20 @@ impl<'a> OrderedEndpoint<'a> {
         limit: usize,
         now: u64,
     ) -> Result<Vec<Packet>> {
+        self.outbox_mode(group, after, limit, now, Purpose::Data)
+    }
+
+    fn outbox_mode(
+        &mut self,
+        group: &[u8],
+        after: Option<u64>,
+        limit: usize,
+        now: u64,
+        purpose: Purpose,
+    ) -> Result<Vec<Packet>> {
         ensure!((1..=128).contains(&limit), "invalid outbox limit");
-        self.inner.transact(now, |session| {
-            let saved = authorized_stream(session, group)?;
+        self.inner.transact_mode(now, purpose == Purpose::Configuration, |session| {
+            let saved = checked_stream(session, group, purpose)?;
             ensure!(saved.writer == session.signer.id(), "only the writer has an outbox");
             let after = after.map(i64::try_from).transpose()?.unwrap_or(-1);
             let mut query = session.db.prepare("SELECT packet FROM stream_outbox WHERE group_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3")?;
@@ -349,16 +337,21 @@ fn roster_hash(expected: &[&str]) -> Result<Digest> {
 
 fn stream(db: &Connection, group: &[u8]) -> Result<Option<Stream>> {
     ensure!(!group.is_empty() && group.len() <= 256, "invalid group ID");
-    Ok(db.query_row("SELECT writer,writer_key,head,head_hash,origin_hash,roster_hash FROM streams WHERE group_id=?1", [group], |row| Ok(Stream {
-        writer:row.get(0)?,key:row.get(1)?,head:row.get(2)?,digest:row.get(3)?,origin:row.get(4)?,roster:row.get(5)?
+    Ok(db.query_row("SELECT writer,writer_key,head,head_hash,origin_hash,roster_hash,purpose FROM streams WHERE group_id=?1", [group], |row| Ok(Stream {
+        writer:row.get(0)?,key:row.get(1)?,head:row.get(2)?,digest:row.get(3)?,origin:row.get(4)?,roster:row.get(5)?,purpose:row.get(6)?
     })).optional()?)
 }
 
-fn authorized_stream(session: &Session<'_>, group: &[u8]) -> Result<Stream> {
+fn checked_stream(session: &Session<'_>, group: &[u8], purpose: Purpose) -> Result<Stream> {
     let stream = stream(session.db, group)?.context("unknown ordered stream")?;
-    session
-        .state
-        .authorize_node(&stream.writer, &stream.key, session.now)?;
+    ensure!(stream.purpose == purpose.name(), "wrong stream purpose");
+    if purpose == Purpose::Configuration {
+        configuration::authorize(session, group, &stream)?;
+    } else {
+        session
+            .state
+            .authorize_node(&stream.writer, &stream.key, session.now)?;
+    }
     Ok(stream)
 }
 
@@ -371,7 +364,7 @@ fn initialize_stream(
 ) -> Result<()> {
     let digest = packet.digest()?;
     session.db.execute(
-        "INSERT INTO streams VALUES(?1,?2,?3,0,?4,?4,?5)",
+        "INSERT INTO streams(group_id,writer,writer_key,head,head_hash,origin_hash,roster_hash) VALUES(?1,?2,?3,0,?4,?4,?5)",
         params![
             packet.group(),
             writer,
@@ -432,4 +425,93 @@ fn advance(db: &Connection, packet: &Packet) -> Result<()> {
         params![packet.group(), packet.sequence(), digest.as_slice()],
     )?;
     Ok(())
+}
+
+fn publish_in(
+    session: &Session<'_>,
+    group: &[u8],
+    purpose: Purpose,
+    operation: impl FnOnce(&Session<'_>) -> Result<Outgoing>,
+) -> Result<Packet> {
+    let saved = checked_stream(session, group, purpose)?;
+    ensure!(
+        saved.writer == session.signer.id(),
+        "only the stream writer can send or change epochs"
+    );
+    let outgoing = operation(session)?;
+    if let Some(packet) = outgoing_request(session.db, outgoing.id)? {
+        return Ok(packet);
+    }
+    let packet = session.signer.sign_stream_packet(
+        group,
+        saved.head.checked_add(1).context("stream exhausted")?,
+        saved.digest,
+        &outgoing.bytes,
+    )?;
+    save_outgoing(session.db, outgoing.id, &packet)?;
+    advance(session.db, &packet)?;
+    Ok(packet)
+}
+
+fn stage_in(session: &Session<'_>, packet: &Packet, purpose: Purpose) -> Result<Staged> {
+    let saved = checked_stream(session, packet.group(), purpose)?;
+    ensure!(
+        saved.writer != session.signer.id(),
+        "writer cannot receive its own stream"
+    );
+    packet.verify(&saved.key)?;
+    let digest = packet.digest()?;
+    if let Some(seen) = seen(session.db, packet.group(), packet.sequence())? {
+        ensure!(seen == digest, "conflicting accepted stream history");
+        return Ok(Staged::Duplicate);
+    }
+    ensure!(
+        packet.sequence() > saved.head && packet.sequence() - saved.head <= MAX_PENDING_DISTANCE,
+        "packet outside receive window"
+    );
+    if packet.sequence() == saved.head + 1 {
+        ensure!(
+            packet.previous() == saved.digest,
+            "stream predecessor mismatch"
+        );
+    }
+    let pending: Option<Vec<u8>> = session
+        .db
+        .query_row(
+            "SELECT digest FROM stream_pending WHERE group_id=?1 AND sequence=?2",
+            params![packet.group(), packet.sequence()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(pending) = pending {
+        ensure!(pending == digest, "conflicting buffered stream history");
+        return Ok(Staged::Duplicate);
+    }
+    let wire = packet.encode()?;
+    let used: usize = session.db.query_row(
+            "SELECT COALESCE(SUM(length(p.packet)),0) FROM stream_pending p JOIN streams s USING(group_id) WHERE s.purpose=?1",
+            [purpose.name()],
+            |row| row.get(0),
+        )?;
+    // Keep room for a missing predecessor even when later packets fill
+    // the queue. Draining that contiguous prefix releases the reserve.
+    let quota = if purpose == Purpose::Configuration {
+        configuration::MAX_PENDING_CONFIGURATION_BYTES
+    } else {
+        MAX_PENDING_BYTES
+    };
+    let capacity = if packet.sequence() == saved.head + 1 {
+        quota
+    } else {
+        quota - gent_crypto::stream::MAX_PACKET_BYTES
+    };
+    ensure!(
+        used + wire.len() <= capacity,
+        "pending stream storage limit reached"
+    );
+    session.db.execute(
+        "INSERT INTO stream_pending VALUES(?1,?2,?3,?4)",
+        params![packet.group(), packet.sequence(), digest.as_slice(), wire],
+    )?;
+    Ok(Staged::Queued)
 }

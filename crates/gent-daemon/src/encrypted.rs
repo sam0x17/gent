@@ -83,6 +83,7 @@ pub struct Outgoing {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Received {
     Application { id: Uuid, sender: String },
+    ConfigurationPart { revision: u64, complete: bool },
     Commit,
     Duplicate,
 }
@@ -115,6 +116,10 @@ pub struct EncryptedEndpoint<'a> {
 }
 
 impl<'a> EncryptedEndpoint<'a> {
+    pub fn authority_state(&self) -> Result<VerifiedState> {
+        authority(&self.db, self.identity)
+    }
+
     pub fn open(home: &Path, identity: &'a NodeIdentity) -> Result<Self> {
         crate::config::private_dir(home)?;
         let path = home.join("mls.sqlite3");
@@ -138,14 +143,14 @@ impl<'a> EncryptedEndpoint<'a> {
         let mut db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        ensure!(matches!(version, 0..=2), "unsupported MLS database version");
+        ensure!(matches!(version, 0..=3), "unsupported MLS database version");
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",
         )?;
         SqliteStorageProvider::<JsonCodec, _>::new(&mut db).run_migrations()?;
-        db.execute_batch(
+        let schema = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        schema.execute_batch(
             "
-          BEGIN IMMEDIATE;
           CREATE TABLE IF NOT EXISTS authority (
             singleton INTEGER PRIMARY KEY CHECK(singleton=1), anchor BLOB NOT NULL,
             checkpoint BLOB NOT NULL, state BLOB NOT NULL, node TEXT NOT NULL, key BLOB NOT NULL
@@ -180,9 +185,31 @@ impl<'a> EncryptedEndpoint<'a> {
             group_id BLOB NOT NULL, sequence INTEGER NOT NULL, digest BLOB NOT NULL,
             packet BLOB NOT NULL, PRIMARY KEY(group_id,sequence)
           );
-          PRAGMA user_version=2;
-          COMMIT;",
+          CREATE TABLE IF NOT EXISTS authority_history (revision INTEGER PRIMARY KEY, state BLOB NOT NULL);
+          INSERT OR IGNORE INTO authority_history SELECT json_extract(checkpoint,'$.revision'),state FROM authority;
+          CREATE TABLE IF NOT EXISTS configuration_streams (
+            group_id BLOB PRIMARY KEY, grant BLOB NOT NULL, revision INTEGER NOT NULL,
+            state_hash BLOB NOT NULL, offset INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE TABLE IF NOT EXISTS configuration_fragments (
+            group_id BLOB PRIMARY KEY, revision INTEGER NOT NULL, digest BLOB NOT NULL,
+            total INTEGER NOT NULL, bytes BLOB NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS configuration_requests (id TEXT PRIMARY KEY, group_id BLOB NOT NULL);
+          PRAGMA user_version=3;",
         )?;
+        let has_purpose = {
+            let mut columns = schema.prepare("PRAGMA table_info(streams)")?;
+            columns
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .iter()
+                .any(|column| column == "purpose")
+        };
+        if !has_purpose {
+            schema.execute_batch("ALTER TABLE streams ADD COLUMN purpose TEXT NOT NULL DEFAULT 'data' CHECK(purpose IN ('data','configuration'));")?;
+        }
+        schema.commit()?;
         Ok(Self { db, identity })
     }
 
@@ -190,7 +217,10 @@ impl<'a> EncryptedEndpoint<'a> {
     /// existing database cannot replace its pin, checkpoint, or node identity.
     pub fn initialize(&mut self, state: &VerifiedState, now: u64) -> Result<()> {
         state.authorize_node(self.identity.id(), &self.identity.public_key(), now)?;
-        self.db.execute(
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO authority VALUES(1,?1,?2,?3,?4,?5)",
             params![
                 serde_json::to_vec(state.anchor())?,
@@ -200,6 +230,11 @@ impl<'a> EncryptedEndpoint<'a> {
                 self.identity.public_key().as_slice()
             ],
         )?;
+        tx.execute(
+            "INSERT INTO authority_history VALUES(?1,?2)",
+            params![state.checkpoint().revision, state.signed().encode()?],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -211,44 +246,7 @@ impl<'a> EncryptedEndpoint<'a> {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut state = authority(&tx, self.identity)?;
         state.advance_history(updates)?;
-        tx.execute(
-            "UPDATE authority SET checkpoint=?1,state=?2 WHERE singleton=1",
-            params![
-                serde_json::to_vec(state.checkpoint())?,
-                state.signed().encode()?
-            ],
-        )?;
-        // A retired writer can never drain its queue again. Release its pending
-        // ciphertext in this same authority transaction so it cannot consume the
-        // endpoint's receive quota after revocation or signing-key replacement.
-        let own_active = state
-            .state()
-            .nodes
-            .get(self.identity.id())
-            .is_some_and(|member| member.signing_key == self.identity.public_key());
-        if !own_active {
-            tx.execute("DELETE FROM stream_pending", [])?;
-        } else {
-            let mut query = tx.prepare("SELECT group_id,writer,writer_key FROM streams")?;
-            let rows = query.query_map([], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            })?;
-            for row in rows {
-                let (group, writer, key) = row?;
-                if !state
-                    .state()
-                    .nodes
-                    .get(&writer)
-                    .is_some_and(|member| member.signing_key.as_slice() == key)
-                {
-                    tx.execute("DELETE FROM stream_pending WHERE group_id=?1", [group])?;
-                }
-            }
-        }
+        persist_authority(&tx, self.identity, &state, updates)?;
         tx.commit()?;
         Ok(())
     }
@@ -260,17 +258,31 @@ impl<'a> EncryptedEndpoint<'a> {
         now: u64,
         operation: impl FnOnce(&Session<'_>) -> Result<T>,
     ) -> Result<T> {
+        self.transact_mode(now, false, operation)
+    }
+
+    fn transact_mode<T>(
+        &mut self,
+        now: u64,
+        configuration_only: bool,
+        operation: impl FnOnce(&Session<'_>) -> Result<T>,
+    ) -> Result<T> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = authority(&tx, self.identity)?;
-        state.authorize_node(self.identity.id(), &self.identity.public_key(), now)?;
+        if configuration_only {
+            authorize_saved_node(&state, self.identity.id(), &self.identity.public_key())?;
+        } else {
+            state.authorize_node(self.identity.id(), &self.identity.public_key(), now)?;
+        }
         let session = Session {
             db: &tx,
             provider: Provider::new(&tx),
             state,
             signer: self.identity,
             now,
+            configuration_only,
         };
         let result = operation(&session)?;
         tx.commit()?;
@@ -448,6 +460,31 @@ fn authenticate(
     key: &[u8],
     now: u64,
 ) -> Result<String> {
+    state.require_fresh(now)?;
+    authenticate_saved(state, credential, key)
+}
+
+fn authorize_saved_node(
+    state: &VerifiedState,
+    node: &str,
+    key: &gent_crypto::PublicKey,
+) -> Result<()> {
+    ensure!(
+        state
+            .state()
+            .nodes
+            .get(node)
+            .is_some_and(|member| &member.signing_key == key),
+        "node unavailable in saved authority"
+    );
+    Ok(())
+}
+
+fn authenticate_saved(
+    state: &VerifiedState,
+    credential: &Credential,
+    key: &[u8],
+) -> Result<String> {
     let basic = BasicCredential::try_from(credential.clone())?;
     ensure!(basic.identity().len() <= 256, "credential too large");
     let identity: Identity = serde_json::from_slice(basic.identity())?;
@@ -455,10 +492,10 @@ fn authenticate(
         identity.version == 1 && identity.cluster == state.anchor().cluster_id,
         "wrong credential scope"
     );
-    state.authorize_node(
+    authorize_saved_node(
+        state,
         &identity.node,
         key.try_into().context("invalid signing key length")?,
-        now,
     )?;
     Ok(identity.node)
 }
@@ -596,6 +633,7 @@ struct Session<'a> {
     state: VerifiedState,
     signer: &'a NodeIdentity,
     now: u64,
+    configuration_only: bool,
 }
 impl Session<'_> {
     fn key_package(&self, request: Uuid) -> Result<Vec<u8>> {
@@ -827,6 +865,22 @@ impl Session<'_> {
         )
     }
     fn receive(&self, group_id: &[u8], wire: &[u8], writer: Option<&str>) -> Result<Received> {
+        self.receive_with(group_id, wire, writer, |id, sender, body| {
+            self.db.execute(
+                "INSERT INTO inbox(group_id,sender,id,body) VALUES(?1,?2,?3,?4)",
+                params![group_id, sender, id.to_string(), body],
+            )?;
+            Ok(Received::Application { id, sender })
+        })
+    }
+
+    fn receive_with(
+        &self,
+        group_id: &[u8],
+        wire: &[u8],
+        writer: Option<&str>,
+        handle_application: impl FnOnce(Uuid, String, Vec<u8>) -> Result<Received>,
+    ) -> Result<Received> {
         let db = self.db;
         let provider = &self.provider;
         let state = &self.state;
@@ -848,7 +902,11 @@ impl Session<'_> {
             .iter()
             .find(|member| member.index == *index)
             .context("sender missing from roster")?;
-        let sender = authenticate(state, &member.credential, &member.signature_key, now)?;
+        let sender = if self.configuration_only {
+            authenticate_saved(state, &member.credential, &member.signature_key)?
+        } else {
+            authenticate(state, &member.credential, &member.signature_key, now)?
+        };
         if let Some(writer) = writer {
             ensure!(sender == writer, "MLS sender is not the stream writer");
         }
@@ -875,14 +933,7 @@ impl Session<'_> {
                     !body.is_empty() && body.len() <= MAX_PAYLOAD_BYTES,
                     "invalid payload size"
                 );
-                db.execute(
-                    "INSERT INTO inbox(group_id,sender,id,body) VALUES(?1,?2,?3,?4)",
-                    params![group_id, sender, envelope.id.to_string(), body],
-                )?;
-                Received::Application {
-                    id: envelope.id,
-                    sender,
-                }
+                handle_application(envelope.id, sender, body)?
             }
             ProcessedMessageContent::StagedCommitMessage(commit) => {
                 // Existing-group membership additions require a separate approved
@@ -894,7 +945,17 @@ impl Session<'_> {
                     })
                     .collect::<BTreeSet<_>>();
                 group.merge_staged_commit(provider, *commit)?;
-                if writer.is_some() {
+                if self.configuration_only {
+                    let after: Vec<_> = group.members().collect();
+                    ensure!(
+                        after.len() == before.len()
+                            && after.iter().all(|member| before
+                                .iter()
+                                .any(|old| old.signature_key == member.signature_key
+                                    && old.credential == member.credential)),
+                        "configuration stream membership cannot change"
+                    );
+                } else if writer.is_some() {
                     validate_ordered_transition(state, &before, group.members().collect(), now)?;
                 } else {
                     ensure!(
@@ -937,6 +998,64 @@ fn validate_ordered_transition(
                 authenticate(state, &member.credential, &member.signature_key, now).is_err(),
                 "cannot remove an authorized stream member"
             );
+        }
+    }
+    Ok(())
+}
+
+fn persist_authority(
+    db: &Connection,
+    identity: &NodeIdentity,
+    state: &VerifiedState,
+    updates: &[SignedState],
+) -> Result<()> {
+    for update in updates {
+        db.execute(
+            "INSERT INTO authority_history VALUES(?1,?2)",
+            params![update.state.revision, update.encode()?],
+        )?;
+    }
+    db.execute(
+        "UPDATE authority SET checkpoint=?1,state=?2 WHERE singleton=1",
+        params![
+            serde_json::to_vec(state.checkpoint())?,
+            state.signed().encode()?
+        ],
+    )?;
+    // A retired writer can never drain its queue again. Release its pending
+    // ciphertext in this same authority transaction so it cannot consume the
+    // endpoint's receive quota after revocation or signing-key replacement.
+    let own_active = state
+        .state()
+        .nodes
+        .get(identity.id())
+        .is_some_and(|member| member.signing_key == identity.public_key());
+    if !own_active {
+        db.execute("DELETE FROM stream_pending", [])?;
+        db.execute("DELETE FROM configuration_fragments", [])?;
+    } else {
+        let mut query = db.prepare("SELECT group_id,writer,writer_key FROM streams")?;
+        let rows = query.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (group, writer, key) = row?;
+            if !state
+                .state()
+                .nodes
+                .get(&writer)
+                .is_some_and(|member| member.signing_key.as_slice() == key)
+            {
+                db.execute("DELETE FROM stream_pending WHERE group_id=?1", [&group])?;
+                db.execute(
+                    "DELETE FROM configuration_fragments WHERE group_id=?1",
+                    [&group],
+                )?;
+            }
         }
     }
     Ok(())

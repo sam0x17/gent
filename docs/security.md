@@ -1,6 +1,6 @@
 # Security component proofs
 
-`gent-crypto` verifies owner-approved node identities and signed configuration history, with durable replica storage in `gent-daemon::replica`. `gent-daemon::encrypted` adds native MLS messaging and persistence; its `ordered` module implements authenticated directional streams. These are library components; the local CLI/RPC proof does not use them yet. Remote delivery and encrypted configuration distribution remain unimplemented.
+`gent-crypto` verifies owner-approved node identities and signed configuration history, with durable replica storage in `gent-daemon::replica`. `gent-daemon::encrypted` adds native MLS messaging and persistence; its `ordered` module implements authenticated directional streams, including encrypted configuration recovery after authority expires. These are library components; the local CLI/RPC proof does not use them yet. Protected pairing and remote delivery remain unimplemented.
 
 ## Trust boundary
 
@@ -21,6 +21,7 @@ Signed bodies use [RFC 8785 JSON canonicalization](https://www.rfc-editor.org/rf
 ```text
 gent/cluster-state/v1<NUL> || JCS(ClusterState)
 gent/enrollment-request/v1<NUL> || JCS(EnrollmentRequest)
+gent/configuration-grant/v1<NUL> || JCS(ConfigurationGrant)
 ```
 
 The signature is Ed25519 over those bytes. State digests and enrollment fingerprints use SHA-256 over the corresponding signing input. Domain separation prevents a signature for one record type from authorizing another. Digests exclude the detached signature. Numeric counters and timestamps stay within JSON's exactly representable integer range.
@@ -33,6 +34,7 @@ Current limits are:
 | --- | --- |
 | Signed configuration | 2 MiB |
 | Enrollment request | 4 KiB |
+| Configuration stream grant | 8 KiB |
 | Active nodes | 1,024 |
 | Retired node IDs / signing keys | 8,192 each |
 | Policy rules / groups | 4,096 / 256 |
@@ -74,7 +76,7 @@ The trust anchor, checkpoint, current signed state, and accepted revision histor
 
 Restoration verifies the exact state digest and revision against the saved checkpoint. An older signed state cannot replace a newer checkpoint. The trusted local checkpoint is part of the security boundary; a relay cannot supply a replacement checkpoint. Restoring the entire database from an old backup is outside this protection and must be addressed by the recovery procedure.
 
-The database contains private configuration, but no node or owner private keys. OS-user access to endpoint files remains trusted. Integration with `~/.gent/config.toml`, encrypted network replication, key storage, and the live daemon policy transaction is still pending.
+The database contains private configuration, but no node or owner private keys. OS-user access to endpoint files remains trusted. The MLS database also retains authority history for the encrypted recovery path below. Integration with `~/.gent/config.toml`, network transport, key storage, and the live daemon policy transaction is still pending.
 
 ## MLS messaging proof
 
@@ -131,11 +133,11 @@ Opaque group IDs, counters, predecessor hashes, ciphertext lengths, signatures, 
 
 Sending, MLS epoch changes, signed packet insertion, and advancement of the stream checkpoint commit together. Repeating a request ID returns its original packet. Concurrent operations on one node reload state under SQLite's immediate transaction lock. Only the pinned writer may send or change that stream's epochs; the general MLS proof APIs reject mutations and receives on ordered groups so callers cannot accidentally bypass sequencing.
 
-`stage` checks current authority and the writer's signature before saving a packet. It recognizes exact repeats and rejects conflicting accepted or buffered sequence slots. Packets may be at most 128 positions ahead of the saved head. Pending ciphertext is limited to 16 MiB across the endpoint database. Future packets can occupy at most 13 MiB, reserving 3 MiB for a missing immediate predecessor. Once a ready prefix occupies that reserve, callers must drain it before staging more data.
+`stage` checks current authority and the writer's signature before saving a packet. It recognizes exact repeats and rejects conflicting accepted or buffered sequence slots. Packets may be at most 128 positions ahead of the saved head. Pending application ciphertext is limited to 16 MiB across the endpoint database. Future packets can occupy at most 13 MiB, reserving 3 MiB for a missing immediate predecessor. Once a ready prefix occupies that reserve, callers must drain it before staging more data. Configuration traffic has a separate quota, described below.
 
 `drain` applies only the next sequence with the expected predecessor digest. Each packet gets a separate transaction covering MLS state, inbox/receipt insertion, stream checkpoint, accepted digest, and pending-row deletion. A later failure cannot undo an earlier committed prefix. Authority is rechecked when applying previously buffered data. The sender inside MLS must equal the pinned outer writer, including for epoch commits. Status exposes the next needed sequence, and the signed outbox supports bounded retransmission from that position.
 
-Schema version 2 adds stream metadata, signed outbox records, accepted digests, and pending ciphertext to the existing MLS database. Existing version-1 proof databases upgrade without replacing their MLS state. A previously used unsequenced group cannot be adopted into an ordered stream. The proof retains both its original MLS outbox and signed packet outbox; runtime storage consolidation, acknowledgment, retention, and total disk quotas remain unfinished.
+Schema version 3 retains stream metadata, signed outbox records, accepted digests, and pending ciphertext, and adds stream purpose, authority history, configuration grants, publication cursors, and partial records. Existing version-1 and version-2 proof databases upgrade without replacing their MLS state or queued ciphertext. Migrated authority history starts at the saved current checkpoint; it cannot reconstruct earlier revisions. A previously used unsequenced group cannot be adopted into an ordered stream. The proof retains both its original MLS outbox and signed packet outbox; runtime storage consolidation, acknowledgment, retention, and total disk quotas remain unfinished.
 
 ### Revocation and conflicting history
 
@@ -145,15 +147,27 @@ A writer's revocation or signing-key replacement disables its existing streams. 
 
 The relay cannot create a valid alternative sequence or skip a predecessor without the writer's signing key. An observed signed fork is rejected against saved accepted or pending history. This does not provide global consensus between cloned copies of a node key: a malicious writer can maintain separate histories until endpoints compare them, or sign invalid MLS data. Such a packet remains pending and stops the stream for diagnosis; the receiver never silently skips it. Recovery from a compromised writer, rollback of an entire endpoint backup, key loss, and selective withholding remain separate work.
 
-### Boundaries still to implement
+## Encrypted configuration recovery
+
+`ordered::configuration` gives each trusted receiving daemon its own two-node configuration stream. An owner-signed grant binds the cluster anchor, exact initial checkpoint, group and origin digest, and both node IDs and signing keys. Provisioning requires fresh authority at both ends. The grant, like a key package, contains private identity metadata and must travel through protected pairing; that transport is still pending. A hosted bridge must never receive a configuration grant.
+
+Only an established configuration stream may receive or retransmit with expired authority. Its saved grant and both endpoint keys must still match known membership. Revocation or signing-key replacement disables it. Fresh authority is required to create a stream, publish a new fragment, or refresh encryption keys. Ordinary data APIs reject configuration streams, and configuration APIs reject data streams. Configuration records never enter the application inbox.
+
+The writer first accepts owner-signed revisions into its local authority history. `next_configuration` then publishes them in order, tracking a separate cursor for each recipient. Each signed record is split into fragments of at most 256 KiB, with its revision, digest, total size, and offset inside MLS encryption. Committed requests return the same packet on retry. A return value of `None` means there is no new history and does not reserve the request ID. Current fragment packets fit the Worker proof's 1 MiB frame limit; larger application messages still need transport sizing or chunking.
+
+The receiver verifies fragment continuity and the complete record's owner signature, predecessor, and revision before changing authority. Known revisions must match retained verified history; conflicting owner-signed forks are rejected. A complete expired revision can advance the checkpoint, but ordinary messaging stays blocked until a fresh revision is reached. Partial records cannot change authority. The final fragment commits authority, history, MLS state, receipts, stream checkpoint, and fragment cleanup in one transaction. An MLS epoch refresh may change encryption keys while preserving both signing identities and membership.
+
+Configuration ciphertext has a separate 8 MiB pending quota, with 3 MiB reserved for a missing predecessor. A full application queue cannot consume that space. Partial records reserve their entire declared size from a separate 8 MiB reconstruction budget when admitted, allowing them to finish even when that budget is full. Completed records release the reservation; retiring a writer removes its pending packets and partial records. Malformed authenticated traffic stalls its stream, and a compromised approved writer can still withhold updates or consume its available quota.
+
+This recovers an expired node that retains its keys, checkpoint, and established stream. It does not recover lost keys or roll back an endpoint backup safely. The sender needs a contiguous retained history after each recipient's initial checkpoint. Retention, stream replacement, and protected distribution of initial grants and key packages remain required for live operation.
+
+## Boundaries still to implement
 
 Key packages contain identity metadata and must travel inside an authenticated, encrypted enrollment or distribution channel. They must not become a plaintext public directory. MLS Welcome messages protect their group information, while ordinary MLS headers still expose opaque group IDs, epochs, sizes, and timing. The surrounding routing protocol must account for this metadata.
 
 Node authentication does not authorize one agent to read another agent's messages. The proof has no model-facing API, and its raw inbox/outbox accessors are for trusted local code. Integration must bind authenticated agent envelopes, recheck policy at send and delivery, and atomically coordinate authority, agent permissions, and queues. The standalone `Replica` and this proof's authority checkpoint must be consolidated in that runtime path.
 
-A likely layout remains a configuration group for trusted daemons and separate messaging groups for authorized endpoints. A limited hosted bridge must never join the configuration group. Encrypted policy distribution, file-key grants, periodic epoch refresh, pairing UX, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before remote delivery is enabled.
-
-Configuration synchronization needs a distinct verification path when local authority has expired. The current data-stream APIs require fresh authority, so routing renewed configuration through those same APIs would prevent an offline node from recovering. The integration must authenticate an owner-signed history against the saved anchor and checkpoint before restoring ordinary messaging authority, without treating the relay's account database as authorization. This path is not implemented yet.
+Configuration streams belong only to trusted daemons; messaging groups serve separately authorized endpoints. Live policy distribution, file-key grants, periodic epoch refresh scheduling, pairing UX, signing-key replacement, lost-state recovery, hosted/mobile trust boundaries, and independent security review remain required before remote delivery is enabled. The configuration recovery library does not yet update the live daemon's policy or TOML file.
 
 ## Verification
 
@@ -163,6 +177,8 @@ Eleven MLS tests pass on Linux and macOS. They cover offline join/delivery and a
 
 Two packet-format tests and ten ordered-stream tests cover signature binding, canonical framing, reordered epochs, simultaneous opposite-direction traffic, concurrent refreshes/retries, writer and Welcome-creator substitution, MLS sender substitution, fork rejection, pending quotas with predecessor reserve, authority changes while buffered, revocation catch-up, partial-prefix durability, and version-1 database migration. Injected ordering-table failures verify that MLS state and stream checkpoints cannot commit separately.
 
+Two configuration-grant tests and eleven configuration-stream tests cover owner/key/group binding, purpose isolation, expired-history recovery, forged policy from an approved writer, large-record reassembly across restart and epoch refresh, conflicting owner history, revocation, separate queue limits, partial-record reservations, and version-2 migration. A valid MLS removal cannot change configuration-stream membership. Injected failures verify that grants, publication cursors, authority history, and cryptographic state roll back together.
+
 Run from the public repository root:
 
 ```sh
@@ -171,4 +187,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo check -p gent-crypto --features mls --target wasm32-unknown-unknown --locked
 ```
 
-The full native workspace has 50 passing tests on Linux and macOS. The authority crate, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, encrypted transport tests, real pairing UX, and recovery tests remain required before production use.
+The full native workspace has 63 passing tests on Linux and macOS. The authority crate, configuration grants, packet format, and signer interface compile for Wasm; native SQLite MLS storage and MLS runtime behavior on Wasm are not covered by that check. Independent protocol review, remote transport tests, real pairing UX, and lost-state recovery tests remain required before production use.

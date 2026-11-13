@@ -17,6 +17,8 @@ pub const MAX_CHAIN_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const STATE_DOMAIN: &[u8] = b"gent/cluster-state/v1\0";
 const REQUEST_DOMAIN: &[u8] = b"gent/enrollment-request/v1\0";
+const CONFIGURATION_DOMAIN: &[u8] = b"gent/configuration-grant/v1\0";
+const MAX_CONFIGURATION_GRANT_BYTES: usize = 8192;
 
 /// Owner signing authority, distinct from the local owner RPC credential and node keys.
 /// Deliberately has no Debug or Serialize implementation.
@@ -108,6 +110,85 @@ pub struct EnrollmentRequest {
 pub struct SignedEnrollment {
     pub request: EnrollmentRequest,
     pub signature: Vec<u8>,
+}
+
+/// Owner authorization for a private, two-node configuration distribution stream.
+/// The grant itself contains private metadata and needs protected pairing transport.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationGrant {
+    pub version: u32,
+    pub anchor: TrustAnchor,
+    pub base: Checkpoint,
+    pub group: Vec<u8>,
+    pub origin: Digest,
+    pub writer: String,
+    pub writer_key: PublicKey,
+    pub reader: String,
+    pub reader_key: PublicKey,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SignedConfigurationGrant {
+    pub grant: ConfigurationGrant,
+    pub signature: Vec<u8>,
+}
+
+impl SignedConfigurationGrant {
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        encode(self, MAX_CONFIGURATION_GRANT_BYTES)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        decode(bytes, MAX_CONFIGURATION_GRANT_BYTES)
+    }
+
+    /// Does not grant messaging authority or require an unexpired lease. The
+    /// receiver must also enforce the grant's saved stream and node-key bindings.
+    pub fn verify(&self, anchor: &TrustAnchor) -> Result<()> {
+        let grant = &self.grant;
+        ensure!(
+            grant.version == 1 && &grant.anchor == anchor,
+            "wrong configuration grant authority"
+        );
+        id(&grant.writer)?;
+        id(&grant.reader)?;
+        public_key(&grant.writer_key)?;
+        public_key(&grant.reader_key)?;
+        ensure!(
+            grant.writer != grant.reader
+                && grant.writer_key != grant.reader_key
+                && grant.writer_key != anchor.owner_key
+                && grant.reader_key != anchor.owner_key,
+            "configuration grant requires two distinct node identities"
+        );
+        ensure!(
+            !grant.group.is_empty()
+                && grant.group.len() <= 256
+                && grant.origin != [0; 32]
+                && grant.base.revision <= MAX_SAFE_INTEGER,
+            "invalid configuration stream binding"
+        );
+        verify(
+            &anchor.owner_key,
+            CONFIGURATION_DOMAIN,
+            grant,
+            &self.signature,
+            MAX_CONFIGURATION_GRANT_BYTES,
+        )
+    }
+
+    /// Enrollment of this exception requires the exact fresh approved checkpoint.
+    pub fn verify_initial(&self, state: &VerifiedState, now: u64) -> Result<()> {
+        self.verify(state.anchor())?;
+        ensure!(
+            &self.grant.base == state.checkpoint(),
+            "configuration grant has a stale base"
+        );
+        state.authorize_node(&self.grant.writer, &self.grant.writer_key, now)?;
+        state.authorize_node(&self.grant.reader, &self.grant.reader_key, now)?;
+        Ok(())
+    }
 }
 
 /// A verified history prefix. Its fields cannot be mutated without validation.
@@ -282,6 +363,56 @@ impl ClusterState {
 }
 
 impl OwnerKey {
+    pub fn authorize_configuration_stream(
+        &self,
+        state: &VerifiedState,
+        group: &[u8],
+        origin: Digest,
+        endpoints: (&str, &str),
+        now: u64,
+    ) -> Result<SignedConfigurationGrant> {
+        ensure!(
+            self.public_key() == state.anchor().owner_key,
+            "wrong owner authority"
+        );
+        state.require_fresh(now)?;
+        let (writer, reader) = endpoints;
+        let grant = ConfigurationGrant {
+            version: 1,
+            anchor: state.anchor().clone(),
+            base: state.checkpoint().clone(),
+            group: group.into(),
+            origin,
+            writer: writer.into(),
+            writer_key: state
+                .state()
+                .nodes
+                .get(writer)
+                .context("unknown configuration writer")?
+                .signing_key,
+            reader: reader.into(),
+            reader_key: state
+                .state()
+                .nodes
+                .get(reader)
+                .context("unknown configuration reader")?
+                .signing_key,
+        };
+        let signature = self
+            .0
+            .sign(&signing_input(
+                CONFIGURATION_DOMAIN,
+                &grant,
+                MAX_CONFIGURATION_GRANT_BYTES,
+            )?)
+            .to_bytes()
+            .to_vec();
+        let signed = SignedConfigurationGrant { grant, signature };
+        signed.verify_initial(state, now)?;
+        signed.encode()?;
+        Ok(signed)
+    }
+
     pub fn generate() -> Result<Self> {
         Ok(Self(signing_key()?))
     }
@@ -482,6 +613,12 @@ impl SignedEnrollment {
 }
 
 impl SignedState {
+    /// Verify one record, without authorizing it or establishing history continuity.
+    /// Apply through VerifiedState before changing live authority.
+    pub fn verified_checkpoint(&self, anchor: &TrustAnchor) -> Result<Checkpoint> {
+        self.verify(anchor)
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode(self, MAX_STATE_BYTES)
     }
