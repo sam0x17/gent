@@ -1,5 +1,6 @@
 //! Account administration only. These records convey no cluster key authority.
 use serde::{Deserialize, Serialize};
+pub mod invitations;
 
 pub const SESSION_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
 pub const SESSION_CREATION_WINDOW_SECONDS: u64 = 15 * 60;

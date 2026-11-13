@@ -146,6 +146,26 @@ fn offer_authenticates_every_field_and_requires_the_transferred_anchor() {
 }
 
 #[test]
+fn signed_offer_cannot_extend_the_issue_time_bound_into_its_identifier() {
+    let (owner, _, state, invite) = fixture();
+    let mut changed = invite.invitation().offer().clone();
+    changed.offer.issued_at += 1;
+    changed.offer.expires_at += 1;
+    changed.signature = owner
+        .0
+        .sign(&signing_input(OFFER_DOMAIN, &changed.offer, MAX_OFFER_BYTES).unwrap())
+        .to_bytes()
+        .to_vec();
+    assert!(
+        changed
+            .verify(state.anchor(), NOW + 1)
+            .unwrap_err()
+            .to_string()
+            .contains("issue time")
+    );
+}
+
+#[test]
 fn issuance_checks_owner_membership_origins_and_continuation_identity() {
     let (owner, issuer, mut state, _) = fixture();
     let outsider = NodeIdentity::generate().unwrap();

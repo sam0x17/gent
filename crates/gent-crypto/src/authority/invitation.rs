@@ -10,7 +10,7 @@ use zeroize::Zeroize;
 
 pub mod channel;
 
-pub const OFFER_LIFETIME: u64 = 15 * 60;
+pub const OFFER_LIFETIME: u64 = gent_protocol::service::invitations::LIFETIME_SECONDS;
 pub const MAX_INVITATION_BYTES: usize = 16 * 1024;
 const OFFER_DOMAIN: &[u8] = b"gent/invitation-offer/v1\0";
 const CLAIM_DOMAIN: &[u8] = b"gent/invitation-claim/v1\0";
@@ -128,8 +128,8 @@ impl SignedOffer {
         ensure!(offer.version == 1, "unsupported invitation version");
         id(&offer.id)?;
         ensure!(
-            Uuid::parse_str(&offer.id)?.get_version_num() == 4,
-            "invalid invitation ID"
+            gent_protocol::service::invitations::issued_at(&offer.id) == Some(offer.issued_at),
+            "invitation ID does not match issue time"
         );
         id(&offer.anchor.cluster_id)?;
         id(&offer.issuer_id)?;
@@ -238,7 +238,7 @@ impl OwnerInvitation {
         let psk = random_secret()?;
         let offer = Offer {
             version: 1,
-            id: Uuid::new_v4().to_string(),
+            id: Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, now, 0)).to_string(),
             anchor: state.anchor().clone(),
             issuer_id: issuer.id().into(),
             issuer_key: issuer.public_key(),
