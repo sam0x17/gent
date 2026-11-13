@@ -75,7 +75,7 @@ def main():
             assert len({aid, bid, old, new, child}) == 5
             cli('permission', 'allow', aid, old, '--permission', 'enumerate', 'send', check=True)
             cli('permission', 'allow', old, aid, '--permission', 'enumerate', 'receive', check=True)
-            sent = codex.call('gent_send', {'recipient': old, 'request_id': str(uuid.uuid4()), 'text': 'old chat only',
+            sent = codex.call('gent_send', {'recipient': old, 'request_id': codex.request_id(meta=a), 'text': 'old chat only',
                                           'files': [{'name': 'image.png', 'media_type': 'image/png', 'data_base64': PNG}]}, meta=a)[0]
             assert call('chat-new', 'gent_inbox') == []
             assert call('chat-old', 'gent_inbox', agent='child') == []

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -200,7 +201,7 @@ def main():
         cli('permission', 'allow', host_id, peer_id, '--permission', 'enumerate', 'receive')
         marker = 'synthetic-' + uuid.uuid4().hex
         file = {'name': 'pixel.png', 'media_type': 'image/png', 'data_base64': generic.PNG}
-        sent = peer.call('gent_send', {'recipient': host_id, 'request_id': str(uuid.uuid4()),
+        sent = peer.call('gent_send', {'recipient': host_id, 'request_id': peer.request_id(),
                                      'text': marker, 'files': [file]})[0]
         peer.close()
         peer = None
@@ -213,7 +214,7 @@ def main():
             assert other_results['gent_agents'] == [[]] and other_results['gent_inbox'] == [[]]
         _, resumed = turn('Continue this same Gent test conversation after a daemon restart. Use only Gent tools. '
              'Call gent_identity, then gent_inbox. For the one queued message, acknowledge receipt and '
-             'reply using gent_reply with a fresh UUID request_id. In the reply text echo the exact marker '
+             'reply using gent_reply with a UUIDv7 from gent_request_ids. In the reply text echo the exact marker '
              'from the message and describe the dominant color of its image. Include that same file in your '
              'reply files array, preserving its name, media_type, and exact data_base64. Do not send a new '
              'unsolicited exchange. Do nothing else.', 'resume', session)
@@ -223,6 +224,10 @@ def main():
         inbox = peer.call('gent_inbox')[0]
         assert len(inbox) == 1, 'host did not send exactly one reply'
         reply = inbox[0]
+        generated = {request for result in results(resumed).get('gent_request_ids', []) for request in result['request_ids']}
+        with sqlite3.connect(state / 'state.sqlite3') as db:
+            reply_request = db.execute('SELECT request_id FROM messages WHERE id=?', (reply['id'],)).fetchone()[0]
+        assert reply_request in generated, 'host did not use an ID returned by gent_request_ids'
         assert reply['sender'] == host_id and reply['reply_to'] == sent['message_id']
         assert marker in reply['text'], 'reply did not preserve marker'
         assert reply['files'] == [file], 'reply did not preserve file bytes'
@@ -230,7 +235,7 @@ def main():
         assert peer.call('gent_message_status', {'message_id': sent['message_id']})[0]['state'] == 'delivered'
         fork_id = None
         if args.automatic_binding:
-            peer.call('gent_send', {'recipient': host_id, 'request_id': str(uuid.uuid4()), 'text': 'parent-only-' + uuid.uuid4().hex})
+            peer.call('gent_send', {'recipient': host_id, 'request_id': peer.request_id(), 'text': 'parent-only-' + uuid.uuid4().hex})
             fork_session, fork_events = turn(registration('forked-chat') + ' Also call gent_inbox.', 'fork', session, fork=True)
             fork_results = results(fork_events)
             fork_id = fork_results['gent_identity'][0]['agent']['id']
@@ -242,10 +247,10 @@ def main():
             assert next(agent for agent in current if agent['id'] == host_id)['name'] == 'host-proof'
         report = {'host': args.host, 'host_session': session, 'agent_id': host_id,
                   'result': 'passed', 'scope': ('host metadata binding' if args.automatic_binding else 'explicit per-session binding') + '; local Unix transport',
-                  'reply_text': reply['text'], 'other_session': other_session, 'fork_agent': fork_id,
+                  'reply_text': reply['text'], 'request_id_helper_verified': True, 'other_session': other_session, 'fork_agent': fork_id,
                   'installed_config': str(installed) if args.installed_binding else None}
         (root / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
-        print(f'PASS: {args.host} registration, same-session resume, restart inbox, image interpretation, file reply and acknowledgment', flush=True)
+        print(f'PASS: {args.host} registration, same-session resume, restart inbox, image interpretation, file reply, request-ID helper and acknowledgment', flush=True)
         if args.automatic_binding:
             print('PASS: shared connector configuration, concurrent chat isolation, resume continuity, and fork isolation', flush=True)
     finally:

@@ -78,6 +78,11 @@ enum Command {
         #[command(subcommand)]
         command: Option<FilesCommand>,
     },
+    /// Inspect or prune local Gent message and agent retry history.
+    History {
+        #[command(subcommand)]
+        command: Option<HistoryCommand>,
+    },
     /// Inspect or revoke a registration.
     Agent {
         #[command(subcommand)]
@@ -110,6 +115,15 @@ enum FilesCommand {
     /// Clean one bounded batch of expired, unchanged handoff copies and encrypted objects.
     Clean {
         /// Preview the batch without removing files or storage records.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+#[derive(Subcommand)]
+enum HistoryCommand {
+    Status,
+    /// Retire a bounded batch of expired exchanges and inadmissible retry IDs.
+    Clean {
         #[arg(long)]
         dry_run: bool,
     },
@@ -355,6 +369,7 @@ async fn execute(cli: Cli) -> Result<()> {
         return Ok(());
     }
     let files_output = matches!(&cli.command, Some(Command::Files { .. }));
+    let history_output = matches!(&cli.command, Some(Command::History { .. }));
     let output = match cli.command {
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
@@ -404,6 +419,16 @@ async fn execute(cli: Cli) -> Result<()> {
                 FilesCommand::Clean { dry_run } => OwnerOp::FilesClean { dry_run },
             };
             owner(&home, action).await?
+        }
+        Some(Command::History { command }) => {
+            owner(
+                &home,
+                match command.unwrap_or(HistoryCommand::Status) {
+                    HistoryCommand::Status => OwnerOp::HistoryStatus,
+                    HistoryCommand::Clean { dry_run } => OwnerOp::HistoryClean { dry_run },
+                },
+            )
+            .await?
         }
         Some(Command::Agent {
             command: AgentCommand::Revoke { agent },
@@ -569,6 +594,8 @@ async fn execute(cli: Cli) -> Result<()> {
         println!("{}", serde_json::to_string(&output)?);
     } else if files_output {
         files::print_report(&output);
+    } else if history_output {
+        files::print_history(&output);
     } else {
         println!("{}", serde_json::to_string_pretty(&output)?);
     }

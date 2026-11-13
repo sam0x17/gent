@@ -158,3 +158,13 @@ Incoming delivery wakes or resumes idle agents where the host supports it, queue
 Distinguish a mobile notification from an agent turn or user response. A notification can invite the user to return without starting a turn. Server coordinators use the ordinary wake/queue policy and can continue authorized work while the phone is unavailable.
 
 `~/.gent/config.toml` holds local settings, the active cluster selection, and separate profiles for joined clusters. Only each cluster's shared policy and authorized metadata are replicated to its members. Keep authentication secrets and private keys in an OS credential store or protected local key store outside TOML.
+
+## Local message history (implemented)
+
+| Command | Behavior |
+| --- | --- |
+| `gent history` / `gent history status` | Report Gent messages, payload usage, exchanges, import retries, relay selections, and pending events. |
+| `gent history clean --dry-run` | Preview one bounded cleanup batch. |
+| `gent history clean` | Retire exchanges seven days after expiry and eligible agent retry records. |
+
+All support `--json`. Cleanup runs automatically at startup and every 15 minutes. These owner commands require no model call. Message limits and the UUIDv7 agent-request contract are documented in [message history and retries](local-proof.md#message-history-and-retries); encrypted transport and provider histories are separate.

@@ -344,6 +344,7 @@ impl StoreSession<'_> {
         Ok(())
     }
     fn import_event(&mut self, peer: &str, event: Event) -> Result<()> {
+        self.timestamp = requests::clock(self.db, self.timestamp)?;
         match event {
             Event::Mesh { envelope } => self.import_mesh(peer, envelope),
             Event::ConfigurationRequest { request_id, edit } => {
@@ -359,6 +360,15 @@ impl StoreSession<'_> {
                 message_id,
                 delivered,
             } => {
+                // A late receipt for retired history has no state to change.
+                // Existing messages still enforce their exact recipient node.
+                if !self.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1)",
+                    [&message_id],
+                    |r| r.get::<_, bool>(0),
+                )? {
+                    return Ok(());
+                }
                 let message = self.message(&message_id)?;
                 ensure!(
                     self.get_agent(&message.sender)?.node_id == self.identity.node.id()
@@ -418,7 +428,14 @@ impl StoreSession<'_> {
                     self.bind_attachments(&message, &attachments)?;
                     return Ok(());
                 }
-                if !self.deliverable(&message)? {
+                if !requests::remote(
+                    self.db,
+                    &request_id,
+                    message.created_at,
+                    message.expires_at,
+                    self.timestamp,
+                )? || !self.deliverable(&message)?
+                {
                     return self.receipt(peer, &message.id, false);
                 }
                 self.validate_relay_message(&message)?;
@@ -470,6 +487,7 @@ impl StoreSession<'_> {
                     &message.relay,
                     &[],
                 )?;
+                history::message_capacity(self.db, payload.len())?;
                 self.db.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES(?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
                 self.bind_attachments(&message, &attachments)?;
                 self.record_relay_message(&message)?;

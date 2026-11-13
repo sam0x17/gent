@@ -67,7 +67,7 @@ fn registered_identity_permissions_and_restart_delivery() {
     let c = register(&mut store, &kc, "c");
     assert_eq!(register(&mut store, &ka, "different label"), a);
     assert_eq!(ok(call(&mut store, &ka, AgentOp::Agents)), json!([]));
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = uuid::Uuid::now_v7().to_string();
     assert!(matches!(
         call(&mut store, &ka, send(&b, &request_id)),
         Response::Error(_)
@@ -137,7 +137,7 @@ fn registered_identity_permissions_and_restart_delivery() {
         AgentOp::Reply {
             file_ids: vec![],
             message_id,
-            request_id: uuid::Uuid::new_v4().to_string(),
+            request_id: uuid::Uuid::now_v7().to_string(),
             text: "make it blue".into(),
             files: vec![],
         },
@@ -147,7 +147,7 @@ fn registered_identity_permissions_and_restart_delivery() {
         reply["message_id"]
     );
     assert!(matches!(
-        call(&mut store, &kb, send(&a, &uuid::Uuid::new_v4().to_string())),
+        call(&mut store, &kb, send(&a, &uuid::Uuid::now_v7().to_string())),
         Response::Error(_)
     ));
 }
@@ -166,7 +166,7 @@ fn queued_work_is_rechecked_and_revoked_credentials_cannot_reregister() {
     let sent = ok(call(
         &mut store,
         &ka,
-        send(&b, &uuid::Uuid::new_v4().to_string()),
+        send(&b, &uuid::Uuid::now_v7().to_string()),
     ));
     p.rules.push(Rule {
         actor: Selector::Agent(b.clone()),
@@ -194,7 +194,7 @@ fn queued_work_is_rechecked_and_revoked_credentials_cannot_reregister() {
             AgentOp::Reply {
                 file_ids: vec![],
                 message_id,
-                request_id: uuid::Uuid::new_v4().to_string(),
+                request_id: uuid::Uuid::now_v7().to_string(),
                 text: "no".into(),
                 files: vec![]
             }
@@ -231,7 +231,7 @@ fn exchange_limits_and_expiry_are_enforced() {
     let sent = ok(call(
         &mut store,
         &ka,
-        send(&b, &uuid::Uuid::new_v4().to_string()),
+        send(&b, &uuid::Uuid::now_v7().to_string()),
     ));
     let mut parent = sent["message_id"].as_str().unwrap().to_string();
     for index in 1..MAX_EXCHANGE_MESSAGES {
@@ -242,7 +242,7 @@ fn exchange_limits_and_expiry_are_enforced() {
             AgentOp::Reply {
                 file_ids: vec![],
                 message_id: parent,
-                request_id: uuid::Uuid::new_v4().to_string(),
+                request_id: uuid::Uuid::now_v7().to_string(),
                 text: "reply".into(),
                 files: vec![],
             },
@@ -258,7 +258,7 @@ fn exchange_limits_and_expiry_are_enforced() {
             AgentOp::Reply {
                 file_ids: vec![],
                 message_id: parent,
-                request_id: uuid::Uuid::new_v4().to_string(),
+                request_id: uuid::Uuid::now_v7().to_string(),
                 text: "extra".into(),
                 files: vec![]
             }
@@ -268,7 +268,7 @@ fn exchange_limits_and_expiry_are_enforced() {
     let next = ok(call(
         &mut store,
         &ka,
-        send(&b, &uuid::Uuid::new_v4().to_string()),
+        send(&b, &uuid::Uuid::now_v7().to_string()),
     ));
     let db = rusqlite::Connection::open(temp.path().join("state.sqlite3")).unwrap();
     db.execute(
@@ -283,7 +283,7 @@ fn exchange_limits_and_expiry_are_enforced() {
             AgentOp::Reply {
                 file_ids: vec![],
                 message_id: next["message_id"].as_str().unwrap().into(),
-                request_id: uuid::Uuid::new_v4().to_string(),
+                request_id: uuid::Uuid::now_v7().to_string(),
                 text: "late".into(),
                 files: vec![]
             }

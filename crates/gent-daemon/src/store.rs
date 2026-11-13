@@ -19,10 +19,12 @@ use std::{
 use tokio::sync::Notify;
 mod configuration;
 mod files;
+mod history;
 mod mesh;
 mod network;
 mod pairing;
 mod relay;
+mod requests;
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -66,6 +68,8 @@ impl Store {
         mesh::schema(&db)?;
         relay::schema(&db)?;
         files::schema(&mut db)?;
+        requests::schema(&db, now())?;
+        history::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -129,10 +133,10 @@ impl Store {
         {
             return self.pair(&cluster_id, action);
         }
-        let timestamp = now();
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let timestamp = requests::clock(&tx, now())?;
         let state = self.identity.state(&tx)?;
         let mut config = self.config.clone();
         config.policy = state.state().policy.clone();
@@ -189,6 +193,7 @@ impl Store {
     pub fn maintain(&mut self) -> Result<()> {
         // Local cleanup remains available after membership/lease loss.
         self.clean_files()?;
+        self.clean_history()?;
         let timestamp = now() as u64;
         let tx = self
             .db
@@ -389,6 +394,8 @@ impl StoreSession<'_> {
             OwnerOp::Agents => Ok(serde_json::to_value(self.all_agents()?)?),
             OwnerOp::FilesStatus => self.files_status(),
             OwnerOp::FilesClean { dry_run } => self.files_clean(dry_run),
+            OwnerOp::HistoryStatus => self.history_status(),
+            OwnerOp::HistoryClean { dry_run } => self.history_clean(dry_run),
             OwnerOp::Providers => {
                 let mut providers = BTreeMap::<String, Vec<Agent>>::new();
                 for agent in self.all_agents()? {
@@ -503,6 +510,7 @@ impl StoreSession<'_> {
                     .filter(|other| self.config.policy.visible(&who, other))
                     .collect::<Vec<_>>()
             )),
+            AgentOp::RequestIds { count } => self.request_ids(count),
             AgentOp::FilePaths => self.file_paths(&who),
             AgentOp::FileImport {
                 request_id,
@@ -725,6 +733,7 @@ impl StoreSession<'_> {
             );
             return Ok(json!({"message_id":message_id,"duplicate":true}));
         }
+        requests::admit(request_id, self.timestamp)?;
         let recipient = self.get_agent(recipient_id)?;
         ensure!(sender.id != recipient.id, UNAVAILABLE);
         let remote = recipient.node_id != self.identity.node.id();
@@ -809,7 +818,9 @@ impl StoreSession<'_> {
             )? == 1,
             "exchange reply limit reached"
         );
-        tx.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES (?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,serde_json::to_string(&message)?])?;
+        let payload = serde_json::to_string(&message)?;
+        history::message_capacity(tx, payload.len())?;
+        tx.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES (?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
         self.bind_attachments(&message, &attachments)?;
         self.record_relay_message(&message)?;
         if remote {

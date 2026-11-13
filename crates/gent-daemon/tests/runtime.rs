@@ -110,7 +110,7 @@ impl Fixture {
             AgentOp::Send {
                 file_ids: vec![],
                 recipient: self.agents[1].clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "queued under signed policy".into(),
                 files: vec![],
             },
@@ -263,7 +263,7 @@ fn failed_message_commit_rolls_back_exchange_and_registration_activity() {
     f.set(permit());
     f.db().execute("UPDATE agents SET last_seen=7", []).unwrap();
     f.db().execute_batch("CREATE TRIGGER fail_message BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT,'injected queue failure'); END;").unwrap();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = Uuid::now_v7().to_string();
     let action = AgentOp::Send {
         file_ids: vec![],
         recipient: f.agents[1].clone(),

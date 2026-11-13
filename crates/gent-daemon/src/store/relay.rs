@@ -528,6 +528,7 @@ impl StoreSession<'_> {
             // An old retry must not reactivate an attachment after a switch.
             return self.relay_view(who, self.relay_attachment(who, &id)?);
         }
+        requests::admit(request_id, self.timestamp)?;
         let peer = self.get_agent(target)?;
         ensure!(
             who.id != peer.id && self.config.policy.can_open(who, &peer),

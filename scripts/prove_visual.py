@@ -446,7 +446,7 @@ def main():
         else:
             marker = 'GENT_VISUAL_' + uuid.uuid4().hex
             initial = turn(local_root, {'label': 'initial', 'session': builder['session'], 'prompt':
-                f'Call gent_identity and gent_agents. Render a card with red left. Send both files to visual-reviewer using gent_send with a fresh UUID request_id. '
+                f'Call gent_identity and gent_agents. Render a card with red left. Send both files to visual-reviewer using gent_send with a UUIDv7 from gent_request_ids. '
                 f'Text: "{marker}: Please inspect this card and send visual feedback with a reference image." Do nothing else.'})
             assert initial['tools']['gent_identity'][0]['agent']['id'] == aid
             first_id = initial['tools']['gent_send'][0]['message_id']
@@ -459,7 +459,7 @@ def main():
             local_daemon = None
             feedback = remote('turn', remote_root, {'label': 'feedback', 'session': reviewer['session'], 'prompt':
                 'Call gent_identity and gent_inbox. Inspect the actual PNG in the pending message. The acceptance criteria are a green status dot in the upper right and an unchanged blue panel. '
-                'Acknowledge the message, then reply to it using gent_reply with a fresh UUID. Begin the text with "OBSERVED: COLOR SIDE" using the dot color and side you actually see, '
+                'Acknowledge the message, then reply to it using gent_reply with a UUIDv7 from gent_request_ids. Begin the text with "OBSERVED: COLOR SIDE" using the dot color and side you actually see, '
                 'then explain the required correction. Render a green right reference card and include both returned files in your reply. Do nothing else.'})
             assert feedback['tools']['gent_identity'][0]['agent']['id'] == bid
             feedback_id = feedback['tools']['gent_reply'][0]['message_id']
@@ -478,7 +478,7 @@ def main():
             assert_files(recovered_feedback, feedback_message['files'])
             revised = turn(local_root, {'label': 'revision', 'session': builder['session'], 'prompt':
                 'Call gent_identity and gent_inbox. Inspect your peer\'s visual feedback and reference PNG, acknowledge it, and use the renderer to implement the requested change. '
-                'Reply to that feedback using gent_reply with a fresh UUID and both revised files. Explain what you changed. Do nothing else.'})
+                'Reply to that feedback using gent_reply with a UUIDv7 from gent_request_ids and both revised files. Explain what you changed. Do nothing else.'})
             assert revised['tools']['gent_identity'][0]['agent']['id'] == aid
             revision_id = revised['tools']['gent_reply'][0]['message_id']
             revision = wait_for(lambda: message_at(True, revision_id), 'revised image delivery')
@@ -486,7 +486,7 @@ def main():
             assert_files(revision, render('green', 'right'))
             assert_files(revision, message_at(False, revision_id)['files'])
             approved = remote('turn', remote_root, {'label': 'approval', 'session': reviewer['session'], 'prompt':
-                'Call gent_identity and gent_inbox. Inspect the revised PNG against your previous acceptance criteria. Acknowledge the message and reply using gent_reply with a fresh UUID. '
+                'Call gent_identity and gent_inbox. Inspect the revised PNG against your previous acceptance criteria. Acknowledge the message and reply using gent_reply with a UUIDv7 from gent_request_ids. '
                 'If it passes, use exactly "APPROVED: green right" as the reply text. Otherwise explain the visual defect. Then use gent_message_status to check receipt of your earlier feedback. Do nothing else.'})
             assert approved['tools']['gent_identity'][0]['agent']['id'] == bid
             assert approved['tools']['gent_message_status'][-1]['state'] == 'delivered'

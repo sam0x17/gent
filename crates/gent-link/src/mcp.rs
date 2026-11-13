@@ -28,6 +28,12 @@ fn tools() -> Vec<Tool> {
     let file_ids = json!({"type":"array","maxItems":4,"uniqueItems":true,"items":{"type":"string","format":"uuid"}});
     let declarations = vec![
         (
+            "gent_request_ids",
+            "Generate UUIDv7 request IDs for new sends, replies, file imports, relay attachments, or relay turns. First use must be within 24 hours. Use one ID per new operation; retain it for identical retries. Never replace an expired ID merely to retry old work. Generating IDs does not submit work.",
+            json!({"count":{"type":"integer","minimum":1,"maximum":32,"default":1}}),
+            vec![],
+        ),
+        (
             "gent_file_paths",
             "Get this agent's local file handoff folders. A CLI host can copy real files into import_directory with its own filesystem tools. Paths refer to the daemon machine.",
             json!({}),
@@ -36,7 +42,7 @@ fn tools() -> Vec<Tool> {
         (
             "gent_file_import",
             "Import a regular file from this agent's import_directory by basename, up to 32 MiB. Returns a file ID usable in file_ids on send, reply, relay_send, or relay_respond. Keep source bytes unchanged for identical request_id retries. Gent cleans unchanged handoff copies after cleanup_after; save lasting files elsewhere.",
-            json!({"request_id":{"type":"string","format":"uuid"},"name":{"type":"string","maxLength":128},"media_type":{"type":"string","maxLength":128}}),
+            json!({"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"name":{"type":"string","maxLength":128},"media_type":{"type":"string","maxLength":128}}),
             vec!["request_id", "name", "media_type"],
         ),
         (
@@ -71,14 +77,14 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_send",
-            "Send to the recipient agent ID returned by gent_agents. Use a new UUID request_id for new work; reuse it only for an identical retry. Optional files contain actual bytes.",
-            json!({"recipient":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
+            "Send to the recipient agent ID returned by gent_agents. Get a UUIDv7 request_id from gent_request_ids for new work; reuse it only for an identical retry. Optional files contain actual bytes.",
+            json!({"recipient":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
             vec!["recipient", "request_id", "text"],
         ),
         (
             "gent_reply",
             "Reply using a message ID from gent_inbox, within its bounded exchange. Reuse request_id only for an identical retry.",
-            json!({"message_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
+            json!({"message_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
             vec!["message_id", "request_id", "text"],
         ),
         (
@@ -101,8 +107,8 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_relay_attach",
-            "Persist a target agent ID using an active owner relay grant and messaging permissions. Use a fresh UUID request_id; an identical retry preserves the original attachment. This selects a target without sending a message.",
-            json!({"target":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"}}),
+            "Persist a target agent ID using an active owner relay grant and messaging permissions. Use a UUIDv7 request_id from gent_request_ids; an identical retry preserves the original attachment. This selects a target without sending a message.",
+            json!({"target":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"}}),
             vec!["target", "request_id"],
         ),
         (
@@ -119,8 +125,8 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_relay_send",
-            "Forward one new turn to a saved attachment. Preserve the user's text and file bytes. A fresh UUID request_id creates work; an identical retry never resends it or changes its original target. The message remains attributed to this intermediary, without proof of human authorship.",
-            json!({"attachment_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
+            "Forward one new turn to a saved attachment. Preserve the user's text and file bytes. A new UUIDv7 request_id from gent_request_ids creates work; an identical retry never resends it or changes its original target. The message remains attributed to this intermediary, without proof of human authorship.",
+            json!({"attachment_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
             vec!["attachment_id", "request_id", "text"],
         ),
         (
@@ -144,13 +150,13 @@ fn tools() -> Vec<Tool> {
         (
             "gent_relay_respond",
             "As the target, respond to your current relay turn with text and optional files. Use progress while work remains; complete to finish; cancelled only after handling a cancellation request. A final outcome advances the queue. Reuse request_id only for an identical retry. Normal host execution approvals still apply.",
-            json!({"turn_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids,"outcome":{"type":"string","enum":["progress","complete","cancelled"]}}),
+            json!({"turn_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids,"outcome":{"type":"string","enum":["progress","complete","cancelled"]}}),
             vec!["turn_id", "request_id", "text", "outcome"],
         ),
         (
             "gent_relay_cancel",
             "Request cancellation of a specific pending turn, including after detach. This does not prove that host execution stopped and does not finish the turn. Inspect its subsequent target response. Reuse request_id only for an identical retry.",
-            json!({"turn_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid"}}),
+            json!({"turn_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"}}),
             vec!["turn_id", "request_id"],
         ),
     ];

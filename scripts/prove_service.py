@@ -13,7 +13,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from smoke_mcp import Client, PNG
 
 
@@ -74,7 +73,7 @@ def main():
         bid = b.call('gent_register', {'name': 'service-recipient', 'provider': 'generic-mcp'})[0]['agent']['id']
         call('permission', 'allow', aid, bid, '--permission', 'enumerate', 'send')
         call('permission', 'allow', bid, aid, '--permission', 'enumerate', 'receive')
-        sent = a.call('gent_send', {'recipient': bid, 'request_id': str(uuid.uuid4()), 'text': 'survive service lifecycle', 'files': [{'name': 'image.png', 'media_type': 'image/png', 'data_base64': PNG}]})[0]
+        sent = a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'survive service lifecycle', 'files': [{'name': 'image.png', 'media_type': 'image/png', 'data_base64': PNG}]})[0]
         assert not call('daemon', 'stop')['daemon']['running']
         assert not (home / 'daemon.sock').exists()
         call('daemon', 'status', expected=3)

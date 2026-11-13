@@ -11,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from smoke_mcp import Client
 
 
@@ -73,10 +72,10 @@ def main():
             outbox = Path(a.call('gent_file_paths')[0]['import_directory'])
             staged = outbox / 'proof.bin'
             staged.write_bytes(payload)
-            request = {'request_id': str(uuid.uuid4()), 'name': staged.name, 'media_type': 'application/octet-stream'}
+            request = {'request_id': a.request_id(), 'name': staged.name, 'media_type': 'application/octet-stream'}
             imported = a.call('gent_file_import', request)[0]
             assert imported['cleanup_after'] > time.time()
-            sent = a.call('gent_send', {'request_id': str(uuid.uuid4()), 'recipient': bid,
+            sent = a.call('gent_send', {'request_id': a.request_id(), 'recipient': bid,
                 'text': 'retention proof', 'file_ids': [imported['file']['id']]})[0]
             received = b.call('gent_inbox')[0][0]
             exported = b.call('gent_file_export', {'file_id': received['attachments'][0]['id']})[0]
@@ -100,7 +99,7 @@ def main():
             # Crash-equivalent recovery: stop, rename one tracked path to its
             # persistent recovery name, replace the original, then restart.
             staged.write_bytes(payload)
-            request['request_id'] = str(uuid.uuid4())
+            request['request_id'] = a.request_id()
             a.call('gent_file_import', request)
             for client in clients:
                 client.close()

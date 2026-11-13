@@ -29,7 +29,7 @@ impl Fixture {
         let send = AgentOp::RelaySend {
             file_ids: vec![],
             attachment_id: id.clone(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: "  exact user text\n".into(),
             files: vec![FilePart {
                 name: "reference.txt".into(),
@@ -56,7 +56,7 @@ impl Fixture {
         AgentOp::RelayRespond {
             file_ids: vec![],
             turn_id: turn.into(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: "target response".into(),
             files: vec![],
             outcome,
@@ -139,7 +139,7 @@ impl Fixture {
     fn attach(&self, target: usize) -> AgentOp {
         AgentOp::RelayAttach {
             target: self.agents[target].clone(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
         }
     }
     fn status(&mut self, id: Option<&str>) -> Value {
@@ -179,7 +179,7 @@ fn turns_preserve_content_attribution_and_pending_work_through_switch_and_restar
             AgentOp::Reply {
                 file_ids: vec![],
                 message_id: turn.clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "bypass completion protocol".into(),
                 files: vec![]
             }
@@ -210,7 +210,7 @@ fn turns_preserve_content_attribution_and_pending_work_through_switch_and_restar
     }
     assert!(matches!(f.agent(0, changed.clone()), Response::Error(_)));
     if let AgentOp::RelaySend { request_id, .. } = &mut changed {
-        *request_id = Uuid::new_v4().to_string();
+        *request_id = Uuid::now_v7().to_string();
     }
     assert!(matches!(f.agent(0, changed), Response::Error(_)));
     let progress = Fixture::respond(&turn, RelayResponseKind::Progress);
@@ -254,7 +254,7 @@ fn multiple_intermediaries_share_one_durable_target_queue_and_cancellation_is_ex
         AgentOp::RelaySend {
             file_ids: vec![],
             attachment_id: attach["attachment"]["id"].as_str().unwrap().into(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: "second intermediary".into(),
             files: vec![],
         },
@@ -285,7 +285,7 @@ fn multiple_intermediaries_share_one_durable_target_queue_and_cancellation_is_ex
     );
     let cancel = AgentOp::RelayCancel {
         turn_id: first.clone(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
     };
     ok(f.agent(0, cancel.clone()));
     assert_eq!(f.turn(&first)["state"], "pending");
@@ -307,7 +307,7 @@ fn relay_turn_and_final_reply_commit_atomically_with_retry_records() {
     let send = AgentOp::RelaySend {
         file_ids: vec![],
         attachment_id: attached["attachment"]["id"].as_str().unwrap().into(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "atomic turn".into(),
         files: vec![],
     };
@@ -345,7 +345,7 @@ fn response_pages_preserve_files_and_revocation_hides_stored_content() {
             AgentOp::RelayRespond {
                 file_ids: vec![],
                 turn_id: turn.clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: format!("image {index}"),
                 files: vec![FilePart {
                     name: "image.png".into(),
@@ -395,7 +395,7 @@ fn relay_history_recovers_turn_ids_and_response_budget_reserves_completion() {
             AgentOp::RelaySend {
                 file_ids: vec![],
                 attachment_id: attachment.clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "follow-up".into(),
                 files: vec![],
             },
@@ -439,7 +439,7 @@ fn relay_history_recovers_turn_ids_and_response_budget_reserves_completion() {
         0,
         AgentOp::RelayCancel {
             turn_id: first.clone(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
         },
     ));
     assert!(matches!(
@@ -447,7 +447,7 @@ fn relay_history_recovers_turn_ids_and_response_budget_reserves_completion() {
             0,
             AgentOp::RelayCancel {
                 turn_id: first.clone(),
-                request_id: Uuid::new_v4().to_string()
+                request_id: Uuid::now_v7().to_string()
             }
         ),
         Response::Error(_)
@@ -480,7 +480,7 @@ fn temporary_permission_block_does_not_let_later_turns_overtake_the_head() {
         AgentOp::RelaySend {
             file_ids: vec![],
             attachment_id: attachment,
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: "later".into(),
             files: vec![],
         },
@@ -512,7 +512,7 @@ fn relay_selection_needs_both_owner_grant_and_ordinary_permissions() {
             AgentOp::Send {
                 file_ids: vec![],
                 recipient: f.agents[1].clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "grant is not permission".into(),
                 files: vec![]
             }
@@ -694,7 +694,7 @@ fn expired_grant_blocks_new_selection_and_expires_persisted_selection() {
         AgentOp::RelaySend {
             file_ids: vec![],
             attachment_id: a["attachment"]["id"].as_str().unwrap().into(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: "expires with grant".into(),
             files: vec![],
         },

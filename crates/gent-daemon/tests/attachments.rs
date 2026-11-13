@@ -8,6 +8,8 @@ use std::{
     path::PathBuf,
 };
 use uuid::Uuid;
+#[path = "attachments/history.rs"]
+mod history;
 #[path = "attachments/retention.rs"]
 mod retention;
 
@@ -93,7 +95,7 @@ impl Fixture {
         )
         .unwrap();
         AgentOp::FileImport {
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             name: name.into(),
             media_type: "application/octet-stream".into(),
         }
@@ -101,7 +103,7 @@ impl Fixture {
     fn send(&self, recipient: usize, ids: Vec<String>) -> AgentOp {
         AgentOp::Send {
             recipient: self.agents[recipient].clone(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: String::new(),
             files: vec![],
             file_ids: ids,
@@ -353,7 +355,7 @@ fn relay_turn_files_obey_grant_revocation_and_scoped_replies() {
         0,
         AgentOp::RelayAttach {
             target: f.agents[1].clone(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
         },
     ));
     let import = f.source(0, "turn.bin", b"turn attachment");
@@ -365,7 +367,7 @@ fn relay_turn_files_obey_grant_revocation_and_scoped_replies() {
         0,
         AgentOp::RelaySend {
             attachment_id: attached["attachment"]["id"].as_str().unwrap().into(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: String::new(),
             files: vec![],
             file_ids: vec![id],
@@ -381,7 +383,7 @@ fn relay_turn_files_obey_grant_revocation_and_scoped_replies() {
         1,
         AgentOp::RelayRespond {
             turn_id: turn.clone(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: String::new(),
             files: vec![],
             file_ids: vec![incoming.clone()],

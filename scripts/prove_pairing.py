@@ -196,7 +196,7 @@ def main():
             wait_for(lambda: applied(granted['revision']))
             wait_for(lambda: len(a.call('gent_agents')[0]) == 1)
             files = [{'name': 'visual.png', 'media_type': 'image/png', 'data_base64': PNG}]
-            attempt = {'recipient': bid, 'request_id': str(uuid.uuid4()), 'text': 'review this image', 'files': files}
+            attempt = {'recipient': bid, 'request_id': a.request_id(), 'text': 'review this image', 'files': files}
             sent = a.call('gent_send', attempt)[0]
             assert a.call('gent_send', attempt)[0]['duplicate']
             wait_for(lambda: len(b.call('gent_inbox')[0]) == 1)
@@ -204,10 +204,10 @@ def main():
             assert inbox[0]['id'] == sent['message_id']
             assert base64.b64decode(inbox[0]['files'][0]['data_base64']) == base64.b64decode(PNG)
             assert any(part['type'] == 'image' and part['data'] == PNG for part in raw['content'])
-            b.call('gent_send', {'recipient': aid, 'request_id': str(uuid.uuid4()), 'text': 'unsolicited'}, error=True)
+            b.call('gent_send', {'recipient': aid, 'request_id': b.request_id(), 'text': 'unsolicited'}, error=True)
             b.call('gent_ack', {'message_id': sent['message_id']})
             wait_for(lambda: a.call('gent_message_status', {'message_id': sent['message_id']})[0]['state'] == 'delivered')
-            reply = b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': str(uuid.uuid4()), 'text': 'image reviewed', 'files': files})[0]
+            reply = b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': b.request_id(), 'text': 'image reviewed', 'files': files})[0]
             wait_for(lambda: len(a.call('gent_inbox')[0]) == 1)
             inbox, raw = a.call('gent_inbox')
             assert inbox[0]['id'] == reply['message_id'] and inbox[0]['reply_to'] == sent['message_id']
@@ -215,14 +215,14 @@ def main():
             a.call('gent_ack', {'message_id': reply['message_id']})
             stop(local_daemon)
             local_daemon = None
-            queued = b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': str(uuid.uuid4()), 'text': 'follow-up while offline'})[0]
+            queued = b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': b.request_id(), 'text': 'follow-up while offline'})[0]
             local_daemon = start_local()
             wait_for(lambda: (home / 'daemon.sock').exists())
             wait_for(lambda: any(m['id'] == queued['message_id'] for m in a.call('gent_inbox')[0]))
             a.call('gent_ack', {'message_id': queued['message_id']})
             grant = cli('relay', 'grant', aid, bid)
             assert grant['state'] == 'applied'
-            attached = a.call('gent_relay_attach', {'target': bid, 'request_id': str(uuid.uuid4())})[0]
+            attached = a.call('gent_relay_attach', {'target': bid, 'request_id': a.request_id()})[0]
             assert attached['attachment']['security_mode'] == 'encrypted_daemon_link'
 
             def restart_relay_nodes():
@@ -244,8 +244,8 @@ def main():
                 assert source.resolve().is_relative_to(home.resolve())
                 content = b'gent-native-mcp-private-file\0' + bytes(range(256)) * 8192
                 source.write_bytes(content)
-                imported = a.call('gent_file_import', {'name': source.name, 'media_type': 'application/octet-stream', 'request_id': str(uuid.uuid4())})[0]['file']
-                request = {'recipient': bid, 'request_id': str(uuid.uuid4()), 'text': 'native file review', 'file_ids': [imported['id']]}
+                imported = a.call('gent_file_import', {'name': source.name, 'media_type': 'application/octet-stream', 'request_id': a.request_id()})[0]['file']
+                request = {'recipient': bid, 'request_id': a.request_id(), 'text': 'native file review', 'file_ids': [imported['id']]}
                 sent_file = a.call('gent_send', request)[0]
                 restart_relay_nodes()
                 assert a.call('gent_send', request)[0]['message_id'] == sent_file['message_id']
@@ -259,7 +259,7 @@ def main():
                 verify = "import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1]).resolve(); assert p.is_relative_to(pathlib.Path(sys.argv[2]).resolve()); print(hashlib.sha256(p.read_bytes()).hexdigest())"
                 digest = remote(['/opt/homebrew/bin/python3', '-c', verify, exported['path'], owner_home]).stdout.strip()
                 assert digest == hashlib.sha256(content).hexdigest() == received['sha256']
-                result = b.call('gent_reply', {'message_id': sent_file['message_id'], 'request_id': str(uuid.uuid4()), 'text': 'native bytes reviewed', 'file_ids': [received['id']]})[0]
+                result = b.call('gent_reply', {'message_id': sent_file['message_id'], 'request_id': b.request_id(), 'text': 'native bytes reviewed', 'file_ids': [received['id']]})[0]
                 restart_relay_nodes()
                 wait_for(lambda: incoming(a, result['message_id']))
                 returned = incoming(a, result['message_id'])['attachments'][0]
@@ -317,7 +317,7 @@ def main():
                 remote(['python3', '-c', STOP_OWNER, owner_home])
                 stop(owner_daemon)
                 owner_daemon = None
-                sent = a.call('gent_send', {'recipient': cid, 'request_id': str(uuid.uuid4()), 'text': 'direct mesh image with owner offline', 'files': files})[0]
+                sent = a.call('gent_send', {'recipient': cid, 'request_id': a.request_id(), 'text': 'direct mesh image with owner offline', 'files': files})[0]
                 wait_for(lambda: len(c.call('gent_inbox')[0]) == 1)
                 inbox, raw = c.call('gent_inbox')
                 assert inbox[0]['id'] == sent['message_id'] and any(part['type'] == 'image' and part['data'] == PNG for part in raw['content'])
@@ -325,7 +325,7 @@ def main():
                 wait_for(lambda: a.call('gent_message_status', {'message_id': sent['message_id']})[0]['state'] == 'delivered')
                 stop(local_daemon)
                 local_daemon = None
-                direct_reply = c.call('gent_reply', {'message_id': sent['message_id'], 'request_id': str(uuid.uuid4()), 'text': 'direct mesh feedback', 'files': files})[0]
+                direct_reply = c.call('gent_reply', {'message_id': sent['message_id'], 'request_id': c.request_id(), 'text': 'direct mesh feedback', 'files': files})[0]
                 local_daemon = start_local()
                 wait_for(lambda: (home / 'daemon.sock').exists())
                 wait_for(lambda: any(m['id'] == direct_reply['message_id'] for m in a.call('gent_inbox')[0]))

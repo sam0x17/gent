@@ -218,7 +218,7 @@ async fn peers_automatically_connect_and_exchange_files_without_the_owner_online
     let sent = ok(nodes[1].agent(AgentOp::Send {
         file_ids: vec![],
         recipient: nodes[2].agent.clone(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "private-peer-image".into(),
         files: vec![FilePart {
             name: "image.png".into(),
@@ -265,7 +265,7 @@ async fn peers_automatically_connect_and_exchange_files_without_the_owner_online
     ok(nodes[2].agent(AgentOp::Reply {
         file_ids: vec![],
         message_id: id,
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "offline direct feedback".into(),
         files: vec![],
     }));
@@ -286,7 +286,7 @@ async fn peers_automatically_connect_and_exchange_files_without_the_owner_online
         nodes[2].agent(AgentOp::Send {
             file_ids: vec![],
             recipient: nodes[1].agent.clone(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: "unsolicited".into(),
             files: vec![]
         }),

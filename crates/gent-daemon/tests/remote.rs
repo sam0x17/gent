@@ -208,7 +208,7 @@ async fn remote_images_scoped_replies_and_authenticated_receipts_survive_restart
     assert_eq!(ok(pair.agent(0, AgentOp::Agents)), json!([]));
     assert_eq!(ok(pair.agent(1, AgentOp::Agents)), json!([]));
     assert!(matches!(
-        pair.agent(0, pair.send("hidden", vec![], &Uuid::new_v4().to_string())),
+        pair.agent(0, pair.send("hidden", vec![], &Uuid::now_v7().to_string())),
         Response::Error(_)
     ));
     pair.allow().await;
@@ -218,7 +218,7 @@ async fn remote_images_scoped_replies_and_authenticated_receipts_survive_restart
         media_type: "image/png".into(),
         data_base64: STANDARD.encode(&bytes),
     };
-    let request = Uuid::new_v4().to_string();
+    let request = Uuid::now_v7().to_string();
     let action = pair.send("private-visual-review", vec![file.clone()], &request);
     let sent = ok(pair.agent(0, action.clone()));
     assert_eq!(ok(pair.agent(0, action))["message_id"], sent["message_id"]);
@@ -245,7 +245,7 @@ async fn remote_images_scoped_replies_and_authenticated_receipts_survive_restart
             AgentOp::Send {
                 file_ids: vec![],
                 recipient: pair.agents[0].clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "unsolicited".into(),
                 files: vec![]
             }
@@ -258,7 +258,7 @@ async fn remote_images_scoped_replies_and_authenticated_receipts_survive_restart
         AgentOp::Reply {
             file_ids: vec![],
             message_id: message.clone(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             text: "scoped feedback".into(),
             files: vec![],
         },
@@ -303,7 +303,7 @@ async fn queued_remote_work_and_directory_tombstones_obey_newer_permissions() {
     relay.mode.store(1, std::sync::atomic::Ordering::SeqCst);
     let sent = ok(pair.agent(
         0,
-        pair.send("offline-work", vec![], &Uuid::new_v4().to_string()),
+        pair.send("offline-work", vec![], &Uuid::now_v7().to_string()),
     ));
     let mut policy = pair.policy();
     policy.rules.push(Rule {
@@ -397,7 +397,7 @@ async fn relay_grant_proposals_sync_and_revoke_persistent_cross_node_selection()
     }
     let attach = AgentOp::RelayAttach {
         target: pair.agents[1].clone(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
     };
     let attached = ok(pair.agent(0, attach.clone()));
     assert_eq!(attached["state"], "attached");
@@ -613,7 +613,7 @@ fn import_file(pair: &Pair, bytes: &[u8]) -> String {
     ok(pair.agent(
         0,
         AgentOp::FileImport {
-            request_id: Uuid::new_v4().to_string(),
+            request_id: Uuid::now_v7().to_string(),
             name: "private-render.bin".into(),
             media_type: "application/x-gent-private-image".into(),
         },
@@ -625,7 +625,7 @@ fn import_file(pair: &Pair, bytes: &[u8]) -> String {
 fn attached_message(pair: &Pair, id: &str) -> AgentOp {
     AgentOp::Send {
         recipient: pair.agents[1].clone(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "attachment visual review".into(),
         files: vec![],
         file_ids: vec![id.into()],
@@ -698,7 +698,7 @@ async fn automatic_attachment_dispatch_recovers_storage_loss_restart_and_recheck
     let inbox = ok(pair.agent(1, AgentOp::Inbox));
     let reply = AgentOp::Reply {
         message_id: inbox[0]["id"].as_str().unwrap().into(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "review result".into(),
         files: vec![],
         file_ids: vec![id.clone()],
@@ -787,7 +787,7 @@ async fn wrangler_dispatches_agent_attachments_with_native_files_and_restart() {
     let inbox = ok(pair.agent(1, AgentOp::Inbox));
     let reply = AgentOp::Reply {
         message_id: inbox[0]["id"].as_str().unwrap().into(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "verified complete image".into(),
         files: vec![],
         file_ids: vec![received.clone()],

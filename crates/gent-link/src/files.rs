@@ -1,5 +1,51 @@
 use serde_json::Value;
 
+pub fn print_history(value: &Value) {
+    if let Some(dry_run) = value["dry_run"].as_bool() {
+        println!(
+            "{} {} exchanges, {} messages ({} payload bytes), {} import retries, and {} relay attachments.",
+            if dry_run { "Would retire" } else { "Retired" },
+            value["exchanges_removed"],
+            value["messages_removed"],
+            value["payload_bytes_removed"],
+            value["import_retries_removed"],
+            value["relay_attachments_removed"]
+        );
+        println!(
+            "Outbound events retained for cancellation: {}; migration-deferred exchanges: {}; more due: {}.",
+            value["outbound_events_cancelled"],
+            value["legacy_exchanges_deferred"],
+            value["more_exchanges_due"]
+        );
+    } else {
+        println!(
+            "Gent messages: {} / {}; payload bytes: {} / {}.",
+            value["messages"],
+            value["limits"]["messages"],
+            value["message_payload_bytes"],
+            value["limits"]["message_payload_bytes"]
+        );
+        println!(
+            "Exchanges: {}; expired exchanges due: {}. Import retries: {} / {}; relay attachments: {}.",
+            value["exchanges"],
+            value["expired_exchanges_due"],
+            value["import_retry_records"],
+            value["limits"]["import_retry_records"],
+            value["relay_attachments"]
+        );
+        println!(
+            "Queued events: {} ({} bytes), including {} cancellations.",
+            value["queued_events"], value["queued_event_bytes"], value["queued_cancellations"]
+        );
+        println!(
+            "Message history: seven days after expiry. New request IDs: UUIDv7, first use within 24 hours."
+        );
+        println!(
+            "Encrypted stream, configuration, and provider histories are separate. Preview: gent history clean --dry-run"
+        );
+    }
+}
+
 pub fn print_report(value: &Value) {
     if let Some(dry_run) = value["dry_run"].as_bool() {
         println!(

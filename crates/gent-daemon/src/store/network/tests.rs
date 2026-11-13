@@ -42,7 +42,7 @@ impl Pair {
             0,
             AgentOp::RelayAttach {
                 target: self.agents[1].clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
             },
         )
         .unwrap()["attachment"]["id"]
@@ -144,7 +144,7 @@ impl Pair {
             AgentOp::Send {
                 file_ids: vec![],
                 recipient: self.agents[1].clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "private work".into(),
                 files,
             },
@@ -191,6 +191,179 @@ impl Pair {
     fn reopen(&mut self, i: usize) {
         self.stores[i] = Store::open(self.homes[i].path()).unwrap();
     }
+    fn retire_history(&mut self, i: usize) -> Value {
+        // Advance request admission/retention only. MLS still uses the real
+        // wall clock and its existing signed authority during these tests.
+        self.stores[i]
+            .db
+            .execute("UPDATE request_clock SET floor=?1", [now() + 9 * 86400])
+            .unwrap();
+        self.stores[i]
+            .execute(Request::Owner {
+                credential: config::read_private(&self.homes[i].path().join("owner.key")).unwrap(),
+                action: OwnerOp::HistoryClean { dry_run: false },
+            })
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn retired_partial_message_cancels_after_restart_even_if_fragment_cursor_rolled_back() {
+    for failed_cursor in [false, true] {
+        let mut pair = Pair::new().await;
+        pair.send(vec![FilePart {
+            name: "partial.png".into(),
+            media_type: "image/png".into(),
+            data_base64: STANDARD.encode(vec![7; 1024 * 1024]),
+        }])
+        .unwrap();
+        let group = pair.group();
+        let next = pair.stores[1].data_next(&group).unwrap();
+        if failed_cursor {
+            pair.stores[0].db.execute_batch("CREATE TRIGGER fail_offset BEFORE UPDATE OF offset ON network_events BEGIN SELECT RAISE(ABORT,'injected offset failure'); END;").unwrap();
+            assert!(pair.stores[0].data_prepare(&group).is_err());
+            pair.stores[0]
+                .db
+                .execute_batch("DROP TRIGGER fail_offset;")
+                .unwrap();
+        } else {
+            pair.stores[0].data_prepare(&group).unwrap();
+        }
+        let packet = pair.stores[0].data_outgoing(&group, next).unwrap().unwrap();
+        pair.stores[1].data_receive(&packet).unwrap();
+        assert_eq!(
+            pair.stores[1]
+                .db
+                .query_row("SELECT COUNT(*) FROM network_partial", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+        let cleaned = pair.retire_history(0);
+        assert_eq!(cleaned["messages_removed"], 1);
+        assert_eq!(cleaned["outbound_events_cancelled"], 1);
+        let offset: usize = pair.stores[0].db.query_row("SELECT offset FROM network_events WHERE cancelled=1 AND length(body)=0 AND subject IS NULL",[],|r|r.get(0)).unwrap();
+        assert_eq!(offset, if failed_cursor { 0 } else { FRAGMENT_BYTES });
+        pair.reopen(0);
+        pair.reopen(1);
+        pair.pump();
+        assert_eq!(
+            pair.stores[1]
+                .db
+                .query_row("SELECT COUNT(*) FROM network_partial", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            pair.stores[0]
+                .db
+                .query_row("SELECT COUNT(*) FROM network_events", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(pair.agent(1, AgentOp::Inbox).unwrap(), json!([]));
+    }
+}
+
+#[tokio::test]
+async fn late_authenticated_receipt_after_pruning_does_not_stall_stream() {
+    let mut pair = Pair::new().await;
+    let id = pair.send(vec![]).unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pair.pump();
+    pair.agent(
+        1,
+        AgentOp::Ack {
+            message_id: id.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(pair.retire_history(0)["messages_removed"], 1);
+    pair.reopen(0);
+    pair.pump();
+    assert_eq!(
+        pair.stores[0]
+            .db
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        pair.stores[1]
+            .db
+            .query_row("SELECT COUNT(*) FROM network_events", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn pruned_remote_request_cannot_return_with_original_or_rewritten_timestamps() {
+    let mut pair = Pair::new().await;
+    pair.send(vec![]).unwrap();
+    let body: Vec<u8> = pair.stores[0]
+        .db
+        .query_row(
+            "SELECT body FROM network_events WHERE subject IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    pair.pump();
+    assert_eq!(pair.retire_history(1)["messages_removed"], 1);
+    let state = pair.stores[1].identity.state(&pair.stores[1].db).unwrap();
+    let renewal = state
+        .renew(
+            pair.stores[0].identity.signing_owner().unwrap(),
+            (now() + 9 * 86400) as u64,
+        )
+        .unwrap();
+    pair.stores[1]
+        .identity
+        .apply(&pair.stores[1].db, renewal)
+        .unwrap();
+    pair.reopen(1);
+    let peer = pair.stores[0].identity.node.id().to_owned();
+    for rewrite in [false, true] {
+        let mut record: Record = serde_json::from_slice(&body).unwrap();
+        if rewrite {
+            if let Event::Message { message, .. } = &mut record.event {
+                message.created_at = now() + 9 * 86400;
+                message.expires_at = message.created_at + EXCHANGE_TTL_SECONDS;
+            } else {
+                panic!("expected message");
+            }
+        }
+        let store = &pair.stores[1];
+        let tx = store.db.unchecked_transaction().unwrap();
+        let mut session = store.network_session(&tx, store.identity.state(&tx).unwrap());
+        session.import_event(&peer, record.event).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    let body: Vec<u8> = pair.stores[1]
+        .db
+        .query_row("SELECT body FROM network_events", [], |r| r.get(0))
+        .unwrap();
+    let record: Record = serde_json::from_slice(&body).unwrap();
+    assert!(matches!(
+        record.event,
+        Event::Receipt {
+            delivered: false,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -203,7 +376,7 @@ async fn remote_relay_replies_cannot_strip_or_substitute_authenticated_turn_cont
             AgentOp::RelaySend {
                 file_ids: vec![],
                 attachment_id: attachment,
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "original turn".into(),
                 files: vec![],
             },
@@ -222,7 +395,7 @@ async fn remote_relay_replies_cannot_strip_or_substitute_authenticated_turn_cont
         let store = &pair.stores[0];
         let tx = store.db.unchecked_transaction().unwrap();
         let mut session = store.network_session(&tx, store.identity.state(&tx).unwrap());
-        let request = Uuid::new_v4().to_string();
+        let request = Uuid::now_v7().to_string();
         let mut message = root.clone();
         message.id = messages::message_id(&pair.agents[1], &request).unwrap();
         message.sender.clone_from(&root.recipient);
@@ -253,7 +426,7 @@ async fn remote_relay_replies_cannot_strip_or_substitute_authenticated_turn_cont
     let response = AgentOp::RelayRespond {
         file_ids: vec![],
         turn_id: turn.clone(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "verified reply".into(),
         files: vec![],
         outcome: RelayResponseKind::Complete,
@@ -280,7 +453,7 @@ async fn crossed_cancellation_and_completion_do_not_reopen_or_lose_a_remote_turn
     let send = AgentOp::RelaySend {
         file_ids: vec![],
         attachment_id: attachment.clone(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "work".into(),
         files: vec![],
     };
@@ -298,13 +471,13 @@ async fn crossed_cancellation_and_completion_do_not_reopen_or_lose_a_remote_turn
     .unwrap();
     let cancel = AgentOp::RelayCancel {
         turn_id: turn.clone(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
     };
     pair.agent(0, cancel.clone()).unwrap();
     let response = AgentOp::RelayRespond {
         file_ids: vec![],
         turn_id: turn.clone(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "already finished".into(),
         files: vec![],
         outcome: RelayResponseKind::Complete,
@@ -364,7 +537,7 @@ async fn grant_revocation_blocks_relay_turns_before_encryption_and_before_target
             AgentOp::RelaySend {
                 file_ids: vec![],
                 attachment_id: attachment.clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "accepted earlier".into(),
                 files: vec![],
             },
@@ -384,7 +557,7 @@ async fn grant_revocation_blocks_relay_turns_before_encryption_and_before_target
             AgentOp::RelaySend {
                 file_ids: vec![],
                 attachment_id: attachment,
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "must not encrypt".into(),
                 files: vec![],
             },
@@ -597,7 +770,7 @@ async fn enrolled_peer_cannot_claim_unknown_foreign_agent_or_forge_reply_or_rece
         )
         .registration(&pair.agents[0])
         .unwrap();
-    let request = Uuid::new_v4().to_string();
+    let request = Uuid::now_v7().to_string();
     message.id = messages::message_id(&sender.id, &request).unwrap();
     message.reply_to = Some(Uuid::new_v4().to_string());
     assert!(
@@ -653,7 +826,7 @@ async fn remote_exchange_budget_stays_bounded_when_both_nodes_queue_replies() {
     let reply = |message: &Value| AgentOp::Reply {
         file_ids: vec![],
         message_id: message["message_id"].as_str().unwrap().into(),
-        request_id: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
         text: "response".into(),
         files: vec![],
     };
@@ -871,7 +1044,7 @@ async fn attachment_grants_reject_substitution_and_downloads_resume_with_current
         .agent(
             0,
             AgentOp::FileImport {
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 name: "native.bin".into(),
                 media_type: "application/octet-stream".into(),
             },
@@ -882,7 +1055,7 @@ async fn attachment_grants_reject_substitution_and_downloads_resume_with_current
             0,
             AgentOp::Send {
                 recipient: pair.agents[1].clone(),
-                request_id: Uuid::new_v4().to_string(),
+                request_id: Uuid::now_v7().to_string(),
                 text: "file review".into(),
                 files: vec![],
                 file_ids: vec![imported["file"]["id"].as_str().unwrap().into()],

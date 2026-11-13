@@ -25,6 +25,32 @@ pub(super) fn schema(db: &mut Connection) -> Result<()> {
             message TEXT PRIMARY KEY REFERENCES messages(id), digest TEXT NOT NULL);",
     )?;
     retention::schema(db)?;
+    let columns = db
+        .prepare("PRAGMA table_info(file_imports)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|name| name == "retire_after") {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "ALTER TABLE file_imports ADD COLUMN retire_after INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        let rows = tx
+            .prepare("SELECT agent,request_id FROM file_imports")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (agent, request) in rows {
+            let deadline =
+                requests::issued(&request).map_or(0, |issued| issued + requests::LIFETIME);
+            tx.execute(
+                "UPDATE file_imports SET retire_after=?3 WHERE agent=?1 AND request_id=?2",
+                params![agent, request, deadline],
+            )?;
+        }
+        tx.commit()?;
+    }
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS file_import_retention ON file_imports(retire_after);",
+    )?;
     Ok(())
 }
 
@@ -102,6 +128,8 @@ impl StoreSession<'_> {
             retention::track(self.db, &who.id, "", name, &stamp, &digest, expiry)?;
             return Ok(json!({"file":grant.descriptor(),"duplicate":true,"cleanup_after":expiry}));
         }
+        requests::admit(request, self.timestamp)?;
+        history::import_capacity(self.db)?;
         let sealed = seal(name, media_type, &bytes)?;
         let expiry = self.timestamp as u64 + crate::file_objects::MAX_RETENTION_SECONDS;
         self.objects()?.stage(&sealed, expiry)?;
@@ -115,8 +143,8 @@ impl StoreSession<'_> {
             ],
         )?;
         self.db.execute(
-            "INSERT INTO file_imports VALUES(?1,?2,?3,?4)",
-            params![who.id, request, fingerprint, descriptor.id],
+            "INSERT INTO file_imports(agent,request_id,fingerprint,object_id,retire_after) VALUES(?1,?2,?3,?4,?5)",
+            params![who.id, request, fingerprint, descriptor.id,requests::issued(request).unwrap()+requests::LIFETIME],
         )?;
         retention::track(self.db, &who.id, "", name, &stamp, &digest, expiry)?;
         Ok(json!({"file":descriptor,"duplicate":false,"cleanup_after":expiry}))

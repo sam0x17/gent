@@ -63,6 +63,12 @@ class Client:
         assert not result.get("isError"), result
         return json.loads(result["content"][0]["text"]), result
 
+    def request_id(self, meta=None):
+        value, _ = self.call("gent_request_ids", meta=meta)
+        request = value["request_ids"][0]
+        assert str(uuid.UUID(request)) == request and uuid.UUID(request).version == 7
+        return request
+
     def close(self):
         if self.process.poll() is None:
             self.process.stdin.close()
@@ -116,12 +122,12 @@ def main():
             bid = b.call("gent_register", {"name": "b", "provider": "arbitrary-b"})[0]["agent"]["id"]
             outsider.call("gent_register", {"name": "hidden", "provider": "hidden-provider"})
             assert a.call("gent_agents")[0] == []
-            attempt = {"recipient": bid, "request_id": str(uuid.uuid4()), "text": "review", "files": [{"name": "pixel.png", "media_type": "image/png", "data_base64": PNG}]}
+            attempt = {"recipient": bid, "request_id": a.request_id(), "text": "review", "files": [{"name": "pixel.png", "media_type": "image/png", "data_base64": PNG}]}
             a.call("gent_send", attempt, error=True)
             cli("permission", "allow", aid, bid, "--permission", "enumerate", "send")
             cli("permission", "allow", bid, aid, "--permission", "enumerate", "receive")
             assert [agent["id"] for agent in a.call("gent_agents")[0]] == [bid]
-            attachment_request = {"target": bid, "request_id": str(uuid.uuid4())}
+            attachment_request = {"target": bid, "request_id": a.request_id()}
             a.call("gent_relay_attach", attachment_request, error=True)
             grant_id = str(uuid.uuid4())
             granted = json.loads(cli("--request-id", grant_id, "relay", "grant", aid, bid))
@@ -161,9 +167,9 @@ def main():
             assert any(part["type"] == "image" and part["data"] == PNG for part in raw["content"])
             b.call("gent_ack", {"message_id": sent["message_id"]})
             assert b.call("gent_inbox")[0] == []
-            reply = b.call("gent_reply", {"message_id": sent["message_id"], "request_id": str(uuid.uuid4()), "text": "make it blue"})[0]
+            reply = b.call("gent_reply", {"message_id": sent["message_id"], "request_id": b.request_id(), "text": "make it blue"})[0]
             assert a.call("gent_inbox")[0][0]["id"] == reply["message_id"]
-            b.call("gent_send", {"recipient": aid, "request_id": str(uuid.uuid4()), "text": "unsolicited"}, error=True)
+            b.call("gent_send", {"recipient": aid, "request_id": b.request_id(), "text": "unsolicited"}, error=True)
 
             for client in clients:
                 client.close()

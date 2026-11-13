@@ -234,6 +234,10 @@ pub enum AgentOp {
     },
     Identity,
     Agents,
+    RequestIds {
+        #[serde(default = "one_request_id")]
+        count: u32,
+    },
     FilePaths,
     FileImport {
         request_id: String,
@@ -314,6 +318,10 @@ pub enum AgentOp {
     },
 }
 
+fn one_request_id() -> u32 {
+    1
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConfigurationEdit {
@@ -359,6 +367,10 @@ pub enum OwnerOp {
     Agents,
     Providers,
     FilesStatus,
+    HistoryStatus,
+    HistoryClean {
+        dry_run: bool,
+    },
     FilesClean {
         dry_run: bool,
     },

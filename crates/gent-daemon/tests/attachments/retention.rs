@@ -222,7 +222,7 @@ fn reimport_extends_handoff_deadline_and_cleanup_is_bounded() {
         .execute("UPDATE file_handoffs SET expires_at=1", [])
         .unwrap();
     if let AgentOp::FileImport { request_id, .. } = &mut import {
-        *request_id = Uuid::new_v4().to_string();
+        *request_id = Uuid::now_v7().to_string();
     }
     ok(f.call(0, import));
     assert_eq!(

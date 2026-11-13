@@ -279,7 +279,7 @@ def main():
         cli('permission', 'allow', peer_id, a, '--permission', 'enumerate', 'send')
         cli('permission', 'allow', a, peer_id, '--permission', 'enumerate', 'receive')
         file = {'name': 'pixel.png', 'media_type': 'image/png', 'data_base64': PNG}
-        sent = peer.call('gent_send', {'recipient': a, 'request_id': str(uuid.uuid4()), 'text': 'parent-only-interactive', 'files': [file]})[0]
+        sent = peer.call('gent_send', {'recipient': a, 'request_id': peer.request_id(), 'text': 'parent-only-interactive', 'files': [file]})[0]
         terminal.send('/clear')
         terminal.settle()
         terminal.text = ''

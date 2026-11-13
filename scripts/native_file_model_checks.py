@@ -220,8 +220,8 @@ def exercise(aid, bid, local, remote, owner, local_state, remote_state, offline,
 
     first = local('native-source',
         'Call gent_identity and gent_agents. Use the native fixture helper to render a red left card to disk. '
-        'Call gent_file_paths, stage both actual files, and import them with gent_file_import, distinct fresh request UUIDs, '
-        'and their correct media types. Send their file IDs to visual-reviewer with gent_send and a fresh request UUID. '
+        'Call gent_file_paths, stage both actual files, and import them with gent_file_import, distinct UUIDv7s from gent_request_ids, '
+        'and their correct media types. Send their file IDs to visual-reviewer with gent_send and a UUIDv7 from gent_request_ids. '
         f'Use exactly "{marker}: inspect these native files" as message text. Do not inline base64. Stop after sending.')
     identity(first, aid)
     imports = [result['file'] for result in first['tools']['gent_file_import']]
@@ -236,7 +236,7 @@ def exercise(aid, bid, local, remote, owner, local_state, remote_state, offline,
         'Call gent_identity and gent_inbox. Check and export both received attachments with gent_file_status and gent_file_export. '
         'Open the exported PNG with your native image tool and inspect it. The acceptance criteria are a green dot in the upper right and an unchanged blue panel. '
         'Acknowledge the message. Render a green right reference with the native helper, stage and import both files, '
-        'then use gent_reply with the new file_ids and a fresh UUID. Start text with "OBSERVED: COLOR SIDE" using the dot you actually see, '
+        'then use gent_reply with the new file_ids and a UUIDv7 from gent_request_ids. Start text with "OBSERVED: COLOR SIDE" using the dot you actually see, '
         'and explain the needed correction. Do not inline base64. Stop after replying.')
     identity(feedback, bid)
     exported(feedback, remote_state, first_files)
@@ -249,7 +249,7 @@ def exercise(aid, bid, local, remote, owner, local_state, remote_state, offline,
     revision = local('native-revision',
         'Call gent_identity and gent_inbox. Export and open the feedback PNG with your native image tool; also export the SVG. '
         'Acknowledge that message. Use the native helper to render the requested revision to disk, stage and import both files, '
-        'and reply to the feedback with gent_reply, fresh request UUID, file_ids, and a brief description of the change. Do not inline base64.')
+        'and reply to the feedback with gent_reply, UUIDv7 from gent_request_ids, file_ids, and a brief description of the change. Do not inline base64.')
     identity(revision, aid)
     exported(revision, local_state, reference)
     revision_id = one(revision, 'gent_reply')['message_id']
@@ -258,7 +258,7 @@ def exercise(aid, bid, local, remote, owner, local_state, remote_state, offline,
     revised_files = attachments(revised, [f['file'] for f in revision['tools']['gent_file_import']])
     approved = remote('native-approval',
         'Call gent_identity and gent_inbox. Export both revised attachments and open the PNG using your native image tool. '
-        'Check your earlier acceptance criteria. Acknowledge it and reply with a fresh request UUID, no files, '
+        'Check your earlier acceptance criteria. Acknowledge it and reply with a UUIDv7 from gent_request_ids, no files, '
         'and exactly "APPROVED: green right" if the image passes. Otherwise describe its defect.')
     identity(approved, bid)
     exported(approved, remote_state, revised_files)
@@ -284,7 +284,7 @@ def exercise(aid, bid, local, remote, owner, local_state, remote_state, offline,
     result_marker = 'NATIVE_RESPONSE_' + uuid.uuid4().hex
     response = remote('native-relay-response',
         'Call gent_identity and gent_relay_next. Export both request files and open the PNG with your native image tool. '
-        'Acknowledge the request, then use gent_relay_respond with a complete outcome and a fresh UUID. '
+        'Acknowledge the request, then use gent_relay_respond with a complete outcome and a UUIDv7 from gent_request_ids. '
         'Return the same received file IDs in file_ids; do not reimport or inline their bytes. '
         'Use exactly "' + result_marker + ': COLOR SIDE" as the text, substituting the dot color and side you see.')
     identity(response, bid)

@@ -134,7 +134,7 @@ gent relay revoke GRANT_UUID
 
 Both agents must already be registered and known to the signing owner. Grants last one day by default, with a seven-day maximum. They supplement enumeration/send/receive policy; they do not grant those permissions. Authorized joined nodes submit these edits through the existing configuration proposal path. `gent config requests` shows acceptance or rejection. Use the global `--request-id UUID` for an exact CLI retry; that UUID is also the grant ID.
 
-The intermediary calls `gent_relay_attach` with `target` and a fresh `request_id`. Selection persists across daemon and MCP restarts. Selecting a different target detaches the previous attachment atomically. Retrying an older selection returns its saved state and does not reactivate it. Detach names an attachment ID, so delayed control calls cannot detach a later selection. Revoked grant IDs stay retired; a new grant requires a new attachment. Status hides target details if enumeration is revoked. `gent relay attachments` is an owner view of the newest 100 local records.
+The intermediary calls `gent_relay_attach` with `target` and a new UUIDv7 `request_id` from `gent_request_ids`. Selection persists across daemon and MCP restarts. Selecting a different target detaches the previous attachment atomically. Retrying an older selection returns its saved state and does not reactivate it. Detach names an attachment ID, so delayed control calls cannot detach a later selection. Revoked grant IDs stay retired; a new grant requires a new attachment. Status hides target details if enumeration is revoked. `gent relay attachments` is an owner view of the newest 100 local records.
 
 Attaching sends nothing. Tool results report `supports_turns: true`. `gent_relay_send` forwards text and files under a stable request ID and returns a `turn_id`. Status checks never resubmit work. `gent_relay_turns` recovers saved turn IDs, including those from detached or replaced attachments. Its pages contain 50 entries; use `next_after` as `after_turn_id` to continue. `gent_relay_turn_status` returns responses with a bounded page size; continue with `after_message_id` when `has_more` is true. Both IDs and replies retain the original target after a switch.
 
@@ -371,15 +371,15 @@ Every committed owner edit or renewal wakes publication immediately. Connected r
 
 ## Files, retries, and limits
 
-For local CLI hosts, call `gent_file_paths`, copy the actual file into the returned `import_directory`, and call `gent_file_import` with its basename, media type, and request UUID. Use the returned file ID in `file_ids` on send/reply or relay tools. Each file can be up to 32 MiB. Gent seals fresh objects for every new message or forward; identical request retries retain their original IDs and bytes.
+For local CLI hosts, call `gent_file_paths`, copy the actual file into the returned `import_directory`, and call `gent_file_import` with its basename, media type, and a UUIDv7 from `gent_request_ids`. Use the returned file ID in `file_ids` on send/reply or relay tools. Each file can be up to 32 MiB. Gent seals fresh objects for every new message or forward; identical request retries retain their original IDs and bytes.
 
 Received messages include descriptors in `attachments`. Call `gent_file_status` until ready during an authorized interaction, then `gent_file_export`. Use the returned path with the host's file or image tools. The path is local to the daemon machine. Files are verified before export; an existing file with different contents is never overwritten. Imported and exported handoff copies are temporary, with a `cleanup_after` timestamp in the tool result. Save lasting files elsewhere. Gent checks current file/message permissions on every access.
 
 Small files can use `{ "name": "image.png", "media_type": "image/png", "data_base64": "..." }` in `files`, with a combined 1 MiB decoded limit. Supported inline images also produce MCP image blocks. Native attachment images require export before inspection. Files from agents remain untrusted input.
 
-Use a fresh UUID `request_id` for each new send or reply. Reuse it only for an identical retry; conflicting content is rejected. Repeated inbox reads retain the same message IDs until acknowledgment. Acknowledge after accepting the message; Gent cannot guarantee a host will perform requested work exactly once after a crash.
+Call `gent_request_ids` for new agent mutations. It returns one UUIDv7 by default or up to 32 with `count`; generating IDs does not submit work. Use one ID per new operation within 24 hours. Keep it for identical retries; conflicting content is rejected. Retained results remain retryable after that window. An expired ID without a retained result is rejected: reconcile the original work and never substitute a new ID just to retry it. Owner CLI configuration IDs have a separate contract and continue to accept UUIDv4. Repeated inbox reads retain the same message IDs until acknowledgment. Acknowledge after accepting the message; Gent cannot guarantee a host will perform requested work exactly once after a crash.
 
-Limits are 64 KiB of text, four files across `files` and `file_ids`, 32 messages per exchange, and a 24-hour exchange lifetime. Encrypted file storage reserves at most 128 objects and 256 MiB of ciphertext per node, including staged and sent copies; the development relay has a separate shared quota. Remote exchanges allocate 16 messages to each sender, including the initial message, so independently queued replies cannot exceed 32 when the nodes reconnect. Inbox responses are bounded; acknowledge retrieved messages before requesting the next batch. Message history has no pruning or aggregate disk quota yet. Plaintext handoff folders are also outside the encrypted-object quota.
+Limits are 64 KiB of text, four files across `files` and `file_ids`, 32 messages per exchange, and a 24-hour exchange lifetime. Encrypted file storage reserves at most 128 objects and 256 MiB of ciphertext per node, including staged and sent copies; the development relay has a separate shared quota. Remote exchanges allocate 16 messages to each sender, including the initial message, so independently queued replies cannot exceed 32 when the nodes reconnect. Inbox responses are bounded; acknowledge retrieved messages before requesting the next batch. Message history and agent retry records have the limits described below. Plaintext handoff folders and encrypted transport histories remain outside those quotas.
 
 Add `--file-objects` to `scripts/prove_pairing.py` to include a 2 MiB native-file round trip between physical Linux and Mac nodes, using the same authenticated MCP tools, file reads/writes, scoped reply, and both daemon restarts. The separate native large-file test uses two local nodes and actual Worker D1/R2 storage:
 
@@ -407,9 +407,28 @@ Gent records successfully imported/exported handoff copies and their file-expiry
 
 Cleanup compares file identity, size, timestamps, and content hash. It preserves changed or replaced files, refuses links and unsafe directories, and never traverses recursively. A stable `.gent-clean-UUID.tmp` recovery name allows the next pass to recover interrupted work. A new file at the original path is left alone. Status lists paths and possible recovery paths for preserved/blocked copies; inspect those locally before moving or removing them. They are retried after 15 minutes.
 
-Files that predate this ledger, unimported outbox files, and exports left by a failed ledger commit remain untracked and require user/host cleanup. Empty folders and abandoned export-writing temporary files also remain. Cleanup does not prune messages, import retry records, or encrypted stream history, and does not guarantee physical erasure from SQLite, WAL, backups, or open file handles. The state directory still assumes a trusted OS user.
+Files that predate this ledger, unimported outbox files, and exports left by a failed ledger commit remain untracked and require user/host cleanup. Empty folders and abandoned export-writing temporary files also remain. `gent files clean` only cleans file storage. Message/retry cleanup uses `gent history clean`; encrypted stream history remains retained. Neither cleanup guarantees physical erasure from SQLite, WAL, backups, or open file handles. The state directory still assumes a trusted OS user.
 
 Run `python3 scripts/smoke_file_retention.py target/debug/gent` to exercise the real CLI, MCP tools, 2 MiB files, dry-run, cleanup, and startup recovery using temporary state. It advances only fixture deadlines and preserves the source outside Gent's handoff folders. The same proof passes on Linux and macOS without model calls or a relay.
+
+## Message history and retries
+
+```sh
+gent history
+gent history status --json
+gent history clean --dry-run
+gent history clean
+```
+
+These owner commands report message counts and payload bytes, exchanges, import retry records, relay selections, and pending outbound events. Cleanup retires whole exchanges seven days after their expiry, including replies, relay turns, file grants, and retry results. It preserves live exchanges. Expired relay selections can retire after seven days once their turns are gone. Import retry records retire only after the object is gone and their request ID can no longer be admitted.
+
+Startup and 15-minute maintenance run one cleanup batch: up to eight exchanges, 256 import retry records, and 128 expired relay selections. `clean` runs one batch immediately. Use `--dry-run` to preview it; repeat cleanup while `more_exchanges_due` is nonzero or a retry/selection batch reaches its limit. New work is limited to 8,192 messages, 256 MiB of serialized message payloads, and 16,384 file import retry records per node. Existing exact retries do not consume these quotas. A full queue rejects new work atomically and can hold up remote message processing until capacity is available.
+
+The daemon persists a request-admission clock that cannot decrease after a committed transaction. New UUIDv7 IDs allow up to 60 seconds of future skew. Existing accepted legacy IDs preserve their retry results; unknown legacy IDs cannot start new local work. Upgrade all nodes together. For already queued remote legacy messages, each upgraded receiver allows at most 24 hours plus 60 seconds from its first upgrade; older exchange records wait until that grace ends before retirement. See [the replay rules and limitations](security.md#message-retention-and-replay-admission).
+
+An old message may already have encrypted fragments in transit. Cleanup compacts its pending event into a cancellation that preserves its ID, destination, and fragment cursor. The receiver clears partial reconstruction when that cancellation arrives. A late receipt for an already retired message is ignored. Cleanup does not delete encrypted stream outboxes, replay/receipt history, configuration history, provider conversations, untracked files, or backups, and it does not bound the entire database.
+
+Run `python3 scripts/smoke_history.py target/debug/gent` for an isolated CLI/MCP proof of ID generation, retained retries, native-file retry retirement, dry-run, cleanup, and restart maintenance. It advances only its temporary database's request clock; it does not change the system clock or use a model or relay.
 
 ## Remaining integration work
 
