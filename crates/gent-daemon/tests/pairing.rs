@@ -179,6 +179,68 @@ async fn joined_node_keeps_its_keys_and_imports_only_development_relay_access() 
 }
 
 #[tokio::test]
+async fn interrupted_pairing_pins_history_until_verified_configuration_catches_up() {
+    use gent_crypto::NodeIdentity;
+    use gent_daemon::{encrypted::ordered::OrderedEndpoint, store::now};
+    let mut owner = Owner::new();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("joined");
+    owner.fail_after = Some(4);
+    assert!(join(&home, &mut owner).await.is_err());
+    for _ in 0..80 {
+        owner.owner(OwnerOp::Renew).unwrap();
+    }
+    owner
+        .owner(OwnerOp::TransportClean { dry_run: false })
+        .unwrap();
+    let status = owner.owner(OwnerOp::TransportStatus).unwrap();
+    assert_eq!(status["authority_history"]["pending_join_pins"], 1);
+    assert!(
+        status["authority_history"]["full_records"]
+            .as_u64()
+            .unwrap()
+            > 64
+    );
+    owner.fail_after = None;
+    owner.reopen();
+    join(&home, &mut owner).await.unwrap();
+    let load = |home: &Path| {
+        let config = config::load(home).unwrap();
+        let key = fs::read(home.join("identity.key")).unwrap();
+        NodeIdentity::from_secret_bytes(&config.node.id, key[8..40].try_into().unwrap()).unwrap()
+    };
+    let writer = load(owner.home.path());
+    let reader = load(&home);
+    let mut source = OrderedEndpoint::open_runtime(owner.home.path(), &writer).unwrap();
+    let mut target = OrderedEndpoint::open_runtime(&home, &reader).unwrap();
+    let db = rusqlite::Connection::open(owner.home.path().join("state.sqlite3")).unwrap();
+    let group: Vec<u8> = db
+        .query_row("SELECT group_id FROM configuration_streams", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    while let Some(packet) = source
+        .next_configuration(&group, uuid::Uuid::new_v4(), now() as u64)
+        .unwrap()
+    {
+        target.stage_configuration(&packet, now() as u64).unwrap();
+        target.drain_configuration(&group, 1, now() as u64).unwrap();
+    }
+    let receipt = target.receipt(&group, now() as u64).unwrap();
+    source.confirm(&receipt, reader.id(), now() as u64).unwrap();
+    while owner
+        .owner(OwnerOp::TransportClean { dry_run: false })
+        .unwrap()["authority_records_compacted"]
+        .as_u64()
+        .unwrap()
+        > 0
+    {}
+    let status = owner.owner(OwnerOp::TransportStatus).unwrap();
+    assert_eq!(status["authority_history"]["pending_join_pins"], 0);
+    assert_eq!(status["authority_history"]["full_records"], 64);
+}
+
+#[tokio::test]
 async fn lost_pairing_replies_resume_without_duplicate_members_or_streams() {
     for interrupted in 1..=8 {
         let mut owner = Owner::new();

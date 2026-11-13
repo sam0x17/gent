@@ -4,6 +4,7 @@
 //! Callers are trusted daemon code, never MCP agents. Node authentication here
 //! does not grant permission to communicate as an agent. Initial authority and
 //! expected group membership must come from authenticated local state.
+pub mod history;
 pub mod ordered;
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -406,16 +407,24 @@ fn members(
     members: impl Iterator<Item = Member>,
     now: u64,
 ) -> Result<BTreeSet<String>> {
+    members_mode(state, members, now, false)
+}
+
+fn members_mode(
+    state: &VerifiedState,
+    members: impl Iterator<Item = Member>,
+    now: u64,
+    configuration_only: bool,
+) -> Result<BTreeSet<String>> {
     let mut ids = BTreeSet::new();
     for member in members {
         ensure!(
             ids.len() < MAX_MEMBERS
-                && ids.insert(authenticate(
-                    state,
-                    &member.credential,
-                    &member.signature_key,
-                    now
-                )?),
+                && ids.insert(if configuration_only {
+                    authenticate_saved(state, &member.credential, &member.signature_key)?
+                } else {
+                    authenticate(state, &member.credential, &member.signature_key, now)?
+                }),
             "invalid group roster"
         );
     }
@@ -698,7 +707,7 @@ impl Session<'_> {
         );
         let fingerprint = request_hash("send", &serde_json::to_vec(&(group_id, body))?);
         let mut group = load_group(provider, group_id)?;
-        members(state, group.members(), now)?;
+        members_mode(state, group.members(), now, self.configuration_only)?;
         if let Some(packet) = retry(db, id, &fingerprint)? {
             return Ok(packet);
         }
@@ -916,12 +925,9 @@ pub(crate) fn persist_authority(
     state: &VerifiedState,
     updates: &[SignedState],
 ) -> Result<()> {
-    for update in updates {
-        db.execute(
-            "INSERT INTO authority_history VALUES(?1,?2)",
-            params![update.state.revision, update.encode()?],
-        )?;
-    }
+    // All callers own a transaction. Cleanup may release records required only
+    // by peers revoked in this update; a capacity or cleanup failure restores
+    // the previous authority together with its history.
     db.execute(
         "UPDATE authority SET checkpoint=?1,state=?2 WHERE singleton=1",
         params![
@@ -929,6 +935,16 @@ pub(crate) fn persist_authority(
             state.signed().encode()?
         ],
     )?;
+    history::clean(db, false)?;
+    for update in updates {
+        let wire = update.encode()?;
+        history::capacity(db, wire.len())?;
+        history::remember(db, &update.verified_checkpoint(state.anchor())?)?;
+        db.execute(
+            "INSERT INTO authority_history VALUES(?1,?2)",
+            params![update.state.revision, wire],
+        )?;
+    }
     let runtime: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata')",
         [],
@@ -1007,7 +1023,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     let mut db = Connection::open(path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    ensure!(matches!(version, 0..=5), "unsupported MLS database version");
+    ensure!(matches!(version, 0..=6), "unsupported MLS database version");
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
     // The original RPC proof used this name for a messages index.
     // Free it before the MLS inbox table is introduced in the same database.
@@ -1070,7 +1086,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
           CREATE TABLE IF NOT EXISTS stream_confirmed (
             group_id BLOB PRIMARY KEY,reader TEXT NOT NULL,reader_key BLOB NOT NULL,
             sequence INTEGER NOT NULL,digest BLOB NOT NULL,receipt BLOB NOT NULL);
-          PRAGMA user_version=5;",
+          PRAGMA user_version=6;",
         )?;
     let has_purpose = {
         let mut columns = schema.prepare("PRAGMA table_info(streams)")?;
@@ -1093,6 +1109,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     schema.execute_batch(
         "CREATE INDEX IF NOT EXISTS receipt_stream_sequence ON receipts(group_id,stream_sequence);",
     )?;
+    history::schema(&schema, version)?;
     schema.commit()?;
     Ok(db)
 }
@@ -1116,5 +1133,6 @@ pub(crate) fn initialize_authority(
         "INSERT INTO authority_history VALUES(?1,?2)",
         params![state.checkpoint().revision, state.signed().encode()?],
     )?;
+    history::remember(db, state.checkpoint())?;
     Ok(())
 }

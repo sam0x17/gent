@@ -101,6 +101,11 @@ impl Store {
         }
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let identity = Identity::load_or_create(home, &config, &tx, now() as u64)?;
+        if identity.owner.is_none() {
+            // Only the SSH owner can issue enrollment snapshots. Conservative
+            // migration pins on a joined runtime cannot represent pending joins.
+            tx.execute("DELETE FROM authority_join_pins", [])?;
+        }
         tx.commit()?;
         let mut store = Self {
             db,
@@ -262,9 +267,7 @@ impl Store {
         let mut endpoint =
             encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
         let timestamp = now() as u64;
-        if endpoint.authority_state()?.require_fresh(timestamp).is_ok() {
-            endpoint.next_configuration(group, uuid::Uuid::new_v4(), timestamp)?;
-        }
+        endpoint.next_configuration(group, uuid::Uuid::new_v4(), timestamp)?;
         Ok(())
     }
 

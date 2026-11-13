@@ -15,8 +15,14 @@ pub fn print_transport(value: &Value) {
             value["wire_receipts_removed"]
         );
         println!(
-            "Outbound packets removed: 0. Repeat while a batch reaches its limit ({} copies or {} replay records).",
-            value["copy_batch_limit"], value["replay_batch_limit"]
+            "Confirmed packet bodies retired: {} ({} bytes). Full configuration records compacted: {} ({} bytes).",
+            value["retained_packets_removed"],
+            value["retained_packet_bytes_removed"],
+            value["authority_records_compacted"],
+            value["authority_bytes_removed"]
+        );
+        println!(
+            "Repeat cleanup while a batch reaches its limit; pending sends and joins keep required history."
         );
     } else {
         for purpose in ["data", "configuration"] {
@@ -41,10 +47,27 @@ pub fn print_transport(value: &Value) {
             value["recent_packets_per_stream"]
         );
         println!(
-            "Outbound packets remain for offline peers. Compaction does not release retained packet quota."
+            "Receiver checkpoints: {}; retired packet tombstones: {}.",
+            value["confirmed_streams"], value["retired_packet_tombstones"]
+        );
+        let authority = &value["authority_history"];
+        println!(
+            "Signed configurations: {} / {} full records; {} / {} bytes. Accepted digests: {}.",
+            authority["full_records"],
+            authority["max_records"],
+            authority["full_record_bytes"],
+            authority["max_record_bytes"],
+            authority["accepted_digests"]
         );
         println!(
-            "Authority history, raw groups, application queues, plaintext, and total database size are separate."
+            "Configuration records due for compaction: {}; pending join pins: {}.",
+            authority["full_records_due"], authority["pending_join_pins"]
+        );
+        println!(
+            "Unconfirmed packets remain for offline peers. Verified checkpoints release confirmed packet capacity."
+        );
+        println!(
+            "Accepted digests, retry records, raw groups, application queues, plaintext, and total database size have separate retention needs."
         );
     }
 }

@@ -173,8 +173,8 @@ All support `--json`. Cleanup runs automatically at startup and every 15 minutes
 
 | Command | Behavior |
 | --- | --- |
-| `gent transport` / `gent transport status` | Report outgoing packet quotas, receiver checkpoints, retired tombstones, duplicate ciphertext bytes, and replay evidence. |
+| `gent transport` / `gent transport status` | Report packet quotas, receiver checkpoints, tombstones, replay evidence, full configuration history, and interrupted joins holding history. |
 | `gent transport clean --dry-run` | Verify and preview one bounded compaction batch. |
-| `gent transport clean` | Retire confirmed packet bodies, compact redundant copies, and discard old replay evidence. |
+| `gent transport clean` | Retire confirmed packet bodies, compact redundant copies and eligible full configurations, and discard old replay evidence. |
 
 All support `--json` and use local owner authority. Authenticated receiver checkpoints allow confirmed ciphertext to retire and release packet capacity. Unconfirmed packets remain available for offline peers. See [encrypted transport storage](local-proof.md#encrypted-transport-storage) for limits, migration, and recovery boundaries.

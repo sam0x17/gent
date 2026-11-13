@@ -54,3 +54,25 @@ def exercise_storage(a, b, target, cli, owner_cli, restore, restart, wait_for):
     assert a.call('gent_send', first[0])[0]['message_id'] == first[1]
     assert not a.call('gent_inbox')[0] and not b.call('gent_inbox')[0]
     print('PASS: 70 two-machine exchanges, authenticated packet retirement, bounded replay evidence, CLI preview/compaction, startup cleanup, and exact agent retry after restart', flush=True)
+
+
+def exercise_authority_history(cli, owner_cli, applied, restart, wait_for):
+    for _ in range(80):
+        result = owner_cli('cluster', 'renew')
+        assert result['state'] == 'applied'
+    revision = result['revision']
+    wait_for(lambda: applied(revision))
+    for command in (cli, owner_cli):
+        wait_for(lambda: command('transport')['authority_history']['pending_join_pins'] == 0)
+        while command('transport', 'clean')['authority_records_compacted']:
+            pass
+        history = command('transport')['authority_history']
+        assert history['full_records'] == 64 and history['full_records_due'] == 0
+        assert history['accepted_digests'] >= 80
+    restart()
+    for command in (cli, owner_cli):
+        assert command('transport')['authority_history']['full_records'] == 64
+    changed = cli('node', 'name', 'set', 'after-history-compaction')
+    assert changed['state'] == 'applied'
+    wait_for(lambda: applied(changed['revision']))
+    print('PASS: 80 signed revisions, bounded full-history retention, released join pins, both daemon restarts, and remote configuration edit after compaction', flush=True)

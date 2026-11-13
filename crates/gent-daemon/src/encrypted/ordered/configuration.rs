@@ -181,7 +181,10 @@ impl OrderedEndpoint<'_> {
         now: u64,
     ) -> Result<Option<Packet>> {
         ensure!(!request.is_nil(), "nil request ID");
-        self.inner.transact(now, |session| {
+        // Already accepted signed history must remain publishable after lease
+        // expiry, including when its quota is preventing an owner renewal.
+        // The recovery grant and current saved node/key membership still apply.
+        self.inner.transact_mode(now, true, |session| {
             let saved = checked_stream(session, group, Purpose::Configuration)?;
             ensure!(saved.writer == session.signer.id(), "only the configuration writer can publish");
             let prior: Option<Vec<u8>> = session.db.query_row("SELECT group_id FROM configuration_requests WHERE id=?1", [request.to_string()], |row| row.get(0)).optional()?;
@@ -396,10 +399,13 @@ fn receive_fragment(session: &Session<'_>, group: &[u8], body: &[u8]) -> Result<
         "configuration history fork or gap"
     );
     if checkpoint.revision <= session.state.checkpoint().revision {
-        let accepted = history(session.db, checkpoint.revision)?
-            .context("missing accepted authority history")?;
+        let accepted = super::super::history::checkpoint(
+            session.db,
+            checkpoint.revision,
+            session.state.anchor(),
+        )?;
         ensure!(
-            accepted.verified_checkpoint(session.state.anchor())? == checkpoint,
+            accepted == checkpoint,
             "conflicting accepted authority history"
         );
     } else {

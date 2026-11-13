@@ -90,6 +90,7 @@ pub(super) fn trim_group(db: &Connection, group: &[u8], head: u64) -> Result<()>
 /// compaction and retirement based on already verified receiver checkpoints.
 /// Stream heads and application state are unchanged.
 pub(crate) fn clean(db: &Connection, dry_run: bool) -> Result<Value> {
+    let (authority_records, authority_bytes) = super::super::history::clean(db, dry_run)?;
     let (retired, retired_bytes) = confirmation::retire(db, dry_run)?;
     let copies = db
         .prepare(
@@ -139,7 +140,7 @@ pub(crate) fn clean(db: &Connection, dry_run: bool) -> Result<Value> {
         }
     }
     Ok(
-        json!({"dry_run":dry_run,"duplicate_copies_compacted":copies.len(),"duplicate_bytes_removed":removed_bytes,
+        json!({"dry_run":dry_run,"authority_records_compacted":authority_records,"authority_bytes_removed":authority_bytes,"duplicate_copies_compacted":copies.len(),"duplicate_bytes_removed":removed_bytes,
         "accepted_digests_removed":seen.len(),"wire_receipts_removed":receipts.len(),
         "copy_batch_limit":COPY_BATCH,"replay_batch_limit":CLEAN_BATCH,
         "retained_packets_removed":retired,"retained_packet_bytes_removed":retired_bytes,"retirement_batch_limit":256}),
@@ -175,10 +176,10 @@ pub(crate) fn status(db: &Connection) -> Result<Value> {
         [RECENT_PACKETS],|r|Ok((r.get(0)?,r.get(1)?)))?;
     let (confirmed,retired):(u64,u64)=db.query_row("SELECT (SELECT COUNT(*) FROM stream_confirmed),(SELECT COUNT(*) FROM stream_outbox WHERE length(packet)=0)",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
     Ok(
-        json!({"confirmed_streams":confirmed,"retired_packet_tombstones":retired,"outgoing":classes,"duplicate_copies":copies,"duplicate_bytes":copy_bytes,
+        json!({"authority_history":super::super::history::status(db)?,"confirmed_streams":confirmed,"retired_packet_tombstones":retired,"outgoing":classes,"duplicate_copies":copies,"duplicate_bytes":copy_bytes,
         "accepted_digests":digests,"accepted_digests_due":due,"ordered_wire_receipts":receipts,"wire_receipts_due":receipts_due,
         "recent_packets_per_stream":RECENT_PACKETS,
-        "scope":"Ordered transport only; unconfirmed packets remain for offline peers. Retry tombstones, authority history, raw groups, application queues, plaintext, and total database size are separate."}),
+        "scope":"Ordered transport and full configuration records; unconfirmed packets remain for offline peers. Accepted authority digests, retry tombstones, raw groups, application queues, plaintext, and total database size have separate retention needs."}),
     )
 }
 

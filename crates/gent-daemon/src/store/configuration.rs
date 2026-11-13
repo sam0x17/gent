@@ -316,14 +316,12 @@ impl StoreSession<'_> {
         );
         match &result {
             EditResult::Applied { checkpoint } => {
-                let signed: Vec<u8> = self.db.query_row(
-                    "SELECT state FROM authority_history WHERE revision=?1",
-                    [checkpoint.revision],
-                    |r| r.get(0),
-                )?;
                 ensure!(
-                    SignedState::decode(&signed)?.verified_checkpoint(self.state.anchor())?
-                        == *checkpoint,
+                    encrypted::history::checkpoint(
+                        self.db,
+                        checkpoint.revision,
+                        self.state.anchor()
+                    )? == *checkpoint,
                     "configuration result does not match signed authority"
                 );
             }

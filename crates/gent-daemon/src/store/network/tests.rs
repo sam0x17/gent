@@ -654,6 +654,136 @@ async fn failed_enqueue_rolls_back_message_and_retry_preserves_ciphertext_after_
 }
 
 #[tokio::test]
+async fn joined_runtime_clears_conservative_legacy_join_pins_without_changing_authority() {
+    let mut pair = Pair::new().await;
+    let before = pair.stores[1]
+        .identity
+        .state(&pair.stores[1].db)
+        .unwrap()
+        .checkpoint()
+        .clone();
+    pair.stores[1]
+        .db
+        .execute_batch("DROP TABLE authority_join_pins; PRAGMA user_version=5;")
+        .unwrap();
+    pair.reopen(1);
+    assert_eq!(
+        pair.stores[1]
+            .db
+            .query_row("SELECT COUNT(*) FROM authority_join_pins", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        pair.stores[1]
+            .identity
+            .state(&pair.stores[1].db)
+            .unwrap()
+            .checkpoint(),
+        &before
+    );
+}
+
+#[tokio::test]
+async fn queued_message_uses_retained_authority_digest_after_full_history_compaction() {
+    let mut pair = Pair::new().await;
+    let sent = pair.send(vec![]).unwrap();
+    let revision = pair.stores[0]
+        .identity
+        .state(&pair.stores[0].db)
+        .unwrap()
+        .checkpoint()
+        .revision;
+    let edit = Uuid::new_v4().to_string();
+    pair.owner(
+        1,
+        OwnerOp::Configure {
+            request_id: edit.clone(),
+            edit: ConfigurationEdit::RenameNode {
+                name: "delayed-result".into(),
+            },
+        },
+    )
+    .unwrap();
+    let request_group: Vec<u8> = pair.stores[1]
+        .db
+        .query_row("SELECT outgoing FROM network_links", [], |r| r.get(0))
+        .unwrap();
+    let next = pair.stores[0].data_next(&request_group).unwrap();
+    pair.stores[1].data_prepare(&request_group).unwrap();
+    let request = pair.stores[1]
+        .data_outgoing(&request_group, next)
+        .unwrap()
+        .unwrap();
+    pair.stores[0].data_receive(&request).unwrap();
+    for _ in 0..80 {
+        let store = &pair.stores[0];
+        let tx = store.db.unchecked_transaction().unwrap();
+        let state = store.identity.state(&tx).unwrap();
+        store
+            .identity
+            .apply(
+                &tx,
+                state
+                    .renew(store.identity.signing_owner().unwrap(), now() as u64)
+                    .unwrap(),
+            )
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    // Deliver only configuration, leaving the old queued message untouched.
+    let streams = pair.stores[0].sync_streams().unwrap();
+    for entry in streams
+        .into_iter()
+        .filter(|s| s.outgoing && s.configuration)
+    {
+        loop {
+            pair.stores[0].sync_prepare(&entry.group).unwrap();
+            let next = pair.stores[1].sync_next(&entry.group).unwrap();
+            let Some(packet) = pair.stores[0].sync_outgoing(&entry.group, next).unwrap() else {
+                break;
+            };
+            pair.stores[1].sync_receive(&packet).unwrap();
+        }
+    }
+    for store in &pair.stores {
+        while {
+            let tx = store.db.unchecked_transaction().unwrap();
+            let (n, _) = encrypted::history::clean(&tx, false).unwrap();
+            tx.commit().unwrap();
+            n > 0
+        } {}
+    }
+    assert!(
+        !pair.stores[1]
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM authority_history WHERE revision=?1)",
+                [revision],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    pair.reopen(1);
+    pair.pump();
+    assert_eq!(
+        pair.owner(
+            1,
+            OwnerOp::ConfigurationRequests {
+                request_id: Some(edit)
+            }
+        )
+        .unwrap()["state"],
+        "applied"
+    );
+    assert_eq!(
+        pair.agent(1, AgentOp::Inbox).unwrap()[0]["id"],
+        sent["message_id"]
+    );
+}
+
+#[tokio::test]
 async fn checkpoints_preserve_pending_send_cursors_and_do_not_acknowledge_agents() {
     let mut pair = Pair::new().await;
     let sent = pair.send(vec![]).unwrap();

@@ -106,6 +106,12 @@ impl Store {
                     )?;
                     state = self.identity.apply(&tx, update)?;
                 }
+                encrypted::history::pin_join(
+                    &tx,
+                    &request.request.node_id,
+                    &request.request.member.signing_key,
+                    state.checkpoint().revision,
+                )?;
                 tx.commit()?;
                 self.sync_wakeup.notify_one();
                 let _ = self.project_config();
@@ -134,17 +140,9 @@ impl Store {
                     revision <= state.checkpoint().revision,
                     "pairing checkpoint is ahead of owner"
                 );
-                let wire: Vec<u8> = self
-                    .db
-                    .query_row(
-                        "SELECT state FROM authority_history WHERE revision=?1",
-                        [revision],
-                        |r| r.get(0),
-                    )
-                    .context("pairing history is unavailable")?;
-                let record = gent_crypto::SignedState::decode(&wire)?;
                 ensure!(
-                    record.verified_checkpoint(state.anchor())?.state_hash == digest,
+                    encrypted::history::checkpoint(&self.db, revision, state.anchor())?.state_hash
+                        == digest,
                     "pairing history fork"
                 );
                 let next: Option<Vec<u8>> = self

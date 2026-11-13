@@ -901,15 +901,12 @@ impl Store {
                         if record.authority.revision > state.checkpoint().revision {
                             return Ok(());
                         }
-                        let signed: Vec<u8> = tx.query_row(
-                            "SELECT state FROM authority_history WHERE revision=?1",
-                            [record.authority.revision],
-                            |r| r.get(0),
-                        )?;
                         ensure!(
-                            gent_crypto::SignedState::decode(&signed)?
-                                .verified_checkpoint(state.anchor())?
-                                == record.authority,
+                            encrypted::history::checkpoint(
+                                &tx,
+                                record.authority.revision,
+                                state.anchor()
+                            )? == record.authority,
                             "node record authority fork"
                         );
                         self.network_session(&tx, state)
