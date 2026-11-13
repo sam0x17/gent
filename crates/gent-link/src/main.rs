@@ -1,14 +1,16 @@
+mod hooks;
 mod integration;
+mod managed_file;
 mod mcp;
 mod pairing;
 mod service;
 
 use anyhow::{Context, Result, ensure};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use gent_daemon::{config, request};
 use gent_protocol::{ConfigurationEdit, Effect, OwnerOp, Permission, Request, Rule, Selector};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -54,6 +56,13 @@ enum Command {
     },
     /// Show user-scope Gent installation for supported hosts.
     Integrations,
+    /// Manage Gent's PATH and completion setup in an interactive shell.
+    Hooks {
+        #[command(subcommand)]
+        command: Option<hooks::Command>,
+    },
+    /// Print a completion script; does not read Gent state or start the daemon.
+    Completions { shell: hooks::Shell },
     /// List host labels announced by registered agents.
     Providers {
         #[command(subcommand)]
@@ -260,6 +269,28 @@ async fn main() {
 }
 
 async fn execute(cli: Cli) -> Result<()> {
+    if let Some(Command::Completions { shell }) = cli.command {
+        let mut script = Vec::new();
+        clap_complete::generate(shell.generator(), &mut Cli::command(), "gent", &mut script);
+        if let Err(error) = std::io::stdout().lock().write_all(&script)
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(error.into());
+        }
+        return Ok(());
+    }
+    if let Some(Command::Hooks { command }) = cli.command {
+        let value = hooks::execute(command.unwrap_or_default())?;
+        println!(
+            "{}",
+            if cli.json {
+                serde_json::to_string(&value)?
+            } else {
+                serde_json::to_string_pretty(&value)?
+            }
+        );
+        return Ok(());
+    }
     let request_id = cli
         .request_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -310,6 +341,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Some(Command::Cluster { .. }) => owner(&home, OwnerOp::Status).await?,
         Some(Command::Daemon { .. }) => unreachable!(),
+        Some(Command::Hooks { .. } | Command::Completions { .. }) => unreachable!(),
         Some(Command::Mcp {
             command: McpCommand::Serve { binding, host },
         }) => {

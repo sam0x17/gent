@@ -112,6 +112,35 @@ The host invokes `gent_register` with a display `name` and arbitrary `provider` 
 | `gent_ack` | Record receipt of a message; this does not claim work is complete. |
 | `gent_message_status` | Inspect queued, delivered, expired, or revoked state. |
 
+## Shell integration
+
+Gent supports Zsh, Bash, and Fish. Shell setup adds the Gent executable directory to PATH when absent and loads completion for the current CLI. Install it independently of node enrollment:
+
+```sh
+gent hooks install
+gent hooks status
+gent hooks install --shell zsh
+gent hooks install --shell bash
+gent hooks install --shell fish
+gent hooks uninstall
+```
+
+`gent hooks` is the status form; `gent hooks remove` aliases uninstall. Detection follows `SHELL`; specify `--shell` when using a different shell. The default startup files are `~/.bashrc`, `$ZDOTDIR/.zshrc` (or `~/.zshrc`), and `$XDG_CONFIG_HOME/fish/config.fish` (or `~/.config/fish/config.fish`). `--rc-file PATH` on install, status, and uninstall selects a custom file. Bash login shells must source `.bashrc`, or installation must target the intended login file explicitly. Open a new shell after installation or removal; an existing shell retains the functions and PATH it already loaded.
+
+The installer owns one marked block containing the executable path and shell type. It preserves surrounding bytes and existing file modes, including a missing final newline. Repeated installation updates that block without duplication; running installation from a different Gent binary updates its path. Uninstall removes only an intact managed block and preserves later edits elsewhere in the file. An altered, incomplete, duplicate, or wrong-shell block requires manual resolution. Symlinked/hard-linked files and files or parent directories writable by other users are refused. A private lock beside the startup file serializes Gent writers, and an atomic file replacement commits the update. The lock file may remain after removal. External editors can still race the final rename, so close them during installation.
+
+Setup runs only in interactive shells when the recorded binary is executable. Zsh initializes its completion system if necessary with `compinit -i`, which ignores insecure completion directories. Bash evaluates the completion output synchronously for compatibility with macOS's Bash 3.2. Fish sources its generated completions and adds only the missing PATH entry. Executable directories containing a colon are rejected because PATH uses colon separators. Startup does not contact the daemon, read Gent state, select a cluster, capture history, or start an agent turn. The global `--home` setting is not embedded into shell setup; normal CLI state selection still applies.
+
+`gent completions bash|zsh|fish` writes a standalone completion script for custom dotfile management. It works without a configured Gent node. Status is read-only and reports the saved block, executable availability, and startup file; it cannot inspect the calling shell's loaded functions. Successful status and changes exit 0; malformed blocks, file protection failures, and unsupported shell detection exit 1.
+
+The isolated proof checks concurrent setup, actual interactive startup, nested command completion, literal quotes/dollar signs/backslashes in executable paths, repeated sourcing, noninteractive and missing-binary guards, and exact removal:
+
+```sh
+python3 scripts/smoke_hooks.py --fish /path/to/fish
+```
+
+Use `--bash` or `--zsh` for nondefault executable paths. It passes with Linux Bash 5.3.9/Zsh 5.9 and macOS Bash 3.2.57/Zsh 5.9, plus Fish 4.9.3 on both machines. The Zsh proof presses Tab in a real pseudo-terminal. Fish was tested from temporary official release binaries; no installed or default shell was changed. Five Rust tests additionally cover ownership, preservation, malformed blocks, default paths, linked/shared files, and concurrent writers.
+
 ## Host conversation bindings
 
 ```sh
@@ -151,7 +180,7 @@ gent integration status codex
 gent integration uninstall claude-code
 ```
 
-`gent integration remove` aliases `uninstall`. `status` without a host inspects both. Installation writes the common MCP server and, for Claude Code, its required identity hook. The daemon must be running when an agent calls Gent. Reopen the host session or restart its Gent MCP connection after changing installation. Skills, shell hooks, and automatic model wake/resume remain separate work.
+`gent integration remove` aliases `uninstall`. `status` without a host inspects both. Installation writes the common MCP server and, for Claude Code, its required identity hook. The daemon must be running when an agent calls Gent. Reopen the host session or restart its Gent MCP connection after changing installation. Shell setup is described above. Skills and automatic model wake/resume remain separate work.
 
 Codex uses `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`. Claude Code uses `~/.claude.json` for its user MCP entry and `~/.claude/settings.json` for its hook. When `CLAUDE_CONFIG_DIR` is set, both `.claude.json` and `settings.json` live inside that directory. `--config-dir PATH` on install, status, or uninstall selects an explicit host directory with those same override semantics. Use the same directory for subsequent operations. Gent state is independently selected by `--home` or `GENT_HOME`.
 
@@ -286,4 +315,4 @@ Limits are 64 KiB of text, four files totaling 1 MiB decoded, 32 messages per ex
 
 Codex and Claude Code have explicit and host-metadata binding proofs on both OSes. Interactive conversation transitions and larger files remain to be tested. Inline base64 in tool JSON is a proof format; practical large-file workflows need resource-based access to avoid filling the model context with encoded bytes. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
-Invite-based pairing, GitHub login, remote connectors, shell hooks, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, and generic MCP messaging use the local development relay. A visual iteration involving real models across machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
+Invite-based pairing, GitHub login, remote connectors, a Gent skill, and persistent relay attachments remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, and generic MCP messaging use the local development relay. A visual iteration involving real models across machines remains pending. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.

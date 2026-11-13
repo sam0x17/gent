@@ -1,6 +1,6 @@
 //! User-scope host installation. Only generated Gent fragments enter the journal.
 mod document;
-mod files;
+use crate::managed_file as files;
 
 use super::{Host, render_configuration};
 use anyhow::{Context, Result, ensure};
@@ -297,8 +297,7 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
 fn mutate(layout: &Layout, home: &Path, desired: Option<Spec>) -> Result<()> {
     files::directory(&layout.directory)?;
     let lock = layout.lock();
-    Snapshot::read(&lock)?.private()?;
-    let _guard = super::lock(&lock)?;
+    let _guard = files::lock(&lock)?;
     let (_, state) = layout.read()?;
     state.owner(home)?;
     recover(layout)?;

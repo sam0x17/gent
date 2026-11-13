@@ -35,9 +35,9 @@ The development build implements `gent cluster join CLUSTER_UUID --via user@owne
 
 Setup must recover from an interrupted step and be safe to rerun. Preserve device identity, existing settings, and unrelated shell configuration. End with a concise status report and the next action, if any.
 
-The current build implements service installation for configured nodes and `gent daemon install --local [NAME]` for initializing a development cluster. GitHub login, hosted enrollment guidance, and shell-hook setup remain pending. See [daemon services](local-proof.md#daemon-services) for the tested systemd/launchd commands, startup context, and state preservation. `gent daemon status` exits 3 when stopped or unavailable while still returning structured status; lifecycle failures exit 1, and successful mutations exit 0.
+The current build implements service installation for configured nodes and `gent daemon install --local [NAME]` for initializing a development cluster. GitHub login and hosted enrollment guidance remain pending. [Shell integration](local-proof.md#shell-integration) now supports Zsh, Bash, and Fish independently of enrollment. See [daemon services](local-proof.md#daemon-services) for the tested systemd/launchd commands, startup context, and state preservation. `gent daemon status` exits 3 when stopped or unavailable while still returning structured status; lifecycle failures exit 1, and successful mutations exit 0.
 
-`gent integration config codex` and `gent integration config claude-code` currently print MCP configuration fragments. The latter includes a required per-call host binding hook. `gent mcp serve --host HOST` selects persistent conversation credentials from host metadata; generic clients can still use explicit `--binding` files. See [host conversation bindings](local-proof.md#host-conversation-bindings) for setup and limitations. `gent integration install`, `status`, and `uninstall` now manage user-scope entries for both CLI hosts; `gent integrations` lists them. See [installation and recovery](local-proof.md#install-host-integrations) for paths, `--config-dir`, ownership, and status semantics. Shell hooks remain pending.
+`gent integration config codex` and `gent integration config claude-code` currently print MCP configuration fragments. The latter includes a required per-call host binding hook. `gent mcp serve --host HOST` selects persistent conversation credentials from host metadata; generic clients can still use explicit `--binding` files. See [host conversation bindings](local-proof.md#host-conversation-bindings) for setup and limitations. `gent integration install`, `status`, and `uninstall` now manage user-scope entries for both CLI hosts; `gent integrations` lists them. See [installation and recovery](local-proof.md#install-host-integrations) for paths, `--config-dir`, ownership, and status semantics. Zsh, Bash, and Fish shell setup is available through `gent hooks install`.
 
 ## Nodes and clusters
 
@@ -80,12 +80,12 @@ Node status should distinguish connected, disconnected, degraded, and unknown or
 | `gent daemon restart` | Restart the service and retain identity and pending work. |
 | `gent daemon logs [--lines N]` | Show recent daemon diagnostics from the service journal or private log file. Keep credentials out of diagnostic output. |
 | `gent hooks` / `gent hooks status` | Show Gent shell-hook installation and detected shell support. |
-| `gent hooks install` | Install shell hooks for a supported shell, detecting it where possible. |
+| `gent hooks install` | Install PATH and completion setup for Zsh, Bash, or Fish; detect from `SHELL` or accept `--shell`. |
 | `gent hooks uninstall` | Remove only the hooks and configuration entries managed by Gent. |
 | `gent hooks remove` | Alias for `gent hooks uninstall`. |
-| `gent completions <shell>` | Emit completion definitions for a supported shell. |
+| `gent completions <shell>` | Emit completion definitions for `bash`, `zsh`, or `fish`, without requiring configured state. |
 
-Shell hooks must use a clearly marked managed block or dedicated sourced file. Repeated installation updates that block without duplication. Removal preserves unrelated user edits and explains any manual cleanup needed if the managed block has been altered. Shell hooks do not authorize uploading arbitrary command history or establish provider session identity by themselves. Provider-specific agent hooks and MCP registration belong to the integration commands below.
+Shell hooks must use a clearly marked managed block or dedicated sourced file. Repeated installation updates that block without duplication. Removal preserves unrelated user edits and explains any manual cleanup needed if the managed block has been altered. Shell hooks do not authorize uploading arbitrary command history or establish provider session identity by themselves. Provider-specific agent hooks and MCP registration belong to the integration commands below. The implemented PATH/completion setup supports `--rc-file PATH`, preserves surrounding bytes, and refuses edited blocks. See [shell integration](local-proof.md#shell-integration) for startup files, activation, and tested versions.
 
 ## Authentication and integrations
 
