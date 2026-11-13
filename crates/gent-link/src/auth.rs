@@ -1,4 +1,5 @@
 //! Native account login. Service credentials never grant cluster key authority.
+pub mod renewal;
 use crate::managed_file::{self, Snapshot};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -27,6 +28,8 @@ const DEFAULT_SERVICE: &str = "https://api.gent.link";
 #[derive(Subcommand)]
 pub enum Command {
     Status,
+    /// Renew an active session near expiry; never signs in or revives a revoked session.
+    Renew,
     /// Sign in with GitHub. SSH sessions use the device-code flow by default.
     Login {
         #[arg(long)]
@@ -420,6 +423,9 @@ impl Service {
 }
 
 pub async fn execute(home: &Path, command: Command) -> Result<Value> {
+    if matches!(command, Command::Renew) {
+        return renewal::renew(home, None).await;
+    }
     let directory = managed_file::normalize(&home.join("auth"))?;
     let path = directory.join("session.json");
     let client = client()?;
@@ -800,6 +806,19 @@ fn callback_code(target: &str, expected: &Url, state: &str) -> Option<Result<Str
 }
 
 pub fn print(value: &Value) {
+    if value["status"] == "active" && value.get("renewed").is_some() {
+        println!(
+            "{}",
+            if value["renewed"] == true {
+                "Service session renewed."
+            } else if value["renewal_due"] == true {
+                "Service session is active; renewal is still pending."
+            } else {
+                "Service session is active; renewal is not due yet."
+            }
+        );
+        return;
+    }
     match value["status"].as_str() {
         Some("active") => println!(
             "Signed in as @{} ({})",

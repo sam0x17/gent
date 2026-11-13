@@ -403,7 +403,7 @@ async fn execute(cli: Cli) -> Result<()> {
     }
     if let Some(Command::Daemon { command }) = cli.command {
         if matches!(command, Some(DaemonCommand::Run)) {
-            gent_daemon::run(&home).await?;
+            auth::renewal::run_daemon(&home).await?;
             return Ok(());
         }
         let status_only = matches!(command, None | Some(DaemonCommand::Status));

@@ -256,6 +256,33 @@ impl Manager {
                     )
                     .await?;
                 }
+                // bootout can return before launchd finishes removing the job
+                // and its process. A following bootstrap must wait for both;
+                // otherwise a rapid restart can fail with an I/O error.
+                let until = tokio::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    let state = self.inspect().await;
+                    ensure!(
+                        state.available,
+                        "launchd became unavailable while stopping Gent"
+                    );
+                    let process_alive = if let Some(pid) = before.pid {
+                        output("/bin/kill", &["-0", &pid.to_string()], true)
+                            .await?
+                            .status
+                            .success()
+                    } else {
+                        false
+                    };
+                    if !state.loaded && state.pid.is_none() && !process_alive {
+                        break;
+                    }
+                    ensure!(
+                        tokio::time::Instant::now() < until,
+                        "launchd has not finished stopping Gent; inspect gent daemon status before retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
         }
         Ok(())

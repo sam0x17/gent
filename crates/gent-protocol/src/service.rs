@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod invitations;
 
 pub const SESSION_LIFETIME_SECONDS: u64 = 30 * 24 * 60 * 60;
+pub const SESSION_RENEWAL_WINDOW_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const SESSION_CREATION_WINDOW_SECONDS: u64 = 15 * 60;
 pub const CALLBACK_PATH: &str = "/gent/github/callback";
 
@@ -74,6 +75,13 @@ pub struct ServiceSession {
     pub github_login: String,
     pub created_at: u64,
     pub expires_at: u64,
+}
+
+/// A retry can only renew the expiry the caller observed, never a later lease.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRenewal {
+    pub expected_expires_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
