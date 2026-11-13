@@ -42,11 +42,12 @@ impl Replica {
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            matches!(version, 0 | 1),
+            matches!(version, 0..=2),
             "unsupported authority database version"
         );
+        crate::storage::configure(&db)?;
         db.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+            "
           CREATE TABLE IF NOT EXISTS cluster_state (
             singleton INTEGER PRIMARY KEY CHECK(singleton=1),
             anchor BLOB NOT NULL, checkpoint BLOB NOT NULL, state BLOB NOT NULL
@@ -54,7 +55,7 @@ impl Replica {
           CREATE TABLE IF NOT EXISTS cluster_history (
             revision INTEGER PRIMARY KEY, state BLOB NOT NULL
           );
-          PRAGMA user_version=1;",
+          PRAGMA user_version=2;",
         )?;
         Ok(Self { db })
     }

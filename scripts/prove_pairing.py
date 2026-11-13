@@ -259,6 +259,11 @@ def main():
                 local_daemon = start_local()
                 wait_for(lambda: remote(owner + ['daemon', 'status'], check=False).returncode == 0)
                 wait_for(lambda: subprocess.run(local + ['daemon', 'status'], capture_output=True).returncode == 0)
+                for status in (cli('files'), json.loads(remote(owner + ['files']).stdout)):
+                    database = status['database']
+                    assert database['journal_mode'] == 'delete'
+                    assert database['max_bytes'] == database['configured_max_bytes'] == 2 * 1024**3
+                    assert database['logical_bytes'] <= database['max_bytes']
 
             exercise_turns(a, b, attached['attachment']['id'], files, wait_for, restart_relay_nodes)
             print('PASS: two-machine ordered relay turns, PNG forwarding, restart recovery, cancellation, final outcomes, and exact retries')

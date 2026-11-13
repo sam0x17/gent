@@ -7,6 +7,7 @@ pub mod messages;
 pub mod pairing;
 pub mod replica;
 mod runtime;
+mod storage;
 pub mod store;
 pub mod sync;
 

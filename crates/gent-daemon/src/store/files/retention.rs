@@ -156,15 +156,6 @@ impl StoreSession<'_> {
                 let dir = if slot.is_empty() { base.join("outbox") } else { base.join("inbox").join(slot) };
                 json!({"path":dir.join(name),"recovery_path":dir.join(format!(".gent-clean-{id}.tmp")),"outcome":outcome,"reason":error})
             }).collect::<Vec<_>>();
-        let page_size: u64 = self
-            .db
-            .pragma_query_value(None, "page_size", |r| r.get(0))?;
-        let pages: u64 = self
-            .db
-            .pragma_query_value(None, "page_count", |r| r.get(0))?;
-        let free: u64 = self
-            .db
-            .pragma_query_value(None, "freelist_count", |r| r.get(0))?;
         let imports: u64 = self
             .db
             .query_row("SELECT COUNT(*) FROM file_imports", [], |r| r.get(0))?;
@@ -173,8 +164,7 @@ impl StoreSession<'_> {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
         Ok(
             json!({"objects":objects,"ciphertext_chunks":chunks,"handoffs":handoffs,"attention":attention,
-            "database":{"logical_bytes":pages*page_size,"reusable_bytes":free*page_size,
-                "scope":"whole endpoint database; excludes WAL and other files"},
+            "database":crate::storage::usage(self.db)?,
             "retained_import_retries":imports,"retained_messages":messages,
             "cleanup_interval_seconds":RETRY_SECONDS,"cleanup_batch_limit":BATCH}),
         )

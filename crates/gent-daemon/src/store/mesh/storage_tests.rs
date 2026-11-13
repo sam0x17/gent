@@ -104,7 +104,7 @@ async fn migrated_pending_jobs_survive_crypto_commit_followed_by_completion_fail
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        11
+        12
     );
     assert_eq!(serde_json::to_vec(&pending(&mesh, 1)).unwrap(), body);
     let streams = mesh.count(1, "streams");

@@ -10,6 +10,8 @@
 pub mod history;
 pub mod ordered;
 mod requests;
+#[cfg(test)]
+mod storage_tests;
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gent_crypto::{Checkpoint, NodeIdentity, SignedState, TrustAnchor, VerifiedState};
@@ -1035,10 +1037,10 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        matches!(version, 0..=11),
+        matches!(version, 0..=12),
         "unsupported MLS database version"
     );
-    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
+    crate::storage::configure(&db)?;
     // The original RPC proof used this name for a messages index.
     // Free it before the MLS inbox table is introduced in the same database.
     let legacy_index: bool = db.query_row(
@@ -1100,7 +1102,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
           CREATE TABLE IF NOT EXISTS stream_confirmed (
             group_id BLOB PRIMARY KEY,reader TEXT NOT NULL,reader_key BLOB NOT NULL,
             sequence INTEGER NOT NULL,digest BLOB NOT NULL,receipt BLOB NOT NULL);
-          PRAGMA user_version=11;",
+          PRAGMA user_version=12;",
         )?;
     let has_purpose = {
         let mut columns = schema.prepare("PRAGMA table_info(streams)")?;

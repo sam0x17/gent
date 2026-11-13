@@ -248,9 +248,18 @@ pub fn print_report(value: &Value) {
             }
         }
         println!(
-            "Endpoint database: {} logical bytes, {} reusable; excludes WAL and other files.",
-            value["database"]["logical_bytes"], value["database"]["reusable_bytes"]
+            "Endpoint database: {} / {} bytes, {} reusable (configured limit: {}).",
+            value["database"]["logical_bytes"],
+            value["database"]["max_bytes"],
+            value["database"]["reusable_bytes"],
+            value["database"]["configured_max_bytes"]
         );
+        println!("Rollback journal and temporary/handoff files need additional disk space.");
+        if value["database"]["oversized"] == true {
+            println!(
+                "Legacy database exceeds the configured limit; existing pages remain usable, further growth is blocked."
+            );
+        }
         println!(
             "Retained messages: {}; import retry records: {}.",
             value["retained_messages"], value["retained_import_retries"]
