@@ -307,7 +307,7 @@ To extend the proof to three daemons across the two machines, build `cargo build
 
 ## Real-agent visual iteration
 
-`scripts/prove_visual.py` runs real Codex and Claude Code conversations on two machines through the same SSH enrollment and encrypted development relay. It requires Python 3.11 or newer on both machines, existing host authentication, and a copy of the script on the remote machine:
+`scripts/prove_visual.py` runs real Codex and Claude Code conversations on two machines through the same SSH enrollment and encrypted development relay. It requires Python 3.11 or newer on both machines, existing host authentication, and copies of the script and its companion `*_model_checks.py` modules in the remote scripts directory:
 
 ```sh
 python3 scripts/prove_visual.py --owner sam@owner-host \
@@ -392,7 +392,7 @@ cargo test -p gent-daemon --test remote --locked \
 
 ## Remaining integration work
 
-Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. Actual subagent execution and real-model larger-file workflows remain to be tested. Authenticated import/export tools now pass native and generic MCP proofs without putting large base64 payloads in model context. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
+Codex and Claude Code have explicit and host-metadata binding proofs on both OSes, including interactive clear/resume. Authenticated import/export tools now pass native, generic MCP, and real-model proofs without putting large base64 payloads in model context. Actual subagent execution and GUI/hosted file access remain to be tested. Daemon transport uses push signals; the agent-facing MCP inbox still requires a tool call. A common MCP connector does not guarantee that an idle host starts a model turn; optional wake/resume hooks require separate verification.
 
 Invite-based pairing, GitHub login, and hosted remote connectors remain to be implemented. SSH pairing, automatic peer links, configuration sync and edits from joined nodes, generic MCP messaging, real-model visual revision, and persistent relay turns use the local development relay. Shared agent guidance is bundled through MCP instructions. The [CLI design](cli.md) and [registration design](providers.md) describe the planned interfaces.
 
@@ -402,4 +402,16 @@ Add `--relay-turns` to the two-machine `scripts/prove_visual.py` command above t
 
 The intermediary forwards exact user text and SVG/PNG bytes, checks pending status without resending, and recovers target progress after both daemons restart. It relays progress and final text without changes, retrieves the original files, submits a distinct follow-up, requests cancellation, detaches, and retrieves the target's final cancellation outcome without reattaching. Assertions inspect stored messages, actual tool responses, final answers, and recipient receipts. Logs and `report.json` remain under private `/tmp/gent-relay-host-*` directories; processes are stopped afterward.
 
-The harness supplies the initial files as small JSON file objects in a synthetic user prompt. Native host-upload interfaces, user-facing mobile attachment rendering, larger files, automatic background turns, and voice are separate acceptance work. The test schedules host turns and does not prove exactly-once external execution or interruption of an executing task.
+The harness supplies the initial files as small JSON file objects in a synthetic user prompt. The following proof exercises larger native CLI files. GUI uploads, user-facing mobile attachment rendering, automatic background turns, and voice remain separate work. The test schedules host turns and does not prove exactly-once external execution or interruption of an executing task.
+
+## Real-agent native files
+
+Use `--native-files` instead of `--relay-turns` with the two-machine command above to exercise local files through the real hosts. Both Linux Codex/Mac Claude and Linux Claude/Mac Codex pass this workflow. A bounded helper writes a 1280 x 800 PNG (3,073,103 bytes) and SVG to disk. Each agent stages actual files in its Gent outbox and imports them through MCP. Messages carry `file_ids`; models never copy the file bytes as base64.
+
+The reviewer exports and opens the PNG with its native image tool, requests a correction, and sends reference files. The builder exports and inspects that feedback, then imports and sends its revision. Both daemons restart during this exchange. After approval, the builder acts as an intermediary: it forwards exact user text and the revised files, then retrieves the target's response and unchanged files after another restart of both daemons. It exports and opens the returned PNG, gives exactly the target's private response text, acknowledges receipt, and detaches. Assertions compare plaintext hashes and lengths at both endpoints and require fresh encrypted object IDs on every send or forward.
+
+Codex runs with workspace writes enabled for the fixture and Gent file folders. Claude permits only the fixture helper and exported PNG reads; absolute `Read` permissions use Claude's double-slash path syntax. Transcript audits permit Gent calls, literal fixture commands, and views of exported PNGs. Every exported PNG must be viewed, with actual image content in the tool result. Codex's exec JSON currently omits image-view events, so its audit also reads the exact synthetic session's own rollout under `CODEX_HOME/sessions`. It rejects an unavailable or ambiguous rollout. Unrelated sessions are not inspected.
+
+Private logs, per-turn results, exported files, and `report.json` remain in each temporary proof directory. `protocol-report.json` preserves completed protocol assertions before transcript auditing, with an explicit audit-pending result; it is not a passing final report. To rerun a transcript audit without invoking a model, run `python3 scripts/prove_visual.py native-audit /absolute/proof/root` on that endpoint.
+
+The proof schedules each turn and restricts rendering to a small fixture. Arbitrary application editing, GUI uploads, mobile rendering, background host wake-up, and voice remain separate work. Host OS access and inference-provider trust still apply.

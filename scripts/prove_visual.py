@@ -26,11 +26,11 @@ import zlib
 from urllib.parse import urlparse
 
 
-def render(color, side):
+def render(color, side, scale=1):
     """Render a small code-native graphic, with no image-library dependencies."""
     colors = {'red': '#d52f42', 'green': '#1b9c68', 'blue': '#346bd4'}
     assert color in colors and side in ('left', 'right')
-    width, height, cx = 160, 100, 24 if side == 'left' else 136
+    width, height, cx = 160 * scale, 100 * scale, 24 if side == 'left' else 136
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 160 100">'
            '<rect width="160" height="100" fill="white"/>'
            '<rect x="20" y="40" width="120" height="40" fill="#346bd4"/>'
@@ -41,12 +41,13 @@ def render(color, side):
     for y in range(height):
         rows.append(0)
         for x in range(width):
+            px, py = x // scale, y // scale
             pixel = b'\xff\xff\xff'
-            if 20 <= x < 140 and 40 <= y < 80:
+            if 20 <= px < 140 and 40 <= py < 80:
                 pixel = bytes.fromhex('346bd4')
-            if (32 <= x < 104 and 52 <= y < 57) or (32 <= x < 80 and 64 <= y < 69):
+            if (32 <= px < 104 and 52 <= py < 57) or (32 <= px < 80 and 64 <= py < 69):
                 pixel = b'\xff\xff\xff'
-            if (x - cx) ** 2 + (y - 18) ** 2 < 100:
+            if (px - cx) ** 2 + (py - 18) ** 2 < 100:
                 pixel = dot
             rows.extend(pixel)
 
@@ -54,7 +55,7 @@ def render(color, side):
         return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data))
 
     png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!2I5B', width, height, 8, 2, 0, 0, 0))
-           + chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
+           + chunk(b'IDAT', zlib.compress(rows, 0 if scale > 1 else -1)) + chunk(b'IEND', b''))
     return [{'name': name, 'media_type': mime, 'data_base64': base64.b64encode(data).decode()}
             for name, mime, data in [('card.svg', 'image/svg+xml', svg), ('card.png', 'image/png', png)]]
 
@@ -99,7 +100,12 @@ def inspect(root):
             message = json.loads(payload)
             message['acknowledged'] = bool(ack)
             messages.append(message)
-    return {'messages': messages, 'config': tomllib.loads((root / 'state/config.toml').read_text())}
+        objects = dict(db.execute('SELECT id,complete FROM file_objects')) if settings(root).get('native_files') else {}
+    result = {'messages': messages, 'config': tomllib.loads((root / 'state/config.toml').read_text())}
+    if settings(root).get('native_files'):
+        from native_file_model_checks import exports
+        result.update(objects=objects, exports=exports(root))
+    return result
 
 
 def stop_process(process):
@@ -144,7 +150,8 @@ def tool_results(events, host):
                 content = item['result']['content']
                 results.setdefault(item['tool'], []).append(json.loads(content[0]['text']))
         else:
-            for block in event.get('message', {}).get('content', []):
+            message = event.get('message', {})
+            for block in message.get('content', []) if isinstance(message, dict) else []:
                 if not isinstance(block, dict):
                     continue
                 if block.get('type') == 'tool_use' and block['name'].startswith('mcp__gent__'):
@@ -170,7 +177,8 @@ def gent_only(events, host):
                 assert item.get('server') == 'gent' and item.get('tool', '').startswith('gent_'), 'unrelated MCP server used'
                 calls += event.get('type') == 'item.completed'
         else:
-            for block in event.get('message', {}).get('content', []):
+            message = event.get('message', {})
+            for block in message.get('content', []) if isinstance(message, dict) else []:
                 if isinstance(block, dict) and block.get('type') == 'tool_use':
                     assert block['name'].startswith('mcp__gent__gent_'), 'unexpected non-Gent host action'
                     calls += 1
@@ -192,13 +200,15 @@ def turn(root, request):
     config = settings(root)
     host, installed = config['host'], root / 'host-config'
     allow_renderer = config.get('allow_renderer', True)
+    native = config.get('native_files', False)
+    native_helper = shlex.join([config['python'], config['script'], 'native-files', str(root)])
     renderer = shlex.join([config['python'], config['script'], 'render'])
     if host == 'codex':
         entry = tomllib.loads((installed / 'config.toml').read_text())['mcp_servers']['gent']
         path = Path(os.getenv('CODEX_HOME', Path.home() / '.codex')) / 'config.toml'
         current = tomllib.loads(path.read_text()) if path.exists() else {}
         command = [config['host_binary'], 'exec', '--json', '--skip-git-repo-check', '-C', str(root / 'work'),
-                   '--sandbox', 'read-only', '--enable' if allow_renderer else '--disable', 'shell_tool', '--disable', 'multi_agent', '--disable', 'apps',
+                   '--sandbox', 'workspace-write' if native else 'read-only', '--enable' if allow_renderer else '--disable', 'shell_tool', '--disable', 'multi_agent', '--disable', 'apps',
                    '-c', 'approval_policy="never"', '-c', 'web_search="disabled"',
                    '-c', 'model_reasoning_effort=' + json.dumps(config.get('reasoning_effort', 'low')),
                    '-c', 'mcp_servers.gent.command=' + json.dumps(entry['command']),
@@ -211,12 +221,15 @@ def turn(root, request):
                     continue
                 assert '.' not in name, 'host configuration names containing dots are unsupported by this proof'
                 command += ['-c', f'{table}.{name}.enabled=false']
+        if native:
+            (root / 'state/files').mkdir(mode=0o700, exist_ok=True)
+            command += ['--add-dir', str(root / 'state/files')]
         command += ['resume', request['session'], '-'] if request.get('session') else ['-']
     else:
         command = [config['host_binary'], '-p', '--output-format', 'stream-json', '--verbose',
-                   '--setting-sources', '', '--strict-mcp-config', '--tools', 'Bash' if allow_renderer else '', '--disable-slash-commands',
+                   '--setting-sources', '', '--strict-mcp-config', '--tools', 'Bash,Read' if native else 'Bash' if allow_renderer else '', '--disable-slash-commands',
                    '--no-chrome', '--permission-mode', 'dontAsk', '--max-budget-usd', '1',
-                   '--allowedTools', 'mcp__gent__*', *([f'Bash({renderer} *)'] if allow_renderer else []),
+                   '--allowedTools', 'mcp__gent__*', *([f'Bash({native_helper} *)', f'Read(/{root}/state/files/*/inbox/*/card.png)'] if native else [f'Bash({renderer} *)'] if allow_renderer else []),
                    '--settings', str(installed / 'settings.json'), '--mcp-config', str(installed / '.claude.json')]
         if request.get('session'):
             command += ['--resume', request['session']]
@@ -231,6 +244,16 @@ def turn(root, request):
                   'Only Gent MCP tools are available. Do not inspect local state, change configuration, spawn agents, '
                   'or use other connectors. Follow the bundled Gent guidance and the user instruction below. '
                   + request['prompt'])
+    if native:
+        prompt = ('Synthetic Gent native-file integration test. Use Gent MCP for all peer communication and file transfers. '
+                  'Follow the bundled file import/export instructions. Your filesystem access is limited to this temporary proof. '
+                  f'The only shell helper allowed is: {native_helper}. Use it with render COLOR SIDE to write card.svg and card.png '
+                  'into your work directory; colors are red/green/blue and sides left/right. It returns metadata, not file contents. '
+                  'Run each helper command literally and separately, without shell variables, chaining, eval, or redirection. '
+                  'Use the same helper with stage BASENAME IMPORT_DIRECTORY to copy each file to the folder returned by gent_file_paths. '
+                  'Use your native image viewer (Codex view_image or Claude Read) only on card.png paths returned by gent_file_export. '
+                  'Do not read Gent state/keys, other files, or unrelated tools; do not use the network directly or spawn agents. '
+                  'Do not put file bytes in your prompt or in files/data_base64; use file_ids. ' + request['prompt'])
     log = root / (request['label'] + '.jsonl')
     with log.open('w') as out, (root / (request['label'] + '.stderr')).open('w') as err:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err, text=True,
@@ -273,6 +296,7 @@ def wait_for(check, description):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--native-files', action='store_true', help='Exercise real-model native file import/export, image inspection, and relay forwarding')
     parser.add_argument('--relay-turns', action='store_true', help='Exercise real-model intermediary/target relay turns instead of visual revision')
     parser.add_argument('--owner', required=True)
     parser.add_argument('--remote-binary', required=True)
@@ -287,6 +311,7 @@ def main():
     parser.add_argument('--relay-token-file', required=True)
     parser.add_argument('--remote-relay-port', type=int, default=18789)
     args = parser.parse_args()
+    assert not (args.native_files and args.relay_turns), 'choose one proof scenario'
     url = urlparse(args.relay_url)
     assert url.scheme == 'http' and url.hostname == '127.0.0.1' and url.port
     assert args.remote_binary.startswith('/') and args.remote_script.startswith('/')
@@ -306,9 +331,9 @@ def main():
         return json.loads(result.stdout)
 
     local_root = Path(prepare({'binary': str(Path(args.binary).resolve()), 'host': args.local_host,
-                              'host_binary': args.local_host_binary, 'relay_turns': args.relay_turns,
+                              'host_binary': args.local_host_binary, 'relay_turns': args.relay_turns, 'native_files': args.native_files,
                               'allow_renderer': not args.relay_turns,
-                              'reasoning_effort': 'medium' if args.relay_turns else 'low'})['root'])
+                              'reasoning_effort': 'medium' if args.relay_turns or args.native_files else 'low'})['root'])
     remote_root = None
     local_daemon = owner_daemon = tunnel = None
     print('Local visual proof:', local_root, flush=True)
@@ -338,14 +363,14 @@ def main():
 
     try:
         remote_root = remote('prepare', data={'binary': args.remote_binary, 'host': args.remote_host,
-                                             'host_binary': args.remote_host_binary, 'relay_turns': args.relay_turns,
+                                             'host_binary': args.remote_host_binary, 'relay_turns': args.relay_turns, 'native_files': args.native_files,
                                              'allow_renderer': not args.relay_turns,
-                                             'reasoning_effort': 'medium' if args.relay_turns else 'low',
+                                             'reasoning_effort': 'medium' if args.relay_turns or args.native_files else 'low',
                                              'relay': f'http://127.0.0.1:{args.remote_relay_port}', 'token': token})['root']
         print('Remote visual proof:', remote_root, flush=True)
         # Different native zlib builds can encode identical pixels differently.
         # Compare exact bytes with the renderer at the attachment's source.
-        reference_files = remote('render', extra=('green', 'right'))['files'] if not args.relay_turns else None
+        reference_files = remote('render', extra=('green', 'right'))['files'] if not args.relay_turns and not args.native_files else None
         with (local_root / 'tunnel.log').open('a') as log:
             tunnel = subprocess.Popen(ssh + ['-o', 'ExitOnForwardFailure=yes', '-N', '-R',
                                       f'127.0.0.1:{args.remote_relay_port}:127.0.0.1:{url.port}', '--', args.owner],
@@ -372,9 +397,7 @@ def main():
         remote_cli('permission', 'allow', aid, bid, '--permission', 'enumerate', 'send')
         grant = remote_cli('permission', 'allow', bid, aid, '--permission', 'enumerate', 'receive')
         wait_for(lambda: inspect(local_root)['config']['applied_revision'] == grant['revision'], 'permission sync')
-        if args.relay_turns:
-            from relay_model_checks import exercise_relay
-
+        if args.relay_turns or args.native_files:
             def local_turn(label, prompt):
                 return turn(local_root, {'label': label, 'session': builder['session'], 'prompt': prompt})
 
@@ -396,15 +419,30 @@ def main():
                 local_daemon = local_start()
                 wait_for(lambda: (local_root / 'state/daemon.sock').exists(), 'intermediary restart')
 
-            report = exercise_relay(
-                aid, bid, local_turn, remote_turn, remote_cli,
-                lambda: inspect(local_root), lambda: remote('inspect', remote_root),
-                offline, restart, render('red', 'left'), wait_for)
+            if args.native_files:
+                from native_file_model_checks import exercise as exercise_native, audit as native_audit
+                report = exercise_native(aid, bid, local_turn, remote_turn, remote_cli,
+                    lambda: inspect(local_root), lambda: remote('inspect', remote_root), offline, restart, wait_for)
+            else:
+                from relay_model_checks import exercise_relay
+                report = exercise_relay(
+                    aid, bid, local_turn, remote_turn, remote_cli,
+                    lambda: inspect(local_root), lambda: remote('inspect', remote_root),
+                    offline, restart, render('red', 'left'), wait_for)
             report.update({'local_host': args.local_host, 'remote_host': args.remote_host,
                            'local_root': str(local_root), 'remote_root': remote_root,
                            'intermediary_session': builder['session'], 'target_session': reviewer['session']})
-            report['local_audit'] = audit(local_root)
-            report['remote_audit'] = remote('audit', remote_root)
+            # Preserve completed protocol assertions if a host's transcript
+            # format changes. This checkpoint is not a successful final report.
+            (local_root / 'protocol-report.json').write_text(
+                json.dumps(dict(report, result='protocol-passed-audit-pending'), indent=2) + '\n')
+            if args.native_files:
+                report['local_audit'] = native_audit(local_root, settings(local_root), tool_results)
+                report['remote_audit'] = remote('native-audit', remote_root)
+            else:
+                report['local_audit'] = audit(local_root)
+                report['remote_audit'] = remote('audit', remote_root)
+
         else:
             marker = 'GENT_VISUAL_' + uuid.uuid4().hex
             initial = turn(local_root, {'label': 'initial', 'session': builder['session'], 'prompt':
@@ -481,7 +519,8 @@ def main():
             stop_process(owner_daemon)
             stop_process(tunnel)
     (local_root / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
-    print('PASS: real-model ordered relay, faithful text/files, pending checks, restart, final outcomes, cancellation, and detach' if args.relay_turns else
+    print('PASS: real-model native files, image inspection, revision, faithful relay forwarding, and restart' if args.native_files else
+          'PASS: real-model ordered relay, faithful text/files, pending checks, restart, final outcomes, cancellation, and detach' if args.relay_turns else
           'PASS: real agents reviewed and revised PNG/SVG files across machines, with scoped replies and offline restart recovery', flush=True)
 
 
@@ -491,7 +530,7 @@ if __name__ == '__main__':
         print(json.dumps({'files': render(*sys.argv[2:])}))
     elif mode == 'prepare':
         print(json.dumps(prepare(json.load(sys.stdin))))
-    elif mode in ('turn', 'install', 'inspect', 'daemon', 'stop', 'cli', 'ready', 'audit'):
+    elif mode in ('turn', 'install', 'inspect', 'daemon', 'stop', 'cli', 'ready', 'audit', 'native-files', 'native-audit'):
         root = Path(sys.argv[2]).resolve()
         if mode == 'daemon':
             (root / 'daemon.pid').write_text(str(os.getpid()))
@@ -505,6 +544,12 @@ if __name__ == '__main__':
             value = inspect(root)
         elif mode == 'audit':
             value = audit(root)
+        elif mode == 'native-files':
+            from native_file_model_checks import fixture
+            value = fixture(root, sys.argv[3:], render)
+        elif mode == 'native-audit':
+            from native_file_model_checks import audit as native_audit
+            value = native_audit(root, settings(root), tool_results)
         elif mode == 'stop':
             value = stop_daemon(root)
         elif mode == 'cli':
