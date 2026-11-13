@@ -3,6 +3,7 @@
 mod joining;
 mod journal;
 pub use joining::join;
+pub(crate) use journal::installation;
 
 use crate::{
     auth,
@@ -46,7 +47,7 @@ fn private(path: &Path) -> Result<Snapshot> {
     snapshot.private()?;
     Ok(snapshot)
 }
-fn decode_file(path: &Path) -> Result<Invitation> {
+pub(crate) fn decode_file(path: &Path) -> Result<Invitation> {
     let snapshot = private(path)?;
     let text = snapshot
         .text
@@ -56,6 +57,13 @@ fn decode_file(path: &Path) -> Result<Invitation> {
         "invitation file too large"
     );
     Invitation::decode(text.as_bytes())
+}
+
+pub(crate) struct Installation {
+    pub name: String,
+    pub offer: gent_crypto::invitation::SignedOffer,
+    pub node: Option<gent_crypto::invitation::ClaimedNode>,
+    pub complete: bool,
 }
 async fn local(home: &Path, action: InvitationOp) -> Result<Value> {
     crate::owner(home, OwnerOp::Invitation { action }).await

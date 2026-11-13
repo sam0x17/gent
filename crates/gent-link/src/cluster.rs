@@ -75,6 +75,50 @@ fn read(home: &Path) -> Result<Option<Setup>> {
         })
         .transpose()
 }
+
+pub(crate) struct Installation {
+    pub name: String,
+    pub service: String,
+    pub pending: bool,
+    pub owner: bool,
+}
+
+/// Read only the setup facts needed by the installer; never expose its bearer.
+pub(crate) fn installation(home: &Path) -> Result<Option<Installation>> {
+    let Some(setup) = read(home)? else {
+        return Ok(None);
+    };
+    let configured = private_snapshot(&config::path(home))?.text.is_some();
+    let mut pending = setup.initial.is_some() || !configured;
+    if configured {
+        let cfg = config::load(home)?;
+        setup.verify_config(&cfg)?;
+        ensure!(
+            cfg.relay.as_ref().is_some_and(|relay| {
+                relay.endpoint == setup.relay_endpoint
+                    && relay.credential_file == home.join(CREDENTIAL)
+            }),
+            "relay settings changed; restore the pinned endpoint before installing"
+        );
+        ensure!(
+            cfg.service
+                .as_ref()
+                .is_none_or(|account| *account == setup.account()),
+            "local service metadata changed"
+        );
+        pending |= cfg.service.is_none();
+    }
+    let credential = private_snapshot(&home.join(CREDENTIAL))?;
+    pending |= setup.credential.as_ref().is_none_or(|saved| {
+        !saved.confirmed || credential.text.as_deref().map(str::trim) != Some(saved.token.as_str())
+    });
+    Ok(Some(Installation {
+        name: setup.name,
+        service: setup.service,
+        pending,
+        owner: setup.role == SetupRole::Owner,
+    }))
+}
 impl Setup {
     fn validate(&self) -> Result<()> {
         ensure!(self.version == 1, "unsupported service setup record");

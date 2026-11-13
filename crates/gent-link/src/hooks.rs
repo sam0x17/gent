@@ -30,7 +30,7 @@ impl Shell {
             Self::Fish => clap_complete::Shell::Fish,
         }
     }
-    fn detected(value: Option<&std::ffi::OsStr>) -> Result<Self> {
+    pub(crate) fn detected(value: Option<&std::ffi::OsStr>) -> Result<Self> {
         match value
             .and_then(|v| Path::new(v).file_name())
             .and_then(|v| v.to_str())
@@ -47,10 +47,10 @@ impl Shell {
 pub struct Options {
     /// Shell to configure (default: the shell named by SHELL).
     #[arg(long)]
-    shell: Option<Shell>,
+    pub(crate) shell: Option<Shell>,
     /// Startup file (default: the selected shell's standard user configuration).
     #[arg(long)]
-    rc_file: Option<PathBuf>,
+    pub(crate) rc_file: Option<PathBuf>,
 }
 impl Options {
     fn resolve(self) -> Result<(Shell, PathBuf)> {

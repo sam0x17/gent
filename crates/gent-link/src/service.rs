@@ -179,6 +179,26 @@ impl Service {
     }
 }
 
+/// Fail before guided login/enrollment when this machine cannot install a service.
+pub async fn preflight(home: &Path) -> Result<()> {
+    let service = Service::new(home).await?;
+    let state = service.manager.inspect().await;
+    ensure!(
+        state.available,
+        "{}",
+        state
+            .error
+            .as_deref()
+            .unwrap_or("user service manager is unavailable; use gent daemon run")
+    );
+    ensure!(
+        service.installed()?.is_some() || !state.loaded,
+        "a service with this label is loaded without Gent's managed file; inspect {}",
+        service.path.display()
+    );
+    service.no_foreground(&state).await
+}
+
 pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
     let service = Service::new(home).await?;
     match action {
@@ -205,7 +225,7 @@ pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
         );
     }
     match &action {
-        DaemonCommand::Install { local } => {
+        DaemonCommand::Install { local, .. } => {
             if !config::path(&service.home).exists() {
                 local.as_deref().context("no Gent configuration; run gent auth login and gent cluster new NAME, or use gent daemon install --local NAME for a development cluster")?;
                 config::private_dir(&service.home)?;
@@ -230,7 +250,7 @@ pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
         "loaded service has no Gent-managed file; inspect {}",
         service.path.display()
     );
-    if let DaemonCommand::Install { local } = &action {
+    if let DaemonCommand::Install { local, .. } = &action {
         if !config::path(&service.home).exists() {
             let _daemon = managed_file::lock(&service.home.join("daemon.lock"))?;
             let name = local

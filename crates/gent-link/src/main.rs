@@ -8,6 +8,7 @@ mod managed_file;
 mod mcp;
 mod pairing;
 mod service;
+mod setup;
 
 use anyhow::{Context, Result, ensure};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -21,7 +22,7 @@ use std::{io::Write, path::PathBuf};
     name = "gent",
     version,
     about = "Permissioned communication between agents",
-    after_help = "Service setup: gent auth login && gent cluster new demo && gent daemon install\nLocal development: gent daemon install --local demo\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
+    after_help = "Guided setup: gent daemon install\nScripted setup: gent auth login && gent daemon install --new demo --no-input\nLocal development: gent daemon install --local demo\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
 )]
 struct Cli {
     /// State directory (default: ~/.gent). Use a separate directory for experiments.
@@ -204,6 +205,8 @@ enum DaemonCommand {
         /// Initialize an unconfigured local development cluster (default name: default).
         #[arg(long, num_args=0..=1, default_missing_value="default")]
         local: Option<String>,
+        #[command(flatten)]
+        setup: setup::Options,
     },
     /// Stop and remove the service, retaining all Gent state and credentials.
     #[command(alias = "remove")]
@@ -404,7 +407,12 @@ async fn execute(cli: Cli) -> Result<()> {
             return Ok(());
         }
         let status_only = matches!(command, None | Some(DaemonCommand::Status));
-        let output = service::execute(&home, command.unwrap_or(DaemonCommand::Status)).await?;
+        let output = match command.unwrap_or(DaemonCommand::Status) {
+            DaemonCommand::Install { local, setup } => {
+                setup::install(&home, local, setup, !cli.json).await?
+            }
+            action => service::execute(&home, action).await?,
+        };
         if cli.json {
             println!("{}", serde_json::to_string(&output)?);
         } else {

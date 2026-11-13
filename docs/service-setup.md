@@ -4,7 +4,13 @@ The source build can provision an owner and join additional nodes through privat
 
 The [invitation enrollment guide](invitation-enrollment.md) documents the implemented commands, protected file transfer, expiry and interrupted-join recovery.
 
-For a configured service:
+For a configured service, run the guided installer in a terminal:
+
+```sh
+gent daemon install
+```
+
+On an unconfigured node it asks whether to create a cluster or join with a private invitation, collects the missing name/file, signs in with GitHub, and starts the per-user service. It offers shell PATH and completion setup for Zsh, Bash or Fish. Each step remains available independently:
 
 ```sh
 gent auth login
@@ -12,6 +18,21 @@ gent cluster new my-cluster
 gent daemon install
 gent hooks install
 ```
+
+For explicit setup or a headless machine:
+
+```sh
+gent daemon install --new my-cluster --headless
+gent daemon install --invite-file /private/path/laptop.gent-invite --name laptop --headless
+```
+
+`--headless` allows device login; `--no-browser` prints the browser login URL and waits for its callback instead of opening a browser. `--service ORIGIN` selects an alternate account service. The installer never selects that origin from a newly supplied invitation. Existing setup pins the account service and relay; changing `--service` cannot move it.
+
+JSON output and non-terminal input never trigger setup questions. Sign in separately, then pass `--new NAME` or `--invite-file FILE --name NODE` with `--no-input` for scripts. `--no-input` also prevents starting login. An explicit `--headless` or `--no-browser` may initiate the existing bounded login flow without a terminal. Add `--hooks --shell zsh` (or `bash`/`fish`) to install shell support explicitly; `--rc-file PATH` chooses a startup file. Shell setup preserves unrelated content. A shell failure after enrollment reports that the daemon is already installed and gives the separate retry command.
+
+The installer checks service-manager availability and service ownership before sign-in. Cancellation or missing choices leave a fresh state directory uncreated. Completed installs preserve node identity and can be repeated while the managed daemon runs, without an account request or a daemon restart when the service definition is unchanged. Interrupted cluster creation resumes with bare `gent daemon install`; interrupted invitation enrollment needs the original file/name, or an explicit `--continue` with a valid replacement. Pending SSH joins must resume through the original `gent cluster join --via ...` command. Stop the daemon before a retry that needs enrollment or credential repair. Completed setup does not automatically check or renew expired credentials.
+
+After installation, connect hosts with `gent integration install codex` and `gent integration install claude-code`. The daemon installer prints these commands; host settings use their separate installers.
 
 Use `gent auth login --service https://YOUR_ACCOUNT_ORIGIN` for an alternate deployment. The account service advertises its relay through authenticated `GET /v1/transport/config`. Account credentials go only to the saved login origin. The CLI accepts HTTPS origins, with HTTP restricted to explicit loopback fixtures; an HTTPS account service cannot select an HTTP relay. The initial relay address is pinned locally. A later discovery response cannot silently move an existing node to another relay.
 
@@ -33,6 +54,8 @@ Transfer that file through an independently trusted channel. On the new machine:
 gent cluster join --invite-file /private/path/laptop.gent-invite --name laptop
 gent daemon install
 ```
+
+Alternatively, combine enrollment and service installation with `gent daemon install --invite-file /private/path/laptop.gent-invite --name laptop`. A repeated completed install with that same file/name preserves the running service. Keep the private invitation available for retries until setup finishes.
 
 The file expires after 15 minutes. Its secrets authenticate the native encrypted enrollment channel; the service cannot supply a replacement trust anchor. Each node gets its own transport credential and keeps its signing key locally. New nodes may edit configuration by default; create the invitation with `--no-configure` for messaging-only membership.
 
@@ -81,7 +104,7 @@ Use `gent daemon install` instead of `start` if the service is not installed. Se
 
 Each connect checks service authority. A valid credential is reused. Once a previously confirmed credential is revoked or expired, connect can issue another after a valid login, preserving encryption identity. A lost admission response retains its exact candidate. If that candidate is still unconfirmed after switching login sessions, retry may need to wait for its 15-minute admission window to close. Only an explicit expired-candidate response permits replacing an unconfirmed token; network errors and a timestamp ahead of the service clock do not. Node retirement remains permanent and cannot be bypassed with connect.
 
-Credentials expire with their issuing account session, currently after 30 days. Automatic renewal and an installer that guides all missing login/enrollment steps remain unfinished. Logging out revokes credentials issued by that session without deleting local messages or keys. `cluster connect` restores transport authorization only; it does not recover lost encryption keys, move ciphertext, restore retired nodes, or perform invitation enrollment.
+Credentials expire with their issuing account session, currently after 30 days. Automatic renewal remains unfinished. Logging out revokes credentials issued by that session without deleting local messages or keys. `cluster connect` restores transport authorization only; it does not recover lost encryption keys, move ciphertext, restore retired nodes, or perform invitation enrollment.
 
 ## Local verification
 

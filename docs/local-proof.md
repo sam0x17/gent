@@ -57,7 +57,7 @@ gent cluster
 gent config path
 ```
 
-`--local` is required to create a development cluster. This build supports one local cluster per state directory. For foreground use, run `gent cluster new demo --local` followed by `gent daemon run`; stop it with Ctrl-C or SIGTERM. A restart preserves identities, permissions, and queued messages. Account login has the separate prototype below; guided hosted enrollment and multi-cluster selection remain future work.
+`--local` is required to create a development cluster. This build supports one local cluster per state directory. For foreground use, run `gent cluster new demo --local` followed by `gent daemon run`; stop it with Ctrl-C or SIGTERM. A restart preserves identities, permissions, and queued messages. For an account service, `gent daemon install` guides login and owner/invitation enrollment; see [service setup](service-setup.md) for explicit choices and noninteractive use. Multi-cluster selection remains future work.
 
 ## Account login
 
@@ -71,7 +71,7 @@ Status is read-only and checks the service before reporting an active session. O
 
 Native Linux and Mac proofs exercise the actual CLI against a local Rust account Worker backed by D1 and a synthetic GitHub provider. They cover browser callback/state/PKCE validation, device polling and slow-down, private credential storage, rejected links, interrupted-login recovery, offline logout and byte-identical existing cluster files. The browser proof sends the callback over HTTP; it does not launch a GUI browser or exercise real GitHub consent.
 
-`scripts/prove_auth.py` is the public CLI portion of that private service harness. The optional `test-auth-provider` build feature accepts an explicit fixture provider only when both it and the account service are loopback origins. Default builds omit this override. Real GitHub consent, production deployment and guided service-backed node enrollment remain unverified or unfinished. Service logout leaves the separate development relay credential unchanged; it revokes dependent credentials issued for the service-backed relay prototype.
+`scripts/prove_auth.py` is the public CLI portion of that private service harness. The optional `test-auth-provider` build feature accepts an explicit fixture provider only when both it and the account service are loopback origins. Default builds omit this override. `scripts/prove_setup.py` includes guided-install checks from `prove_guided.py`: real service installation, terminal choices/cancellation, interrupted credential provisioning, repeated installs and shell-file preservation. Real GitHub consent and production deployment remain unverified. Service logout leaves the separate development relay credential unchanged; it revokes dependent credentials issued for the service-backed relay prototype.
 
 ## Service-backed transport proof
 

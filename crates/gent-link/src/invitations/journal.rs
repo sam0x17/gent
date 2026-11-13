@@ -30,6 +30,24 @@ pub(super) struct Journal {
     saved: Saved,
     _lock: std::fs::File,
 }
+
+pub(crate) fn installation(home: &Path) -> Result<Option<super::Installation>> {
+    let snapshot = private(&home.join("auth/invitation-join.json"))?;
+    let Some(text) = snapshot.text else {
+        return Ok(None);
+    };
+    let saved: Saved = serde_json::from_str(&text)
+        .map_err(|_| anyhow::anyhow!("invalid invitation join journal; restore it from backup"))?;
+    ensure!(saved.version == 1, "unsupported invitation join journal");
+    config::label(&saved.name)?;
+    saved.offer.fingerprint()?;
+    Ok(Some(super::Installation {
+        name: saved.name,
+        offer: saved.offer,
+        node: saved.node,
+        complete: saved.receipt.is_some(),
+    }))
+}
 fn digest(action: &Action) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_jcs::to_vec(action)?)))
 }

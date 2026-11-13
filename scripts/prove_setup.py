@@ -275,6 +275,9 @@ def main():
         check_preserved(keys, ids)
         print('PASS: private files, link/missing-state/account rejection, real service lifecycle and daemon exclusion', flush=True)
 
+        from prove_guided import prove as prove_guided
+        prove_guided(args.binary.resolve(), root, env, origin, fault, calls)
+
         # Confirmed revoked credentials can be replaced after a fresh login.
         cli('auth', 'logout')
         http('/v1/transport/session', token=token, status=401)
