@@ -2,6 +2,8 @@
 
 The source build can provision an owner and join additional nodes through a trusted SSH channel against a configured Gent account service. The public account and messaging services are not deployed yet. Real GitHub consent and invitation enrollment remain unfinished.
 
+The [invitation enrollment design](invitation-enrollment.md) describes the next stage. Commands shown there are proposals; use the SSH procedure below for the current build.
+
 For a configured service:
 
 ```sh
