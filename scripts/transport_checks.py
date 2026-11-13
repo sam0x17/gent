@@ -5,8 +5,8 @@
 RESTORE_COPIES = r'''
 import base64,json,pathlib,sqlite3,sys
 with sqlite3.connect(pathlib.Path(sys.argv[1])/'state.sqlite3') as db:
-    rows=db.execute('SELECT id,packet FROM stream_outbox ORDER BY rowid LIMIT 12').fetchall()
-    assert len(rows)==12
+    rows=db.execute('SELECT id,packet FROM stream_outbox WHERE sequence=0 ORDER BY rowid LIMIT 12').fetchall()
+    assert rows
     for request,wire in rows:
         raw=base64.b64decode(json.loads(wire)['ciphertext'])
         assert db.execute('UPDATE outbox SET bytes=? WHERE id=?',(raw,request)).rowcount==1
@@ -32,23 +32,25 @@ def exercise_storage(a, b, target, cli, owner_cli, restore, restart, wait_for):
         assert incoming(a, reply['message_id'])['text'] == f'review {index}'
         a.call('gent_ack', {'message_id': reply['message_id']})
     for command in (cli, owner_cli):
+        wait_for(lambda: command('transport')['retired_packet_tombstones'] > 128)
+        wait_for(lambda: command('transport')['outgoing']['data']['packets'] < 32)
         status = command('transport', 'status')
-        assert status['outgoing']['data']['packets'] > 128
+        assert status['confirmed_streams'] > 0
         assert status['duplicate_copies'] == status['accepted_digests_due'] == status['wire_receipts_due'] == 0
     restore()
     for command in (cli, owner_cli):
-        assert command('transport')['duplicate_copies'] == 12
-        before = command('transport')['outgoing']
+        copies = command('transport')['duplicate_copies']
+        assert copies > 0
         preview = command('transport', 'clean', '--dry-run')
-        assert preview['duplicate_copies_compacted'] == 8 and preview['retained_packets_removed'] == 0
-        assert command('transport')['duplicate_copies'] == 12
+        assert preview['duplicate_copies_compacted'] == min(copies, 8)
+        assert command('transport')['duplicate_copies'] == copies
         cleaned = command('transport', 'clean')
-        assert cleaned['duplicate_copies_compacted'] == 8 and cleaned['duplicate_bytes_removed'] > 0
-        assert command('transport')['duplicate_copies'] == 4
-        assert command('transport')['outgoing']['data']['packets'] >= before['data']['packets']
+        assert cleaned['duplicate_copies_compacted'] == min(copies, 8) and cleaned['duplicate_bytes_removed'] > 0
+        assert command('transport')['duplicate_copies'] == max(copies - 8, 0)
+    restore()
     restart()
     for command in (cli, owner_cli):
         wait_for(lambda: command('transport')['duplicate_copies'] == 0)
     assert a.call('gent_send', first[0])[0]['message_id'] == first[1]
     assert not a.call('gent_inbox')[0] and not b.call('gent_inbox')[0]
-    print('PASS: 70 two-machine exchanges, bounded replay evidence, CLI preview/compaction, startup cleanup, and exact retry after restart', flush=True)
+    print('PASS: 70 two-machine exchanges, authenticated packet retirement, bounded replay evidence, CLI preview/compaction, startup cleanup, and exact agent retry after restart', flush=True)

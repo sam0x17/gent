@@ -181,6 +181,96 @@ async fn automatic_sync_catches_up_after_outage_and_peer_restart() {
 }
 
 #[tokio::test]
+async fn receiver_checkpoints_retire_only_verified_history_and_restore_lost_relay_storage() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use gent_crypto::stream::Packet;
+    let relay = RelayServer::start().await;
+    let mut f = Fixture::new(&relay.endpoint, &relay.token);
+    let source = f.start(0);
+    let revision = f.set(policy("checkpoint-private-history"));
+    let packet = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(packet) = relay
+                .data
+                .lock()
+                .unwrap()
+                .values()
+                .filter_map(|q| q.get(1))
+                .find_map(|p| Packet::decode(p).ok())
+            {
+                break packet;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let key = format!("checkpoint/{}", URL_SAFE_NO_PAD.encode(packet.group()));
+    let forged = NodeIdentity::generate()
+        .unwrap()
+        .sign_stream_receipt(packet.group(), packet.sequence(), packet.digest().unwrap())
+        .unwrap();
+    relay
+        .data
+        .lock()
+        .unwrap()
+        .insert(key.clone(), vec![forged.encode().unwrap()]);
+    let before = relay.requests.load(Ordering::SeqCst);
+    relay.notices.send(relay::Notice::Changed).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while relay.requests.load(Ordering::SeqCst) <= before + 1 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let db = rusqlite::Connection::open(f.homes[0].path().join("state.sqlite3")).unwrap();
+    let count = || {
+        db.query_row("SELECT COUNT(*) FROM stream_confirmed", [], |r| {
+            r.get::<_, u64>(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(count(), 0);
+    assert!(
+        db.query_row(
+            "SELECT length(packet)>0 FROM stream_outbox WHERE group_id=?1 AND sequence=?2",
+            rusqlite::params![packet.group(), packet.sequence()],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    relay.data.lock().unwrap().remove(&key);
+    let receiver = f.start(1);
+    f.wait_revision(revision).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM stream_outbox WHERE length(packet)=0)",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(count() > 0);
+    drop(receiver);
+    drop(source);
+    relay.data.lock().unwrap().clear();
+    // Both daemons reopen their own committed state after relay loss.
+    f.stores =
+        std::array::from_fn(|i| Arc::new(Mutex::new(Store::open(f.homes[i].path()).unwrap())));
+    let _source = f.start(0);
+    let _receiver = f.start(1);
+    let revision = f.set(policy("checkpoint-after-loss"));
+    f.wait_revision(revision).await;
+}
+
+#[tokio::test]
 async fn malicious_relay_positions_and_bytes_cannot_change_configuration() {
     let relay = RelayServer::start().await;
     let f = Fixture::new(&relay.endpoint, &relay.token);

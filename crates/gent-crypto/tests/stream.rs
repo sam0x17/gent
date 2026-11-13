@@ -5,6 +5,51 @@ use gent_crypto::{
 use serde_json::json;
 
 #[test]
+fn receiver_checkpoints_bind_every_field_and_have_bounded_canonical_wire() {
+    use gent_crypto::stream::{MAX_RECEIPT_BYTES, Receipt};
+    let node = NodeIdentity::generate().unwrap();
+    let other = NodeIdentity::generate().unwrap();
+    let receipt = node.sign_stream_receipt(b"opaque", 13, [7; 32]).unwrap();
+    receipt.verify(&node.public_key()).unwrap();
+    assert!(receipt.verify(&other.public_key()).is_err());
+    let wire = receipt.encode().unwrap();
+    assert_eq!(Receipt::decode(&wire).unwrap(), receipt);
+    let fields = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(fields.as_object().unwrap().len(), 5);
+    assert!(!String::from_utf8(wire.clone()).unwrap().contains(node.id()));
+    for (field, value) in [
+        ("group", json!("b3RoZXI=")),
+        ("sequence", json!(14)),
+        ("digest", json!(vec![8; 32])),
+        ("signature", json!(vec![0; 64])),
+        ("version", json!(2)),
+    ] {
+        let mut changed = fields.clone();
+        changed[field] = value;
+        let changed: Receipt = serde_json::from_value(changed).unwrap();
+        assert!(
+            changed.verify(&node.public_key()).is_err(),
+            "accepted changed {field}"
+        );
+    }
+    let mut padded = wire.clone();
+    padded.push(b' ');
+    assert!(Receipt::decode(&padded).is_err());
+    let duplicate = String::from_utf8(wire)
+        .unwrap()
+        .replacen('{', "{\"sequence\":13,", 1);
+    assert!(Receipt::decode(duplicate.as_bytes()).is_err());
+    assert!(Receipt::decode(&vec![0; MAX_RECEIPT_BYTES + 1]).is_err());
+    assert!(node.sign_stream_receipt(b"", 1, [7; 32]).is_err());
+    assert!(node.sign_stream_receipt(&[1; 257], 1, [7; 32]).is_err());
+    assert!(
+        node.sign_stream_receipt(b"g", MAX_SEQUENCE, [7; 32])
+            .is_err()
+    );
+    assert!(node.sign_stream_receipt(b"g", 1, [0; 32]).is_err());
+}
+
+#[test]
 fn signatures_bind_ciphertext_group_sequence_and_predecessor() {
     let node = NodeIdentity::generate().unwrap();
     let other = NodeIdentity::generate().unwrap();

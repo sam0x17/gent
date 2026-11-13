@@ -14,14 +14,14 @@ const CONFIGURATION_BYTES: u64 = 128 * 1024 * 1024;
 pub(super) fn capacity(db: &Connection, purpose: &str, bytes: usize) -> Result<()> {
     let (count, used): (u64, u64) = db.query_row(
         "SELECT COUNT(*),COALESCE(SUM(length(o.packet)),0) FROM stream_outbox o
-         JOIN streams s USING(group_id) WHERE s.purpose=?1",
+         JOIN streams s USING(group_id) WHERE s.purpose=?1 AND length(o.packet)>0",
         [purpose],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let (max_count, max_bytes) = limits(purpose)?;
     ensure!(
         count < max_count && used.saturating_add(bytes as u64) <= max_bytes,
-        "{purpose} transport history quota exhausted; inspect gent transport status; cleaning duplicate copies does not release retained packet quota"
+        "{purpose} transport history quota exhausted; inspect gent transport status; waiting for authenticated receiver checkpoints may release capacity"
     );
     Ok(())
 }
@@ -43,6 +43,10 @@ pub(crate) fn bytes(db: &Connection, id: &str, group: &[u8], raw: Vec<u8>) -> Re
     let (wire,sequence,key):(Vec<u8>,u64,PublicKey) = db.query_row(
         "SELECT o.packet,o.sequence,s.writer_key FROM stream_outbox o JOIN streams s USING(group_id)
          WHERE o.id=?1 AND o.group_id=?2",params![id,group],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    ensure!(
+        !wire.is_empty(),
+        "transport request was confirmed and retired; it cannot be submitted again"
+    );
     let packet = Packet::decode(&wire)?;
     packet.verify(&key)?;
     ensure!(
@@ -83,8 +87,10 @@ pub(super) fn trim_group(db: &Connection, group: &[u8], head: u64) -> Result<()>
 }
 
 /// Caller owns an immediate transaction. No authority lease is needed for local
-/// compaction, which never changes stream heads, packets, or application state.
+/// compaction and retirement based on already verified receiver checkpoints.
+/// Stream heads and application state are unchanged.
 pub(crate) fn clean(db: &Connection, dry_run: bool) -> Result<Value> {
+    let (retired, retired_bytes) = confirmation::retire(db, dry_run)?;
     let copies = db
         .prepare(
             "SELECT o.id,o.group_id,o.bytes FROM outbox o JOIN stream_outbox s ON s.id=o.id
@@ -136,7 +142,7 @@ pub(crate) fn clean(db: &Connection, dry_run: bool) -> Result<Value> {
         json!({"dry_run":dry_run,"duplicate_copies_compacted":copies.len(),"duplicate_bytes_removed":removed_bytes,
         "accepted_digests_removed":seen.len(),"wire_receipts_removed":receipts.len(),
         "copy_batch_limit":COPY_BATCH,"replay_batch_limit":CLEAN_BATCH,
-        "retained_packets_removed":0}),
+        "retained_packets_removed":retired,"retained_packet_bytes_removed":retired_bytes,"retirement_batch_limit":256}),
     )
 }
 
@@ -145,7 +151,7 @@ pub(crate) fn status(db: &Connection) -> Result<Value> {
     for purpose in ["data", "configuration"] {
         let (count, bytes): (u64, u64) = db.query_row(
             "SELECT COUNT(*),COALESCE(SUM(length(o.packet)),0)
-            FROM stream_outbox o JOIN streams s USING(group_id) WHERE s.purpose=?1",
+            FROM stream_outbox o JOIN streams s USING(group_id) WHERE s.purpose=?1 AND length(o.packet)>0",
             [purpose],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -167,11 +173,12 @@ pub(crate) fn status(db: &Connection) -> Result<Value> {
     let (receipts,receipts_due):(u64,u64)=db.query_row("SELECT COUNT(*),COALESCE(SUM(r.stream_sequence IS NULL OR
         (r.stream_sequence>0 AND r.stream_sequence<=s.head-?1)),0) FROM receipts r JOIN streams s USING(group_id)",
         [RECENT_PACKETS],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let (confirmed,retired):(u64,u64)=db.query_row("SELECT (SELECT COUNT(*) FROM stream_confirmed),(SELECT COUNT(*) FROM stream_outbox WHERE length(packet)=0)",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
     Ok(
-        json!({"outgoing":classes,"duplicate_copies":copies,"duplicate_bytes":copy_bytes,
+        json!({"confirmed_streams":confirmed,"retired_packet_tombstones":retired,"outgoing":classes,"duplicate_copies":copies,"duplicate_bytes":copy_bytes,
         "accepted_digests":digests,"accepted_digests_due":due,"ordered_wire_receipts":receipts,"wire_receipts_due":receipts_due,
         "recent_packets_per_stream":RECENT_PACKETS,
-        "scope":"Ordered transport only; outbound packets stay retained for offline peers. Authority history, raw groups, application queues, plaintext, and total database size are separate."}),
+        "scope":"Ordered transport only; unconfirmed packets remain for offline peers. Retry tombstones, authority history, raw groups, application queues, plaintext, and total database size are separate."}),
     )
 }
 

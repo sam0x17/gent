@@ -9,6 +9,84 @@ use sha2::{Digest as _, Sha256};
 pub const MAX_CIPHERTEXT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_PACKET_BYTES: usize = 3 * 1024 * 1024;
 pub const MAX_SEQUENCE: u64 = (1 << 53) - 1;
+pub const MAX_RECEIPT_BYTES: usize = 4096;
+
+/// Durable receiver checkpoint. Contains only metadata already visible in the
+/// opaque stream, with no identity, key, message ID, or application content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Receipt {
+    version: u8,
+    #[serde(with = "bytes")]
+    group: Vec<u8>,
+    sequence: u64,
+    digest: Digest,
+    pub(crate) signature: Vec<u8>,
+}
+impl Receipt {
+    pub(crate) fn unsigned(group: &[u8], sequence: u64, digest: Digest) -> Self {
+        Self {
+            version: 1,
+            group: group.into(),
+            sequence,
+            digest,
+            signature: vec![],
+        }
+    }
+    pub fn group(&self) -> &[u8] {
+        &self.group
+    }
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    pub fn digest(&self) -> Digest {
+        self.digest
+    }
+    pub(crate) fn signing_input(&self) -> Result<Vec<u8>> {
+        ensure!(
+            self.version == 1
+                && !self.group.is_empty()
+                && self.group.len() <= 256
+                && self.sequence < MAX_SEQUENCE
+                && self.digest != [0; 32],
+            "invalid stream receipt"
+        );
+        let mut input = b"gent/stream-receipt/v1\0".to_vec();
+        input.extend_from_slice(&(self.group.len() as u16).to_be_bytes());
+        input.extend_from_slice(&self.group);
+        input.extend_from_slice(&self.sequence.to_be_bytes());
+        input.extend_from_slice(&self.digest);
+        Ok(input)
+    }
+    pub fn verify(&self, key: &PublicKey) -> Result<()> {
+        let key = VerifyingKey::from_bytes(key)?;
+        ensure!(!key.is_weak(), "weak stream reader key");
+        key.verify_strict(
+            &self.signing_input()?,
+            &Signature::try_from(self.signature.as_slice())?,
+        )
+        .context("invalid stream receipt signature")
+    }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.signing_input()?;
+        ensure!(
+            self.signature.len() == 64,
+            "invalid receipt signature length"
+        );
+        let wire = serde_jcs::to_vec(self)?;
+        ensure!(wire.len() <= MAX_RECEIPT_BYTES, "receipt too large");
+        Ok(wire)
+    }
+    pub fn decode(wire: &[u8]) -> Result<Self> {
+        ensure!(
+            !wire.is_empty() && wire.len() <= MAX_RECEIPT_BYTES,
+            "invalid receipt size"
+        );
+        let receipt: Self = serde_json::from_slice(wire)?;
+        ensure!(receipt.encode()? == wire, "noncanonical stream receipt");
+        Ok(receipt)
+    }
+}
 
 /// Contains no node IDs, names, public keys, plaintext, or agent request IDs.
 /// Opaque group IDs, sequence counters, predecessor hashes and sizes are visible.

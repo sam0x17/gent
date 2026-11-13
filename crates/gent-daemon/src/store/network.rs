@@ -681,7 +681,12 @@ impl Store {
         Ok(streams)
     }
 
-    fn data_peer(&self, db: &Connection, group: &[u8], outgoing: bool) -> Result<String> {
+    pub(super) fn data_peer(
+        &self,
+        db: &Connection,
+        group: &[u8],
+        outgoing: bool,
+    ) -> Result<String> {
         let column = if outgoing { "outgoing" } else { "incoming" };
         let (peer, key): (String, Vec<u8>) = db.query_row(
             &format!("SELECT peer,peer_key FROM network_links WHERE {column}=?1"),

@@ -144,6 +144,55 @@ impl Fixture {
 }
 
 #[test]
+fn checkpoint_retirement_allows_expired_configuration_recovery_but_rechecks_revocation() {
+    let f = Fixture::new();
+    let config = f.configuration(1);
+    let group = config.packet.group();
+    let data = f.data(0, 1);
+    let update = f.state.renew(&f.owner, f.now + 1).unwrap();
+    f.endpoint(0).apply_authority(&[update]).unwrap();
+    let packets = f.publish_all(group, f.now + 1);
+    let expired = f.now + MAX_STATE_LIFETIME + 10;
+    for packet in &packets {
+        f.endpoint(1).stage_configuration(packet, expired).unwrap();
+        f.endpoint(1)
+            .drain_configuration(group, 1, expired)
+            .unwrap();
+    }
+    assert!(f.endpoint(1).receipt(data.group(), expired).is_err());
+    let receipt = f.endpoint(1).receipt(group, expired).unwrap();
+    f.endpoint(0)
+        .confirm(&receipt, f.nodes[1].id(), expired)
+        .unwrap();
+    assert_eq!(
+        f.endpoint(0).storage_status().unwrap()["outgoing"]["configuration"]["packets"],
+        1
+    );
+    let state = f.endpoint(0).authority_state().unwrap();
+    let renewed = state.renew(&f.owner, expired).unwrap();
+    f.endpoint(0).apply_authority(&[renewed]).unwrap();
+    let packets = f.publish_all(group, expired);
+    for packet in &packets {
+        f.endpoint(1).stage_configuration(packet, expired).unwrap();
+        f.endpoint(1)
+            .drain_configuration(group, 1, expired)
+            .unwrap();
+    }
+    let receipt = f.endpoint(1).receipt(group, expired).unwrap();
+    let state = f.endpoint(0).authority_state().unwrap();
+    let revoked = state
+        .revoke_node(&f.owner, f.nodes[1].id(), expired)
+        .unwrap();
+    f.endpoint(0).apply_authority(&[revoked]).unwrap();
+    assert!(
+        f.endpoint(0)
+            .confirm(&receipt, f.nodes[1].id(), expired)
+            .is_err()
+    );
+    assert!(f.endpoint(0).confirmed_receipt(group, expired).is_err());
+}
+
+#[test]
 fn expired_nodes_verify_history_before_ordinary_delivery_resumes() {
     let f = Fixture::new();
     let config = f.configuration(1);
@@ -782,7 +831,7 @@ fn version_two_streams_upgrade_without_losing_ciphertext() {
         f.db(1)
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
     let configuration = f.configuration(1);
     assert_eq!(

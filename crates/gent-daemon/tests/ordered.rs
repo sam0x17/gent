@@ -10,6 +10,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+#[path = "ordered/confirmation.rs"]
+mod confirmation;
 #[path = "ordered/storage.rs"]
 mod storage;
 
@@ -593,7 +595,7 @@ fn raw_groups_upgrade_storage_but_cannot_be_adopted_into_streams() {
         w.db(1)
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
     assert!(w.endpoint(0).create(request, &peers, w.now).is_err());
     let wrapped = w.nodes[0]

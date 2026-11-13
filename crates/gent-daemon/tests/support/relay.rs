@@ -171,6 +171,8 @@ async fn serve(
                 &body,
                 mode.load(Ordering::SeqCst),
             )
+        } else if parts.len() == 5 && matches!(parts[4], "checkpoint" | "retire") {
+            checkpoint(&mut data, &parts, &request[0], &body)
         } else if parts.len() == 4 {
             let next = if mode.load(Ordering::SeqCst) == 3 {
                 9999
@@ -193,7 +195,7 @@ async fn serve(
                 } else {
                     (409, vec![])
                 }
-            } else if let Some(packet) = queue.get(sequence) {
+            } else if let Some(packet) = queue.get(sequence).filter(|p| !p.is_empty()) {
                 let mut bytes = packet.clone();
                 if mode.load(Ordering::SeqCst) == 2 {
                     let end = bytes.len() - 1;
@@ -214,6 +216,44 @@ async fn serve(
     );
     let _ = socket.write_all(header.as_bytes()).await;
     let _ = socket.write_all(&response).await;
+}
+
+fn checkpoint(
+    data: &mut BTreeMap<String, Vec<Vec<u8>>>,
+    parts: &[&str],
+    method: &str,
+    body: &[u8],
+) -> (u16, Vec<u8>) {
+    use gent_crypto::stream::Receipt;
+    let key = format!("checkpoint/{}", parts[3]);
+    if method == "GET" {
+        return data
+            .get(&key)
+            .map_or((404, vec![]), |r| (200, r[0].clone()));
+    }
+    let receipt = Receipt::decode(body).unwrap();
+    if parts[4] == "retire" {
+        let queue = data.entry(parts[3].into()).or_default();
+        let end = receipt.sequence() as usize + 1;
+        if queue.len() < end {
+            queue.resize(end, vec![]);
+        }
+        for packet in &mut queue[..end] {
+            packet.clear();
+        }
+        return (204, vec![]);
+    }
+    if let Some(saved) = data.get(&key) {
+        let old = Receipt::decode(&saved[0]).unwrap();
+        if old.sequence() > receipt.sequence() || saved[0] == body {
+            return (204, vec![]);
+        }
+        if old.sequence() == receipt.sequence() {
+            return (409, vec![]);
+        }
+    }
+    data.insert(key, vec![body.to_vec()]);
+    (200, vec![])
 }
 
 // Development object transport for daemon scheduling tests. The Worker suite

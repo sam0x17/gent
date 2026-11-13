@@ -25,8 +25,8 @@ struct Fragment {
     data: String,
 }
 
-struct Progress {
-    grant: SignedConfigurationGrant,
+pub(super) struct Progress {
+    pub(super) grant: SignedConfigurationGrant,
     revision: u64,
     hash: Digest,
     offset: usize,
@@ -265,7 +265,7 @@ fn initialize_configuration(db: &Connection, signed: &SignedConfigurationGrant) 
     Ok(())
 }
 
-fn progress(db: &Connection, group: &[u8]) -> Result<Progress> {
+pub(super) fn progress(db: &Connection, group: &[u8]) -> Result<Progress> {
     let (grant, revision, hash, offset): (Vec<u8>, u64, Digest, usize) = db.query_row(
         "SELECT grant,revision,state_hash,offset FROM configuration_streams WHERE group_id=?1",
         [group],

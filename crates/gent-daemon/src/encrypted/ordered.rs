@@ -1,6 +1,7 @@
 //! Directional MLS streams: one writer, authenticated ordering, durable gaps.
 //! Replies use another stream. These APIs are for trusted daemon code only.
 pub mod configuration;
+pub mod confirmation;
 pub mod storage;
 use super::*;
 use gent_crypto::{Digest, PublicKey, stream::Packet};
@@ -350,8 +351,10 @@ impl<'a> OrderedEndpoint<'a> {
         self.inner.transact_mode(now, purpose == Purpose::Configuration, |session| {
             let saved = checked_stream(session, group, purpose)?;
             ensure!(saved.writer == session.signer.id(), "only the writer has an outbox");
+            ensure!(after.is_none_or(|n| n < gent_crypto::stream::MAX_SEQUENCE), "invalid outbox position");
             let after = after.map(i64::try_from).transpose()?.unwrap_or(-1);
-            let mut query = session.db.prepare("SELECT packet FROM stream_outbox WHERE group_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3")?;
+            ensure!((after+1) as u64 >= confirmation::next(session.db,group)?,"requested stream prefix was confirmed and retired; endpoint recovery is required for an older receiver");
+            let mut query = session.db.prepare("SELECT packet FROM stream_outbox WHERE group_id=?1 AND sequence>?2 AND length(packet)>0 ORDER BY sequence LIMIT ?3")?;
             let mut result = Vec::new();
             let mut bytes = 0;
             for row in query.query_map(params![group,after,limit], |row| row.get::<_,Vec<u8>>(0))? {
@@ -435,7 +438,14 @@ fn outgoing_request(db: &Connection, id: Uuid) -> Result<Option<Packet>> {
             |row| row.get(0),
         )
         .optional()?;
-    wire.map(|wire| Packet::decode(&wire)).transpose()
+    wire.map(|wire| {
+        ensure!(
+            !wire.is_empty(),
+            "transport request was confirmed and retired; it cannot be submitted again"
+        );
+        Packet::decode(&wire)
+    })
+    .transpose()
 }
 
 fn save_outgoing(db: &Connection, id: Uuid, packet: &Packet) -> Result<()> {

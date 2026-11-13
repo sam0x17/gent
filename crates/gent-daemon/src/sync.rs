@@ -4,7 +4,7 @@ use crate::{config, store::Store};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{StreamExt, stream};
-use gent_crypto::stream::Packet;
+use gent_crypto::stream::{MAX_RECEIPT_BYTES, Packet, Receipt};
 use reqwest::{Client, StatusCode, Url, header};
 use serde::Deserialize;
 use std::{
@@ -134,6 +134,52 @@ impl Relay {
         );
         Ok(Some(packet))
     }
+
+    fn checkpoint_route(&self, group: &[u8], action: &str) -> Result<Url> {
+        Ok(self.origin.join(&format!(
+            "v1/mailboxes/{}/{action}",
+            URL_SAFE_NO_PAD.encode(group)
+        ))?)
+    }
+    async fn checkpoint(&self, group: &[u8]) -> Result<Option<Receipt>> {
+        let response = self
+            .client
+            .get(self.checkpoint_route(group, "checkpoint")?)
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        ensure!(
+            response.status() == StatusCode::OK,
+            "relay checkpoint fetch failed ({})",
+            response.status()
+        );
+        let receipt = Receipt::decode(&bounded(response, MAX_RECEIPT_BYTES).await?)?;
+        ensure!(
+            receipt.group() == group,
+            "relay returned another stream checkpoint"
+        );
+        Ok(Some(receipt))
+    }
+    async fn put_checkpoint(&self, receipt: &Receipt, retire: bool) -> Result<()> {
+        let action = if retire { "retire" } else { "checkpoint" };
+        let response = self
+            .client
+            .put(self.checkpoint_route(receipt.group(), action)?)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(receipt.encode()?)
+            .send()
+            .await?;
+        ensure!(
+            matches!(response.status(), StatusCode::OK | StatusCode::NO_CONTENT),
+            "relay checkpoint storage failed ({})",
+            response.status()
+        );
+        // Service replies are availability hints; only a locally verified
+        // receiver signature authorizes retirement in the endpoint database.
+        Ok(())
+    }
 }
 
 pub(crate) async fn bounded(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
@@ -170,6 +216,17 @@ async fn local<T: Send + 'static>(
 async fn transfer(store: SharedStore, relay: Relay, entry: Stream) -> Result<Option<u64>> {
     let group = entry.group;
     if entry.outgoing {
+        let received = relay.checkpoint(&group).await?;
+        let g = group.clone();
+        let confirmed = local(store.clone(), move |store| {
+            store.transport_confirm(&g, entry.configuration, received.as_ref())
+        })
+        .await?;
+        if let Some(receipt) = confirmed {
+            // This also restores the confirmed prefix after relay storage loss.
+            // Do this before preparing new data so a full queue can recover.
+            relay.put_checkpoint(&receipt, true).await?;
+        }
         let g = group.clone();
         local(store.clone(), move |store| {
             if entry.configuration {
@@ -204,15 +261,24 @@ async fn transfer(store: SharedStore, relay: Relay, entry: Stream) -> Result<Opt
             }
         })
         .await?;
+        let g = group.clone();
+        let receipt = local(store.clone(), move |store| {
+            store.transport_receipt(&g, entry.configuration)
+        })
+        .await?;
+        relay.put_checkpoint(&receipt, false).await?;
         if let Some(packet) = relay.get(&group, next).await? {
-            local(store, move |store| {
+            let g = group.clone();
+            let receipt = local(store, move |store| {
                 if entry.configuration {
-                    store.sync_receive(&packet)
+                    store.sync_receive(&packet)?;
                 } else {
-                    store.data_receive(&packet)
+                    store.data_receive(&packet)?;
                 }
+                store.transport_receipt(&g, entry.configuration)
             })
             .await?;
+            relay.put_checkpoint(&receipt, false).await?;
             return Ok(Some(next));
         }
     }

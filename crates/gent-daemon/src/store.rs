@@ -267,6 +267,41 @@ impl Store {
         }
         Ok(())
     }
+
+    pub(crate) fn transport_receipt(
+        &self,
+        group: &[u8],
+        configuration: bool,
+    ) -> Result<gent_crypto::stream::Receipt> {
+        if !configuration {
+            self.data_peer(&self.db, group, false)?;
+        }
+        encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?
+            .receipt(group, now() as u64)
+    }
+
+    pub(crate) fn transport_confirm(
+        &self,
+        group: &[u8],
+        configuration: bool,
+        receipt: Option<&gent_crypto::stream::Receipt>,
+    ) -> Result<Option<gent_crypto::stream::Receipt>> {
+        let mut endpoint =
+            encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
+        let reader = if configuration {
+            endpoint.configuration_reader(group)?
+        } else {
+            self.data_peer(&self.db, group, true)?
+        };
+        if let Some(receipt) = receipt {
+            ensure!(
+                receipt.group() == group,
+                "checkpoint belongs to another stream"
+            );
+            endpoint.confirm(receipt, &reader, now() as u64)?;
+        }
+        endpoint.confirmed_receipt(group, now() as u64)
+    }
     pub(crate) fn sync_outgoing(
         &self,
         group: &[u8],

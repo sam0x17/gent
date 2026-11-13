@@ -535,6 +535,16 @@ impl OwnerKey {
 }
 
 impl NodeIdentity {
+    pub fn sign_stream_receipt(
+        &self,
+        group: &[u8],
+        sequence: u64,
+        digest: Digest,
+    ) -> Result<crate::stream::Receipt> {
+        let mut receipt = crate::stream::Receipt::unsigned(group, sequence, digest);
+        receipt.signature = self.key.sign(&receipt.signing_input()?).to_bytes().to_vec();
+        Ok(receipt)
+    }
     /// Authenticate an opaque packet and its position in a directional stream.
     pub fn sign_stream_packet(
         &self,

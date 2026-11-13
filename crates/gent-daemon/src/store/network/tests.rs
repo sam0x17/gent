@@ -654,6 +654,63 @@ async fn failed_enqueue_rolls_back_message_and_retry_preserves_ciphertext_after_
 }
 
 #[tokio::test]
+async fn checkpoints_preserve_pending_send_cursors_and_do_not_acknowledge_agents() {
+    let mut pair = Pair::new().await;
+    let sent = pair.send(vec![]).unwrap();
+    let group = pair.group();
+    let next = pair.stores[1].data_next(&group).unwrap();
+    pair.stores[0].db.execute_batch("CREATE TRIGGER fail_cursor BEFORE DELETE ON network_events BEGIN SELECT RAISE(ABORT,'injected cursor'); END;").unwrap();
+    assert!(pair.stores[0].data_prepare(&group).is_err());
+    let packet = pair.stores[0].data_outgoing(&group, next).unwrap().unwrap();
+    pair.stores[1].data_receive(&packet).unwrap();
+    let receipt = pair.stores[1].transport_receipt(&group, false).unwrap();
+    pair.stores[0]
+        .transport_confirm(&group, false, Some(&receipt))
+        .unwrap();
+    let retained: Vec<u8> = pair.stores[0]
+        .db
+        .query_row(
+            "SELECT packet FROM stream_outbox WHERE group_id=?1 AND sequence=?2",
+            params![&group, next],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, packet.encode().unwrap());
+    // Storage confirmation is independent of Gent's agent-level inbox/ack.
+    assert_eq!(
+        pair.agent(1, AgentOp::Inbox)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    pair.reopen(0);
+    pair.stores[0]
+        .db
+        .execute_batch("DROP TRIGGER fail_cursor")
+        .unwrap();
+    pair.stores[0].data_prepare(&group).unwrap();
+    pair.stores[0]
+        .transport_confirm(&group, false, Some(&receipt))
+        .unwrap();
+    let retained: Vec<u8> = pair.stores[0]
+        .db
+        .query_row(
+            "SELECT packet FROM stream_outbox WHERE group_id=?1 AND sequence=?2",
+            params![&group, next],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(retained.is_empty());
+    pair.pump();
+    assert_eq!(
+        pair.agent(1, AgentOp::Inbox).unwrap()[0]["id"],
+        sent["message_id"]
+    );
+}
+
+#[tokio::test]
 async fn failed_recipient_import_keeps_decrypted_record_until_transaction_can_commit() {
     let mut pair = Pair::new().await;
     pair.send(vec![]).unwrap();
