@@ -1,6 +1,7 @@
 //! Agent authorization and durable bindings for separately transported files.
 use super::*;
 use crate::{file_objects::Objects, messages::PrivateAttachment};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use gent_crypto::files::{FileGrant, seal};
 use gent_protocol::file_objects::Manifest;
 use zeroize::Zeroizing;
@@ -165,6 +166,34 @@ impl StoreSession<'_> {
             json!({"file":grant.descriptor(),"state":if status.complete {"ready"} else {"pending"},
             "chunks_present":status.chunks_present,"chunks_total":grant.chunk_count(),"expires_at":status.expires_at}),
         )
+    }
+
+    pub(super) fn file_read(&self, who: &Agent, id: &str, index: u32) -> Result<Value> {
+        let grant = self.accessible_file(who, id)?;
+        let bytes = self.objects()?.read_chunk(id, index)?;
+        let next = (index + 1 < grant.chunk_count()).then_some(index + 1);
+        Ok(json!({"file":grant.descriptor(),"chunk_index":index,
+            "offset":u64::from(index) * gent_protocol::file_objects::CHUNK_BYTES as u64,
+            "byte_length":bytes.len(),"chunks_total":grant.chunk_count(),
+            "next_chunk_index":next,"data_base64":STANDARD.encode(&bytes)}))
+    }
+
+    pub(super) fn file_view(&self, who: &Agent, id: &str) -> Result<Value> {
+        let grant = self.accessible_file(who, id)?;
+        let descriptor = grant.descriptor();
+        ensure!(
+            matches!(
+                descriptor.media_type.as_str(),
+                "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+            ),
+            "file view requires PNG, JPEG, WebP, or GIF; use file_read for other files"
+        );
+        ensure!(
+            descriptor.byte_length <= gent_protocol::file_objects::MAX_IMAGE_VIEW_BYTES as u64,
+            "file view exceeds 4 MiB; use file_read or request a smaller image"
+        );
+        let bytes = self.objects()?.read(id)?;
+        Ok(json!({"file":descriptor,"data_base64":STANDARD.encode(&bytes)}))
     }
 
     pub(super) fn seal_attachments(

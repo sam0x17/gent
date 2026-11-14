@@ -76,6 +76,18 @@ fn tools() -> Vec<Tool> {
             vec!["file_id"],
         ),
         (
+            "gent_file_read",
+            "Read one authorized, complete file's chunk as base64, at most 256 KiB decoded. Start at chunk_index 0 and follow next_chunk_index until null. Concatenate decoded chunks and verify file.byte_length and file.sha256 before using the complete file. Permissions and expiry are checked on every call. No filesystem access. Use gent_file_view to inspect an image directly.",
+            json!({"file_id":{"type":"string","format":"uuid"},"chunk_index":{"type":"integer","minimum":0,"maximum":127}}),
+            vec!["file_id", "chunk_index"],
+        ),
+        (
+            "gent_file_view",
+            "Read and verify an authorized complete PNG, JPEG, WebP, or GIF up to 4 MiB and return its actual bytes as MCP image content for visual inspection. No resizing or filesystem access. Check gent_file_status while pending. For larger images use gent_file_read or ask the source agent for a smaller preview. Host image rendering support varies.",
+            json!({"file_id":{"type":"string","format":"uuid"}}),
+            vec!["file_id"],
+        ),
+        (
             "gent_file_export",
             "Verify and export an authorized complete file into this agent's export_directory. Returns a local path for host file or image tools and cleanup_after for this temporary copy. Check gent_file_status while pending. Existing files with different bytes are never overwritten. Save lasting files outside the handoff folder.",
             json!({"file_id":{"type":"string","format":"uuid"}}),
@@ -195,7 +207,7 @@ impl ServerHandler for GentMcp {
             .1;
         let instructions = if matches!(self.credentials, Credentials::Remote(_)) {
             format!(
-                "{instructions}\n\nRemote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: use inline attachments (up to 1 MiB each, four per message) and supported file retrieval tools. Native hosted file handles are not supported.\n"
+                "{instructions}\n\nRemote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: send inline attachments (up to 1 MiB combined, four per message), forward authorized file_ids, read separate objects with gent_file_read, or inspect images up to 4 MiB with gent_file_view. Native hosted file handles are not supported.\n"
             )
         } else {
             instructions.to_string()
@@ -316,10 +328,21 @@ impl ServerHandler for GentMcp {
                         "mode":"user_controlled_gateway",
                         "plaintext_endpoints":["model_provider","user_node"],
                         "gent_relay":"encrypted_node_traffic_only",
-                        "file_access":"inline_attachments_only; no local filesystem or native hosted file handles"
+                        "file_access":"inline attachments, authorized file chunks and image views; no local filesystem or native hosted file handles"
                     }));
                 }
+                // Image data belongs in the image block, not a second large copy
+                // in text. The descriptor remains available for identification.
+                let viewed_image = if operation == "file_view" {
+                    let data = value.as_object_mut().and_then(|v| v.remove("data_base64"));
+                    data.and_then(|data| Some(ContentBlock::image(
+                        data.as_str()?, value["file"]["media_type"].as_str()?,
+                    )))
+                } else {
+                    None
+                };
                 let mut content = vec![ContentBlock::text(value.to_string())];
+                content.extend(viewed_image);
                 if matches!(operation, "inbox" | "relay_next" | "relay_turn_status") {
                     let messages: Vec<&Value> = match operation {
                         "relay_next" => value.get("request").into_iter().collect(),

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 pub const CHUNK_BYTES: usize = 256 * 1024;
 pub const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
+/// Whole-image MCP views fit the local RPC frame after base64 encoding.
+pub const MAX_IMAGE_VIEW_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_CHUNKS: u32 = (MAX_FILE_BYTES / CHUNK_BYTES) as u32;
 pub const TAG_BYTES: usize = 16;
 pub const MAX_MANIFEST_BYTES: usize = 16 * 1024;

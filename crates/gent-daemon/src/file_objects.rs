@@ -291,6 +291,20 @@ impl<'a> Objects<'a> {
         self.open(id)
     }
 
+    /// Authenticate one plaintext chunk of a completed object. Completion already
+    /// checked the whole-file digest; reassemblers should check it again. This
+    /// reads only the selected ciphertext, not the entire file on every call.
+    pub fn read_chunk(&self, id: &str, index: u32) -> Result<Zeroizing<Vec<u8>>> {
+        let grant = self.ready(id)?;
+        grant.ciphertext_len(index)?;
+        let bytes: Vec<u8> = self.db.query_row(
+            "SELECT ciphertext FROM file_chunks WHERE object_id=?1 AND position=?2",
+            params![id, index],
+            |r| r.get(0),
+        )?;
+        grant.decrypt_chunk(index, &bytes)
+    }
+
     /// Reconstruct the public storage manifest after restart from saved immutable
     /// chunks and the original deadline. This never exports a private grant.
     pub fn transport_manifest(&self, id: &str) -> Result<gent_protocol::file_objects::Manifest> {

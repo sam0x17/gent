@@ -248,6 +248,13 @@ pub enum AgentOp {
     FileStatus {
         file_id: String,
     },
+    FileRead {
+        file_id: String,
+        chunk_index: u32,
+    },
+    FileView {
+        file_id: String,
+    },
     FileExport {
         file_id: String,
     },

@@ -655,6 +655,11 @@ impl StoreSession<'_> {
                 media_type,
             } => self.file_import(&who, &request_id, &name, &media_type),
             AgentOp::FileStatus { file_id } => self.file_status(&who, &file_id),
+            AgentOp::FileRead {
+                file_id,
+                chunk_index,
+            } => self.file_read(&who, &file_id, chunk_index),
+            AgentOp::FileView { file_id } => self.file_view(&who, &file_id),
             AgentOp::FileExport { file_id } => self.file_export(&who, &file_id, export_step),
             AgentOp::RelayAttach { target, request_id } => {
                 self.relay_attach(&who, &target, &request_id)

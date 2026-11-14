@@ -18,6 +18,7 @@ import urllib.request
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gent", type=Path, required=True)
+    parser.add_argument("--files", action="store_true", help="also prove 32 MiB chunk reads and image views")
     args = parser.parse_args()
     binary = args.gent.resolve()
     with tempfile.TemporaryDirectory(prefix="gent-gw-", dir="/tmp") as temporary:
@@ -124,6 +125,10 @@ def main():
             assert first["agent"]["id"] != second["agent"]["id"]
             assert first["access_route"]["mode"] == "user_controlled_gateway"
             original = first["cluster_id"]
+            files = None
+            if args.files:
+                from gateway_file_checks import FileChecks
+                files = FileChecks(binary, home, cli, rpc, token, first, second)
             # The primary CLI now selects another managed profile. Both running
             # and restarted --home runtimes must remain on the physical node.
             cli("cluster", "new", "selected-elsewhere", "--local")
@@ -139,6 +144,8 @@ def main():
             gateway = start("gateway", "run", "--listen", address)
             ready(gateway)
             assert call("gent_identity", {})["agent"]["id"] == first["agent"]["id"]
+            if files:
+                files.after_restart()
             cli("--cluster", original, "gateway", "clients", "revoke", added["client"])
             rpc("tools/list", {}, token, expected=401)
             cli("--cluster", original, "gateway", "clients", "add", "synthetic-host",
@@ -150,6 +157,7 @@ def main():
                 assert token not in text
                 assert "test/conversation" not in text
             print(json.dumps({"status": "passed", "proof": "foreground-gateway",
+                              "file_reads": bool(files),
                               "platform": os.uname().sysname,
                               "checks": ["private host export", "separate conversations", "profile switch isolation",
                                          "daemon and gateway restart", "live host revocation", "clean shutdown",
