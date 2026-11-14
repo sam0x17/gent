@@ -9,6 +9,8 @@ mod candidates;
 
 #[path = "owner_succession/journal.rs"]
 mod decision_journal;
+#[path = "owner_succession/readiness.rs"]
+mod preparation_readiness;
 #[path = "owner_succession/standby.rs"]
 mod standby;
 

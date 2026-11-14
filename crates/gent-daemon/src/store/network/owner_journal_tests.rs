@@ -146,6 +146,7 @@ async fn partial_out_of_order_transfer_survives_restart_and_authenticates_every_
     let candidate = prepare(&mut pair);
     let id = &candidate.candidate.id;
     let keys = [credential(&pair, 0), credential(&pair, 1)];
+    prepare_readiness(&mut pair, &candidate);
     let authorization = pair.stores[0]
         .authorize_owner_handoff(&keys[0], &candidate)
         .unwrap();
@@ -328,6 +329,7 @@ async fn authorization_and_page_storage_commit_together_or_leave_the_owner_unfro
     let mut pair = Pair::new().await;
     let key = credential(&pair, 0);
     let candidate = prepare(&mut pair);
+    prepare_readiness(&mut pair, &candidate);
     for table in ["owner_journals", "owner_journal_pages"] {
         pair.stores[0].db.execute_batch(&format!("CREATE TRIGGER fail_journal BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'journal failure'); END;")).unwrap();
         assert!(
@@ -632,7 +634,7 @@ async fn schema_eighteen_migration_preserves_legacy_fence_keys_and_completed_can
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            22
+            23
         );
     }
     assert_eq!(status(&mut pair, 0)["signing_frozen"], true);

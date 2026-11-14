@@ -837,7 +837,7 @@ fn version_two_streams_upgrade_without_losing_ciphertext() {
         f.db(1)
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        22
+        23
     );
     let configuration = f.configuration(1);
     assert_eq!(

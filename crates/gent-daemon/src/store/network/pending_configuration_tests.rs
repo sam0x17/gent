@@ -163,7 +163,7 @@ async fn legacy_queue_and_full_edit_recover_without_changing_identity_or_fingerp
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            22
+            23
         );
     }
 }

@@ -128,6 +128,12 @@ fn complete(
     }
     let source = key(mesh, from);
     let target = key(mesh, to);
+    let readiness = mesh.stores[to]
+        .owner_handoff_readiness(&target, &candidate.candidate.id)
+        .unwrap();
+    mesh.stores[from]
+        .record_owner_readiness(&source, &candidate, &readiness)
+        .unwrap();
     let authorization = mesh.stores[from]
         .authorize_owner_handoff(&source, &candidate)
         .unwrap();

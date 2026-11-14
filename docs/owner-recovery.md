@@ -4,7 +4,7 @@
 
 This workflow complements [encrypted backups and fresh joined-node replacement](recovery.md). It can run on a surviving joined node without the cluster owner's signing secret. The local owner's RPC credential is required to create a challenge or sign a report. Agents have no MCP tool for these operations.
 
-`gent recovery status` reports the local owner epoch, whether signing is frozen, the issued handoff request and successor node, prepared/completed candidate counts, and decision-journal snapshot counts and reserved bytes. It does not return keys or private configuration. The [handoff preparation APIs](owner-succession.md#preparation-on-separate-nodes) are available to trusted Rust callers; the CLI exposes their status only until coordinated activation exists.
+`gent recovery status` reports the local owner epoch, whether signing is frozen, the issued handoff request and successor node, prepared/completed candidate counts, decision-journal snapshot counts and reserved bytes, and readiness report counts and storage limits. It does not return keys or private configuration. The [handoff preparation APIs](owner-succession.md#preparation-on-separate-nodes) are available to trusted Rust callers; the CLI exposes their status only until coordinated activation exists.
 
 ## Collect reports
 

@@ -167,15 +167,15 @@ pub(crate) fn active_key(
     Ok(key)
 }
 
-fn readiness(
+pub(super) fn readiness(
     db: &Connection,
     node: &NodeIdentity,
     baseline: &VerifiedState,
     candidate: &SignedOwnerCandidate,
-) -> Result<()> {
+) -> Result<Vec<(SignedConfigurationGrant, Receipt)>> {
     let digest = candidate.digest()?;
-    let mut ready = std::collections::BTreeSet::new();
-    let mut query = db.prepare("SELECT c.grant,c.group_id,s.writer,s.writer_key,s.origin_hash,s.head FROM configuration_streams c JOIN streams s USING(group_id) WHERE s.purpose='configuration'")?;
+    let mut ready = std::collections::BTreeMap::new();
+    let mut query = db.prepare("SELECT c.grant,c.group_id,s.writer,s.writer_key,s.origin_hash,s.head FROM configuration_streams c JOIN streams s USING(group_id) WHERE s.purpose='configuration' ORDER BY c.group_id")?;
     for row in query.query_map([], |r| {
         Ok((
             r.get::<_, Vec<u8>>(0)?,
@@ -222,7 +222,7 @@ fn readiness(
             data,
             "successor needs an established data link to each peer"
         );
-        ready.insert(reader);
+        ready.insert(reader, (grant, receipt));
     }
     ensure!(
         baseline
@@ -230,10 +230,10 @@ fn readiness(
             .nodes
             .keys()
             .filter(|id| id.as_str() != node.id())
-            .all(|id| ready.contains(id)),
+            .all(|id| ready.contains_key(id)),
         "successor configuration streams are not ready for every enrolled peer"
     );
-    Ok(())
+    Ok(ready.into_values().collect())
 }
 
 impl Store {

@@ -41,6 +41,12 @@ fn complete(
     pair.stores[to]
         .confirm_owner_configuration(&keys[to], &receipt)
         .unwrap();
+    let readiness = pair.stores[to]
+        .owner_handoff_readiness(&keys[to], &candidate.candidate.id)
+        .unwrap();
+    pair.stores[from]
+        .record_owner_readiness(&keys[from], &candidate, &readiness)
+        .unwrap();
     let authorization = pair.stores[from]
         .authorize_owner_handoff(&keys[from], &candidate)
         .unwrap();
@@ -608,6 +614,7 @@ fn activation_storage_cannot_be_silently_recreated_after_upgrade() {
         "owner_epochs",
         "configuration_routes",
         "retired_configuration_requests",
+        "owner_readiness",
     ] {
         store
             .db
@@ -627,7 +634,7 @@ fn activation_storage_cannot_be_silently_recreated_after_upgrade() {
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
             .unwrap(),
-        22
+        23
     );
 }
 

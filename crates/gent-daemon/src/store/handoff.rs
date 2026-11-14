@@ -19,6 +19,7 @@ const LIMIT: usize = 64;
 const MAGIC: &[u8] = b"GENTOWN1";
 mod activation;
 mod journal;
+mod readiness;
 mod streams;
 pub(crate) use activation::{active_key, admit_epochs, check_epochs};
 
@@ -46,7 +47,8 @@ pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
         );
     }
     journal::schema(db, previous)?;
-    activation::schema(db, previous)
+    activation::schema(db, previous)?;
+    readiness::schema(db, previous)
 }
 
 fn restore(candidate: &SignedOwnerCandidate, baseline: &[u8]) -> Result<VerifiedState> {
@@ -184,6 +186,7 @@ pub(super) fn status(db: &Connection, state: &VerifiedState) -> Result<Value> {
         "prepared_candidates":candidates,"completed_candidates":completed,
         "journal_transfer":journal::usage(db)?,
         "configuration_preparation":{"records":stream_records,"stored_bytes":stream_bytes},
+        "readiness":readiness::usage(db)?,
         "activation_supported":true}),
     )
 }
@@ -393,6 +396,7 @@ impl Store {
         );
         let owner = &*self.identity.signing_owner(&tx)?;
         let timestamp = requests::clock(&tx, now())? as u64;
+        readiness::require(&tx, &state, candidate, timestamp)?;
         let (manifest, body) = journal::capture(&tx, &state, candidate)?;
         let authorization = state.authorize_owner_candidate_with_journal(
             owner,

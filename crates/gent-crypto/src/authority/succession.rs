@@ -9,6 +9,7 @@ const RECORD_DOMAIN: &[u8] = b"gent/owner-succession-record/v1\0";
 mod candidate;
 pub use candidate::*;
 pub mod journal;
+pub mod readiness;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

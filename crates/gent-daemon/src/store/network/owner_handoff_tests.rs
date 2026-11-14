@@ -13,12 +13,52 @@ fn prepare(pair: &mut Pair) -> SignedOwnerCandidate {
 }
 
 fn issue(pair: &mut Pair, candidate: &SignedOwnerCandidate) -> SignedOwnerTransition {
+    prepare_readiness(pair, candidate);
     let key = credential(pair, 0);
     let authorization = pair.stores[0]
         .authorize_owner_handoff(&key, candidate)
         .unwrap();
     transfer(pair, candidate, &authorization);
     authorization
+}
+
+fn prepare_readiness(pair: &mut Pair, candidate: &SignedOwnerCandidate) {
+    use crate::encrypted::ordered::OrderedEndpoint;
+    let keys = [credential(pair, 0), credential(pair, 1)];
+    let id = &candidate.candidate.id;
+    let report = match pair.stores[1].owner_handoff_readiness(&keys[1], id) {
+        Ok(report) => report,
+        Err(_) => {
+            let package =
+                OrderedEndpoint::open_runtime(pair.homes[0].path(), &pair.stores[0].identity.node)
+                    .unwrap()
+                    .key_package(Uuid::new_v4(), now() as u64)
+                    .unwrap();
+            let reader = pair.stores[0].identity.node.id().to_owned();
+            let request = Uuid::new_v4();
+            let preparation = pair.stores[1]
+                .prepare_owner_configuration(&keys[1], id, request, (&reader, &package))
+                .unwrap();
+            let grant = pair.stores[0]
+                .authorize_owner_configuration(&keys[0], &preparation)
+                .unwrap();
+            let invitation = pair.stores[1]
+                .install_owner_configuration(&keys[1], request, &grant)
+                .unwrap();
+            let receipt = pair.stores[0]
+                .receive_owner_configuration(&keys[0], &invitation)
+                .unwrap();
+            pair.stores[1]
+                .confirm_owner_configuration(&keys[1], &receipt)
+                .unwrap();
+            pair.stores[1]
+                .owner_handoff_readiness(&keys[1], id)
+                .unwrap()
+        }
+    };
+    pair.stores[0]
+        .record_owner_readiness(&keys[0], candidate, &report)
+        .unwrap();
 }
 
 fn transfer(
@@ -48,6 +88,8 @@ mod journal_tests;
 mod owner_activation_tests;
 #[path = "owner_configuration_tests.rs"]
 mod owner_configuration_tests;
+#[path = "owner_readiness_tests.rs"]
+mod owner_readiness_tests;
 #[path = "pending_configuration_tests.rs"]
 mod pending_configuration_tests;
 
@@ -227,6 +269,7 @@ async fn preparation_and_authorization_recover_atomic_database_failures() {
         expected
     );
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    prepare_readiness(&mut pair, &expected);
     pair.stores[0].db.execute_batch("CREATE TRIGGER fail_fence BEFORE UPDATE ON owner_handoff_control BEGIN SELECT RAISE(ABORT,'fence failure'); END;").unwrap();
     assert!(
         pair.stores[0]
@@ -459,7 +502,7 @@ async fn version_seventeen_migration_preserves_keys_and_checkpoint_before_first_
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        22
+        23
     );
     let candidate = prepare(&mut pair);
     issue(&mut pair, &candidate);
@@ -563,6 +606,7 @@ async fn stale_and_competing_candidates_cannot_freeze_a_new_checkpoint_or_replac
     let mut pair = Pair::new().await;
     let owner = credential(&pair, 0);
     let stale = prepare(&mut pair);
+    prepare_readiness(&mut pair, &stale);
     configure(
         &mut pair,
         0,
