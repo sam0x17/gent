@@ -13,6 +13,14 @@ pub struct Plan {
     pub source: String,
     pub successor: String,
     pub expires_at: u64,
+    /// Old plans retain manual activation. New CLI plans allow activation only
+    /// after a separately issued, verified owner authorization and journal.
+    #[serde(default, skip_serializing_if = "manual_activation")]
+    pub auto_activate: bool,
+}
+
+fn manual_activation(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Clone, Serialize, Deserialize)]

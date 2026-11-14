@@ -13,12 +13,12 @@ use crate::{
 };
 use gent_crypto::{scoped_id, stream::Packet};
 
-mod storage;
+pub(super) mod storage;
 pub(super) use storage::{schema, usage};
 const BATCH: usize = 8;
 
 impl Plan {
-    fn current(&self, state: &VerifiedState, timestamp: u64) -> Result<()> {
+    pub(super) fn current(&self, state: &VerifiedState, timestamp: u64) -> Result<()> {
         ensure!(
             !self.id.is_nil() && self.source != self.successor,
             "invalid owner preparation plan"
@@ -199,10 +199,22 @@ impl Store {
         id: Uuid,
         successor: &str,
     ) -> Result<Value> {
+        self.start_owner_preparation_mode(credential, id, successor, false)
+    }
+
+    pub(super) fn start_owner_preparation_mode(
+        &mut self,
+        credential: &str,
+        id: Uuid,
+        successor: &str,
+        auto_activate: bool,
+    ) -> Result<Value> {
         ensure!(hash(credential) == self.owner_hash, "unauthorized");
         if let Some(plan) = storage::load_plan(&self.db, id)? {
             ensure!(
-                plan.source == self.identity.node.id() && plan.successor == successor,
+                plan.source == self.identity.node.id()
+                    && plan.successor == successor
+                    && plan.auto_activate == auto_activate,
                 "owner preparation request changed"
             );
             return self.owner_preparation_status(credential, id);
@@ -220,6 +232,7 @@ impl Store {
             source: self.identity.node.id().into(),
             successor: successor.into(),
             expires_at: timestamp + 900,
+            auto_activate,
         };
         plan.current(&state, timestamp)?;
         storage::save_plan(&tx, &plan)?;

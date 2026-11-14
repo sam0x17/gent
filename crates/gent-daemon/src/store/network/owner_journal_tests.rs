@@ -634,7 +634,7 @@ async fn schema_eighteen_migration_preserves_legacy_fence_keys_and_completed_can
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            25
+            26
         );
     }
     assert_eq!(status(&mut pair, 0)["signing_frozen"], true);

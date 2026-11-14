@@ -22,6 +22,7 @@ mod coordination;
 pub(crate) mod journal;
 mod readiness;
 mod streams;
+mod transfer;
 pub(crate) use activation::{active_key, admit_epochs, check_epochs};
 
 pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
@@ -50,7 +51,8 @@ pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
     journal::schema(db, previous)?;
     activation::schema(db, previous)?;
     readiness::schema(db, previous)?;
-    coordination::schema(db, previous)
+    coordination::schema(db, previous)?;
+    transfer::schema(db, previous)
 }
 
 fn restore(candidate: &SignedOwnerCandidate, baseline: &[u8]) -> Result<VerifiedState> {
@@ -190,6 +192,7 @@ pub(super) fn status(db: &Connection, state: &VerifiedState) -> Result<Value> {
         "configuration_preparation":{"records":stream_records,"stored_bytes":stream_bytes},
         "readiness":readiness::usage(db)?,
         "preparation_exchange":coordination::usage(db)?,
+        "transfer":transfer::usage(db)?,
         "delivery":encrypted::ordered::configuration::handoff::usage(db)?,
         "activation_supported":true}),
     )
@@ -369,6 +372,15 @@ impl Store {
         credential: &str,
         candidate: &SignedOwnerCandidate,
     ) -> Result<SignedOwnerTransition> {
+        self.issue_owner_handoff(credential, candidate, false)
+    }
+
+    fn issue_owner_handoff(
+        &mut self,
+        credential: &str,
+        candidate: &SignedOwnerCandidate,
+        coordinated: bool,
+    ) -> Result<SignedOwnerTransition> {
         ensure!(hash(credential) == self.owner_hash, "unauthorized");
         let _lock = config::state_lock(&self.home, "owner-handoff.lock")?;
         let tx = self
@@ -386,6 +398,10 @@ impl Store {
                 previous.candidate == *candidate,
                 "a different owner handoff is already issued"
             );
+            if coordinated {
+                transfer::arm_source(&tx, &self.identity.node, &state, candidate, false)?;
+                tx.commit()?;
+            }
             return Ok(previous.authorization);
         }
         ensure!(
@@ -422,6 +438,9 @@ impl Store {
             [&candidate.candidate.id],
         )?;
         journal::save_source(&tx, candidate, &authorization, &manifest, &body)?;
+        if coordinated {
+            transfer::arm_source(&tx, &self.identity.node, &state, candidate, true)?;
+        }
         tx.commit()?;
         Ok(authorization)
     }

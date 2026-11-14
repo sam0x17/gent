@@ -74,7 +74,7 @@ pub(super) fn save_plan(db: &Connection, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn load_plan(db: &Connection, id: Uuid) -> Result<Option<Plan>> {
+pub(in crate::store::handoff) fn load_plan(db: &Connection, id: Uuid) -> Result<Option<Plan>> {
     let wire: Option<Vec<u8>> = db
         .query_row(
             "SELECT plan FROM owner_preparation_plans WHERE id=?1",
@@ -93,7 +93,10 @@ pub(super) fn load_plan(db: &Connection, id: Uuid) -> Result<Option<Plan>> {
     .transpose()
 }
 
-pub(super) fn candidate(db: &Connection, id: Uuid) -> Result<Option<SignedOwnerCandidate>> {
+pub(in crate::store::handoff) fn candidate(
+    db: &Connection,
+    id: Uuid,
+) -> Result<Option<SignedOwnerCandidate>> {
     let wire: Option<Vec<u8>> = db.query_row(
         "SELECT candidate FROM owner_preparation_plans WHERE id=?1",
         [id.to_string()],

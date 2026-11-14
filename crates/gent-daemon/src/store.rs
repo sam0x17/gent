@@ -258,6 +258,13 @@ impl Store {
         {
             return self.manage_invitation(&credential, action);
         }
+        if let Request::Owner {
+            credential,
+            action: OwnerOp::OwnerTransfer { action },
+        } = request
+        {
+            return self.owner_transfer(&credential, action);
+        }
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -652,6 +659,9 @@ impl StoreSession<'_> {
             OwnerOp::FilesClean { dry_run } => self.files_clean(dry_run),
             OwnerOp::HistoryStatus => self.history_status(),
             OwnerOp::OwnerHandoffStatus => handoff::status(self.db, &self.state),
+            OwnerOp::OwnerTransfer { .. } => {
+                anyhow::bail!("owner transfer requires the authenticated store entry point")
+            }
             OwnerOp::RecoveryChallenge => Ok(serde_json::to_value(
                 gent_crypto::recovery::RecoveryBaseline::new(&self.state, self.timestamp as u64)?,
             )?),

@@ -353,7 +353,7 @@ fn export_cleanup_is_bounded_and_version_twelve_handoffs_survive_upgrade() {
         f.db()
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        25
+        26
     );
     fail_publication(&f);
     for _ in 0..10 {

@@ -60,7 +60,7 @@ Files use strict canonical JCS JSON. Challenges are limited to 4 KiB; baselines 
 
 ## Required before owner replacement
 
-The cluster trust anchor pins the original owner public key. The [signer succession protocol](owner-succession.md) verifies delegation to a fresh signer while retaining that root, including configuration grants, invitations and legacy agent certificates. Trusted runtime APIs now activate a prepared successor with its decision journal and confirmed peer connections. They still require authorization from the current signer; orchestration and a user-facing handoff command remain unfinished. Merely copying the current secret from an archive would let both copies sign competing histories.
+The cluster trust anchor pins the original owner public key. The [signer succession protocol](owner-succession.md) verifies delegation to a fresh signer while retaining that root, including configuration grants, invitations and legacy agent certificates. Trusted runtime APIs now activate a prepared successor with its decision journal and confirmed peer connections. The local-owner `gent cluster owner prepare/commit/resume` workflow coordinates encrypted preparation, explicit commitment and automatic completion. It still requires authorization from the current signer and cannot recover a lost key. Merely copying the current secret from an archive would let both copies sign competing histories.
 
 The remaining activation and lost-key recovery work must define and verify:
 

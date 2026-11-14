@@ -14,6 +14,7 @@ mod managed_file;
 mod mcp;
 mod node;
 mod owner_recovery;
+mod owner_transfer;
 mod pairing;
 mod permission_admin;
 mod service;
@@ -44,7 +45,7 @@ struct Cli {
     /// Machine-readable output.
     #[arg(long, global = true)]
     json: bool,
-    /// Stable UUID for retrying a policy edit, config apply, rename, or renewal.
+    /// Stable UUID for retrying an edit, renewal, or owner-transfer preparation.
     #[arg(long, global = true)]
     request_id: Option<String>,
     #[command(subcommand)]
@@ -234,6 +235,11 @@ enum RelayCommand {
 }
 #[derive(Subcommand)]
 enum ClusterCommand {
+    /// Prepare, commit, inspect or resume a signing-owner transfer.
+    Owner {
+        #[command(subcommand)]
+        command: Option<owner_transfer::Command>,
+    },
     /// Register an initialized local directory; does not join or move an agent.
     Add {
         directory: PathBuf,
@@ -645,6 +651,12 @@ async fn execute(cli: Cli) -> Result<()> {
             command: Some(ClusterCommand::New { local: false, .. } | ClusterCommand::Connect)
         })
     );
+    let owner_transfer_output = matches!(
+        &cli.command,
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Owner { .. })
+        })
+    );
     let output = match cli.command {
         Some(Command::Recovery { command }) => owner_recovery::execute(&home, command).await?,
         Some(Command::Work { command }) => work::execute(&home, command).await?,
@@ -659,6 +671,9 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Cluster {
             command: Some(ClusterCommand::Renew),
         }) => configure(&home, &request_id, ConfigurationEdit::Renew).await?,
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Owner { command }),
+        }) => owner_transfer::execute(&home, &request_id, command).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Join(args)),
         }) => contexts::provision::join(&root, &home, args).await?,
@@ -951,6 +966,8 @@ async fn execute(cli: Cli) -> Result<()> {
     };
     if cli.json {
         println!("{}", serde_json::to_string(&output)?);
+    } else if owner_transfer_output {
+        owner_transfer::print(&output);
     } else if cluster_setup_output {
         println!(
             "Cluster {} configured on node {}.",

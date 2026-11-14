@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 pub mod administration;
 pub mod file_objects;
 pub mod history;
+pub mod owner_transfer;
 pub mod permissions;
 pub mod service;
 pub mod work;
@@ -550,6 +551,9 @@ pub enum OwnerOp {
     /// Private recovery evidence. These operations grant no replacement authority.
     RecoveryChallenge,
     OwnerHandoffStatus,
+    OwnerTransfer {
+        action: owner_transfer::OwnerTransferOp,
+    },
     RecoveryObserve {
         challenge: String,
     },

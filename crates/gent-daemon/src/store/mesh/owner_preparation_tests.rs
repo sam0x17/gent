@@ -1,6 +1,9 @@
 use super::*;
 use crate::messages::owner_preparation::{Envelope, Plan, Step};
 
+#[path = "owner_transfer_tests.rs"]
+mod owner_transfer_tests;
+
 fn key(mesh: &Mesh, i: usize) -> String {
     config::read_private(&mesh.homes[i].path().join("owner.key")).unwrap()
 }
@@ -88,6 +91,7 @@ fn begin(mesh: &Mesh, id: Uuid) -> Envelope {
             source,
             successor,
             expires_at: now() as u64 + 900,
+            auto_activate: false,
         },
         candidate: None,
         step: Step::Begin,
@@ -352,7 +356,7 @@ async fn preparation_schema_migrates_old_storage_and_refuses_current_storage_los
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
             .unwrap(),
-        25
+        26
     );
     mesh.stores[0]
         .db
