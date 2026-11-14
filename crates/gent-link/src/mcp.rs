@@ -300,7 +300,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_relay_turn_status",
-            "Check one of this intermediary's turns without resubmitting it. Responses and files retain their original target. Pending survives timeouts and restarts; completed means the target reported a final outcome. Pass next_after as after_message_id to read more responses when has_more is true.",
+            "Check one of this intermediary's turns without resubmitting it. Responses and files retain their original target. Pending survives timeouts and restarts; completed means the target reported a final outcome. Pass next_after as after_message_id to read more responses when has_more is true. In user-selected relay mode, present the target response text verbatim with its attachments; omit your own preface, tool/identity report and summary unless the user requests diagnostics.",
             json!({"turn_id":{"type":"string","format":"uuid"},"after_message_id":{"type":"string","format":"uuid"}}),
             vec!["turn_id"],
         ),
@@ -326,21 +326,27 @@ fn tools() -> Vec<Tool> {
     declarations.into_iter().map(|(name,description,properties,required)|Tool::new_with_raw(name,Some(description.into()),Arc::new(json!({"type":"object","additionalProperties":false,"properties":properties,"required":required}).as_object().unwrap().clone()))).collect()
 }
 
+// Some hosts retain only the first 4096 instruction characters. Keep route
+// disclosure and core workflows ahead of optional detailed guidance.
+fn instructions(remote: bool) -> String {
+    let instructions = include_str!("../skills/gent/SKILL.md")
+        .split_once("\n---\n")
+        .expect("bundled skill has closing frontmatter")
+        .1;
+    if remote {
+        format!(
+            "Remote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: send inline attachments (up to 1 MiB combined, four per message), forward authorized file_ids, read separate objects with gent_file_read, or inspect images up to 4 MiB with gent_file_view. If gent_file_import_remote is available and enabled for this host, use an actual host-provided file object from an owner-approved HTTPS origin. If gent_file_link is enabled for this host, use it for a user-requested download. It grants anyone holding the URL access to that file for up to five minutes, without host credentials or mTLS. Keep the URL private; use file_ids for agent messaging. Provider handling of resource links remains unverified.\n\n{instructions}"
+        )
+    } else {
+        instructions.to_string()
+    }
+}
+
 impl ServerHandler for GentMcp {
     fn get_info(&self) -> ServerConfig {
-        let instructions = include_str!("../skills/gent/SKILL.md")
-            .split_once("\n---\n")
-            .expect("bundled skill has closing frontmatter")
-            .1;
-        let instructions = if matches!(self.credentials, Credentials::Remote(_)) {
-            format!(
-                "{instructions}\n\nRemote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: send inline attachments (up to 1 MiB combined, four per message), forward authorized file_ids, read separate objects with gent_file_read, or inspect images up to 4 MiB with gent_file_view. If gent_file_import_remote is available and enabled for this host, use an actual host-provided file object from an owner-approved HTTPS origin. If gent_file_link is enabled for this host, use it for a user-requested download. It grants anyone holding the URL access to that file for up to five minutes, without host credentials or mTLS. Keep the URL private; use file_ids for agent messaging. Provider handling of resource links remains unverified.\n"
-            )
-        } else {
-            instructions.to_string()
-        };
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(instructions)
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            instructions(matches!(self.credentials, Credentials::Remote(_))),
+        )
     }
 
     async fn list_tools(
@@ -618,4 +624,25 @@ pub async fn run(
     service.waiting().await?;
     drop(guard);
     Ok(())
+}
+
+#[cfg(test)]
+mod instruction_tests {
+    use super::*;
+
+    #[test]
+    fn core_and_remote_disclosure_survive_host_instruction_cutoff() {
+        for remote in [false, true] {
+            let instructions = instructions(remote);
+            let detailed = instructions
+                .find("## Permission explanations")
+                .expect("core guidance precedes detailed workflows");
+            assert!(instructions[..detailed].chars().count() <= 4096);
+            assert!(instructions[..detailed].contains("only the target's exact response"));
+            if remote {
+                assert!(instructions.starts_with("Remote route: user-controlled gateway."));
+                assert!(instructions[..detailed].contains("model provider"));
+            }
+        }
+    }
 }
