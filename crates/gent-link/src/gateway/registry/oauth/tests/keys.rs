@@ -1,7 +1,7 @@
 use super::*;
 use crate::gateway::registry::keys::Update;
 
-fn jwks(f: &Fixture, which: &str) -> PathBuf {
+pub(super) fn jwks(f: &Fixture, which: &str) -> PathBuf {
     let policy = serde_json::to_value(assertion::tests::policy()).unwrap();
     let keys: Vec<_> = policy["keys"]
         .as_array()
@@ -14,7 +14,7 @@ fn jwks(f: &Fixture, which: &str) -> PathBuf {
     fs::write(&path, serde_json::to_vec(&json!({"keys":keys})).unwrap()).unwrap();
     path
 }
-fn second_authentication(fields: &mut Parameters) {
+pub(super) fn second_authentication(fields: &mut Parameters) {
     fields.insert(
         "client_assertion".into(),
         assertion::tests::sign(

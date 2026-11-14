@@ -170,7 +170,7 @@ impl Registry {
                 pending_export: Some(digest(text)),
             });
             client.keys_updated = true;
-            state.version = 5;
+            state.version = state.version.max(5);
             state.clock = now;
             self.save(&state)?;
         }
@@ -188,13 +188,20 @@ impl Registry {
     fn key_export(&self, id: &str, client: &Client) -> Export {
         let revision = client.key_update.as_ref().map_or(0, |u| u.revision);
         Export {
-            version: if revision > 0 { 4 } else { 3 },
+            version: if client.subject_key.is_some() {
+                5
+            } else if revision > 0 {
+                4
+            } else {
+                3
+            },
             registry: self.id.clone(),
             cluster: self.cluster.clone(),
             node: self.node.clone(),
             client: id.into(),
             name: client.name.clone(),
             conversation_key: client.conversation_key.clone(),
+            subject_key: client.subject_key.clone(),
             token: None,
             created_at: client.created_at,
             expires_at: client.expires_at,

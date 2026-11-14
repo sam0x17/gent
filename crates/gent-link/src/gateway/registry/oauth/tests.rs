@@ -3,6 +3,7 @@ use std::fs;
 const RESOURCE: &str = "https://node.example/mcp";
 const REDIRECT: &str = "https://host.example/callback?tenant=one";
 mod keys;
+mod subjects;
 struct Fixture {
     _temp: tempfile::TempDir,
     home: PathBuf,
@@ -243,6 +244,9 @@ impl Fixture {
         Self::with_assertions(false)
     }
     fn with_assertions(signed: bool) -> Self {
+        Self::with_subject(signed, None)
+    }
+    fn with_subject(signed: bool, subject: Option<&str>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("node");
         config::initialize(&home, "oauth").unwrap();
@@ -255,7 +259,10 @@ impl Fixture {
         let result = add_client(
             &home,
             "host",
-            "test/conversation",
+            BindingKeys {
+                conversation: "test/conversation".into(),
+                subject: subject.map(str::to_owned),
+            },
             &out,
             720,
             Some(registration.clone()),
@@ -266,7 +273,10 @@ impl Fixture {
             add_client(
                 &home,
                 "host",
-                "test/conversation",
+                BindingKeys {
+                    conversation: "test/conversation".into(),
+                    subject: subject.map(str::to_owned)
+                },
                 &out,
                 720,
                 Some(registration),

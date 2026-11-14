@@ -127,6 +127,15 @@ struct Grant {
     refresh_key: String,
     refresh_generation: u32,
     revoked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subject: Option<Subject>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Subject {
+    Unbound,
+    Bound(String),
 }
 
 fn challenge(value: &str) -> bool {
@@ -148,6 +157,24 @@ fn equal(a: &str, b: &str) -> bool {
 }
 
 impl Records {
+    pub(super) fn check_subject(&self, id: &str, subject: &str) -> Result<bool> {
+        match self.grants.get(id).and_then(|g| g.subject.as_ref()) {
+            Some(Subject::Unbound) => Ok(true),
+            Some(Subject::Bound(expected)) => {
+                ensure!(
+                    expected == subject,
+                    "OAuth grant belongs to a different host user"
+                );
+                Ok(false)
+            }
+            None => anyhow::bail!("OAuth subject binding state is missing"),
+        }
+    }
+    pub(super) fn bind_subject(&mut self, id: &str, subject: String) -> Result<()> {
+        self.check_subject(id, &subject)?;
+        self.grants.get_mut(id).unwrap().subject = Some(Subject::Bound(subject));
+        Ok(())
+    }
     pub(super) fn enable_assertions(&mut self) {
         self.assertions.get_or_insert_with(BTreeMap::new);
     }
@@ -215,6 +242,13 @@ impl Records {
                 .clients
                 .get(&grant.client)
                 .context("OAuth client missing")?;
+            ensure!(
+                client.subject_key.is_some() == grant.subject.is_some(),
+                "OAuth subject binding state is missing or inconsistent"
+            );
+            if let Some(Subject::Bound(subject)) = &grant.subject {
+                ensure!(hash(subject), "invalid OAuth subject binding");
+            }
             ensure!(
                 uuid(id)
                     && client
@@ -576,6 +610,7 @@ impl Registry {
                     .map_err(|_| Failure("invalid_client"))?;
             }
             let client_expiry = client.expires_at;
+            let subject_required = client.subject_key.is_some();
             if let Some((jti, expires)) = assertion {
                 let replays = state
                     .oauth
@@ -639,6 +674,7 @@ impl Registry {
                         refresh_key: config::secret(),
                         refresh_generation: 0,
                         revoked: false,
+                        subject: subject_required.then_some(Subject::Unbound),
                     };
                     let response = token_response(&grant_id, &grant, access, now);
                     request.grant = Some(grant_id.clone());

@@ -109,6 +109,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent gateway` / `gent gateway status` | Inspect local remote-MCP grants and limits without probing a listener. |
 | `gent gateway clients add NAME --conversation-key KEY --out FILE` | Export a private credential for a trusted host's conversation namespace. |
 | `gent gateway clients add NAME ... --tls-client-ca FILE --tls-client-name DNS` | Additionally require a certificate chaining to the pinned CA with that exact DNS SAN. Applies to MCP access and OAuth token requests. |
+| `gent gateway clients add NAME ... --subject-key KEY` | Require a distinct host-owned user metadata field, pin each OAuth grant to its first reported user, and scope conversations by user. |
 | `gent gateway clients add NAME ... --oauth-metadata URL --oauth-resource URL --redirect-uri URL` | Import published signed-client metadata and public keys, retaining only owner-selected callbacks. |
 | `gent gateway clients keys show ID` / `keys set ID --jwks FILE --expect-revision N` | Inspect or replace a signed client's keys without changing its grants or agents. |
 | `gent gateway clients keys refresh ID --expect-revision N` | Explicitly re-fetch the client's metadata and keys, preserving its callback selection. |

@@ -23,7 +23,9 @@ const MAX_CLIENT_BINDINGS: usize = 256;
 const MAX_LIFETIME: u64 = 8760 * 3600;
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WORKERS: usize = 16;
+mod bindings;
 mod keys;
+pub(crate) use bindings::BindingKeys;
 pub(crate) mod oauth;
 
 #[derive(Debug)]
@@ -73,6 +75,10 @@ struct Client {
     name: String,
     conversation_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    subject_key: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    subject_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     token_hash: Option<String>,
     created_at: u64,
     expires_at: u64,
@@ -102,6 +108,8 @@ struct Export {
     client: String,
     name: String,
     conversation_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subject_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
     created_at: u64,
@@ -205,9 +213,12 @@ impl State {
             .values()
             .any(|c| c.oauth.as_ref().is_some_and(|r| r.assertion.is_some()));
         let updates = self.clients.values().any(|c| c.key_update.is_some());
+        let subjects = self.clients.values().any(|c| c.subject_key.is_some());
         ensure!(
             self.version
-                == if updates {
+                == if subjects {
+                    6
+                } else if updates {
                     5
                 } else if assertions {
                     4
@@ -230,6 +241,14 @@ impl State {
         for (id, client) in &self.clients {
             config::label(&client.name)?;
             metadata_key(&client.conversation_key)?;
+            ensure!(
+                client.subject_required == client.subject_key.is_some(),
+                "gateway subject policy is missing"
+            );
+            if let Some(subject) = &client.subject_key {
+                bindings::subject_key(subject, &client.conversation_key)?;
+                ensure!(client.oauth.is_some(), "subject binding requires OAuth");
+            }
             if let Some(registration) = &client.oauth {
                 registration.validate()?;
                 ensure!(
@@ -442,45 +461,6 @@ impl Registry {
         }
         Ok(client)
     }
-    pub(crate) fn credential(&self, permit: &Permit, meta: &Value) -> Result<String> {
-        directory_check(&self.directory())?;
-        let _lock = managed_file::lock(&self.directory().join("state.lock"))?;
-        let mut state = self.read()?;
-        let now = auth::now()?;
-        let client = Self::client(&state, permit, now)?;
-        conversation_key(&client.conversation_key)?;
-        let conversation=meta.get(&client.conversation_key).and_then(Value::as_str)
-            .filter(|s|!s.trim().is_empty() && s.len()<=512 && !s.chars().any(char::is_control))
-            .context("host conversation metadata is missing or invalid; this connection cannot select an agent")?;
-        let key = digest(conversation);
-        let credential = if let Some(value) = client.bindings.get(&key) {
-            value.clone()
-        } else {
-            ensure!(
-                client.bindings.len() < MAX_CLIENT_BINDINGS
-                    && state
-                        .clients
-                        .values()
-                        .map(|c| c.bindings.len())
-                        .sum::<usize>()
-                        < MAX_BINDINGS,
-                "gateway conversation capacity reached"
-            );
-            config::secret()
-        };
-        let dirty = state.clock != now || !client.bindings.contains_key(&key);
-        if dirty {
-            state.clock = now;
-            state
-                .clients
-                .get_mut(&permit.client)
-                .expect("client checked")
-                .bindings
-                .insert(key, credential.clone());
-            self.save(&state)?;
-        }
-        Ok(credential)
-    }
     pub(crate) fn listing(&self) -> Result<Value> {
         let state = self.read()?;
         let now = auth::now()?.max(state.clock);
@@ -490,6 +470,7 @@ impl Registry {
             .map(|(id, c)| {
                 json!({"id":id,"name":c.name,
             "conversation_key":c.conversation_key,"expires_at":c.expires_at,"revoked":c.revoked,
+            "subject_key":c.subject_key,
             "active":!c.revoked && now<c.expires_at,"conversations":c.bindings.len(),"oauth":c.oauth,
             "key_revision":c.key_update.as_ref().map_or(0, |u| u.revision),
             "key_export_pending":c.key_update.as_ref().is_some_and(|u| u.pending_export.is_some()),
@@ -537,12 +518,19 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
 pub(super) fn add_client(
     home: &Path,
     name: &str,
-    key: &str,
+    binding: impl Into<BindingKeys>,
     out: &Path,
     hours: u64,
     oauth: Option<oauth::Registration>,
     mtls: Option<TlsPolicy>,
 ) -> Result<Value> {
+    let binding = binding.into();
+    let key = binding.conversation.as_str();
+    let subject_key = binding.subject;
+    if let Some(subject) = &subject_key {
+        bindings::subject_key(subject, key)?;
+        ensure!(oauth.is_some(), "subject binding requires OAuth");
+    }
     let signed = oauth.as_ref().is_some_and(|r| r.assertion.is_some());
     if let Some(registration) = &oauth {
         registration.validate()?;
@@ -621,7 +609,9 @@ pub(super) fn add_client(
         );
         let id = Uuid::new_v4().to_string();
         Export {
-            version: if signed {
+            version: if subject_key.is_some() {
+                5
+            } else if signed {
                 3
             } else if mtls.is_some() {
                 2
@@ -634,6 +624,7 @@ pub(super) fn add_client(
             client: id.clone(),
             name: name.into(),
             conversation_key: key.into(),
+            subject_key: subject_key.clone(),
             token: if signed {
                 None
             } else {
@@ -648,7 +639,9 @@ pub(super) fn add_client(
     };
     ensure!(
         value.version
-            == if signed && value.key_revision > 0 {
+            == if subject_key.is_some() {
+                5
+            } else if signed && value.key_revision > 0 {
                 4
             } else if signed {
                 3
@@ -663,6 +656,7 @@ pub(super) fn add_client(
             && uuid(&value.client)
             && value.name == name
             && value.conversation_key == key
+            && value.subject_key == subject_key
             && value.oauth == oauth
             && value.mtls == mtls
             && (signed || value.key_revision == 0)
@@ -683,6 +677,7 @@ pub(super) fn add_client(
         ensure!(
             client.name == name
                 && client.conversation_key == key
+                && client.subject_key == subject_key
                 && client.token_hash == hash
                 && client.export == out
                 && client.created_at == value.created_at
@@ -730,7 +725,9 @@ pub(super) fn add_client(
         // Export first, registry second. A retry after either write reuses the
         // same secret. No bearer or signing key is printed by the command.
         exported.write(&(serde_json::to_string(&value)? + "\n"))?;
-        state.version = state.version.max(if signed {
+        state.version = state.version.max(if subject_key.is_some() {
+            6
+        } else if signed {
             4
         } else if mtls.is_some() {
             3
@@ -750,6 +747,8 @@ pub(super) fn add_client(
             Client {
                 name: name.into(),
                 conversation_key: key.into(),
+                subject_required: subject_key.is_some(),
+                subject_key,
                 token_hash: hash,
                 created_at: value.created_at,
                 expires_at: value.expires_at,

@@ -24,6 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gent", type=Path, required=True)
     parser.add_argument("--private-key-jwt", action="store_true")
+    parser.add_argument("--subject-binding", action="store_true")
     args = parser.parse_args()
     binary = args.gent.resolve()
     with tempfile.TemporaryDirectory(prefix="gent-go-", dir="/tmp") as temporary:
@@ -97,10 +98,17 @@ def main():
                 assert response.code == status, f"unexpected HTTP status {response.code}"
                 return response.headers, response.read().decode()
 
-        def call(token, name, arguments):
+        def call(token, name, arguments, *, subject="synthetic-user-a", error=False, metadata=None):
+            if metadata is None:
+                metadata = {"test/conversation": "same-chat"}
+                if args.subject_binding and subject is not None:
+                    metadata["test/subject"] = subject
             _, body = http("/mcp", bearer=token, rpc={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-                "name": name, "arguments": arguments, "_meta": {"test/conversation": "same-chat"}}})
+                "name": name, "arguments": arguments, "_meta": metadata}})
             result = json.loads(body)
+            if error:
+                assert "error" in result or result["result"].get("isError"), result
+                return result
             assert "error" not in result and not result["result"].get("isError"), result
             return json.loads(result["result"]["content"][0]["text"])
 
@@ -149,13 +157,16 @@ def main():
                 jwks = home / "jwks.json"
                 jwks.write_text(json.dumps({"keys": [original_jwk]}))
                 extra = ["--oauth-client-id", "https://synthetic.invalid/client.json", "--oauth-jwks", str(jwks)]
+            if args.subject_binding:
+                extra.extend(["--subject-key", "test/subject"])
+                private_values.extend(["synthetic-user-a", "synthetic-user-b"])
             added = cli("gateway", "clients", "add", "synthetic-oauth", "--conversation-key", "test/conversation",
                         "--out", str(export), "--oauth-resource", resource, "--redirect-uri", callback, *extra)
             exported = json.loads(export.read_text())
             local_client_id = exported["client"]
             if args.private_key_jwt:
                 client_id = exported["oauth"]["assertion"]["client_id"]
-                assert "token" not in exported and exported["version"] == 3
+                assert "token" not in exported and exported["version"] == (5 if args.subject_binding else 3)
                 # Prove that setup pins the key material and exact retries keep it.
                 assert cli("gateway", "clients", "add", "synthetic-oauth", "--conversation-key", "test/conversation",
                            "--out", str(export), "--oauth-resource", resource, "--redirect-uri", callback, *extra) == added
@@ -187,7 +198,20 @@ def main():
             if args.private_key_jwt:
                 http("/mcp", bearer=authentication()["client_assertion"], status=401)
             token = authorize()
+            if args.subject_binding:
+                call(token["access_token"], "gent_register", {"name": "hosted", "provider": "synthetic"}, subject=None, error=True)
+                # Arguments never supply the host identity metadata.
+                call(token["access_token"], "gent_register", {"name": "hosted", "provider": "synthetic", "test/subject": "synthetic-user-a"}, subject=None, error=True)
+                saved = json.loads((home / "gateway/state.json").read_text())
+                assert saved["clients"][local_client_id]["bindings"] == {}
+                assert all(g["subject"] == "unbound" for g in saved["oauth"]["grants"].values())
             first = call(token["access_token"], "gent_register", {"name": "hosted", "provider": "synthetic"})
+            if args.subject_binding:
+                second_token = authorize()
+                second = call(second_token["access_token"], "gent_register", {"name": "other-user", "provider": "synthetic"}, subject="synthetic-user-b")
+                assert second["agent"]["id"] != first["agent"]["id"]
+                call(token["access_token"], "gent_identity", {}, subject="synthetic-user-b", error=True)
+                call(second_token["access_token"], "gent_identity", {}, error=True)
             stop(gateway)
             gateway = start("gateway", "run", "--listen", address)
             for _ in range(200):
@@ -203,6 +227,9 @@ def main():
             rotated = json.loads(body)
             private_values.extend([rotated["access_token"], rotated["refresh_token"]])
             assert call(rotated["access_token"], "gent_identity", {})["agent"]["id"] == first["agent"]["id"]
+            if args.subject_binding:
+                call(rotated["access_token"], "gent_identity", {}, subject="synthetic-user-b", error=True)
+                assert call(second_token["access_token"], "gent_identity", {}, subject="synthetic-user-b")["agent"]["id"] == second["agent"]["id"]
             http("/mcp", bearer=token["access_token"], status=401)
             http("/oauth/token", form=refresh, status=400)
             if args.private_key_jwt:
@@ -261,7 +288,7 @@ def main():
                 replacement.unlink()
                 overlap.unlink()
                 exported = json.loads(export.read_text())
-                assert exported["client"] == local_client_id and exported["version"] == 4 and exported["key_revision"] == 2
+                assert exported["client"] == local_client_id and exported["version"] == (5 if args.subject_binding else 4) and exported["key_revision"] == 2
                 assert "token" not in exported and len(exported["oauth"]["assertion"]["keys"]) == 1
                 stop(gateway)
                 gateway = start("gateway", "run", "--listen", address)
@@ -273,6 +300,12 @@ def main():
                     except urllib.error.URLError:
                         time.sleep(0.025)
                 fresh = renew(fresh, authentication())
+            if args.subject_binding:
+                call(fresh["access_token"], "gent_identity", {}, subject="synthetic-user-b", error=True)
+                saved = (home / "gateway/state.json").read_text()
+                assert "synthetic-user-a" not in saved and "synthetic-user-b" not in saved
+                assert json.loads(saved)["version"] == 6
+                assert json.loads(export.read_text())["subject_key"] == "test/subject"
             cli("gateway", "clients", "revoke", local_client_id)
             http("/mcp", bearer=fresh["access_token"], status=401)
             stop(gateway)
@@ -284,7 +317,9 @@ def main():
                 "discovery", "local owner consent", "PKCE", "issuer and state callback", "restart",
                 "refresh", "replay revocation", "reconnect identity", "host revocation", "private logs"] + ([
                 "pinned JWKS", "no shared secret", "persistent assertion replay rejection", "key overlap and retirement",
-                "key-update retry", "stale update rejection", "grant and agent continuity after key update"] if args.private_key_jwt else [])}))
+                "key-update retry", "stale update rejection", "grant and agent continuity after key update"] if args.private_key_jwt else []) + ([
+                "user-scoped conversation isolation", "grant user pin", "missing and argument-supplied user rejection",
+                "user continuity through refresh restart and reauthorization", "hashed user persistence"] if args.subject_binding else [])}))
         finally:
             for process in processes:
                 if process.poll() is None:

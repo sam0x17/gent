@@ -47,6 +47,26 @@ Claude Code HTTP calls supply `claudecode/toolUseId`, which changes for every ca
 
 A host credential authorizes a namespace containing several agents. Its holder can select any conversation in that namespace, so the host must supply conversation metadata outside model control. The gateway cannot prove that an arbitrary metadata string came from ChatGPT or Claude. Verify provenance and stability on each actual host before granting access. Separate host credentials isolate equal conversation identifiers from each other. Existing daemon permissions still determine discovery, messages, replies and relay grants; registration grants no communication permissions.
 
+### Scope conversations to a host user
+
+For an OAuth host that provides stable user metadata on every call, select that field when creating its namespace:
+
+```sh
+gent --home /private/path/gent-node gateway clients add scoped-host \
+  --conversation-key test/conversation --subject-key test/subject \
+  --oauth-resource https://agent.example.net/mcp \
+  --redirect-uri https://host.example/callback \
+  --out /private/path/gent-node/scoped-host.json
+```
+
+These are synthetic metadata names. The host must supply both values in per-call `_meta`; prompts, tool arguments and initialization metadata cannot substitute for them. `--subject-key` requires OAuth and a namespaced field distinct from the conversation key. It works with either secret or signed client authentication and optional mTLS. Setup retries cannot add, remove or change this policy on an existing namespace. Existing unscoped clients keep their bindings; moving one to scoped bindings requires a new namespace and new agents.
+
+Each OAuth grant begins unbound. Its first call with valid identity metadata pins a hash of the reported user while allocating the agent credential in the same transaction. Later calls through that grant must report the same user, including after token refresh or gateway restart. A conflicting user is rejected before an agent is selected. Missing or malformed metadata and binding-capacity refusal leave an unbound grant unchanged. Agent identity includes the host namespace, user and conversation, so equal conversation IDs under different users remain separate. A newly approved grant reporting the same user and conversation recovers the original agent.
+
+The pin depends on the trusted host's report; Gent does not independently verify the user's account. The first report must come from a host that keeps metadata and OAuth credentials outside model control. A compromised host can still impersonate its users. OpenAI's [reference](https://developers.openai.com/plugins/reference#_meta-fields-the-client-provides) documents `openai/subject` and `openai/session` as candidate user/conversation fields. Their provenance, stability and behavior across real accounts and devices still need verification; Gent does not automatically enable this policy for a provider label. CLI integrations do not require this optional field.
+
+Only hashes of user and conversation identifiers enter the binding records; raw values are neither returned by status nor logged. Hashing does not protect low-entropy identifiers from guessing by someone with registry access. Scoped records use registry version 6 and export version 5; older readers reject them. Required policy markers and explicit unbound/bound grant records reject missing state instead of silently disabling user checks. The existing per-host conversation quota is shared across that host's users.
+
 ## Direct TLS
 
 A reachable listener requires a certificate, private key and canonical HTTPS origin:
@@ -105,7 +125,7 @@ gent --home /private/path/gent-node gateway clients revoke CLIENT_UUID
 
 Status and listing inspect configuration without probing the listener. Revocation rejects future host requests, including requests on an existing connection. The gateway rechecks the credential before resolving each tool call. Already accepted operations and agent data remain. Agent revocation through `gent agent revoke` also survives gateway reconnection; registration cannot create a replacement for that same binding.
 
-Private `gateway/state.json` stores host token digests and persistent agent credentials indexed by hashed conversation IDs. A registry UUID in `config.toml` pins it to the node and cluster. Missing, corrupt or mismatched established state causes access to fail; restore a consistent backup instead of deleting the registry to repair it. Config version 3 protects the required local pin, and daemon projections preserve it. The highest observed authentication/binding timestamp is durable; a backward clock change blocks access until time catches up. The OS user and local backups are trusted.
+Private `gateway/state.json` stores host token digests and persistent agent credentials indexed by hashed conversation IDs, with user scope when configured. A registry UUID in `config.toml` pins it to the node and cluster. Missing, corrupt or mismatched established state causes access to fail; restore a consistent backup instead of deleting the registry to repair it. Config version 3 protects the required local pin, and daemon projections preserve it. The highest observed authentication/binding timestamp is durable; a backward clock change blocks access until time catches up. The OS user and local backups are trusted.
 
 The registry admits at most 32 host records, 256 conversations per host, and 4096 conversations total, with a 2 MiB state limit. Revoked and expired records retain their bindings and consume capacity. Host-grant lifetime extension and record retirement are future work; a replacement host grant needs a new name and export. OAuth access-token refresh works within the original grant lifetime. The server permits 64 simultaneous connections and 16 filesystem workers, with a 6 MiB request limit, 10-second TLS/header deadlines, 30-second request deadline and 60-second connection lifetime. Filesystem worker slots remain occupied if their requesting connection disappears. Clients reconnect and retry safely using operation IDs.
 
