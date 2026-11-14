@@ -252,7 +252,24 @@ impl StoreSession<'_> {
             );
         }
         if self.identity.is_current_owner(&self.state) {
-            self.accept_configuration(&origin, request, edit)?;
+            if handoff::frozen(self.db, &self.state)? {
+                // The source cannot decide new work after issuing a handoff.
+                // Keep its own edits durably, like other origins, without
+                // inventing a self-addressed data stream. Epoch reconciliation
+                // routes the retained input once the successor is accepted.
+                storage::insert(
+                    self.db,
+                    &origin,
+                    id,
+                    &origin,
+                    &fingerprint(&edit)?,
+                    &edit,
+                    None,
+                )?;
+                pending::retain(self.db, &origin, id, &edit)?;
+            } else {
+                self.accept_configuration(&origin, request, edit)?;
+            }
         } else {
             ensure!(
                 administration::edit_identity(&edit).is_some()

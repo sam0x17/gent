@@ -147,16 +147,16 @@ async fn separate_node_preparation_fences_all_owner_handles_and_survives_delayed
             .is_err()
     );
     assert!(stale.identity.signing_owner(&stale.db).is_err());
-    assert!(
-        stale
-            .execute(Request::Owner {
-                credential: keys[0].clone(),
-                action: OwnerOp::SetPolicy {
-                    policy: Policy::default()
-                }
-            })
-            .is_err()
-    );
+    let queued = stale
+        .execute(Request::Owner {
+            credential: keys[0].clone(),
+            action: OwnerOp::SetPolicy {
+                policy: Policy::default(),
+            },
+        })
+        .unwrap();
+    assert_eq!(queued["state"], "queued");
+    assert_eq!(queued["payload_retained"], true);
     // Even an already computed, correctly signed old-owner revision is fenced.
     let old_key =
         gent_crypto::OwnerKey::from_secret_bytes(identities[0][40..72].try_into().unwrap());

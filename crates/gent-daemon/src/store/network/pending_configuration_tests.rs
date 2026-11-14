@@ -15,6 +15,121 @@ fn count(pair: &Pair) -> u64 {
 }
 
 #[tokio::test]
+async fn frozen_source_retains_its_local_edits_atomically_and_reroutes_after_activation() {
+    for allowed in [false, true] {
+        let mut pair = Pair::new().await;
+        let keys = [credential(&pair, 0), credential(&pair, 1)];
+        let origin = pair.stores[0].identity.node.id().to_owned();
+        let initial_name = pair.stores[0]
+            .identity
+            .state(&pair.stores[0].db)
+            .unwrap()
+            .state()
+            .nodes[&origin]
+            .name
+            .clone();
+        if allowed {
+            pair.stores[0]
+                .execute(Request::Owner {
+                    credential: keys[0].clone(),
+                    action: OwnerOp::DelegateConfiguration {
+                        node_id: origin.clone(),
+                        allow: true,
+                    },
+                })
+                .unwrap();
+            pair.pump();
+        }
+        let candidate = prepare(&mut pair);
+        let authorization = issue(&mut pair, &candidate);
+        let id = Uuid::new_v4().to_string();
+        let edit = ConfigurationEdit::RenameNode {
+            name: "retired-source-edit".into(),
+        };
+        pair.stores[0].db.execute_batch("CREATE TRIGGER refuse_payload BEFORE INSERT ON configuration_pending BEGIN SELECT RAISE(ABORT,'payload failure'); END;").unwrap();
+        assert!(configure(&mut pair, 0, &id, edit.clone()).is_err());
+        assert_eq!(
+            pair.stores[0]
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM configuration_edits WHERE id=?1",
+                    [&id],
+                    |r| r.get::<_, usize>(0)
+                )
+                .unwrap(),
+            0
+        );
+        pair.stores[0]
+            .db
+            .execute_batch("DROP TRIGGER refuse_payload")
+            .unwrap();
+        let queued = configure(&mut pair, 0, &id, edit.clone()).unwrap();
+        assert_eq!(queued["state"], "queued");
+        assert_eq!(queued["payload_retained"], true);
+        assert!(configure(&mut pair, 0, &id, ConfigurationEdit::Renew).is_err());
+        pair.reopen(0);
+        assert_eq!(configure(&mut pair, 0, &id, edit.clone()).unwrap(), queued);
+        assert_eq!(
+            pair.stores[0]
+                .identity
+                .state(&pair.stores[0].db)
+                .unwrap()
+                .checkpoint(),
+            &candidate.candidate.base
+        );
+        assert!(pair.stores[0].require_provisioning_owner().is_err());
+        assert_eq!(
+            pair.stores[0]
+                .authorize_owner_handoff(&keys[0], &candidate)
+                .unwrap(),
+            authorization
+        );
+        pair.stores[1]
+            .accept_owner_handoff(&keys[1], &candidate.candidate.id, &authorization)
+            .unwrap();
+        pair.stores[1]
+            .activate_owner_handoff(&keys[1], &candidate.candidate.id)
+            .unwrap();
+        pair.pump();
+        let completed = configure(&mut pair, 0, &id, edit.clone()).unwrap();
+        assert_eq!(
+            completed["state"],
+            if allowed { "applied" } else { "rejected" }
+        );
+        if !allowed {
+            assert!(
+                completed["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("configuration-management grant")
+            );
+        }
+        let expected_name = if allowed {
+            "retired-source-edit"
+        } else {
+            &initial_name
+        };
+        assert_eq!(
+            config::load(pair.homes[0].path()).unwrap().node.name,
+            expected_name
+        );
+        assert_eq!(
+            pair.stores[0]
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM configuration_pending WHERE id=?1",
+                    [&id],
+                    |r| r.get::<_, usize>(0)
+                )
+                .unwrap(),
+            0
+        );
+        pair.reopen(0);
+        assert_eq!(configure(&mut pair, 0, &id, edit).unwrap(), completed);
+    }
+}
+
+#[tokio::test]
 async fn full_pending_policy_survives_transport_retirement_and_owner_downtime() {
     let mut pair = Pair::new().await;
     let id = Uuid::new_v4().to_string();
