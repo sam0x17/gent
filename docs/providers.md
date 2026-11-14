@@ -42,6 +42,8 @@ Use the same registration and messaging tools for Codex, Claude Code, desktop, w
 
 Files, screenshots, and images use the shared attachment protocol. Verify whether each host can supply and consume the actual bytes. Report unsupported directions rather than substituting a description or inaccessible link. Gent stores its own messages and delivery state; the host retains the broader conversation history.
 
+Model inspection and user-visible file presentation are separate. In the tested Linux VS Code extensions, `gent_file_export` supplies a verified local path: Codex renders a Markdown image and file link, while Claude Code opens the file link in VS Code's image viewer and blocks local-path inline images. Gent's shared guidance now uses these routes when the host shares the daemon filesystem. Fresh ordinary relay turns pass exact response text plus the supported file presentation in both extensions. Earlier sessions added diagnostic prose, so this bounded check does not establish consistent behavior across models or long conversations. Hosted/mobile file display and access to another machine's handoff paths remain separate acceptance work.
+
 ## Configuration and visibility
 
 `~/.gent/config.toml` contains local node and integration settings alongside the cluster profiles and shared permission policy. Agent registrations and durable queues live in daemon state. Replicate authorized registration metadata through encrypted cluster state; a node disconnect must not erase its agents' identities or their permissions.

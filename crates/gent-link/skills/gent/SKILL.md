@@ -21,6 +21,8 @@ After reconnecting, use `gent_relay_status` and `gent_relay_turns`, then `gent_r
 
 Forward native attachments using their `file_ids`. Inspect images with `gent_file_view`; use `gent_file_read` for other files. Preserve inline `files` name, media_type and data_base64 exactly. Local handoff folders belong to the daemon machine. Archived history grants no current identity, permission or right to repeat work. Detailed workflows follow.
 
+For user-facing attachments, export local files and provide a supported preview or file link. A file ID or model-visible image alone is not a user attachment. Use the host display guidance below.
+
 ## Permission explanations
 
 Use `gent_permission_check` with a visible peer's ID to explain current enumeration, unsolicited send/receive and reply-policy gates. Identity comes from this connection. The result includes no private rules and does not grant reply rights or prove delivery; replies still require an accepted unexpired exchange with capacity remaining. Hidden and unknown peers return the same unavailable result. The owner can use `gent permission explain ACTOR_UUID PEER_UUID` locally for matching rules.
@@ -79,6 +81,10 @@ If `gent_file_link` is available and enabled for this host, use it for a user-re
 Retry an interrupted export with the same file ID while access is valid. If Gent reports changed temporary or destination contents, preserve those files and report the conflict. A plaintext quota error requires owner inspection through `gent files`; repeating a new export does not create more capacity.
 
 Small files can still use `files` entries containing `name`, `media_type`, and exact `data_base64`, with a combined 1 MiB decoded limit. Preserve all three fields when forwarding inline files. Inbox results include supported inline raster image blocks. Use the file tools above for separately transported attachments.
+
+When presenting a received file to the user, call `gent_file_export` if the host shares the daemon filesystem. Use its returned absolute path in a Markdown file link, such as `[preview.png](</returned/path/preview.png>)`; do not guess paths or use a file ID as a link. In the tested Codex VS Code extension, `![preview](</returned/path/preview.png>)` also renders a local image inline. The tested Claude Code VS Code extension blocks that inline syntax but opens the file link in the editor's image viewer. These are local IDE routes; remote hosts cannot use another machine's handoff paths. For an enabled remote download route, use `gent_file_link` as described by that tool. Otherwise report the display/download limitation briefly rather than claiming the user received a usable attachment. Do not paste large base64 blobs into the conversation to imitate an attachment.
+
+In relay mode, preserve the target's response text and add only the supported image/file presentation. Omit file IDs, checksums and export/acknowledgment reports unless requested. A model-visible image tool result does not establish that the user can see or download the image.
 
 Inspect the image when reviewing visual work. Include source files and rendered previews when both help the recipient. Send revisions as new messages in the same exchange. A description or inaccessible URL does not transfer file bytes.
 

@@ -162,13 +162,13 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_file_view",
-            "Read and verify an authorized complete PNG, JPEG, WebP, or GIF up to 4 MiB and return its actual bytes as MCP image content for visual inspection. No resizing or filesystem access. Check gent_file_status while pending. For larger images use gent_file_read or ask the source agent for a smaller preview. Host image rendering support varies.",
+            "Read and verify an authorized complete PNG, JPEG, WebP, or GIF up to 4 MiB and return its actual bytes as MCP image content for visual inspection. No resizing or filesystem access. Check gent_file_status while pending. For larger images use gent_file_read or ask the source agent for a smaller preview. This lets the model inspect bytes; it may not display an attachment to the user. For local user-facing images/files, use gent_file_export and a supported preview or file link. Keep relay response text unchanged and omit file IDs or diagnostic reports.",
             json!({"file_id":{"type":"string","format":"uuid"}}),
             vec!["file_id"],
         ),
         (
             "gent_file_export",
-            "Verify and export an authorized complete file into this agent's export_directory. Returns a local path for host file or image tools and cleanup_after for this temporary copy. Check gent_file_status while pending. Existing files with different bytes are never overwritten. Save lasting files outside the handoff folder.",
+            "Verify and export an authorized complete file into this agent's export_directory. Returns a local path and cleanup_after for this temporary copy. When the host shares the daemon filesystem, present a Markdown file link using that exact absolute path. Codex VS Code also renders local Markdown images; Claude Code VS Code blocks local inline images, so use a file link to open its editor viewer. In relay mode, add only this file presentation to the unchanged target text; omit export/acknowledgment reports, IDs and checksums. Check gent_file_status while pending. Existing files with different bytes are never overwritten. Save lasting files outside the handoff folder.",
             json!({"file_id":{"type":"string","format":"uuid"}}),
             vec!["file_id"],
         ),
