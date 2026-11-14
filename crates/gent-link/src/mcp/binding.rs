@@ -1,11 +1,56 @@
 //! Explicit bindings keep their cluster/node across context changes. The scope
 //! is local metadata, not a credential and not a remote enrollment mechanism.
-use crate::managed_file::Snapshot;
-use anyhow::{Result, ensure};
+use crate::managed_file::{self, Snapshot};
+use anyhow::{Context, Result, ensure};
+use fs2::FileExt;
 use gent_daemon::config::Config;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+
+pub(crate) struct Opened {
+    pub credential: String,
+    _stable: File,
+    _credential: File,
+}
+
+pub(crate) fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+pub(crate) fn lock(path: &Path) -> Result<File> {
+    managed_file::directory(path.parent().context("missing binding directory")?)?;
+    managed_file::lock(&sidecar(path, ".binding.lock"))
+}
+
+pub(crate) fn normalize(path: &Path) -> Result<PathBuf> {
+    gent_daemon::recovery::ensure_active(path.parent().context("missing binding directory")?)?;
+    let path = managed_file::normalize(path)?;
+    gent_daemon::recovery::ensure_active(path.parent().context("missing binding directory")?)?;
+    Ok(path)
+}
+
+pub(crate) fn open(path: &Path, cfg: &Config, explicit: bool) -> Result<Opened> {
+    let path = normalize(path)?;
+    let stable = lock(&path)?;
+    let snapshot = Snapshot::read(&path)?;
+    snapshot.private()?;
+    crate::agent_recovery::ensure_ready(&path, cfg)?;
+    let existing = snapshot.text.is_some();
+    let credential = gent_daemon::config::binding(&path)?;
+    let file = OpenOptions::new().read(true).write(true).open(&path)?;
+    file.try_lock_exclusive()
+        .context("binding is already in use by another MCP connection")?;
+    pin(&path, cfg, &credential, !existing || explicit)?;
+    Ok(Opened {
+        credential,
+        _stable: stable,
+        _credential: file,
+    })
+}
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,7 +62,7 @@ struct Scope {
 }
 
 /// Caller holds the binding file's exclusive lock through pinning and use.
-pub(super) fn pin(path: &Path, cfg: &Config, credential: &str, may_initialize: bool) -> Result<()> {
+pub(crate) fn pin(path: &Path, cfg: &Config, credential: &str, may_initialize: bool) -> Result<()> {
     let mut name = path.as_os_str().to_owned();
     name.push(".scope.json");
     let snapshot = Snapshot::read(&PathBuf::from(name))?;

@@ -162,6 +162,36 @@ pub async fn import_history(
     target_agent: String,
     restore_revision: Option<u64>,
 ) -> Result<Value> {
+    let prepared = prepare_history(archive, identity, selection)?;
+    crate::owner(
+        home,
+        gent_protocol::OwnerOp::HistoryImport {
+            directory: prepared
+                .directory
+                .to_str()
+                .context("history path must be UTF-8")?
+                .into(),
+            manifest_sha256: prepared.manifest_sha256.clone(),
+            source_agent: prepared.source_agent.clone(),
+            target_agent,
+            restore_revision,
+        },
+    )
+    .await
+}
+
+pub struct PreparedHistory {
+    _scratch: tempfile::TempDir,
+    pub directory: PathBuf,
+    pub manifest_sha256: String,
+    pub source_agent: String,
+}
+
+pub fn prepare_history(
+    archive: &Path,
+    identity: &Path,
+    selection: HistorySelection,
+) -> Result<PreparedHistory> {
     use sha2::{Digest as _, Sha256};
     let scratch = tempfile::Builder::new()
         .prefix("gent-history-import-")
@@ -183,24 +213,43 @@ pub async fn import_history(
         _ => anyhow::bail!("select exactly one of --from-agent or --from-import"),
     };
     let directory = fs::canonicalize(directory)?;
+    ensure!(
+        gent_protocol::history::valid_id(&source_agent),
+        "invalid archived agent identity"
+    );
+    {
+        use std::io::{BufRead, BufReader};
+        let mut reader = BufReader::new(File::open(directory.join("agents.jsonl"))?);
+        let mut found = false;
+        for _ in 0..65_536 {
+            let mut line = Vec::new();
+            let size = (&mut reader).take(4097).read_until(b'\n', &mut line)?;
+            if size == 0 {
+                break;
+            }
+            ensure!(
+                size <= 4096 && line.last() == Some(&b'\n'),
+                "invalid exported agent record"
+            );
+            let agent: gent_protocol::Agent =
+                serde_json::from_slice(&line).context("invalid exported agent record")?;
+            if agent.id == source_agent {
+                found = true;
+                break;
+            }
+        }
+        ensure!(found, "archived agent is absent from this history");
+    }
     let manifest_sha256 = format!(
         "{:x}",
         Sha256::digest(fs::read(directory.join("history.json"))?)
     );
-    crate::owner(
-        home,
-        gent_protocol::OwnerOp::HistoryImport {
-            directory: directory
-                .to_str()
-                .context("history path must be UTF-8")?
-                .into(),
-            manifest_sha256,
-            source_agent,
-            target_agent,
-            restore_revision,
-        },
-    )
-    .await
+    Ok(PreparedHistory {
+        _scratch: scratch,
+        directory,
+        manifest_sha256,
+        source_agent,
+    })
 }
 
 fn create(home: &Path, archive: &Path, identity: &Path) -> Result<Value> {

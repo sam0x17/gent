@@ -552,3 +552,73 @@ fn aggregate_provenance_quota_preserves_readable_import_lists() {
     db.execute("DELETE FROM recovered_sources", []).unwrap();
     assert_eq!(ok(f.import(None))["messages"], 23);
 }
+
+#[test]
+fn owner_recovery_registers_and_assigns_atomically_without_reactivating_revoked_access() {
+    let mut f = Fixture::new();
+    let credential = config::secret();
+    let action = |pin: String| OwnerOp::AgentRecover {
+        directory: f.directory.to_str().unwrap().into(),
+        manifest_sha256: pin,
+        source_agent: f.source.clone(),
+        agent_credential: credential.clone(),
+        name: "recovered-agent".into(),
+        provider: "generic".into(),
+    };
+    let valid = action(f.pin.clone());
+    let wrong = action("00".repeat(32));
+    let before = f.counts();
+    let db = Connection::open(f.home.join("state.sqlite3")).unwrap();
+    let count = || {
+        db.query_row("SELECT COUNT(*) FROM agents", [], |r| r.get::<_, u64>(0))
+            .unwrap()
+    };
+    let agents = count();
+    error(f.store.handle(Request::Owner {
+        credential: config::secret(),
+        action: valid.clone(),
+    }));
+    error(f.owner(wrong));
+    assert_eq!(count(), agents);
+    assert_eq!(f.counts(), before);
+    db.execute_batch("CREATE TRIGGER fail_recovery BEFORE INSERT ON recovered_chunks WHEN NEW.position=1 BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+    error(f.owner(valid.clone()));
+    assert_eq!(count(), agents);
+    assert_eq!(f.rows(), (0, 0, 0));
+    assert_eq!(f.counts(), before);
+    db.execute_batch("DROP TRIGGER fail_recovery").unwrap();
+    let result = ok(f.owner(valid.clone()));
+    let agent = result["agent"]["id"].as_str().unwrap().to_string();
+    let import = result["history"]["import_id"].as_str().unwrap().to_string();
+    assert_ne!(agent, f.source);
+    assert_eq!(count(), agents + 1);
+    assert!(!result.to_string().contains(&credential));
+    assert_eq!(ok(f.owner(valid.clone()))["history"]["duplicate"], true);
+    assert_eq!(count(), agents + 1);
+    assert_eq!(
+        ok(f.store.handle(Request::Agent {
+            credential: credential.clone(),
+            action: AgentOp::Inbox
+        })),
+        json!([])
+    );
+    assert_eq!(
+        ok(f.store.handle(Request::Agent {
+            credential: credential.clone(),
+            action: AgentOp::Agents
+        })),
+        json!([])
+    );
+    ok(f.owner(OwnerOp::HistoryRemove {
+        import_id: import,
+        expected_revision: 1,
+    }));
+    error(f.owner(valid.clone()));
+    assert_eq!(count(), agents + 1);
+    ok(f.owner(OwnerOp::Revoke { agent_id: agent }));
+    error(f.owner(valid));
+    error(f.store.handle(Request::Agent {
+        credential,
+        action: AgentOp::Identity,
+    }));
+}

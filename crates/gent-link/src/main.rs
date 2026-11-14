@@ -1,3 +1,4 @@
+mod agent_recovery;
 mod auth;
 mod backup;
 mod cluster;
@@ -298,8 +299,14 @@ enum ListCommand {
 }
 #[derive(Subcommand)]
 enum AgentCommand {
-    Show { agent: String },
-    Revoke { agent: String },
+    Show {
+        agent: String,
+    },
+    Revoke {
+        agent: String,
+    },
+    /// Create a fresh conversation binding and assign selected archived history.
+    Recover(agent_recovery::Args),
 }
 #[derive(Subcommand)]
 enum NodeCommand {
@@ -720,6 +727,9 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Agent {
             command: AgentCommand::Revoke { agent },
         }) => owner(&home, OwnerOp::Revoke { agent_id: agent }).await?,
+        Some(Command::Agent {
+            command: AgentCommand::Recover(args),
+        }) => agent_recovery::execute(&home, args).await?,
         Some(Command::Agent {
             command: AgentCommand::Show { agent },
         }) => {

@@ -525,6 +525,42 @@ impl StoreSession<'_> {
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
+            OwnerOp::AgentRecover {
+                directory,
+                manifest_sha256,
+                source_agent,
+                agent_credential,
+                name,
+                provider,
+            } => {
+                let registered = self.agent(
+                    &agent_credential,
+                    AgentOp::Register {
+                        name: name.clone(),
+                        provider: provider.clone(),
+                    },
+                    files::ExportStep::Reserve,
+                )?;
+                let id = registered["agent"]["id"]
+                    .as_str()
+                    .context("missing recovered agent identity")?;
+                let agent = self.get_agent(id)?;
+                ensure!(
+                    agent.name == name && agent.provider == provider,
+                    "recovery registration arguments changed"
+                );
+                let history = self.recovered_import(
+                    Path::new(&directory),
+                    &manifest_sha256,
+                    &source_agent,
+                    id,
+                    None,
+                )?;
+                Ok(
+                    json!({"agent":agent,"history":history,"source_agent":source_agent,
+                    "scope":"fresh local registration with assigned history; old credentials, peer permissions and pending work are not restored"}),
+                )
+            }
             OwnerOp::HistoryImports => self.recovered_imports(None),
             OwnerOp::HistoryImport {
                 directory,

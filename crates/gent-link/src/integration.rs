@@ -28,7 +28,7 @@ pub enum Host {
     ClaudeCode,
 }
 impl Host {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude-code",
@@ -156,6 +156,23 @@ fn scope(home: &Path, host: Host) -> Result<PathBuf> {
     config::private_dir(&folder)?;
     Ok(folder)
 }
+
+pub(crate) fn recovery_binding(
+    home: &Path,
+    host: Host,
+    conversation: &str,
+    subagent: Option<&str>,
+) -> Result<PathBuf> {
+    identifier(Some(&json!(conversation)))?;
+    if let Some(id) = subagent {
+        ensure!(
+            host == Host::ClaudeCode,
+            "Codex child agents use their own conversation IDs"
+        );
+        identifier(Some(&json!(id)))?;
+    }
+    Ok(scope(home, host)?.join(format!("{}.key", session_key(conversation, subagent))))
+}
 fn private_file(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
@@ -201,27 +218,21 @@ fn lock(path: &Path) -> Result<File> {
 
 struct Binding {
     credential: String,
-    _guard: File,
+    _opened: crate::mcp::binding::Opened,
 }
 impl Binding {
-    fn open(path: &Path) -> Result<Self> {
-        if path.exists() {
-            private_file(path)?;
-        }
-        let credential = config::binding(path)?;
-        let guard = OpenOptions::new().read(true).write(true).open(path)?;
-        guard
-            .try_lock_exclusive()
-            .context("conversation binding is in use by another MCP connection")?;
+    fn open(path: &Path, cfg: &config::Config) -> Result<Self> {
+        let opened = crate::mcp::binding::open(path, cfg, true)?;
         Ok(Self {
-            credential,
-            _guard: guard,
+            credential: opened.credential.clone(),
+            _opened: opened,
         })
     }
 }
 
 pub struct Bindings {
     host: Host,
+    cfg: config::Config,
     folder: PathBuf,
     active: BTreeMap<String, Binding>,
 }
@@ -229,6 +240,7 @@ impl Bindings {
     pub fn new(home: &Path, host: Host) -> Result<Self> {
         Ok(Self {
             host,
+            cfg: config::load(home)?,
             folder: scope(home, host)?,
             active: BTreeMap::new(),
         })
@@ -270,7 +282,7 @@ impl Bindings {
             let _lock = lock(&self.folder.join("bindings.lock"))?;
             self.active.insert(
                 key.clone(),
-                Binding::open(&self.folder.join(format!("{key}.key")))?,
+                Binding::open(&self.folder.join(format!("{key}.key")), &self.cfg)?,
             );
         }
         Ok(self.active[&key].credential.clone())
@@ -519,17 +531,18 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let home = home();
         let path = home.path().join("credential");
-        let binding = Binding::open(&path).unwrap();
+        let cfg = config::load(home.path()).unwrap();
+        let binding = Binding::open(&path, &cfg).unwrap();
         drop(binding);
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(Binding::open(&path).is_err());
+        assert!(Binding::open(&path, &cfg).is_err());
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let link = home.path().join("link");
         std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert!(Binding::open(&link).is_err());
+        assert!(Binding::open(&link, &cfg).is_err());
         fs::remove_file(&link).unwrap();
         fs::hard_link(&path, &link).unwrap();
-        assert!(Binding::open(&path).is_err());
+        assert!(Binding::open(&path, &cfg).is_err());
         assert_eq!(shell_arg("a '$HOME"), "'a '\"'\"'$HOME'");
     }
 }

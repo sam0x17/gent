@@ -35,7 +35,8 @@ pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value>
     let timeout = if matches!(
         &request,
         Request::Owner {
-            action: gent_protocol::OwnerOp::HistoryImport { .. },
+            action: gent_protocol::OwnerOp::HistoryImport { .. }
+                | gent_protocol::OwnerOp::AgentRecover { .. },
             ..
         }
     ) {
@@ -148,7 +149,8 @@ async fn serve(
         + if matches!(
             &decoded,
             Ok(Request::Owner {
-                action: gent_protocol::OwnerOp::HistoryImport { .. },
+                action: gent_protocol::OwnerOp::HistoryImport { .. }
+                    | gent_protocol::OwnerOp::AgentRecover { .. },
                 ..
             })
         ) {

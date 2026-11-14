@@ -1,6 +1,5 @@
 use crate::integration::{Bindings, Host};
-use anyhow::{Context, Result};
-use fs2::FileExt;
+use anyhow::Result;
 use gent_daemon::{config, request};
 use gent_protocol::{AgentOp, Request};
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, model::*, service::RequestContext};
@@ -9,7 +8,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
-mod binding;
+pub(crate) mod binding;
 
 #[derive(Clone)]
 enum Credentials {
@@ -603,16 +602,9 @@ pub async fn run(
         Credentials::Host(Arc::new(Mutex::new(Bindings::new(&home, host)?)))
     } else if let Some(path) = binding_path {
         // A binding file is selected outside the model by the owner/host per conversation.
-        let existing = crate::managed_file::Snapshot::read(&path)?.text.is_some();
-        let credential = config::binding(&path)?;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)?;
-        file.try_lock_exclusive()
-            .context("binding is already in use by another MCP connection")?;
-        binding::pin(&path, &cfg, &credential, !existing || explicit_context)?;
-        guard = Some(file);
+        let opened = binding::open(&path, &cfg, explicit_context)?;
+        let credential = opened.credential.clone();
+        guard = Some(opened);
         Credentials::Fixed(credential)
     } else {
         eprintln!(

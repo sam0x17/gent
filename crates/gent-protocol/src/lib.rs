@@ -533,6 +533,14 @@ pub enum OwnerOp {
     FilesStatus,
     HistoryStatus,
     HistoryImports,
+    AgentRecover {
+        directory: String,
+        manifest_sha256: String,
+        source_agent: String,
+        agent_credential: String,
+        name: String,
+        provider: String,
+    },
     HistoryImport {
         directory: String,
         manifest_sha256: String,

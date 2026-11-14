@@ -1,6 +1,6 @@
 # Backup and recovery
 
-Gent can create encrypted backups of a stopped node, verify every payload, extract the archive into a guarded offline directory, and export retained Gent history with recovered files. The owner can assign one archived agent's history to a current local agent. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Migrating agent identities, bindings or pending work, and replacing a lost cluster owner remain unfinished.
+Gent can create encrypted backups of a stopped node, verify every payload, extract the archive into a guarded offline directory, and export retained Gent history with recovered files. The owner can assign one archived agent's history to a current local agent or prepare a fresh conversation binding with that history. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Migrating old agent identities, peer permissions or pending work, and replacing a lost cluster owner remain unfinished.
 
 ## Commands
 
@@ -147,6 +147,32 @@ Choose exactly one of `--from-agent` or `--from-import`. The latter uses the sel
 
 Once captured in a later backup, imported content can be recovered using that backup and its key alone. Earlier archives remain necessary for records or files that were never included in the import. A snapshot taken before removal still contains its earlier history; neither a later removal nor agent revocation can retract old archives. Restoring a raw database as live node state remains unsafe and blocked by the activation guard.
 
+## Recover a conversation binding
+
+Start or enroll the replacement node normally. Close the host's Gent MCP connection before preparing its binding. Choose the historical agent from an offline export, then run one of these commands against the replacement node:
+
+```sh
+gent --home ~/.gent-replacement agent recover ~/gent-backups/node.age \
+  --identity ~/gent-recovery.key --from-agent OLD_AGENT_UUID \
+  --name recovered-agent --binding ~/.gent-replacement/bindings/recovered.key
+
+gent --home ~/.gent-replacement agent recover ~/gent-backups/node.age \
+  --identity ~/gent-recovery.key --from-agent OLD_AGENT_UUID \
+  --name recovered-codex --host codex --conversation CODEX_THREAD_ID
+
+gent --home ~/.gent-replacement agent recover ~/gent-backups/node.age \
+  --identity ~/gent-recovery.key --from-import SAVED_IMPORT_UUID \
+  --name recovered-claude --host claude-code --conversation CLAUDE_SESSION_ID
+```
+
+Select exactly one of `--from-agent` or `--from-import`. The latter reads an assignment saved in a later backup. Select either an explicit `--binding` path or a supported `--host` with its actual conversation ID. Use the Codex thread ID from that conversation or Claude's session ID, not an agent UUID or display name. For a Claude child, also supply its actual `--subagent CHILD_ID`; Codex children have their own thread IDs. Explicit bindings accept an optional descriptive `--provider`, defaulting to `generic`; host mode supplies its provider label.
+
+The destination must be unused. An ordinary existing binding is never overwritten, even if it has not registered yet. Use `gent history import --agent CURRENT_AGENT_UUID` to add history to an existing agent. The daemon registers a fresh agent and assigns its selected history in one transaction, including registration announcements and quota accounting. Its new identity receives the current cluster's applicable blanket/same-node permissions. Old credentials, explicit peer permissions, reply rights and pending work remain historical state.
+
+Reconnect the conversation with Gent configured to use the replacement node's explicit `--home` or `--cluster`. For an explicit binding, also select the returned binding path. Host mode derives the normal conversation path automatically. Recovery does not edit host settings or move provider transcripts. Close the old connection before changing configuration; for installed entries, use the existing integration uninstall/install workflow to select the replacement home. Check `gent_identity` after reconnecting, then read `gent_history_imports`. Historical messages remain outside the live inbox and must not trigger old actions automatically.
+
+A private `.recovery.json` sidecar records publication. While pending, it holds the newly generated credential and blocks MCP use of that binding. If the daemon is unavailable, a reply is lost or the command is interrupted, rerun the exact same command with the same archive, destination and labels. The retry reuses the credential, agent and assignment. Completion removes the credential from the sidecar; keep the receipt, binding key and `.scope.json` together. Changed arguments, conflicting files, busy bindings or a different node cause refusal. A missing pending key can be recreated from its own record; a missing completed key is never silently regenerated. Removal of the assignment or revocation of the new agent prevents recovery retries from restoring access.
+
 ## Replace a lost joined node
 
 On the current owner, use `gent nodes` to identify the lost node. From a fresh node directory on the replacement machine:
@@ -165,7 +191,7 @@ If joining is interrupted, rerun the identical command with the same home, name 
 
 Signed revocation applies as peers receive current configuration. Offline peers can retain stale authority until synchronization or lease expiry. Service credential removal follows the existing owner maintenance journal and may remain pending during service downtime. On the owner, `gent node removals` reports the old node, replacement identity and cleanup status; service confirmation does not prove that every peer has caught up. The development relay uses a shared credential and has no per-node service revocation.
 
-The new node never opens the archived runtime, resumes an old MLS ratchet or clears the recovery guard. Keep extracted archives offline. Use the separate history assignment above to grant a new agent read access to selected archived exchanges. Pending work, agent bindings and peer permissions still need deliberate migration rules; archived requests must not silently become new sends. Replacing a node cannot remove historical data already held by it or its backups.
+The new node never opens the archived runtime, resumes an old MLS ratchet or clears the recovery guard. Keep extracted archives offline. Use the separate history assignment or fresh binding recovery above to grant a new agent read access to selected archived exchanges. Pending work and peer permissions still need deliberate migration rules; archived requests must not silently become new sends. Replacing a node cannot remove historical data already held by it or its backups.
 
 ## Replace through a private invitation
 
@@ -188,7 +214,7 @@ Gent enrollment uses the invitation's encrypted Noise mailbox; SSH is unnecessar
 
 ## Remaining recovery work
 
-Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, a new cluster can receive selected archived history through the assignment commands above, without recovering the old cluster's authority. Agent bindings, peer permissions and pending-work reconciliation remain unfinished. Multi-user recovery authority remains future work.
+Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, a new cluster can receive selected archived history through the assignment commands above, without recovering the old cluster's authority. Migration of old agent identities and peer permissions, gateway conversation recovery and pending-work reconciliation remain unfinished. Multi-user recovery authority remains future work.
 
 ## Validation
 
@@ -210,6 +236,17 @@ python3 scripts/prove_history_import.py --gent target/debug/gent
 ```
 
 Its optional `--peer user@peer-host --remote-gent /absolute/path/to/gent` mode also exports both later archives on the peer and compares every resulting file byte for byte. It transfers only disposable proof archives/keys over SSH and removes the peer directory afterward.
+
+Binding recovery tests cover atomic registration/history rollback, pending publication, lost replies, changed or busy destinations, guarded paths and revoked access. The native proof exercises explicit, Codex, Claude and Claude child bindings with synthetic host metadata. The real-host proof resumes the same provider conversation against a fresh node and checks actual tool responses for its new identity, empty live inbox, archived messages and PNG:
+
+```sh
+cargo test -p gent-link agent_recovery
+python3 scripts/prove_agent_recovery.py --gent target/debug/gent
+python3 scripts/prove_host.py --host codex --recover-binding
+python3 scripts/prove_host.py --host claude-code --recover-binding
+```
+
+The real-host proofs use the installed host's authenticated model access and retain private proof directories and synthetic provider sessions. Add `--use-host-config` for Codex when its configured provider is required; the proof disables unrelated MCP servers and plugins for that run. Neither proof changes saved host configuration.
 
 Replacement tests cover lost replies at every pairing step, owner/competing-target refusal, atomic rollback, durable key pins, interrupted publication, schema migration, invitation scope and retries after later revocation. The optional physical-machine proof adds a replacement to the existing SSH workflow:
 
