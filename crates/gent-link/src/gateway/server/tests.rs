@@ -10,6 +10,7 @@ use tokio::{
     task::JoinHandle,
 };
 mod cimd;
+mod downloads;
 mod files;
 mod mtls;
 mod oauth;
@@ -75,8 +76,19 @@ impl Running {
         tls: Option<TlsAcceptor>,
         metadata: Arc<crate::gateway::metadata::runtime::Runtime>,
     ) -> Self {
-        let stop = CancellationToken::new();
         let registry = Registry::open(home).unwrap();
+        Self::start_with_registry(home, listener, origin, host, tls, metadata, registry).await
+    }
+    async fn start_with_registry(
+        home: &Path,
+        listener: TcpListener,
+        origin: String,
+        host: String,
+        tls: Option<TlsAcceptor>,
+        metadata: Arc<crate::gateway::metadata::runtime::Runtime>,
+        registry: Registry,
+    ) -> Self {
+        let stop = CancellationToken::new();
         let app = router(
             home.into(),
             registry,
@@ -582,6 +594,7 @@ async fn direct_tls_requires_valid_server_trust_and_plaintext_cannot_bind_public
     config::write_private(&cert, generated.cert.pem().as_bytes()).unwrap();
     config::write_private(&key, generated.signing_key.serialize_pem().as_bytes()).unwrap();
     let mut options = Run {
+        file_downloads: vec![],
         file_origin: vec![],
         client_metadata: vec![],
         listen: address,

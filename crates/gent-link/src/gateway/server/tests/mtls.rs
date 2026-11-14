@@ -81,6 +81,89 @@ struct Endpoint {
     options: Run,
     server_cert: Certificate,
 }
+
+#[tokio::test]
+async fn downloads_require_mtls_to_mint_but_delegate_file_access_without_a_certificate() {
+    let f = Fixture::new();
+    let daemon = Daemon::start(&f.home).await;
+    let ca = Ca::new("download host");
+    let leaf = ca.good();
+    let (id, token) = grant(
+        &f,
+        "download-host",
+        ca.policy(&f.home.join("download-ca.pem")),
+        None,
+    );
+    let mut endpoint = Endpoint::new(&f);
+    endpoint.options.file_downloads.push(id.clone());
+    let server = endpoint.start(&f).await;
+    let trusted = endpoint.client(Some(&leaf));
+    let anonymous = endpoint.client(None);
+    server
+        .call(
+            &trusted,
+            &token,
+            "a",
+            "gent_register",
+            json!({"name":"a","provider":"fixture"}),
+        )
+        .await;
+    let registry = Registry::open(&f.home).unwrap();
+    let permit = registry
+        .authenticate_remote(token.clone(), server.url.clone(), leaf.peer())
+        .await
+        .unwrap();
+    let credential = registry
+        .credential(&permit, &json!({"test/conversation":"a"}))
+        .unwrap();
+    let file = gent_daemon::receive_file(
+        &f.home,
+        credential,
+        gent_protocol::file_objects::IncomingFile {
+            request_id: request_id(),
+            source_id: "a".repeat(64),
+            name: "private.bin".into(),
+            media_type: "application/octet-stream".into(),
+        },
+        b"delegated bytes",
+    )
+    .await
+    .unwrap()["file"]
+        .clone();
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call", "params":{
+        "name":"gent_file_link","arguments":{"file_id":file["id"]},"_meta":{"test/conversation":"a"}
+    }});
+    assert_eq!(
+        server
+            .post(&anonymous, &token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let linked = server
+        .call(
+            &trusted,
+            &token,
+            "a",
+            "gent_file_link",
+            json!({"file_id":file["id"]}),
+        )
+        .await;
+    let url = linked["download_url"].as_str().unwrap();
+    let response = anonymous.get(url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(&response.bytes().await.unwrap()[..], b"delegated bytes");
+    registry.revoke(&id).unwrap();
+    assert_eq!(
+        anonymous.get(url).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    server.close().await;
+    daemon.close(&f.home).await;
+}
 impl Endpoint {
     fn new(f: &Fixture) -> Self {
         let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -90,6 +173,7 @@ impl Endpoint {
         config::write_private(&key, generated.signing_key.serialize_pem().as_bytes()).unwrap();
         Self {
             options: Run {
+                file_downloads: vec![],
                 file_origin: vec![],
                 client_metadata: vec![],
                 listen: "127.0.0.1:0".parse().unwrap(),
@@ -105,13 +189,26 @@ impl Endpoint {
         self.options.listen = listener.local_addr().unwrap();
         self.options.origin = Some(format!("https://localhost:{}", self.options.listen.port()));
         let (host, origin) = origin(&self.options, self.options.listen).unwrap();
-        let policies = Registry::open(&f.home).unwrap().tls_policies().unwrap();
-        Running::start(
+        let registry = Registry::open(&f.home)
+            .unwrap()
+            .with_file_downloads(&self.options.file_downloads, &origin)
+            .unwrap();
+        let policies = registry.tls_policies().unwrap();
+        let metadata = crate::gateway::metadata::runtime::Runtime::new(
+            registry.clone(),
+            format!("{origin}/mcp"),
+            &[],
+        )
+        .await
+        .unwrap();
+        Running::start_with_registry(
             &f.home,
             listener,
             origin,
             host,
             tls(&self.options, &policies).unwrap(),
+            metadata,
+            registry,
         )
         .await
     }

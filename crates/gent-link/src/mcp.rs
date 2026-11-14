@@ -47,6 +47,11 @@ impl GentMcp {
         {
             tools.push(crate::gateway::files::tool());
         }
+        if let Credentials::Remote(registry) = &self.credentials
+            && registry.downloads.enabled()
+        {
+            tools.push(crate::gateway::downloads::tool());
+        }
         tools
     }
 }
@@ -212,7 +217,7 @@ impl ServerHandler for GentMcp {
             .1;
         let instructions = if matches!(self.credentials, Credentials::Remote(_)) {
             format!(
-                "{instructions}\n\nRemote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: send inline attachments (up to 1 MiB combined, four per message), forward authorized file_ids, read separate objects with gent_file_read, or inspect images up to 4 MiB with gent_file_view. If gent_file_import_remote is available and enabled for this host, use an actual host-provided file object from an owner-approved HTTPS origin. Provider download links for outgoing Gent files are not implemented.\n"
+                "{instructions}\n\nRemote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: send inline attachments (up to 1 MiB combined, four per message), forward authorized file_ids, read separate objects with gent_file_read, or inspect images up to 4 MiB with gent_file_view. If gent_file_import_remote is available and enabled for this host, use an actual host-provided file object from an owner-approved HTTPS origin. If gent_file_link is enabled for this host, use it for a user-requested download. It grants anyone holding the URL access to that file for up to five minutes, without host credentials or mTLS. Keep the URL private; use file_ids for agent messaging. Provider handling of resource links remains unverified.\n"
             )
         } else {
             instructions.to_string()
@@ -311,6 +316,54 @@ impl ServerHandler for GentMcp {
                 }
             }
         };
+        if operation == "file_link" {
+            let Credentials::Remote(registry) = &self.credentials else {
+                unreachable!()
+            };
+            let permit = context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .and_then(|parts| parts.extensions.get::<crate::gateway::Permit>())
+                .cloned()
+                .ok_or_else(|| {
+                    ErrorData::invalid_request("gateway authentication required", None)
+                })?;
+            let result = async {
+                let id = call
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("file_id"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("invalid file link arguments"))?;
+                registry
+                    .downloads
+                    .link(
+                        registry,
+                        permit,
+                        serde_json::to_value(&context.meta)?,
+                        &self.home,
+                        credential,
+                        id.into(),
+                    )
+                    .await
+            }
+            .await;
+            return Ok(match result {
+                Ok(value) => {
+                    let resource = serde_json::from_value(json!({
+                        "type": "resource_link",
+                        "uri": value["download_url"],
+                        "name": value["file"]["name"],
+                        "mimeType": value["file"]["media_type"],
+                        "size": value["file"]["byte_length"]
+                    }))
+                    .expect("valid file resource link");
+                    CallToolResult::success(vec![ContentBlock::text(value.to_string()), resource])
+                }
+                Err(error) => CallToolResult::error(vec![ContentBlock::text(error.to_string())]),
+            }
+            .into());
+        }
         if operation == "file_import_remote" {
             let Credentials::Remote(registry) = &self.credentials else {
                 unreachable!()
@@ -369,7 +422,7 @@ impl ServerHandler for GentMcp {
                         "mode":"user_controlled_gateway",
                         "plaintext_endpoints":["model_provider","user_node"],
                         "gent_relay":"encrypted_node_traffic_only",
-                        "file_access":"inline attachments, authorized file chunks and image views, optional host file import; no local filesystem or outgoing hosted download links"
+                        "file_access":"inline attachments, authorized file chunks and image views, optional host file import and five-minute bearer download links; no local filesystem"
                     }));
                 }
                 // Image data belongs in the image block, not a second large copy

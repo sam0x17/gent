@@ -1,4 +1,5 @@
 use super::*;
+mod downloads;
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},

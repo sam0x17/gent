@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--gent", type=Path, required=True)
     parser.add_argument("--files", action="store_true", help="also prove 32 MiB chunk reads and image views")
     parser.add_argument("--host-files", action="store_true", help="prove host file inputs using a public PNG and local binary framing")
+    parser.add_argument("--downloads", action="store_true", help="also prove bearer file links, full integrity and restart (includes --files)")
     args = parser.parse_args()
     binary = args.gent.resolve()
     with tempfile.TemporaryDirectory(prefix="gent-gw-", dir="/tmp") as temporary:
@@ -123,6 +124,8 @@ def main():
             if args.host_files:
                 from gateway_input_checks import InputChecks, ORIGIN
                 file_options = ["--file-origin", added["client"] + "=" + ORIGIN]
+            if args.downloads:
+                file_options.extend(["--file-downloads", added["client"]])
             gateway = start("gateway", "run", "--listen", address, *file_options)
             ready(gateway)
             first = call("gent_register", {"name": "one", "provider": "synthetic"})
@@ -131,9 +134,13 @@ def main():
             assert first["access_route"]["mode"] == "user_controlled_gateway"
             original = first["cluster_id"]
             files = None
-            if args.files:
+            if args.files or args.downloads:
                 from gateway_file_checks import FileChecks
                 files = FileChecks(binary, home, cli, rpc, token, first, second)
+            downloads = None
+            if args.downloads:
+                from gateway_download_checks import DownloadChecks
+                downloads = DownloadChecks(home, files)
             inputs = InputChecks(binary, home, cli, rpc, token) if args.host_files else None
             # The primary CLI now selects another managed profile. Both running
             # and restarted --home runtimes must remain on the physical node.
@@ -150,8 +157,12 @@ def main():
             gateway = start("gateway", "run", "--listen", address, *file_options)
             ready(gateway)
             assert call("gent_identity", {})["agent"]["id"] == first["agent"]["id"]
+            if downloads:
+                downloads.after_restart()
             if files:
                 files.after_restart()
+            if downloads:
+                downloads.after_permission_change()
             if inputs:
                 inputs.after_restart()
             cli("--cluster", original, "gateway", "clients", "revoke", added["client"])
@@ -164,9 +175,12 @@ def main():
                 text = path.read_text()
                 assert token not in text
                 assert "test/conversation" not in text
+            if downloads:
+                downloads.check_logs(logs)
             print(json.dumps({"status": "passed", "proof": "foreground-gateway",
                               "file_reads": bool(files),
                               "host_file_inputs": bool(inputs),
+                              "file_downloads": bool(downloads),
                               "platform": os.uname().sysname,
                               "checks": ["private host export", "separate conversations", "profile switch isolation",
                                          "daemon and gateway restart", "live host revocation", "clean shutdown",

@@ -24,6 +24,8 @@ const MAX_LIFETIME: u64 = 8760 * 3600;
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WORKERS: usize = 16;
 mod bindings;
+mod downloads;
+pub(crate) use downloads::{Download, DownloadTarget};
 mod keys;
 pub(crate) use bindings::BindingKeys;
 pub(crate) mod oauth;
@@ -48,6 +50,7 @@ pub(crate) struct Registry {
     node: String,
     workers: Arc<tokio::sync::Semaphore>,
     pub(crate) files: Arc<super::files::Runtime>,
+    pub(crate) downloads: Arc<super::downloads::Runtime>,
 }
 #[derive(Clone)]
 pub(crate) struct Permit {
@@ -338,6 +341,7 @@ impl Registry {
             node: cfg.node.id,
             workers: Arc::new(tokio::sync::Semaphore::new(MAX_WORKERS)),
             files: Arc::new(super::files::Runtime::default()),
+            downloads: Arc::new(super::downloads::Runtime::default()),
         };
         value.read()?;
         Ok(value)

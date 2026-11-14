@@ -2,6 +2,7 @@ use super::*;
 use std::fs;
 const RESOURCE: &str = "https://node.example/mcp";
 const REDIRECT: &str = "https://host.example/callback?tenant=one";
+mod downloads;
 mod keys;
 mod subjects;
 struct Fixture {

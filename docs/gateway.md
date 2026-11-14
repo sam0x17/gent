@@ -139,6 +139,22 @@ Keep the same request ID, host file ID, name and type on retries. A refreshed UR
 
 The owner grants ordinary permissions and time-limited relay selection through the existing CLI. Target selection, pending turns, replies and receipts stay in the daemon database across gateway restarts. A timeout does not prove that a send failed: keep its original request ID for an identical retry, or inspect its status.
 
+### Download links
+
+Enable outgoing links for selected existing hosts at gateway startup:
+
+```sh
+gent --home /absolute/node/profile gateway run --file-downloads CLIENT_UUID
+```
+
+Repeat the flag for more hosts, retaining it across restarts. Public access requires the direct TLS setup above. The option enables `gent_file_link {file_id}` for those hosts; unselected hosts cannot mint links even if discovery shows the tool. The call needs ordinary host authentication and conversation/user metadata, including mTLS when required by that host. The file must be ready and currently accessible to the issuing agent.
+
+The result contains `file`, `download_url`, `expires_at` and `access: "bearer_url"`, plus an MCP `resource_link` with URI, filename, media type and byte length. Use this for a user-requested download. Anyone holding the URL can fetch that file without host credentials or mTLS until expiry, at most five minutes. Keep links private. Continue using `file_ids` for agent messaging. Actual ChatGPT/Claude display, file import and mobile handling of these links remain unverified; no provider-specific output metadata is assumed.
+
+Links survive gateway/daemon restarts on the same origin while the host remains enabled. They bind to the registry, host, agent, file and, when used, the OAuth grant and its pinned user. Access-token refresh preserves them; host/grant revocation, agent/message permission changes, expired access, or disabling the option prevents later downloads. Their expiry cannot exceed the file, host or OAuth grant lifetime. Links do not permit listing files, reading another file or calling MCP tools. Revocation cannot retract an already admitted response or bytes copied by a recipient.
+
+`GET` verifies every chunk and the full length/hash of files up to 32 MiB before sending any file bytes, then rechecks registry and file access. Two payloads may occupy memory at once; their slots remain held until the response bodies are released, including slow readers. Capacity refusal returns 503 with `Retry-After: 1`. `HEAD` checks current access and returns metadata without reading the file body. Ranges return 416; invalid, expired and unauthorized links return 404. Responses use attachment disposition, no-store, no-referrer, nosniff and a sandbox CSP. Cross-origin bearer downloads are allowed; MCP/OAuth retain their existing Origin restrictions. The gateway writes no plaintext handoff copies and logs no URLs. Browser, host and recipient copies remain outside Gent's control.
+
 ## State, revocation and limits
 
 ```sh
@@ -163,6 +179,7 @@ cargo test -p gent-daemon --test config
 cargo build -p gent-link
 python3 scripts/prove_gateway.py --gent target/debug/gent --files
 python3 scripts/prove_gateway.py --gent target/debug/gent --host-files
+python3 scripts/prove_gateway.py --gent target/debug/gent --downloads
 python3 scripts/prove_gateway_mtls.py --gent target/debug/gent
 ```
 
@@ -171,3 +188,5 @@ Tests cover separate conversations and host namespaces, absent and forged identi
 With `--files`, the native proof additionally imports a 32 MiB file, an empty file and a generated PNG larger than 1 MiB through local stdio MCP, then retrieves them through HTTP after daemon/gateway restart. It verifies exact reassembly and image blocks, forwarding, missing or changed conversation metadata, malformed arguments, hidden local tools, message permission changes and agent revocation. Daemon tests cover image-view size limits, incomplete objects, tampered chunks, expiry and unauthorized IDs. This proves the MCP representation without a hosted provider or model rendering step.
 
 With `--host-files`, the native proof fetches a public PNG from GitHub through the real HTTPS path, verifies its image bytes, and retries after restart using an intentionally unavailable URL. It also checks local binary ingress for a 32 MiB file, interrupted/oversized bodies, digest mismatches, ingress capacity, unchanged handoff usage and restart retries. Gateway tests exercise host isolation, failures and revocation during download; TLS fixtures check the download body limits and response policy. The public PNG is a synthetic host input, not a ChatGPT or Claude attachment.
+
+With `--downloads`, the proof includes `--files` and additionally checks resource links, exact 32 MiB/PNG/empty downloads, response headers, HEAD/range behavior, surviving URLs after both process restarts, and permission revocation. Corrupting a later stored chunk returns 404 without releasing a verified prefix. Gateway tests also check OAuth refresh/revocation and user binding, minting through mTLS with certificate-free redemption, per-host selection, safe filenames, disabled options and capacity retained through cloned response bodies.

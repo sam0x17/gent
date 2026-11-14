@@ -328,6 +328,41 @@ pub(super) fn check_access(state: &State, permit: &Permit, now: u64) -> Result<(
     Ok(())
 }
 
+/// A delegated file link follows the grant's lifetime and revocation, across
+/// ordinary access-token refresh. It grants no other OAuth or agent operation.
+pub(super) fn download_scope(
+    state: &State,
+    client: &str,
+    id: &str,
+    resource: &str,
+    now: u64,
+) -> Result<(Option<String>, u64)> {
+    let grant = state
+        .oauth
+        .as_ref()
+        .and_then(|o| o.grants.get(id))
+        .context("download grant unavailable")?;
+    ensure!(
+        grant.client == client
+            && grant.resource == resource
+            && !grant.revoked
+            && now < grant.expires_at,
+        "download grant inactive"
+    );
+    let scoped = state
+        .clients
+        .get(client)
+        .context("download host unavailable")?
+        .subject_key
+        .is_some();
+    let subject = match (scoped, &grant.subject) {
+        (true, Some(Subject::Bound(value))) => Some(value.clone()),
+        (false, None) => None,
+        _ => anyhow::bail!("download user binding unavailable"),
+    };
+    Ok((subject, grant.expires_at))
+}
+
 pub(crate) type Parameters = BTreeMap<String, String>;
 pub(crate) fn parameters(input: &str) -> Result<Parameters> {
     ensure!(input.len() <= 8192, "OAuth parameters too large");

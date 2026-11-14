@@ -39,6 +39,7 @@ mod tests;
 
 #[derive(Clone)]
 struct Boundary {
+    home: PathBuf,
     registry: Registry,
     host: String,
     origin: String,
@@ -70,7 +71,9 @@ impl Boundary {
             "invalid host"
         );
         ensure!(
-            !headers.contains_key("origin") || one(headers, "origin") == Some(self.origin.as_str()),
+            request.uri().path().starts_with("/files/")
+                || !headers.contains_key("origin")
+                || one(headers, "origin") == Some(self.origin.as_str()),
             "invalid origin"
         );
         ensure!(
@@ -91,6 +94,19 @@ async fn guard(
     let response = async {
         if boundary.validate(&request).is_err() {
             return StatusCode::FORBIDDEN.into_response();
+        }
+        if let Some(token) = request.uri().path().strip_prefix("/files/") {
+            return boundary
+                .registry
+                .downloads
+                .handle(
+                    &boundary.registry,
+                    &boundary.home,
+                    token,
+                    request.method(),
+                    request.headers(),
+                )
+                .await;
         }
         if request.uri().path() != "/mcp" {
             return oauth::handle(&boundary, request).await;
@@ -136,12 +152,14 @@ async fn guard(
     response
         .headers_mut()
         .insert("x-content-type-options", "nosniff".parse().unwrap());
-    response.headers_mut().insert(
-        "content-security-policy",
-        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-            .parse()
-            .unwrap(),
-    );
+    response
+        .headers_mut()
+        .entry("content-security-policy")
+        .or_insert(
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+                .parse()
+                .unwrap(),
+        );
     response
 }
 
@@ -232,6 +250,7 @@ fn router(
         .enforce_origin_validation()
         .with_cancellation_token(stop);
     let binding = registry.clone();
+    let gateway_home = home.clone();
     let service = StreamableHttpService::new(
         move || Ok(GentMcp::remote(home.clone(), binding.clone())),
         Arc::new(NeverSessionManager::default()),
@@ -241,6 +260,7 @@ fn router(
         .route_service("/mcp", any_service(service))
         .layer(middleware::from_fn_with_state(
             Boundary {
+                home: gateway_home,
                 registry,
                 host,
                 origin,
@@ -308,6 +328,7 @@ pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
     let listener = TcpListener::bind(options.listen).await?;
     let address = listener.local_addr()?;
     let (host, origin) = origin(&options, address)?;
+    let registry = registry.with_file_downloads(&options.file_downloads, &origin)?;
     let stop = CancellationToken::new();
     let metadata = super::metadata::runtime::Runtime::new(
         registry.clone(),
