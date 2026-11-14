@@ -3,17 +3,26 @@
 Expires only the synthetic grant's server-side access token while the gateway is
 stopped. This exercises the client's HTTP 401 recovery with a still-live refresh
 grant; it does not simulate the client's proactive expiry timer or edit its store.
+The concurrent option launches two chats together with one shared OAuth entry;
+it checks overlapping client runs, without forcing an HTTP-level race.
 """
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
 import subprocess
+import threading
 import time
 import tomllib
 
 
 def exercise(host, executable, name, root, work, gent_dir, resource, registration,
-             callback, env, restart_gateway, cli):
+             callback, env, restart_gateway, cli, conversations=1):
+    assert conversations in (1, 2)
+    directories = [work / f"{host}-{index}" for index in range(conversations)]
+    for directory in directories:
+        directory.mkdir()
+
     def grants():
         state = json.loads((gent_dir / "gateway/state.json").read_text())
         return {key: value for key, value in state["oauth"]["grants"].items()
@@ -23,10 +32,11 @@ def exercise(host, executable, name, root, work, gent_dir, resource, registratio
     assert len(original) == 1
     family_id, initial = next(iter(original.items()))
 
-    def turn(label, session=None):
+    def turn(label, index, session, barrier):
+        directory = directories[index]
         if host == "codex":
             command = [executable, "--profile", name, "exec", "--json", "--skip-git-repo-check",
-                       "--sandbox", "read-only", "-C", str(work), "--disable", "shell_tool",
+                       "--sandbox", "read-only", "-C", str(directory), "--disable", "shell_tool",
                        "--disable", "multi_agent", "--disable", "apps", "-c", 'approval_policy="never"',
                        "-c", 'web_search="disabled"', "-c", 'model_reasoning_effort="low"']
             config_dir = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
@@ -40,7 +50,7 @@ def exercise(host, executable, name, root, work, gent_dir, resource, registratio
                 command += ["resume", session]
             command += ["-"]
         else:
-            path = root / "claude-lifecycle.json"
+            path = root / f"claude-lifecycle-{index}.json"
             path.write_text(json.dumps({"mcpServers": {name: {"type": "http", "url": resource,
                 "oauth": {"clientId": registration["client"], "callbackPort": callback}}}}))
             command = [executable, "-p", "--output-format", "stream-json", "--verbose", "--setting-sources", "",
@@ -52,10 +62,13 @@ def exercise(host, executable, name, root, work, gent_dir, resource, registratio
         prompt = (f"This is an isolated Gent OAuth compatibility test. Call gent_register with name oauth-proof "
                   f"and provider {host}, then call gent_identity. Call both even if either returns an error. "
                   "Do not use other tools or repair anything. Report completion briefly.")
-        output, errors = root / (host + "-" + label + ".jsonl"), root / (host + "-" + label + ".stderr")
+        output, errors = root / f"{host}-{label}-{index}.jsonl", root / f"{host}-{label}-{index}.stderr"
         with output.open("w") as out, errors.open("w") as err:
-            completed = subprocess.run(command, input=prompt, text=True, cwd=work, env=env,
+            barrier.wait(timeout=30)
+            started = time.monotonic()
+            completed = subprocess.run(command, input=prompt, text=True, cwd=directory, env=env,
                                        stdout=out, stderr=err, timeout=180)
+            ended = time.monotonic()
         assert completed.returncode == 0, f"{host} {label} failed; private model output omitted"
         events = [json.loads(line) for line in output.read_text().splitlines() if line.strip()]
         reported = None
@@ -91,12 +104,26 @@ def exercise(host, executable, name, root, work, gent_dir, resource, registratio
                 assert not result.get("isError"), "OAuth model tool was rejected"
                 identities.add(json.loads(result["content"][0]["text"])["agent"]["id"])
             assert len(identities) == 1
-            return reported, identities.pop()
+            return reported, identities.pop(), started, ended
         for _, result in responses:
             assert result.get("isError") and "conversation binding unavailable" in result["content"][0]["text"], "Claude missing identity did not fail closed"
-        return reported, None
+        return reported, None, started, ended
 
-    conversation, agent = turn("initial")
+    def turns(label, sessions=None):
+        sessions = sessions or [None] * conversations
+        barrier = threading.Barrier(conversations)
+        with ThreadPoolExecutor(max_workers=conversations) as pool:
+            jobs = [pool.submit(turn, label, index, session, barrier)
+                    for index, session in enumerate(sessions)]
+            results = [job.result() for job in jobs]
+        assert max(row[2] for row in results) < min(row[3] for row in results), "client runs did not overlap"
+        identities = {row[0]: row[1] for row in results}
+        assert len(identities) == conversations, "separate chats shared a conversation"
+        if host == "codex":
+            assert len(set(identities.values())) == conversations, "separate chats shared a Gent agent"
+        return identities
+
+    identities = turns("initial")
     initial = grants()[family_id]
 
     def expire():
@@ -111,21 +138,22 @@ def exercise(host, executable, name, root, work, gent_dir, resource, registratio
         os.replace(temporary, path)
 
     restart_gateway(expire)
-    resumed, restored = turn("renewed", conversation)
+    restored = turns("renewed", list(identities))
     current = grants()
     assert set(current) == {family_id}, "client reauthorized instead of refreshing its grant"
     current = current[family_id]
     assert current["refresh_generation"] > initial["refresh_generation"] and not current["revoked"], "client did not refresh"
     assert current["access_hash"] != initial["access_hash"] and current["access_expires_at"] > int(time.time())
     assert current["expires_at"] == initial["expires_at"], "refresh extended the authorization lifetime"
-    assert restored == agent and resumed == conversation
+    assert restored == identities
     restart_gateway(lambda: None)
-    _, restored = turn("reconnected", conversation)
-    assert restored == agent
+    assert turns("reconnected", list(identities)) == identities
     clients = cli("gateway", "clients", "list")["clients"]
     client = next(c for c in clients if c["id"] == registration["client"])
-    assert client["conversations"] == (1 if host == "codex" else 0)
+    assert client["conversations"] == (conversations if host == "codex" else 0)
     return {"checks": ["OAuth-authenticated tools", "server access expiry", "client-driven refresh",
                        "unchanged grant lifetime", "restart and resume"],
             "agent_binding": "stable" if host == "codex" else "missing conversation rejected",
-            "model_turns": 3}
+            "concurrent_chats": conversations,
+            "refresh_rotations": current["refresh_generation"] - initial["refresh_generation"],
+            "model_turns": 3 * conversations}

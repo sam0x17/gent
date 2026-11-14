@@ -6,6 +6,7 @@ removed through `mcp logout` on exit. Claude uses an isolated configuration
 directory and file storage (Keychain access is disabled for this subprocess).
 No existing provider settings are edited. Secrets never enter command arguments.
 --exercise-models uses normal model access for token-renewal and reconnect tests.
+--exercise-concurrent runs that lifecycle with two simultaneous chats per host.
 """
 import argparse
 import json
@@ -41,8 +42,12 @@ def main():
     parser.add_argument("--gent", type=Path, required=True)
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--claude", default="claude")
-    parser.add_argument("--exercise-models", action="store_true")
+    models = parser.add_mutually_exclusive_group()
+    models.add_argument("--exercise-models", action="store_true")
+    models.add_argument("--exercise-concurrent", action="store_true")
     args = parser.parse_args()
+    exercise_models = args.exercise_models or args.exercise_concurrent
+    conversations = 2 if args.exercise_concurrent else 1
     binary = str(args.gent.resolve())
     codex = shutil.which(args.codex)
     claude = shutil.which(args.claude)
@@ -217,10 +222,10 @@ def main():
             results = {}
             results["codex"] = login([codex, "--profile", name, "mcp", "login", name, "--no-browser"],
                                      "codex-login", registration["client"], callback)
-            if args.exercise_models:
+            if exercise_models:
                 from gateway_client_lifecycle import exercise
                 results["codex"]["lifecycle"] = exercise("codex", codex, name, root, work, gent_dir, resource,
-                    registration, urllib.parse.urlsplit(callback).port, os.environ, restart_gateway, cli)
+                    registration, urllib.parse.urlsplit(callback).port, os.environ, restart_gateway, cli, conversations)
             claude_dir = root / "claude"
             claude_dir.mkdir()
             shim_dir = root / "bin"
@@ -244,9 +249,9 @@ def main():
             assert stored.exists() and registration["token"] in stored.read_text(), "Claude did not persist the client secret in the isolated file store"
             results["claude"] = login([claude, "mcp", "login", name, "--no-browser"],
                                       "claude-login", registration["client"], callback, env)
-            if args.exercise_models:
+            if exercise_models:
                 results["claude"]["lifecycle"] = exercise("claude", claude, name, root, work, gent_dir, resource,
-                    registration, urllib.parse.urlsplit(callback).port, env, restart_gateway, cli)
+                    registration, urllib.parse.urlsplit(callback).port, env, restart_gateway, cli, conversations)
             for host, (registration, _) in clients.items():
                 cli("gateway", "clients", "revoke", registration["client"])
                 results[host]["version"] = subprocess.check_output(
@@ -260,7 +265,7 @@ def main():
             if credentials.exists():
                 assert name not in credentials.read_text(), "Codex proof credential remains"
             print(json.dumps({"status": "passed", "proof": "installed-client-oauth", "clients": results,
-                              "credential_cleanup": "passed", "model_turns": 6 if args.exercise_models else 0}))
+                              "credential_cleanup": "passed", "model_turns": 6 * conversations if exercise_models else 0}))
         finally:
             for process in reversed(processes):
                 if process.poll() is None:
