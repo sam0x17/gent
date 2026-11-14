@@ -155,6 +155,10 @@ pub struct ConfigurationGrant {
     pub writer_key: PublicKey,
     pub reader: String,
     pub reader_key: PublicKey,
+    /// A prepared successor stream may publish only after this exact candidate
+    /// is selected at `base`. Absent on ordinary, immediately usable streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_candidate: Option<Digest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,6 +202,7 @@ impl SignedConfigurationGrant {
             !grant.group.is_empty()
                 && grant.group.len() <= 256
                 && grant.origin != [0; 32]
+                && grant.owner_candidate != Some([0; 32])
                 && grant.base.revision <= MAX_SAFE_INTEGER,
             "invalid configuration stream binding"
         );
@@ -231,6 +236,44 @@ impl SignedConfigurationGrant {
         state.authorize_node(&self.grant.writer, &self.grant.writer_key, now)?;
         state.authorize_node(&self.grant.reader, &self.grant.reader_key, now)?;
         Ok(())
+    }
+
+    /// Check the pins of a candidate already verified against its initial state.
+    /// This alone does not authorize a new candidate or activate an owner.
+    pub fn verify_owner_candidate(
+        &self,
+        candidate: &succession::SignedOwnerCandidate,
+    ) -> Result<()> {
+        self.verify(&candidate.candidate.anchor)?;
+        ensure!(
+            self.grant.owner_candidate == Some(candidate.digest()?)
+                && self.grant.base == candidate.candidate.base
+                && self.grant.writer == candidate.candidate.node.id
+                && self.grant.writer_key == candidate.candidate.node.signing_key,
+            "configuration grant belongs to another owner candidate"
+        );
+        Ok(())
+    }
+
+    /// Standby streams wait for their exact handoff. Later accepted epochs may
+    /// still distribute retained history through an established stream.
+    pub fn can_publish(&self, state: &VerifiedState) -> Result<bool> {
+        self.verify(state.anchor())?;
+        let Some(candidate) = self.grant.owner_candidate else {
+            return Ok(true);
+        };
+        let chain = &state.state().owner_transitions;
+        let preceding = &self.grant.owner_transitions;
+        Ok(chain.starts_with(preceding)
+            && chain.get(preceding.len()).is_some_and(|signed| {
+                let transition = &signed.transition;
+                transition.base == self.grant.base
+                    && transition.successor.as_ref().is_some_and(|s| {
+                        s.candidate == candidate
+                            && s.node.id == self.grant.writer
+                            && s.node.signing_key == self.grant.writer_key
+                    })
+            }))
     }
 }
 
@@ -533,6 +576,38 @@ impl OwnerKey {
         endpoints: (&str, &str),
         now: u64,
     ) -> Result<SignedConfigurationGrant> {
+        self.configuration_grant(state, group, origin, endpoints, None, now)
+    }
+
+    pub fn authorize_standby_configuration_stream(
+        &self,
+        state: &VerifiedState,
+        candidate: &succession::SignedOwnerCandidate,
+        group: &[u8],
+        origin: Digest,
+        reader: &str,
+        now: u64,
+    ) -> Result<SignedConfigurationGrant> {
+        candidate.verify(state, now)?;
+        self.configuration_grant(
+            state,
+            group,
+            origin,
+            (&candidate.candidate.node.id, reader),
+            Some(candidate.digest()?),
+            now,
+        )
+    }
+
+    fn configuration_grant(
+        &self,
+        state: &VerifiedState,
+        group: &[u8],
+        origin: Digest,
+        endpoints: (&str, &str),
+        owner_candidate: Option<Digest>,
+        now: u64,
+    ) -> Result<SignedConfigurationGrant> {
         ensure!(
             self.public_key() == state.state().owner_key,
             "wrong owner authority"
@@ -560,6 +635,7 @@ impl OwnerKey {
                 .get(reader)
                 .context("unknown configuration reader")?
                 .signing_key,
+            owner_candidate,
         };
         let signature = self
             .0

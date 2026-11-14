@@ -9,6 +9,8 @@ mod candidates;
 
 #[path = "owner_succession/journal.rs"]
 mod decision_journal;
+#[path = "owner_succession/standby.rs"]
+mod standby;
 
 fn fixture() -> (OwnerKey, [NodeIdentity; 2], VerifiedState) {
     let owner = OwnerKey::generate().unwrap();

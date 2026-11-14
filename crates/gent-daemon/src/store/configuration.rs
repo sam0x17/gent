@@ -188,7 +188,8 @@ impl StoreSession<'_> {
             let grant = SignedConfigurationGrant::decode(&grant?)?;
             grant.verify(self.state.anchor())?;
             let grant = grant.grant;
-            if grant.reader == self.identity.node.id()
+            if grant.owner_candidate.is_none()
+                && grant.reader == self.identity.node.id()
                 && grant.reader_key == self.identity.node.public_key()
                 && self
                     .state

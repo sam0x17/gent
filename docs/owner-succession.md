@@ -20,6 +20,22 @@ The signed successor binding supplies the future configuration-writer address, i
 
 Origins now [retain full pending proposals](security.md#configuration-edit-storage) until an authenticated result commits, independently of transport retirement. This supplies the input needed for future rerouting. Older requests whose local bodies were already retired report `payload_retained: false`; an exact resubmission can restore the input. Activation must reconcile these cases rather than assume a compact summary is sufficient to retry an edit.
 
+## Prepared successor configuration streams
+
+The successor can prepare its own encrypted configuration streams while the current owner still signs. Trusted local-owner APIs split group creation from grant authorization, so neither owner key leaves its machine:
+
+1. `prepare_owner_configuration` uses a locally saved candidate and the reader's authenticated MLS key package. It commits the group, signed Welcome, request fingerprint and candidate binding together. The stream accepts no application traffic and remains unavailable to configuration publication.
+2. `authorize_owner_configuration` verifies the candidate and Welcome against current authority, signs a grant for that exact group, reader and candidate, then saves the grant before returning it. After the signing stop, only an already committed exact authorization can be retrieved.
+3. `install_owner_configuration` installs the grant on the successor. `receive_owner_configuration` installs it on the reader and returns a signed receipt for the committed origin. `confirm_owner_configuration` verifies and retains that receipt on the successor. Each operation requires its node's local owner credential.
+
+The grant's optional `owner_candidate` digest binds the existing checkpoint and successor node. Ordinary grants omit it and retain their canonical encoding. A prepared stream can publish only after accepted authority selects that exact candidate at that checkpoint. Incoming configuration also checks this binding, even when the sender supplies a correctly signed and encrypted update. Standby grants do not participate in selecting the current configuration writer. A different candidate, an unbound handoff or an ordinary old-owner update cannot activate the stream.
+
+Creation and first installation require the exact fresh checkpoint. Saved preparations and installed grants support exact retries after candidate or lease expiry, with current node/key checks; those retries create no new authorization. Failed writes roll back MLS state and their associated records. Request IDs cannot convert an existing data/raw group into a standby stream. An abandoned standby does not retain unrelated future configuration history.
+
+Schema 21 adds preparation and owner-grant records, with a combined 4,096-record / 64 MiB metadata admission budget. Origin packets use the existing configuration transport budget. Configuration grant installation also enforces the dispatcher's 4,096-stream limit. Missing current-schema preparation tables fail startup. `gent recovery status` reports preparation record and byte counts. Cleanup of abandoned preparations remains future work.
+
+These are local Rust coordination APIs. There is no CLI/MCP handoff command or automatic encrypted exchange of these preparation artifacts yet. Authorization of the handoff itself does not yet require a readiness receipt from every peer. Live activation must enforce that requirement, install the successor key, adopt completed decisions and reroute pending requests atomically. The planned activation workflow must establish each participating peer's connection before relying on it for offline catch-up; a peer that was never prepared still needs a connection established. The live runtime continues to reject successor epochs until the activation workflow is implemented.
+
 ## Completed-request journal transfer
 
 A result lost during handoff must not cause the successor to execute the same edit again. The source snapshots every completed configuration request, including rejections, in the transaction that stops signing. Each entry retains its origin, request ID, deciding writer, fingerprint, compact edit summary and exact result. Full legacy edits are reduced to summaries after checking their fingerprints. Pending requests are excluded because they have no decision yet.

@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 const LIMIT: usize = 64;
 const MAGIC: &[u8] = b"GENTOWN1";
 mod journal;
+mod streams;
 
 pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
     let count: usize = db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('owner_handoff_control','owner_handoffs','owner_candidates')", [], |r| r.get(0))?;
@@ -126,6 +127,7 @@ pub(crate) fn check_state(db: &Connection, state: &VerifiedState) -> Result<()> 
 pub(super) fn status(db: &Connection, state: &VerifiedState) -> Result<Value> {
     let blocked = frozen(db, state)?;
     let issued = issued(db)?;
+    let (stream_records, stream_bytes) = encrypted::ordered::configuration::standby::usage(db)?;
     let (candidates, completed): (u64, u64) = db.query_row(
         "SELECT COUNT(*),COUNT(completed) FROM owner_candidates",
         [],
@@ -141,6 +143,7 @@ pub(super) fn status(db: &Connection, state: &VerifiedState) -> Result<Value> {
         "successor_node":issued.as_ref().map(|r| &r.candidate.candidate.node.id),
         "prepared_candidates":candidates,"completed_candidates":completed,
         "journal_transfer":journal::usage(db)?,
+        "configuration_preparation":{"records":stream_records,"stored_bytes":stream_bytes},
         "activation_supported":false}),
     )
 }

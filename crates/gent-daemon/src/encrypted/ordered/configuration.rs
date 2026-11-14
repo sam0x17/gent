@@ -2,6 +2,7 @@
 //! this channel; application messages never gain an expired-lease exemption.
 use super::*;
 use gent_crypto::{MAX_STATE_BYTES, OwnerKey, SignedConfigurationGrant};
+pub mod standby;
 
 pub const MAX_FRAGMENT_BYTES: usize = 256 * 1024;
 pub const MAX_PENDING_CONFIGURATION_BYTES: usize = 8 * 1024 * 1024;
@@ -53,6 +54,13 @@ impl OrderedEndpoint<'_> {
             let mut streams = Vec::new();
             for group in groups {
                 if let Ok(stream) = checked_stream(session, &group, Purpose::Configuration) {
+                    if stream.writer == session.signer.id()
+                        && !progress(session.db, &group)?
+                            .grant
+                            .can_publish(&session.state)?
+                    {
+                        continue;
+                    }
                     streams.push(ConfigurationStream {
                         group,
                         outgoing: stream.writer == session.signer.id(),
@@ -136,7 +144,7 @@ impl OrderedEndpoint<'_> {
     ) -> Result<()> {
         let packet = &invitation.packet;
         let signed = &invitation.grant;
-        self.inner.transact(now, |session| {
+        self.inner.transact_mode(now, true, |session| {
             signed.verify(session.state.anchor())?;
             let grant = &signed.grant;
             ensure!(
@@ -212,6 +220,7 @@ impl OrderedEndpoint<'_> {
                 ensure!(!requests::managed(request), "transport request is unallocated or retired; it cannot publish configuration");
             }
             let cursor = progress(session.db, group)?;
+            ensure!(cursor.grant.can_publish(&session.state)?, "standby configuration candidate is not active");
             let revision = cursor.revision.checked_add(1).context("revision overflow")?;
             let Some(record) = history(session.db, revision)? else { return Ok(None); };
             let checkpoint = record.verified_checkpoint(session.state.anchor())?;
@@ -240,6 +249,12 @@ impl OrderedEndpoint<'_> {
         now: u64,
     ) -> Result<Packet> {
         self.inner.transact(now, |session| {
+            ensure!(
+                progress(session.db, group)?
+                    .grant
+                    .can_publish(&session.state)?,
+                "standby configuration candidate is not active"
+            );
             publish_in(session, group, Purpose::Configuration, |session| {
                 session.rotate(group, request)
             })
@@ -275,6 +290,12 @@ impl OrderedEndpoint<'_> {
 
 fn initialize_configuration(db: &Connection, signed: &SignedConfigurationGrant) -> Result<()> {
     let grant = &signed.grant;
+    ensure!(
+        db.query_row("SELECT COUNT(*) FROM configuration_streams", [], |r| r
+            .get::<_, usize>(0))?
+            < 4096,
+        "configuration stream capacity reached"
+    );
     db.execute(
         "UPDATE streams SET purpose='configuration' WHERE group_id=?1",
         [&grant.group],
@@ -417,6 +438,17 @@ fn receive_fragment(session: &Session<'_>, group: &[u8], body: &[u8]) -> Result<
     );
     let update = SignedState::decode(&wire)?;
     let checkpoint = update.verified_checkpoint(session.state.anchor())?;
+    if cursor.grant.grant.owner_candidate.is_some() {
+        let publication = VerifiedState::restore(
+            session.state.anchor().clone(),
+            checkpoint.clone(),
+            update.clone(),
+        )?;
+        ensure!(
+            cursor.grant.can_publish(&publication)?,
+            "configuration update does not activate its standby candidate"
+        );
+    }
     ensure!(
         checkpoint.revision == part.revision && update.state.previous == Some(cursor.hash),
         "configuration history fork or gap"

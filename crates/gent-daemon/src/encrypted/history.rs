@@ -171,6 +171,11 @@ fn floor(db: &Connection, state: &VerifiedState, node: &str) -> Result<(u64, Vec
         let (group, wire, revision, offset, head, confirmed) = row?;
         let signed = SignedConfigurationGrant::decode(&wire)?;
         signed.verify(state.anchor())?;
+        // An unselected candidate cannot publish this suffix. Do not retain
+        // unrelated future revisions forever for an abandoned preparation.
+        if signed.grant.owner_candidate.is_some() && !signed.can_publish(state)? {
+            continue;
+        }
         let grant = signed.grant;
         ensure!(
             grant.group == group && grant.writer == node,
