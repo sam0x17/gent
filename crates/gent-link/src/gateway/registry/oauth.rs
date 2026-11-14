@@ -32,12 +32,16 @@ pub(crate) struct Registration {
     pub redirect_uris: Vec<String>,
 }
 
-fn url(value: &str) -> Result<url::Url> {
+fn url(value: &str, callback: bool) -> Result<url::Url> {
     ensure!(value.len() <= 2048, "OAuth URL is too long");
     let url = url::Url::parse(value).context("invalid OAuth URL")?;
-    let loopback = url
-        .host_str()
-        .is_some_and(|h| h == "127.0.0.1" || h == "[::1]");
+    let loopback = url.host_str().is_some_and(|h| {
+        h == "127.0.0.1"
+                || h == "[::1]"
+                // Claude Code preregisters localhost callbacks. Keep this
+                // exception out of resource URLs and require a concrete port.
+                || (callback && h == "localhost" && url.port().is_some_and(|p| p != 0))
+    });
     ensure!(
         (url.scheme() == "https" || (url.scheme() == "http" && loopback))
             && url.host_str().is_some()
@@ -45,13 +49,13 @@ fn url(value: &str) -> Result<url::Url> {
             && url.password().is_none()
             && url.fragment().is_none()
             && url.as_str() == value,
-        "OAuth URL must be canonical HTTPS or numeric loopback HTTP"
+        "OAuth URL must be canonical HTTPS or loopback HTTP; localhost is only allowed for callbacks with an explicit nonzero port"
     );
     Ok(url)
 }
 impl Registration {
     pub(crate) fn validate(&self) -> Result<()> {
-        let resource = url(&self.resource)?;
+        let resource = url(&self.resource, false)?;
         ensure!(
             resource.path() == "/mcp" && resource.query().is_none(),
             "OAuth resource must name the exact /mcp endpoint"
@@ -62,7 +66,7 @@ impl Registration {
         );
         let mut unique = std::collections::BTreeSet::new();
         for redirect in &self.redirect_uris {
-            let redirect_url = url(redirect)?;
+            let redirect_url = url(redirect, true)?;
             ensure!(
                 unique.insert(redirect)
                     && !redirect_url
@@ -423,7 +427,7 @@ impl Registry {
             let Some(approved) = request.decision else {
                 return Ok(None);
             };
-            let mut redirect = url(&request.redirect)?;
+            let mut redirect = url(&request.redirect, true)?;
             {
                 let mut query = redirect.query_pairs_mut();
                 if approved {

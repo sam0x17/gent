@@ -41,6 +41,10 @@ The host must attach its own conversation identifier to every `tools/call` reque
 
 The metadata key is configured by the owner when issuing the host credential. Missing, non-string, empty, oversized or control-containing conversation identifiers are rejected. Initialization metadata, HTTP session IDs, provider labels and tool arguments cannot substitute for it. Stateless requests support older clients that initialize with MCP `2025-11-25`; the SDK also handles newer protocol versions. There is no persistent HTTP session to use as an agent identity.
 
+Installed Codex CLI HTTP calls supply `threadId`; register its host grant with `--conversation-key threadId`. Gent accepts this specific unnamespaced field alongside namespaced host fields. Other unnamespaced fields, including `sessionId`, remain invalid. The real-host proof checks repeated calls, restart/resume and fork isolation. These are CLI observations, not evidence for Codex desktop, IDE or ChatGPT.
+
+Claude Code HTTP calls supply `claudecode/toolUseId`, which changes for every call and cannot identify a conversation. Gent rejects that registration key. Claude Code should continue using the [local hooked integration](cli.md), which maps each tool-use ID to the actual conversation. OAuth login can succeed while agent tools correctly reject missing conversation metadata. Ordinary Claude web/mobile metadata needs a separate investigation.
+
 A host credential authorizes a namespace containing several agents. Its holder can select any conversation in that namespace, so the host must supply conversation metadata outside model control. The gateway cannot prove that an arbitrary metadata string came from ChatGPT or Claude. Verify provenance and stability on each actual host before granting access. Separate host credentials isolate equal conversation identifiers from each other. Existing daemon permissions still determine discovery, messages, replies and relay grants; registration grants no communication permissions.
 
 ## Direct TLS

@@ -110,17 +110,29 @@ fn hash(value: &str) -> bool {
 fn metadata_key(key: &str) -> Result<()> {
     ensure!(
         key.len() <= 128
-            && key
-                .split_once('/')
-                .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty())
+            && (key == "threadId"
+                || key
+                    .split_once('/')
+                    .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty()))
             && key
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)),
-        "conversation key must name a host-owned namespaced MCP metadata field"
+        "conversation key must name a host-owned namespaced MCP metadata field or Codex threadId"
     );
     ensure!(
         !key.starts_with("io.modelcontextprotocol/"),
         "protocol metadata cannot identify a conversation"
+    );
+    Ok(())
+}
+
+fn conversation_key(key: &str) -> Result<()> {
+    metadata_key(key)?;
+    // Old registries may contain this syntactically valid key. Keep them
+    // readable for inspection/revocation, but never issue or use its bindings.
+    ensure!(
+        key != "claudecode/toolUseId",
+        "Claude tool-use IDs identify calls, not conversations; use the local hooked stdio integration"
     );
     Ok(())
 }
@@ -348,6 +360,7 @@ impl Registry {
         let mut state = self.read()?;
         let now = auth::now()?;
         let client = Self::client(&state, permit, now)?;
+        conversation_key(&client.conversation_key)?;
         let conversation=meta.get(&client.conversation_key).and_then(Value::as_str)
             .filter(|s|!s.trim().is_empty() && s.len()<=512 && !s.chars().any(char::is_control))
             .context("host conversation metadata is missing or invalid; this connection cannot select an agent")?;
@@ -431,7 +444,7 @@ pub(super) fn add_client(
         registration.validate()?;
     }
     config::label(name)?;
-    metadata_key(key)?;
+    conversation_key(key)?;
     ensure!(
         (1..=8760).contains(&hours),
         "invalid gateway credential lifetime"

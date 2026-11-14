@@ -353,6 +353,64 @@ fn untrusted_inputs_and_request_capacity_are_bounded_without_redirect_or_grant_c
 }
 
 #[test]
+fn native_localhost_callbacks_require_an_exact_registered_url() {
+    let f = Fixture::new();
+    let callback = "http://localhost:49152/callback";
+    let mut state = f.registry.read().unwrap();
+    state
+        .clients
+        .get_mut(&f.client)
+        .unwrap()
+        .oauth
+        .as_mut()
+        .unwrap()
+        .redirect_uris = vec![callback.into()];
+    f.registry.save(&state).unwrap();
+    let mut fields = f.authorization();
+    for bad in [
+        "http://127.0.0.1:49152/callback",
+        "http://localhost:49153/callback",
+        "http://localhost:49152/other",
+    ] {
+        fields.insert("redirect_uri".into(), bad.into());
+        assert!(f.registry.begin(&fields, RESOURCE).is_err());
+    }
+    fields.insert("redirect_uri".into(), callback.into());
+    let pending = f.registry.begin(&fields, RESOURCE).unwrap();
+    let id = pending["request"].as_str().unwrap();
+    f.registry.oauth_decide(id, true).unwrap();
+    let redirect = f.registry.continue_request(id, RESOURCE).unwrap().unwrap();
+    assert!(redirect.starts_with(&format!("{callback}?")));
+    for bad in [
+        "http://localhost/callback",
+        "http://localhost:0/callback",
+        "http://localhost.:49152/callback",
+        "http://sub.localhost:49152/callback",
+        "http://localhost.example:49152/callback",
+        "http://localhost:49152/callback#fragment",
+        "http://user@localhost:49152/callback",
+    ] {
+        assert!(
+            Registration {
+                resource: RESOURCE.into(),
+                redirect_uris: vec![bad.into()],
+            }
+            .validate()
+            .is_err(),
+            "accepted {bad}"
+        );
+    }
+    assert!(
+        Registration {
+            resource: "http://localhost:49152/mcp".into(),
+            redirect_uris: vec![callback.into()],
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
 fn concurrent_redemption_and_refresh_commit_only_once_and_replay_revokes_the_family() {
     let f = Fixture::new();
     let code = f.code();

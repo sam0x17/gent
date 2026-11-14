@@ -14,7 +14,7 @@ gent --home /private/path/gent-node gateway clients add hosted-client \
   --out /private/path/gent-node/hosted-client.json
 ```
 
-For an OAuth client, the private export's `client` is its client ID and `token` is its client secret. Configure both in the host's OAuth settings, outside prompts and tool arguments. The client secret cannot be used as an MCP bearer. The export also records the resource and allowed callbacks. Repeating the same command preserves the registration; changed callbacks, audience, mode or original options fail. Repeat `--redirect-uri` for up to eight callbacks, matched exactly. URLs must be canonical HTTPS, with numeric loopback HTTP allowed for local tests. Wildcard matching and outbound metadata fetching are absent.
+For an OAuth client, the private export's `client` is its client ID and `token` is its client secret. Configure both in the host's OAuth settings, outside prompts and tool arguments. The client secret cannot be used as an MCP bearer. The export also records the resource and allowed callbacks. Repeating the same command preserves the registration; changed callbacks, audience, mode or original options fail. Repeat `--redirect-uri` for up to eight callbacks, matched exactly. URLs must be canonical HTTPS, with numeric loopback HTTP allowed for local tests. Native callbacks also accept `http://localhost:PORT/callback` with an explicit nonzero port, as used by Claude Code. This exception applies only to callbacks; resource URLs and gateway listeners retain their existing rules. No hostname, port or path substitution is allowed. Wildcard matching and outbound metadata fetching are absent.
 
 Start the daemon and [direct TLS gateway](gateway.md#direct-tls). The client discovers:
 
@@ -71,8 +71,20 @@ There are at most 64 retained authorization requests, four per client, and 128 t
 cargo test -p gent-link gateway
 cargo build -p gent-link
 python3 scripts/prove_gateway_oauth.py --gent target/debug/gent
+# Opt-in installed clients; no model calls:
+python3 scripts/prove_gateway_clients.py --gent target/debug/gent
+# Opt-in normal model access; four synthetic turns:
+python3 scripts/prove_gateway_hosts.py --gent target/debug/gent
 ```
 
 The tests cover approval/denial, PKCE, exact callback/client/audience checks, expiry, replay and concurrent redemption, stable bindings through refresh/reconnect, host revocation, bounded malformed inputs and real HTTP discovery. The CLI proof runs separate native gateway and daemon processes and checks approval, callback issuer/state, restart, refresh, replay revocation, reconnect identity and private logs.
+
+Both opt-in proofs pass on Linux with Codex 0.167.2 / Claude Code 2.1.323 and on macOS with Codex 0.167.0 / Claude Code 2.1.311. These are tested versions, not minimum supported versions.
+
+The installed-client proof drives each CLI's actual `mcp login --no-browser` flow, approves the request through Gent, checks S256/resource/callback/scope/state and confirms code redemption in Gent's registry. Claude's callback prompt runs in a temporary terminal. Codex uses a temporary profile and a unique file-store OAuth entry, removed with `mcp logout`; Claude uses isolated configuration and file credentials with Keychain commands disabled for that subprocess. Existing provider settings remain intact. This does not test native Keychain behavior, client-driven refresh or hosted provider consent.
+
+The separate model proof uses static host bearers and observes unchanged loopback HTTP tool calls. It checks Codex identity across repeated calls, a gateway/daemon restart, resume and fork, and checks Claude's missing-conversation rejection without allocating an agent. It deletes private test files on exit; provider-managed synthetic conversations remain. These proofs establish OAuth login and metadata behavior separately, not a complete OAuth-authenticated model session or mobile integration.
+
+For installed Codex, put the preregistered client ID/secret and callback URL in the server's `oauth` settings. Let resource discovery supply `resource`: Linux Codex 0.167.2 duplicated that parameter when `oauth_resource` was explicitly set to the discovered URL. Gent continues to reject duplicates. For Claude Code, `mcp add --client-id ID --client-secret --callback-port PORT` accepts the secret through `MCP_CLIENT_SECRET`; subsequent login reads the saved secret. Its callback uses `localhost`, matched exactly. See the [Codex configuration schema](https://github.com/openai/codex/blob/main/codex-rs/core/config.schema.json) and [Claude Code preregistration instructions](https://code.claude.com/docs/en/mcp#use-pre-configured-oauth-credentials). Successful Claude login still lacks a stable HTTP conversation identifier; use its existing local hook integration for agent traffic.
 
 The [MCP authorization specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization) defines resource discovery and audience-bound bearer use. OpenAI's [authentication guide](https://developers.openai.com/plugins/build/auth) describes S256, resource parameters and issuer checks; use the callback shown in its management page. Anthropic's [custom connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp) documents an option to supply your own OAuth client. These documents identify routes to test. They do not establish Gent compatibility, trustworthy per-conversation metadata, hosted file access or mobile E2EE.

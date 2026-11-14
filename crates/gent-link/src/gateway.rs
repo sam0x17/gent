@@ -48,7 +48,7 @@ pub enum ClientCommand {
     /// Issue a private host credential. Transfer it to the host outside model prompts.
     Add {
         name: String,
-        /// Host-owned per-call MCP metadata field, e.g. gent/conversation.
+        /// Host-owned per-call MCP metadata field, e.g. gent/conversation or Codex threadId.
         /// Provider support and metadata provenance must be verified separately.
         #[arg(long)]
         conversation_key: String,

@@ -95,6 +95,69 @@ fn host_namespaces_and_conversations_are_durable_and_cannot_be_selected_by_argum
 }
 
 #[test]
+fn codex_remote_threads_are_distinct_and_session_or_call_ids_cannot_replace_them() {
+    let f = Fixture::new();
+    let mut state = f.registry.read().unwrap();
+    state.clients.get_mut(&f.id).unwrap().conversation_key = "threadId".into();
+    f.registry.save(&state).unwrap();
+    let original = json!({"threadId":"original", "sessionId":"shared", "callId":"one"});
+    let first = f.registry.credential(&f.permit(), &original).unwrap();
+    assert_eq!(
+        first,
+        f.registry
+            .credential(
+                &f.permit(),
+                &json!({"threadId":"original", "sessionId":"shared", "callId":"two"})
+            )
+            .unwrap()
+    );
+    assert_ne!(
+        first,
+        f.registry
+            .credential(
+                &f.permit(),
+                &json!({"threadId":"fork", "sessionId":"shared", "callId":"three"})
+            )
+            .unwrap()
+    );
+    assert!(
+        f.registry
+            .credential(
+                &f.permit(),
+                &json!({"sessionId":"shared", "arguments":{"threadId":"original"}})
+            )
+            .is_err()
+    );
+    for key in [
+        "sessionId",
+        "callId",
+        "windowId",
+        "itemId",
+        "progressToken",
+        "claudecode/toolUseId",
+        "io.modelcontextprotocol/clientInfo",
+    ] {
+        assert!(conversation_key(key).is_err(), "accepted {key}");
+    }
+    let reopened = Registry::open(&f.home).unwrap();
+    assert_eq!(first, reopened.credential(&f.permit(), &original).unwrap());
+
+    // An older manually configured call-ID grant can still be revoked. It
+    // must not make unrelated clients or the whole registry unreadable.
+    let mut state = f.registry.read().unwrap();
+    state.clients.get_mut(&f.id).unwrap().conversation_key = "claudecode/toolUseId".into();
+    f.registry.save(&state).unwrap();
+    let reopened = Registry::open(&f.home).unwrap();
+    assert!(
+        reopened
+            .credential(&f.permit(), &json!({"claudecode/toolUseId":"call"}))
+            .is_err()
+    );
+    reopened.listing().unwrap();
+    reopened.revoke(&f.id).unwrap();
+}
+
+#[test]
 fn lost_export_and_registration_responses_do_not_duplicate_or_reactivate_clients() {
     let f = Fixture::new();
     let original = fs::read(&f.export).unwrap();
