@@ -4,6 +4,8 @@ use std::os::unix::fs::PermissionsExt;
 
 #[path = "owner_activation_tests.rs"]
 mod owner_activation_tests;
+#[path = "owner_preparation_tests.rs"]
+mod owner_preparation_tests;
 #[path = "removal_tests.rs"]
 mod removal_tests;
 #[path = "storage_tests.rs"]

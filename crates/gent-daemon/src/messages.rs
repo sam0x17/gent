@@ -5,6 +5,7 @@ use gent_crypto::{Checkpoint, SignedLegacyAgentBinding, VerifiedState, agent_id,
 use gent_protocol::Message;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub mod owner_preparation;
 
 pub const FRAGMENT_BYTES: usize = 256 * 1024;
 pub const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024;
@@ -49,6 +50,9 @@ impl Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
+    OwnerPreparation {
+        envelope: Box<owner_preparation::Envelope>,
+    },
     Mesh {
         envelope: MeshEnvelope,
     },

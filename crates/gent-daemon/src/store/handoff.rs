@@ -1,7 +1,7 @@
 //! Owner-authenticated preparation and local successor activation.
 //! Private successor keys stay on their node. Issuing authority durably fences
-//! the source before any signature is returned. Network orchestration and abort
-//! are not implemented.
+//! the source before any signature is returned. Preparation can exchange its
+//! artifacts over encrypted node links; issuing and activating remain explicit.
 use super::*;
 use gent_crypto::{
     OwnerKey, SignedState,
@@ -18,6 +18,7 @@ use zeroize::Zeroizing;
 const LIMIT: usize = 64;
 const MAGIC: &[u8] = b"GENTOWN1";
 mod activation;
+mod coordination;
 pub(crate) mod journal;
 mod readiness;
 mod streams;
@@ -48,7 +49,8 @@ pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
     }
     journal::schema(db, previous)?;
     activation::schema(db, previous)?;
-    readiness::schema(db, previous)
+    readiness::schema(db, previous)?;
+    coordination::schema(db, previous)
 }
 
 fn restore(candidate: &SignedOwnerCandidate, baseline: &[u8]) -> Result<VerifiedState> {
@@ -187,6 +189,7 @@ pub(super) fn status(db: &Connection, state: &VerifiedState) -> Result<Value> {
         "journal_transfer":journal::usage(db)?,
         "configuration_preparation":{"records":stream_records,"stored_bytes":stream_bytes},
         "readiness":readiness::usage(db)?,
+        "preparation_exchange":coordination::usage(db)?,
         "delivery":encrypted::ordered::configuration::handoff::usage(db)?,
         "activation_supported":true}),
     )

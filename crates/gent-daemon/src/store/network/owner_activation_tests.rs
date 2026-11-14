@@ -634,7 +634,7 @@ fn activation_storage_cannot_be_silently_recreated_after_upgrade() {
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
             .unwrap(),
-        24
+        25
     );
 }
 

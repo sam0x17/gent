@@ -504,7 +504,7 @@ async fn version_seventeen_migration_preserves_keys_and_checkpoint_before_first_
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        24
+        25
     );
     let candidate = prepare(&mut pair);
     issue(&mut pair, &candidate);

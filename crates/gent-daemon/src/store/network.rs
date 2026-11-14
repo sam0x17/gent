@@ -367,6 +367,7 @@ impl StoreSession<'_> {
     fn import_event(&mut self, peer: &str, event: Event) -> Result<()> {
         self.timestamp = requests::clock(self.db, self.timestamp)?;
         match event {
+            Event::OwnerPreparation { envelope } => self.import_owner_preparation(peer, &envelope),
             Event::Mesh { envelope } => self.import_mesh(peer, envelope),
             Event::ConfigurationRequest { request_id, edit } => {
                 self.accept_configuration(peer, request_id, *edit)

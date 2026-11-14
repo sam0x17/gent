@@ -324,7 +324,12 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>, files: files
     let mut previous_error = None;
     loop {
         let result = local(store.clone(), |store| {
-            let pending = store.mesh_tick();
+            let mesh = store.mesh_tick();
+            let preparation = store.owner_preparation_tick();
+            let pending = match (mesh, preparation) {
+                (Ok(mesh), Ok(preparation)) => Ok(mesh || preparation),
+                (Err(error), _) | (_, Err(error)) => Err(error),
+            };
             Ok((store.sync_streams()?, pending))
         })
         .await;
