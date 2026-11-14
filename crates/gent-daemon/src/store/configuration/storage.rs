@@ -20,13 +20,35 @@ fn agent_usage(db: &Connection, administrator: &str) -> Result<(u64, u64, u64, u
         COALESCE(SUM(json_extract(edit,'$.administrator')=?1 AND result IS NULL),0),
         COALESCE(SUM(length(CAST(origin AS BLOB))+length(CAST(id AS BLOB))+length(CAST(writer AS BLOB))+
         length(CAST(fingerprint AS BLOB))+length(edit)+COALESCE(length(result),?2)),0)
-        FROM configuration_edits WHERE CASE WHEN json_valid(edit) THEN json_extract(edit,'$.op') END IN ('agent_permissions','agent_permission_rules')",
+        FROM configuration_edits WHERE CASE WHEN json_valid(edit) THEN json_extract(edit,'$.op') END IN ('agent_permissions','agent_permission_rules','agent_groups')",
         params![administrator, RESULT_RESERVE], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?)
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Summary {
+    CreateGroup {
+        name: String,
+    },
+    DeleteGroup {
+        name: String,
+    },
+    GroupMembers {
+        group: String,
+        members: Vec<String>,
+        action: gent_protocol::administration::GroupAction,
+    },
+    GrantGroupAdmin {
+        grant_id: String,
+    },
+    RevokeGroupAdmin {
+        grant_id: String,
+    },
+    AgentGroups {
+        administrator: String,
+        request_id: String,
+        changes: Vec<gent_protocol::administration::GroupChange>,
+    },
     Policy,
     Replace,
     RenameNode {
@@ -60,6 +82,32 @@ enum Summary {
 impl From<&ConfigurationEdit> for Summary {
     fn from(edit: &ConfigurationEdit) -> Self {
         match edit {
+            ConfigurationEdit::CreateGroup { name } => Self::CreateGroup { name: name.clone() },
+            ConfigurationEdit::DeleteGroup { name } => Self::DeleteGroup { name: name.clone() },
+            ConfigurationEdit::GroupMembers {
+                group,
+                members,
+                action,
+            } => Self::GroupMembers {
+                group: group.clone(),
+                members: members.clone(),
+                action: *action,
+            },
+            ConfigurationEdit::GrantGroupAdmin { grant_id, .. } => Self::GrantGroupAdmin {
+                grant_id: grant_id.clone(),
+            },
+            ConfigurationEdit::RevokeGroupAdmin { grant_id } => Self::RevokeGroupAdmin {
+                grant_id: grant_id.clone(),
+            },
+            ConfigurationEdit::AgentGroups {
+                administrator,
+                request_id,
+                changes,
+            } => Self::AgentGroups {
+                administrator: administrator.clone(),
+                request_id: request_id.clone(),
+                changes: changes.clone(),
+            },
             ConfigurationEdit::Policy { .. } => Self::Policy,
             ConfigurationEdit::Replace { .. } => Self::Replace,
             ConfigurationEdit::RenameNode { name } => Self::RenameNode { name: name.clone() },
@@ -256,8 +304,31 @@ pub(super) fn describe(body: &[u8], compact: bool, status: &mut Value) -> Result
         Summary::from(&serde_json::from_slice::<ConfigurationEdit>(body)?)
     };
     match summary {
-        Summary::RenameNode { name } => status["name"] = name.into(),
-        Summary::GrantRelay { grant_id }
+        Summary::RenameNode { name }
+        | Summary::CreateGroup { name }
+        | Summary::DeleteGroup { name } => status["name"] = name.into(),
+        Summary::GroupMembers {
+            group,
+            members,
+            action,
+        } => {
+            status["group"] = group.into();
+            status["members"] = json!(members);
+            status["action"] = json!(action);
+        }
+        Summary::AgentGroups {
+            administrator,
+            request_id,
+            changes,
+        } => {
+            status["administrator"] = administrator.into();
+            status["agent_request_id"] = request_id.into();
+            status["changes"] = json!(changes);
+            status["group_membership"] = true.into();
+        }
+        Summary::GrantGroupAdmin { grant_id }
+        | Summary::RevokeGroupAdmin { grant_id }
+        | Summary::GrantRelay { grant_id }
         | Summary::RevokeRelay { grant_id }
         | Summary::GrantPermissionAdmin { grant_id }
         | Summary::RevokePermissionAdmin { grant_id } => status["grant_id"] = grant_id.into(),

@@ -1,6 +1,151 @@
 use super::*;
 
 #[tokio::test]
+async fn group_edits_bind_each_http_call_and_keep_members_and_results_scoped() {
+    use gent_protocol::{ConfigurationEdit, administration::GroupAction};
+    let f = Fixture::new();
+    let daemon = Daemon::start(&f.home).await;
+    let server = f.start().await;
+    let client = client();
+    let mut ids = Vec::new();
+    for chat in ["a", "b", "hidden"] {
+        ids.push(
+            server
+                .call(
+                    &client,
+                    &f.token,
+                    chat,
+                    "gent_register",
+                    json!({"name":chat,"provider":"test"}),
+                )
+                .await["agent"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    let mut policy = Policy::default();
+    policy.groups.insert("team".into(), vec![ids[2].clone()]);
+    for (a, b) in [(0, 1), (1, 0)] {
+        policy.rules.push(Rule {
+            actor: Selector::Agent(ids[a].clone()),
+            peer: Selector::Agent(ids[b].clone()),
+            permission: Permission::Enumerate,
+            effect: Effect::Allow,
+        });
+    }
+    owner(&f.home, OwnerOp::SetPolicy { policy }).await;
+    let grant = uuid::Uuid::new_v4().to_string();
+    owner(
+        &f.home,
+        OwnerOp::Configure {
+            request_id: grant.clone(),
+            edit: ConfigurationEdit::GrantGroupAdmin {
+                grant_id: grant.clone(),
+                administrator: ids[0].clone(),
+                group: "team".into(),
+                members: Selector::All,
+                actions: vec![GroupAction::Add, GroupAction::Remove],
+                lifetime_seconds: 60,
+            },
+        },
+    )
+    .await;
+    let scopes = server
+        .call(&client, &f.token, "a", "gent_group_admin_scopes", json!({}))
+        .await;
+    assert_eq!(scopes["grants"].as_array().unwrap().len(), 1);
+    assert!(!scopes.to_string().contains(&ids[2]));
+    assert_eq!(
+        server
+            .call(&client, &f.token, "b", "gent_group_admin_scopes", json!({}))
+            .await["grants"],
+        json!([])
+    );
+    assert_eq!(
+        server
+            .call(
+                &client,
+                &f.token,
+                "a",
+                "gent_group_members",
+                json!({"group":"team"})
+            )
+            .await["members"],
+        json!([])
+    );
+    let args = json!({"request_id":request_id(),"changes":[{"grant_id":grant,"group":"team","member":ids[1],"action":"add"}]});
+    for (arguments, meta) in [
+        (args.clone(), json!({})),
+        (args.clone(), json!({"test/conversation":"b"})),
+        (
+            {
+                let mut forged = args.clone();
+                forged["administrator"] = json!(ids[0]);
+                forged
+            },
+            json!({"test/conversation":"b"}),
+        ),
+    ] {
+        let result = server
+            .rpc(
+                &client,
+                &f.token,
+                "tools/call",
+                json!({"name":"gent_group_apply","arguments":arguments,"_meta":meta}),
+            )
+            .await;
+        assert_eq!(result["result"]["isError"], true, "{result}");
+    }
+    let preview = server
+        .call(
+            &client,
+            &f.token,
+            "a",
+            "gent_group_preview",
+            json!({"changes":args["changes"]}),
+        )
+        .await;
+    assert!(!preview.to_string().contains(&ids[2]));
+    let result = server
+        .call(&client, &f.token, "a", "gent_group_apply", args.clone())
+        .await;
+    assert_eq!(result["state"], "applied");
+    assert!(result.get("revision").is_none());
+    assert!(result.get("config_saved").is_none());
+    assert_eq!(
+        server
+            .call(
+                &client,
+                &f.token,
+                "a",
+                "gent_group_request",
+                json!({"request_id":args["request_id"]})
+            )
+            .await,
+        result
+    );
+    let denied=server.rpc(&client,&f.token,"tools/call",json!({"name":"gent_group_request","arguments":{"request_id":args["request_id"]},"_meta":{"test/conversation":"b"}})).await;
+    assert_eq!(denied["result"]["isError"], true);
+    owner(
+        &f.home,
+        OwnerOp::Configure {
+            request_id: request_id(),
+            edit: ConfigurationEdit::RevokeGroupAdmin { grant_id: grant },
+        },
+    )
+    .await;
+    assert_eq!(
+        server
+            .call(&client, &f.token, "a", "gent_group_apply", args)
+            .await,
+        result
+    );
+    server.close().await;
+    daemon.close(&f.home).await;
+}
+
+#[tokio::test]
 async fn delegated_edits_bind_each_http_call_and_keep_request_status_private() {
     delegated_edits(false).await;
 }

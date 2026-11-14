@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 #[path = "runtime/administration.rs"]
 mod administration;
+#[path = "runtime/group_administration.rs"]
+mod group_administration;
 #[path = "runtime/permissions.rs"]
 mod permissions;
 #[path = "runtime/rule_administration.rs"]

@@ -4,6 +4,7 @@ mod contexts;
 mod doctor;
 mod files;
 mod gateway;
+mod groups;
 mod hooks;
 mod integration;
 mod invitations;
@@ -47,6 +48,12 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Manage permission groups and separately delegated membership editing.
+    #[command(alias = "groups")]
+    Group {
+        #[command(subcommand)]
+        command: Option<groups::Command>,
+    },
     /// Diagnose local setup without repairing state or running a model.
     Doctor(doctor::Options),
     /// Sign in to Gent's service, inspect the account session, or sign out.
@@ -774,6 +781,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 .await?
             }
         },
+        Some(Command::Group { command }) => groups::run(&home, &request_id, command).await?,
         Some(Command::Permission {
             command: PermissionCommand::Explain { actor, peer },
         }) => owner(&home, OwnerOp::PermissionExplain { actor, peer }).await?,

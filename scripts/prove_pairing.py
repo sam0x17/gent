@@ -24,6 +24,7 @@ from smoke_mcp import Client, PNG
 from relay_checks import exercise_turns
 import edit_storage_checks
 from prove_administration import exercise as exercise_administration, exercise_rules
+from group_checks import exercise_groups
 from transport_checks import (RESTORE_COPIES, ADVANCE_EVENT_CLOCK, exercise_storage,
                               exercise_authority_history, exercise_event_retention)
 
@@ -343,17 +344,22 @@ def main():
             exercise_turns(a, b, attached['attachment']['id'], files, wait_for, restart_relay_nodes)
             print('PASS: two-machine ordered relay turns, PNG forwarding, restart recovery, cancellation, final outcomes, and exact retries')
             if args.agent_administration:
-                def admin_owner(*command):
-                    return json.loads(remote(owner + list(command)).stdout)
+                def admin_owner(*command, error=False):
+                    result = remote(owner + list(command), check=not error)
+                    if error:
+                        assert result.returncode != 0, result.stdout
+                        return result.stderr
+                    return json.loads(result.stdout)
 
                 node_id = cli('cluster')['node']['id']
                 admin_owner('node', 'admin', 'revoke', node_id)
                 wait_for(lambda: not next(n for n in cli('nodes') if n['id'] == node_id)['can_configure'])
                 exercise_administration(a, b, aid, bid, admin_owner, restart_relay_nodes, wait_for)
                 exercise_rules(a, b, aid, bid, admin_owner, restart_relay_nodes, wait_for)
+                exercise_groups(a, b, aid, bid, admin_owner, restart_relay_nodes, wait_for)
                 admin_owner('node', 'admin', 'grant', node_id)
                 wait_for(lambda: next(n for n in cli('nodes') if n['id'] == node_id)['can_configure'])
-                print('PASS: delegated pair and selector-rule MCP administration across encrypted nodes without node-admin authority, owner audit, restart and revocation')
+                print('PASS: delegated pair, selector-rule and group MCP administration across encrypted nodes without node-admin authority, owner audit, restart and revocation')
             if args.transport_storage or args.configuration_storage or args.event_storage or args.edit_storage:
                 def owner_cli(*command):
                     return json.loads(remote(owner + list(command)).stdout)

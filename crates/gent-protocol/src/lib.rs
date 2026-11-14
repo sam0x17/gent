@@ -67,7 +67,7 @@ pub struct Rule {
 pub struct Policy {
     #[serde(default)]
     pub rules: Vec<Rule>,
-    /// Group membership is owner-managed, never supplied by an agent.
+    /// Signed membership, changed by the owner or a separately delegated agent.
     #[serde(default)]
     pub groups: BTreeMap<String, Vec<String>>,
     /// Explicit owner authorization to select a target for user relay work.
@@ -78,6 +78,8 @@ pub struct Policy {
     /// previously signed policy bytes unchanged.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub admin_grants: BTreeMap<String, administration::AdminGrant>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub group_admin_grants: BTreeMap<String, administration::GroupAdminGrant>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,6 +251,20 @@ pub enum AgentOp {
         request_id: String,
     },
     PermissionRuleScopes,
+    GroupAdminScopes,
+    GroupMembers {
+        group: String,
+    },
+    GroupPreview {
+        changes: Vec<administration::GroupChange>,
+    },
+    GroupApply {
+        request_id: String,
+        changes: Vec<administration::GroupChange>,
+    },
+    GroupRequest {
+        request_id: String,
+    },
     PermissionRulePreview {
         changes: Vec<administration::PermissionRuleChange>,
     },
@@ -371,6 +387,33 @@ fn one_request_id() -> u32 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConfigurationEdit {
+    CreateGroup {
+        name: String,
+    },
+    DeleteGroup {
+        name: String,
+    },
+    GroupMembers {
+        group: String,
+        members: Vec<String>,
+        action: administration::GroupAction,
+    },
+    GrantGroupAdmin {
+        grant_id: String,
+        administrator: String,
+        group: String,
+        members: Selector,
+        actions: Vec<administration::GroupAction>,
+        lifetime_seconds: u64,
+    },
+    RevokeGroupAdmin {
+        grant_id: String,
+    },
+    AgentGroups {
+        administrator: String,
+        request_id: String,
+        changes: Vec<administration::GroupChange>,
+    },
     Policy {
         policy: Policy,
     },
@@ -422,6 +465,14 @@ pub enum ConfigurationEdit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOp {
+    Groups {
+        name: Option<String>,
+    },
+    GroupAdmins,
+    GroupAdminHistory {
+        administrator: Option<String>,
+        before: Option<u64>,
+    },
     Configure {
         request_id: String,
         edit: ConfigurationEdit,

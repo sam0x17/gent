@@ -11,6 +11,53 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
 }
 fn validate(edit: &ConfigurationEdit) -> Result<()> {
     match edit {
+        ConfigurationEdit::CreateGroup { name } | ConfigurationEdit::DeleteGroup { name } => {
+            config::label(name)?
+        }
+        ConfigurationEdit::GroupMembers { group, members, .. } => {
+            administration::groups::validate_members(group, members)?
+        }
+        ConfigurationEdit::GrantGroupAdmin {
+            grant_id,
+            administrator,
+            group,
+            members,
+            actions,
+            lifetime_seconds,
+        } => {
+            let mut policy = Policy::default();
+            policy.groups.insert(group.clone(), vec![]);
+            if let Selector::Group(name) = members {
+                policy.groups.insert(name.clone(), vec![]);
+            }
+            policy.group_admin_grants.insert(
+                grant_id.clone(),
+                gent_protocol::administration::GroupAdminGrant {
+                    administrator: administrator.clone(),
+                    group: group.clone(),
+                    members: members.clone(),
+                    actions: actions.clone(),
+                    issued_at: 0,
+                    expires_at: *lifetime_seconds,
+                },
+            );
+            gent_crypto::validate_policy(&policy)?;
+        }
+        ConfigurationEdit::RevokeGroupAdmin { grant_id } => {
+            let id = Uuid::parse_str(grant_id)?;
+            ensure!(
+                !id.is_nil() && id.to_string() == *grant_id,
+                "invalid group administration grant ID"
+            );
+        }
+        ConfigurationEdit::AgentGroups {
+            administrator,
+            request_id,
+            changes,
+        } => {
+            administration::request_id(administrator, request_id)?;
+            administration::groups::validate_changes(changes)?;
+        }
         ConfigurationEdit::Policy { policy } => gent_crypto::validate_policy(policy)?,
         ConfigurationEdit::Replace {
             cluster_name,
@@ -231,6 +278,72 @@ impl StoreSession<'_> {
         }
         let timestamp = self.timestamp as u64;
         match edit {
+            ConfigurationEdit::CreateGroup { name } => {
+                let mut policy = self.config.policy.clone();
+                ensure!(!policy.groups.contains_key(name), "group already exists");
+                policy.groups.insert(name.clone(), vec![]);
+                self.state.set_policy(owner, policy, timestamp)
+            }
+            ConfigurationEdit::DeleteGroup { name } => {
+                let mut policy = self.config.policy.clone();
+                ensure!(policy.groups.remove(name).is_some(), "unknown group");
+                self.state
+                    .set_policy(owner, policy, timestamp)
+                    .context("cannot delete a group still referenced by a rule or grant")
+            }
+            ConfigurationEdit::GroupMembers {
+                group,
+                members,
+                action,
+            } => {
+                let mut policy = self.config.policy.clone();
+                for member in members {
+                    if *action == gent_protocol::administration::GroupAction::Add {
+                        ensure!(!self.get_agent(member)?.revoked, UNAVAILABLE);
+                    }
+                    administration::groups::change_member(&mut policy, group, member, *action)?;
+                }
+                self.state.set_policy(owner, policy, timestamp)
+            }
+            ConfigurationEdit::GrantGroupAdmin {
+                grant_id,
+                administrator,
+                group,
+                members,
+                actions,
+                lifetime_seconds,
+            } => {
+                ensure!(!self.get_agent(administrator)?.revoked, UNAVAILABLE);
+                let mut policy = self.config.policy.clone();
+                ensure!(
+                    !policy.group_admin_grants.contains_key(grant_id)
+                        && !policy.admin_grants.contains_key(grant_id),
+                    "administration grant ID already exists"
+                );
+                policy.group_admin_grants.insert(
+                    grant_id.clone(),
+                    gent_protocol::administration::GroupAdminGrant {
+                        administrator: administrator.clone(),
+                        group: group.clone(),
+                        members: members.clone(),
+                        actions: actions.clone(),
+                        issued_at: timestamp,
+                        expires_at: timestamp
+                            .checked_add(*lifetime_seconds)
+                            .context("administration expiry overflow")?,
+                    },
+                );
+                self.state.set_policy(owner, policy, timestamp)
+            }
+            ConfigurationEdit::RevokeGroupAdmin { grant_id } => {
+                let mut policy = self.config.policy.clone();
+                ensure!(
+                    policy.group_admin_grants.remove(grant_id).is_some()
+                        || self.state.state().retired_admin_grants.contains(grant_id),
+                    "unknown group administration grant ID"
+                );
+                self.state.set_policy(owner, policy, timestamp)
+            }
             ConfigurationEdit::Policy { policy } => {
                 self.state.set_policy(owner, policy.clone(), timestamp)
             }
@@ -331,7 +444,8 @@ impl StoreSession<'_> {
                 self.state.set_policy(owner, policy, timestamp)
             }
             ConfigurationEdit::AgentPermissions { .. }
-            | ConfigurationEdit::AgentPermissionRules { .. } => {
+            | ConfigurationEdit::AgentPermissionRules { .. }
+            | ConfigurationEdit::AgentGroups { .. } => {
                 let policy = self.validate_agent_configuration(origin, edit)?;
                 self.state.set_policy(owner, policy, timestamp)
             }
@@ -468,6 +582,11 @@ impl StoreSession<'_> {
         edit: &ConfigurationEdit,
     ) -> Result<Policy> {
         match edit {
+            ConfigurationEdit::AgentGroups {
+                administrator,
+                changes,
+                ..
+            } => self.agent_group_policy(origin, administrator, changes),
             ConfigurationEdit::AgentPermissions {
                 administrator,
                 changes,

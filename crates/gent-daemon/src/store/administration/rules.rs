@@ -96,9 +96,10 @@ impl StoreSession<'_> {
                     }
                     Selector::Group(name) => {
                         ensure!(
-                            grants
-                                .iter()
-                                .any(|g| [&g.actor, &g.peer].contains(&selector))
+                            (self.group_scope_known(&admin, selector)
+                                || grants
+                                    .iter()
+                                    .any(|g| [&g.actor, &g.peer].contains(&selector)))
                                 && self.config.policy.groups.contains_key(name),
                             UNAVAILABLE
                         );
@@ -106,6 +107,7 @@ impl StoreSession<'_> {
                     Selector::Node(id) => {
                         ensure!(
                             (nodes.contains(id)
+                                || self.group_scope_known(&admin, selector)
                                 || grants
                                     .iter()
                                     .any(|g| [&g.actor, &g.peer].contains(&selector)))

@@ -517,6 +517,19 @@ impl StoreSession<'_> {
             OwnerOp::Status => Ok(
                 json!({"process_id":std::process::id(),"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
+            OwnerOp::Groups { name } => match name {
+                Some(name) => Ok(
+                    json!({"name":name,"members":self.config.policy.groups.get(&name).context("unknown group")?}),
+                ),
+                None => Ok(json!(self.config.policy.groups)),
+            },
+            OwnerOp::GroupAdmins => Ok(
+                json!({"grants":self.config.policy.group_admin_grants,"retired":self.state.state().retired_admin_grants}),
+            ),
+            OwnerOp::GroupAdminHistory {
+                administrator,
+                before,
+            } => self.administration_history(administrator.as_deref(), before, true),
             OwnerOp::PermissionExplain { actor, peer } => self.permission_explain(&actor, &peer),
             OwnerOp::PermissionAdmins => {
                 Ok(json!({"grants":self.state.state().policy.admin_grants,
@@ -685,6 +698,14 @@ impl StoreSession<'_> {
             } => self.permission_apply(&who, &request_id, changes),
             AgentOp::PermissionRequest { request_id } => self.permission_request(&who, &request_id),
             AgentOp::PermissionRuleScopes => self.permission_rule_scopes(&who),
+            AgentOp::GroupAdminScopes => self.group_admin_scopes(&who),
+            AgentOp::GroupMembers { group } => self.group_members(&who, &group),
+            AgentOp::GroupPreview { changes } => self.group_preview(&who, &changes),
+            AgentOp::GroupApply {
+                request_id,
+                changes,
+            } => self.group_apply(&who, &request_id, changes),
+            AgentOp::GroupRequest { request_id } => self.permission_request(&who, &request_id),
             AgentOp::PermissionRulePreview { changes } => {
                 self.permission_rule_preview(&who, &changes)
             }

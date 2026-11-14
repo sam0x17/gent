@@ -2,6 +2,7 @@
 use super::*;
 use gent_protocol::administration::{MAX_PERMISSION_CHANGES, PermissionChange};
 use uuid::Uuid;
+pub(super) mod groups;
 pub(super) mod rules;
 
 pub(super) fn edit_identity(edit: &ConfigurationEdit) -> Option<(&str, &str)> {
@@ -12,6 +13,11 @@ pub(super) fn edit_identity(edit: &ConfigurationEdit) -> Option<(&str, &str)> {
             ..
         }
         | ConfigurationEdit::AgentPermissionRules {
+            administrator,
+            request_id,
+            ..
+        }
+        | ConfigurationEdit::AgentGroups {
             administrator,
             request_id,
             ..
@@ -60,10 +66,20 @@ impl StoreSession<'_> {
         administrator: Option<&str>,
         before: Option<u64>,
     ) -> Result<Value> {
+        self.administration_history(administrator, before, false)
+    }
+    pub(super) fn administration_history(
+        &self,
+        administrator: Option<&str>,
+        before: Option<u64>,
+        groups: bool,
+    ) -> Result<Value> {
         let rows = self.db.prepare("SELECT rowid,origin,id FROM configuration_edits WHERE
-            CASE WHEN json_valid(edit) THEN json_extract(edit,'$.op') END IN ('agent_permissions','agent_permission_rules')
+            CASE WHEN json_valid(edit) THEN
+              CASE WHEN ?3 THEN json_extract(edit,'$.op')='agent_groups'
+              ELSE json_extract(edit,'$.op') IN ('agent_permissions','agent_permission_rules') END END
             AND (?1 IS NULL OR json_extract(edit,'$.administrator')=?1) AND rowid<?2 ORDER BY rowid DESC LIMIT 100")?
-            .query_map(params![administrator,before.unwrap_or(i64::MAX as u64)],|r| Ok((r.get::<_,u64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
+            .query_map(params![administrator,before.unwrap_or(i64::MAX as u64),groups],|r| Ok((r.get::<_,u64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let next = (rows.len() == 100).then(|| rows.last().unwrap().0);
         let mut entries = Vec::new();

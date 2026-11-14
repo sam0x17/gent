@@ -57,6 +57,10 @@ impl GentMcp {
 }
 
 fn tools() -> Vec<Tool> {
+    let group_changes = json!({"type":"array","minItems":1,"maxItems":32,"items":{
+        "type":"object","additionalProperties":false,"required":["grant_id","group","member","action"],
+        "properties":{"grant_id":{"type":"string","format":"uuid"},"group":{"type":"string","maxLength":128},
+            "member":{"type":"string","format":"uuid"},"action":{"type":"string","enum":["add","remove"]}}}});
     let permission_changes = json!({"type":"array","minItems":1,"maxItems":32,"items":{
         "type":"object","additionalProperties":false,"required":["grant_id","actor","peer","permission","decision"],
         "properties":{"grant_id":{"type":"string","format":"uuid"},"actor":{"type":"string","format":"uuid"},
@@ -73,6 +77,36 @@ fn tools() -> Vec<Tool> {
     let file = json!({"type":"object","additionalProperties":false,"required":["name","media_type","data_base64"],"properties":{"name":{"type":"string"},"media_type":{"type":"string"},"data_base64":{"type":"string"}}});
     let file_ids = json!({"type":"array","maxItems":4,"uniqueItems":true,"items":{"type":"string","format":"uuid"}});
     let declarations = vec![
+        (
+            "gent_group_admin_scopes",
+            "List this authenticated agent's separate owner-issued group membership grants. Each names a group, member selector, add/remove actions and expiry. Same-node compares the member with this administrator. No hidden identities or group membership counts. Membership edits affect ALL rules and existing editing scopes referencing the group; permission-edit grants alone confer no membership authority.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "gent_group_members",
+            "List currently visible members of a group named in your active membership grants, filtered to your editable member scopes. This is not a complete list and has no hidden-member count. Hidden or unknown group names are unavailable. Use gent_agents to choose a visible candidate to add, or your own identity.",
+            json!({"group":{"type":"string","maxLength":128}}),
+            vec!["group"],
+        ),
+        (
+            "gent_group_preview",
+            "Preview 1-32 user-requested group membership changes under separate grants from gent_group_admin_scopes. Each contains grant_id, group, member UUID, and action add/remove. Members must already be visible or yourself. All scopes are checked against pre-edit policy; one change cannot authorize another in the batch. Membership changes affect all rules and existing editing scopes using the group. No aggregate effects or hidden member identities are returned.",
+            json!({"changes":group_changes.clone()}),
+            vec!["changes"],
+        ),
+        (
+            "gent_group_apply",
+            "Apply a user-authorized group membership batch previously reviewed with gent_group_preview. Use a fresh UUIDv7 from gent_request_ids; retain identical arguments for retries. The owner rechecks scope, identity, visibility and expiry atomically. Queued is pending; use gent_group_request. Applied membership persists after delegation expiry/revocation. This cannot create/delete groups or issue grants.",
+            json!({"request_id":{"type":"string","format":"uuid"},"changes":group_changes}),
+            vec!["request_id", "changes"],
+        ),
+        (
+            "gent_group_request",
+            "Read this authenticated agent's saved administration request. Shares status and retry IDs with permission editing; reusing an ID for a different operation conflicts. Applied describes a past accepted edit, not current membership. No other agent's requests, owner errors or cluster revision are exposed.",
+            json!({"request_id":{"type":"string","format":"uuid"}}),
+            vec!["request_id"],
+        ),
         (
             "gent_request_ids",
             "Generate UUIDv7 request IDs for new sends, replies, file imports, relay attachments, or relay turns. First use must be within 24 hours. Use one ID per new operation; retain it for identical retries. Never replace an expired ID merely to retry old work. Generating IDs does not submit work.",
@@ -171,7 +205,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_permission_rule_preview",
-            "Preview 1-32 selector-rule changes within an explicit selector-rule delegation. Each actor/peer is {kind:all|same_node} or {kind:agent|node|group,id:...}. Use groups named in active rule scopes and nodes from those scopes, your node, or visible agents. Named agents must already be visible or yourself. Scope containment is checked structurally; a node or group can narrow to a visible member, but group/node subsets are never inferred from current contents. Matching hidden/future agents can be affected, but none are listed. Other overlapping rules still apply.",
+            "Preview 1-32 selector-rule changes within an explicit selector-rule delegation. Each actor/peer is {kind:all|same_node} or {kind:agent|node|group,id:...}. Use groups named in active rule or membership scopes and nodes from those scopes, your node, or visible agents. Membership grants alone do not authorize rule edits. Named agents must already be visible or yourself. Scope containment is checked structurally; a node or group can narrow to a visible member, but group/node subsets are never inferred from current contents. Matching hidden/future agents can be affected, but none are listed. Other overlapping rules still apply.",
             json!({"changes":rule_changes.clone()}),
             vec!["changes"],
         ),

@@ -5,6 +5,36 @@ use super::*;
 pub const MAX_ADMIN_GRANT_LIFETIME: u64 = 7 * 24 * 60 * 60;
 pub const MAX_PERMISSION_CHANGES: usize = 32;
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupAction {
+    Add,
+    Remove,
+}
+
+/// Membership authority affects every policy use of this group, including
+/// existing administration scopes. It never creates or modifies another grant.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GroupAdminGrant {
+    pub administrator: String,
+    pub group: String,
+    /// SameNode compares a candidate member with the administrator's node.
+    pub members: Selector,
+    pub actions: Vec<GroupAction>,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GroupChange {
+    pub grant_id: String,
+    pub group: String,
+    pub member: String,
+    pub action: GroupAction,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AdminGrant {
@@ -51,6 +81,23 @@ pub struct PermissionRuleChange {
 }
 
 impl Policy {
+    pub fn group_admin_allows(
+        &self,
+        grant: &GroupAdminGrant,
+        administrator: &Agent,
+        member: &Agent,
+        action: GroupAction,
+        now: u64,
+    ) -> bool {
+        !administrator.revoked
+            && !member.revoked
+            && grant.administrator == administrator.id
+            && grant.issued_at <= now
+            && now < grant.expires_at
+            && grant.actions.contains(&action)
+            && self.matches(&grant.members, member, administrator)
+    }
+
     pub fn admin_allows(
         &self,
         grant: &AdminGrant,

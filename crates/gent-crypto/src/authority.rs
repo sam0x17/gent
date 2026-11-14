@@ -307,7 +307,7 @@ pub fn validate_policy(policy: &Policy) -> Result<()> {
         policy.rules.len() <= 4096
             && policy.groups.len() <= 256
             && policy.relay_grants.len() <= 1024
-            && policy.admin_grants.len() <= 1024,
+            && policy.admin_grants.len() + policy.group_admin_grants.len() <= 1024,
         "policy exceeds limits"
     );
     for (name, members) in &policy.groups {
@@ -319,12 +319,18 @@ pub fn validate_policy(policy: &Policy) -> Result<()> {
             ensure!(distinct.insert(member), "duplicate group member");
         }
     }
-    for selector in policy.rules.iter().flat_map(|r| [&r.actor, &r.peer]).chain(
-        policy
-            .admin_grants
-            .values()
-            .flat_map(|g| [&g.actor, &g.peer]),
-    ) {
+    for selector in policy
+        .rules
+        .iter()
+        .flat_map(|r| [&r.actor, &r.peer])
+        .chain(
+            policy
+                .admin_grants
+                .values()
+                .flat_map(|g| [&g.actor, &g.peer]),
+        )
+        .chain(policy.group_admin_grants.values().map(|g| &g.members))
+    {
         match selector {
             Selector::Agent(value) | Selector::Node(value) => id(value)?,
             Selector::Group(name) => {
@@ -355,6 +361,30 @@ pub fn validate_policy(policy: &Policy) -> Result<()> {
             ensure!(
                 !grant.permissions[..i].contains(permission),
                 "duplicate administration permission"
+            );
+        }
+        lifetime(grant.issued_at, grant.expires_at, MAX_ADMIN_GRANT_LIFETIME)?;
+    }
+    for (grant_id, grant) in &policy.group_admin_grants {
+        id(grant_id)?;
+        id(&grant.administrator)?;
+        label(&grant.group)?;
+        ensure!(
+            !policy.admin_grants.contains_key(grant_id),
+            "duplicate administration grant ID"
+        );
+        ensure!(
+            policy.groups.contains_key(&grant.group),
+            "unknown administration group"
+        );
+        ensure!(
+            !grant.actions.is_empty() && grant.actions.len() <= 2,
+            "invalid group administration actions"
+        );
+        for (i, action) in grant.actions.iter().enumerate() {
+            ensure!(
+                !grant.actions[..i].contains(action),
+                "duplicate group administration action"
             );
         }
         lifetime(grant.issued_at, grant.expires_at, MAX_ADMIN_GRANT_LIFETIME)?;
@@ -421,11 +451,18 @@ impl ClusterState {
         for retired in &self.retired_admin_grants {
             id(retired)?;
             ensure!(
-                !self.policy.admin_grants.contains_key(retired),
+                !self.policy.admin_grants.contains_key(retired)
+                    && !self.policy.group_admin_grants.contains_key(retired),
                 "retired administration grant cannot be restored"
             );
         }
         for grant in self.policy.admin_grants.values() {
+            ensure!(
+                grant.issued_at <= self.issued_at,
+                "administration grant issued after its configuration"
+            );
+        }
+        for grant in self.policy.group_admin_grants.values() {
             ensure!(
                 grant.issued_at <= self.issued_at,
                 "administration grant issued after its configuration"
@@ -918,6 +955,18 @@ impl VerifiedState {
                     ),
                 }
             }
+            for (id, grant) in &previous.policy.group_admin_grants {
+                match update.state.policy.group_admin_grants.get(id) {
+                    Some(next) => ensure!(
+                        next == grant,
+                        "group administration grant identity is immutable"
+                    ),
+                    None => ensure!(
+                        update.state.retired_admin_grants.contains(id),
+                        "removed administration grant requires retirement"
+                    ),
+                }
+            }
             next.signed = update.clone();
             next.checkpoint = checkpoint;
         }
@@ -957,6 +1006,17 @@ impl VerifiedState {
         for (id, grant) in &self.state().policy.admin_grants {
             match state.policy.admin_grants.get(id) {
                 Some(next) => ensure!(next == grant, "administration grant identity is immutable"),
+                None => {
+                    state.retired_admin_grants.insert(id.clone());
+                }
+            }
+        }
+        for (id, grant) in &self.state().policy.group_admin_grants {
+            match state.policy.group_admin_grants.get(id) {
+                Some(next) => ensure!(
+                    next == grant,
+                    "group administration grant identity is immutable"
+                ),
                 None => {
                     state.retired_admin_grants.insert(id.clone());
                 }

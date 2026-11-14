@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn group_membership_scopes_bind_administrator_action_location_and_time() {
+    let mut admin = agent("admin", "one");
+    let mut member = agent("member", "one");
+    let mut p = Policy::default();
+    let mut grant = GroupAdminGrant {
+        administrator: admin.id.clone(),
+        group: "team".into(),
+        members: Selector::SameNode,
+        actions: vec![GroupAction::Add],
+        issued_at: 10,
+        expires_at: 20,
+    };
+    assert!(p.group_admin_allows(&grant, &admin, &member, GroupAction::Add, 10));
+    assert!(p.group_admin_allows(&grant, &admin, &admin, GroupAction::Add, 10));
+    assert!(!p.group_admin_allows(&grant, &member, &admin, GroupAction::Add, 10));
+    assert!(!p.group_admin_allows(&grant, &admin, &member, GroupAction::Remove, 10));
+    for now in [9, 20] {
+        assert!(!p.group_admin_allows(&grant, &admin, &member, GroupAction::Add, now));
+    }
+    member.node_id = "two".into();
+    assert!(!p.group_admin_allows(&grant, &admin, &member, GroupAction::Add, 10));
+    grant.members = Selector::Node("two".into());
+    assert!(p.group_admin_allows(&grant, &admin, &member, GroupAction::Add, 10));
+    grant.members = Selector::Group("scope".into());
+    p.groups.insert("scope".into(), vec![member.id.clone()]);
+    assert!(p.group_admin_allows(&grant, &admin, &member, GroupAction::Add, 10));
+    member.revoked = true;
+    assert!(!p.group_admin_allows(&grant, &admin, &member, GroupAction::Add, 10));
+    member.revoked = false;
+    admin.revoked = true;
+    assert!(!p.group_admin_allows(&grant, &admin, &member, GroupAction::Add, 10));
+}
+
+#[test]
 fn selector_rule_containment_never_covers_pairs_outside_the_owner_scope() {
     let admin = agent("admin", "one");
     let mut policy = Policy::default();

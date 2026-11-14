@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 from smoke_mcp import Client
+from group_checks import exercise_groups
 
 
 def exercise(a, b, aid, bid, owner, restart, wait_for):
@@ -116,8 +117,11 @@ def main():
         clients = []
         daemon = None
 
-        def cli(*args):
+        def cli(*args, error=False):
             r = subprocess.run(base + list(args), capture_output=True, text=True, timeout=15)
+            if error:
+                assert r.returncode != 0, r.stdout
+                return r.stderr
             assert r.returncode == 0, r.stderr
             return json.loads(r.stdout)
 
@@ -167,11 +171,13 @@ def main():
             exercise_rules(a, b, aid, bid, cli, restart, wait_for)
             audit = [r for r in cli('config', 'requests') if r.get('administrator') == aid]
             assert len(audit) == 6 and all(r['state'] == 'applied' and r['changes'] and r['revision'] for r in audit)
+            exercise_groups(a, b, aid, bid, cli, restart, wait_for)
             print(json.dumps({'status': 'passed', 'proof': 'agent administration', 'platform': os.uname().sysname,
                               'checks': ['owner CLI grants', 'scoped preview', 'bound identity', 'atomic batches',
                                          'private request status', 'actual messages and replies',
                                          'exact retries', 'restart', 'deny and inherit', 'revocation', 'owner audit',
-                                         'selector-rule opt-in', 'node selectors', 'shared request namespace']}))
+                                         'selector-rule opt-in', 'node selectors', 'shared request namespace',
+                                         'group CLI lifecycle', 'delegated group membership', 'group delivery gates', 'group audit']}))
         finally:
             for client in clients:
                 client.close()
