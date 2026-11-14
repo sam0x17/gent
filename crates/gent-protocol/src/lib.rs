@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub mod file_objects;
+pub mod permissions;
 pub mod service;
 
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -152,16 +153,11 @@ impl Policy {
             return Some(Effect::Deny);
         }
         let mut decision = None;
-        for rule in &self.rules {
-            if rule.permission == permission
-                && self.matches(&rule.actor, actor, peer)
-                && self.matches(&rule.peer, peer, actor)
-            {
-                if rule.effect == Effect::Deny {
-                    return Some(Effect::Deny);
-                }
-                decision = Some(Effect::Allow);
+        for (_, rule) in self.matching_rules(actor, peer, permission) {
+            if rule.effect == Effect::Deny {
+                return Some(Effect::Deny);
             }
+            decision = Some(Effect::Allow);
         }
         decision
     }
@@ -171,19 +167,14 @@ impl Policy {
     }
 
     pub fn can_open(&self, sender: &Agent, recipient: &Agent) -> bool {
-        self.visible(sender, recipient)
-            && self.visible(recipient, sender)
-            && self.decision(sender, recipient, Permission::Send) == Some(Effect::Allow)
-            && self.decision(recipient, sender, Permission::Receive) == Some(Effect::Allow)
-            && self.decision(sender, recipient, Permission::Receive) != Some(Effect::Deny)
+        self.open_checks(sender, recipient)
+            .all(|(_, allowed)| allowed)
     }
 
     /// Call only after verifying an accepted, unexpired exchange and its participants.
     pub fn can_reply(&self, sender: &Agent, recipient: &Agent) -> bool {
-        self.visible(sender, recipient)
-            && self.visible(recipient, sender)
-            && self.decision(sender, recipient, Permission::Receive) != Some(Effect::Deny)
-            && self.decision(recipient, sender, Permission::Receive) != Some(Effect::Deny)
+        self.reply_checks(sender, recipient)
+            .all(|(_, allowed)| allowed)
     }
 }
 
@@ -234,6 +225,10 @@ pub enum AgentOp {
         provider: String,
     },
     Identity,
+    /// Current relationship with one visible peer; never exposes raw policy.
+    PermissionCheck {
+        peer: String,
+    },
     Agents,
     RequestIds {
         #[serde(default = "one_request_id")]
@@ -401,6 +396,10 @@ pub enum OwnerOp {
     Status,
     /// Read-only local-owner diagnostics; never advances clocks or projects files.
     Diagnose,
+    PermissionExplain {
+        actor: String,
+        peer: String,
+    },
     Nodes,
     Agents,
     Providers,

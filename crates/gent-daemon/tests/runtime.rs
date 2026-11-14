@@ -13,6 +13,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "runtime/permissions.rs"]
+mod permissions;
+
 struct Fixture {
     home: tempfile::TempDir,
     owner_rpc: String,

@@ -11,6 +11,8 @@ On first use in this conversation, call `gent_register` with a useful name and t
 
 Find recipients through `gent_agents`. Use the returned `id` as `gent_send.recipient`; a display name is not a routing ID. An empty directory can be intentional. If access is denied or a target is absent, report that result without probing guessed IDs or changing owner configuration. MCP messaging grants do not authorize policy administration.
 
+Use `gent_permission_check` with a visible peer's ID to explain current enumeration, unsolicited send/receive and reply-policy gates. Identity comes from this connection. The result includes no private rules and does not grant reply rights or prove delivery; replies still require an accepted unexpired exchange with capacity remaining. Hidden and unknown peers return the same unavailable result. The owner can use `gent permission explain ACTOR_UUID PEER_UUID` locally for matching rules. Agent policy editing is not yet available.
+
 ## Messages and replies
 
 - Call `gent_request_ids` to obtain UUIDv7 request IDs (one by default, up to 32 with `count`). Use a distinct ID for each new send, reply, file import, relay attachment, response, or cancellation. First use must be within 24 hours. Generating IDs does not submit work.

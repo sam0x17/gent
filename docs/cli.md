@@ -158,6 +158,7 @@ Additional command families should follow the same grammar as their functionalit
 | Command | Behavior |
 | --- | --- |
 | `gent agents` | List agents the caller may discover in the selected cluster. |
+| `gent permission explain ACTOR_UUID PEER_UUID` | Explain current signed policy gates and matching rules under local owner authority. See [permission checks](permissions.md). |
 | `gent agent show <agent>` | Show permitted identity, location, availability, MCP/host capabilities, and connection security mode. |
 | `gent files [status]` | Show local encrypted storage usage, tracked handoff copies, cleanup issues, and retained record counts under owner authority. |
 | `gent files clean [--dry-run]` | Reap expired encrypted objects and process one bounded batch of expired handoff copies. Preserve changed, replaced, and untracked files; `--dry-run` previews without deleting. |

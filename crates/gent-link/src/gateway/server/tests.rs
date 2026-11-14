@@ -14,6 +14,7 @@ mod downloads;
 mod files;
 mod mtls;
 mod oauth;
+mod permissions;
 
 struct Fixture {
     _temp: tempfile::TempDir,

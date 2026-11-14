@@ -25,6 +25,7 @@ pub mod invitations;
 mod mesh;
 mod network;
 mod pairing;
+mod permissions;
 mod relay;
 pub(crate) mod removals;
 mod requests;
@@ -511,6 +512,7 @@ impl StoreSession<'_> {
             OwnerOp::Status => Ok(
                 json!({"process_id":std::process::id(),"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
+            OwnerOp::PermissionExplain { actor, peer } => self.permission_explain(&actor, &peer),
             OwnerOp::Nodes => {
                 let links = self
                     .db
@@ -659,6 +661,7 @@ impl StoreSession<'_> {
                     .filter(|other| self.config.policy.visible(&who, other))
                     .collect::<Vec<_>>()
             )),
+            AgentOp::PermissionCheck { peer } => self.permission_check(&who, &peer),
             AgentOp::RequestIds { count } => self.request_ids(count),
             AgentOp::FilePaths => self.file_paths(&who),
             AgentOp::FileImport {

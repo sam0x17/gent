@@ -177,6 +177,10 @@ The owner daemon checks renewal at startup and every 15 minutes, renewing when a
 
 `OrderedEndpoint::open_runtime` attaches trusted daemon code to this database. Receiving a complete configuration revision advances the same checkpoint used by live RPC permission checks and queues the same TOML projection. Runtime tests pass encrypted packets directly between peers, including a newer denial that blocks an already queued message. Separate dispatcher tests exercise network synchronization through a local relay.
 
+### Permission explanations
+
+`gent permission explain ACTOR_UUID PEER_UUID` requires local owner authentication and reports the current signed revision, freshness, policy gates and all matching rules in both directions. An expired snapshot remains inspectable by the owner and is labeled stale. The shared `gent_permission_check` MCP tool binds the actor to the authenticated conversation and requires current membership and peer enumeration. Hidden, unknown and revoked peers return the same unavailable error. Agents receive only that pair's gates and blockers; rule indices, selectors, group membership and cluster revision metadata remain private. A policy check grants no reply right, does not reserve permissions and does not establish delivery. See [permission explanations](permissions.md) for field semantics. Agent-scoped policy administration remains unfinished.
+
 ## Configuration proposals from joined nodes
 
 Signed membership carries an optional `can_configure` capability. Missing or false values retain the previous canonical encoding and grant no delegated administration. Enrollment requests cannot set it themselves. SSH pairing grants it for newly enrolled nodes; invitations grant it by default unless created with `--no-configure`. Retries preserve current rights, including revocation. Existing older nodes require an explicit `gent node admin grant NODE_UUID` on the owner. Rotation preserves the approved capability, and removed nodes cannot receive new grants. The owner's signing key remains authoritative independently of this delegated flag.

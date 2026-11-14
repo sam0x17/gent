@@ -316,6 +316,8 @@ enum PermissionName {
 }
 #[derive(Subcommand)]
 enum PermissionCommand {
+    /// Explain effective policy between two registered agent IDs, including matching rules.
+    Explain { actor: String, peer: String },
     /// Add grants. Selectors: agent UUID, *, same-node, node:UUID, group:NAME.
     Allow {
         actor: String,
@@ -766,8 +768,12 @@ async fn execute(cli: Cli) -> Result<()> {
                 .await?
             }
         },
+        Some(Command::Permission {
+            command: PermissionCommand::Explain { actor, peer },
+        }) => owner(&home, OwnerOp::PermissionExplain { actor, peer }).await?,
         Some(Command::Permission { command }) => {
             let (actor, peer, permissions, effect) = match command {
+                PermissionCommand::Explain { .. } => unreachable!(),
                 PermissionCommand::Allow {
                     actor,
                     peer,

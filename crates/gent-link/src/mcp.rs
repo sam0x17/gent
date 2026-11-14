@@ -122,6 +122,12 @@ fn tools() -> Vec<Tool> {
             vec![],
         ),
         (
+            "gent_permission_check",
+            "Check current enumeration, unsolicited send/receive and reply-policy gates with a peer from gent_agents. Hidden and unknown peers are indistinguishable. No policy editing or rule/group disclosure. Reply-policy approval still requires an accepted unexpired received message and remaining exchange capacity; this tool issues no grant and does not prove delivery or connectivity.",
+            json!({"peer":{"type":"string","format":"uuid"}}),
+            vec!["peer"],
+        ),
+        (
             "gent_send",
             "Send to the recipient agent ID returned by gent_agents. Get a UUIDv7 request_id from gent_request_ids for new work; reuse it only for an identical retry. Optional files contain actual bytes.",
             json!({"recipient":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
