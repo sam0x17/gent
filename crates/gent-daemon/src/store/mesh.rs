@@ -93,7 +93,7 @@ impl MeshEnvelope {
 impl StoreSession<'_> {
     pub(super) fn import_mesh(&self, sender: &str, envelope: MeshEnvelope) -> Result<()> {
         envelope.validate_size()?;
-        if self.identity.owner.is_some() {
+        if self.identity.is_current_owner(&self.state) {
             ensure!(
                 envelope.origin == sender && envelope.target != self.identity.node.id(),
                 "mesh forwarding origin or target mismatch"
@@ -136,7 +136,7 @@ impl Store {
             &self.identity.node.public_key(),
             now() as u64,
         )?;
-        let writer = if self.identity.owner.is_some() {
+        let writer = if self.identity.is_current_owner(&state) {
             None
         } else {
             // Configuration-only fixtures and interrupted enrollment may not yet
@@ -261,7 +261,7 @@ impl Store {
             tx.commit()?;
             return Ok(());
         }
-        if self.identity.owner.is_some() {
+        if self.identity.is_current_owner(&state) {
             let tx = self.db.unchecked_transaction()?;
             let target = envelope.target.clone();
             self.network_session(&tx, self.identity.state(&tx)?)

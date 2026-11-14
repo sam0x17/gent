@@ -24,7 +24,9 @@ impl Store {
             "node_id": self.identity.node.id(), "cluster_id": state.state().cluster_id,
             "authority": {"revision": state.checkpoint().revision, "expires_at": state.state().expires_at,
                 "fresh": state.require_fresh(observed.max(floor) as u64).is_ok(),
-                "member": member, "owner": self.identity.owner.is_some(),
+                "member": member, "owner": self.identity.is_current_owner(&state),
+                "owner_epoch": state.owner_epoch(),
+                "signing_frozen": handoff::frozen(&tx, &state)?,
                 "clock_ahead": floor > observed},
             "config_saved": !runtime::projection_pending(&tx)?,
             "relay": {"configured": self.config.relay.is_some(), "health": self.sync_health.snapshot()}

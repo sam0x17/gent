@@ -8,6 +8,8 @@ mod administration_tests;
 mod configuration_storage_tests;
 #[path = "group_administration_tests.rs"]
 mod group_administration_tests;
+#[path = "owner_handoff_tests.rs"]
+mod owner_handoff_tests;
 #[path = "retention_tests.rs"]
 mod retention_tests;
 #[path = "retries.rs"]
@@ -373,7 +375,10 @@ async fn pruned_remote_request_cannot_return_with_original_or_rewritten_timestam
     let state = pair.stores[1].identity.state(&pair.stores[1].db).unwrap();
     let renewal = state
         .renew(
-            pair.stores[0].identity.signing_owner().unwrap(),
+            pair.stores[0]
+                .identity
+                .signing_owner(&pair.stores[0].db)
+                .unwrap(),
             (now() + 9 * 86400) as u64,
         )
         .unwrap();
@@ -776,7 +781,7 @@ async fn queued_message_uses_retained_authority_digest_after_full_history_compac
             .apply(
                 &tx,
                 state
-                    .renew(store.identity.signing_owner().unwrap(), now() as u64)
+                    .renew(store.identity.signing_owner(&tx).unwrap(), now() as u64)
                     .unwrap(),
             )
             .unwrap();

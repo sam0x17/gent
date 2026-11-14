@@ -108,7 +108,7 @@ impl StoreSession<'_> {
             existing.is_none_or(|existing| existing == node),
             "agent ID already belongs to another node"
         );
-        let certificate = self.identity.signing_owner()?.bind_legacy_agent(
+        let certificate = self.identity.signing_owner(self.db)?.bind_legacy_agent(
             &self.state,
             id,
             node,
@@ -582,7 +582,9 @@ impl Store {
         )
     }
     pub(crate) fn needs_data_pairing(&self) -> Result<bool> {
-        Ok(self.identity.owner.is_none()
+        Ok(!self
+            .identity
+            .is_current_owner(&self.identity.state(&self.db)?)
             && !self
                 .db
                 .query_row("SELECT EXISTS(SELECT 1 FROM network_links)", [], |r| {

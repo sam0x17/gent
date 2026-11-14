@@ -21,6 +21,7 @@ mod administration;
 mod configuration;
 mod diagnostics;
 mod files;
+pub(crate) mod handoff;
 mod history;
 pub mod invitations;
 mod mesh;
@@ -61,10 +62,7 @@ impl Store {
     /// Called by offline owner provisioning while holding daemon.lock. Service
     /// registration cannot turn a joined node into a cryptographic owner.
     pub fn require_provisioning_owner(&self) -> Result<()> {
-        ensure!(
-            self.identity.owner.is_some(),
-            "service cluster setup requires this cluster's owner signing key"
-        );
+        self.identity.signing_owner(&self.db)?;
         self.require_provisioning_member()
     }
 
@@ -84,7 +82,9 @@ impl Store {
     }
     pub fn require_provisioning_joined(&self) -> Result<()> {
         ensure!(
-            self.identity.owner.is_none(),
+            !self
+                .identity
+                .is_current_owner(&self.identity.state(&self.db)?),
             "the existing owner cannot be replaced by a joined identity"
         );
         self.require_provisioning_member()
@@ -157,7 +157,7 @@ impl Store {
                 "replacement record does not match signed retirement"
             );
         }
-        if identity.owner.is_none() {
+        if !identity.is_current_owner(&identity.state(&tx)?) {
             // Only the SSH owner can issue enrollment snapshots. Conservative
             // migration pins on a joined runtime cannot represent pending joins.
             tx.execute("DELETE FROM authority_join_pins", [])?;
@@ -329,10 +329,11 @@ impl Store {
             "local node is no longer enrolled"
         );
         crate::file_objects::Objects::new(&tx, timestamp)?.reap()?;
-        let renew = self.identity.owner.is_some()
+        let renew = self.identity.is_current_owner(&state)
+            && !handoff::frozen(&tx, &state)?
             && state.state().expires_at.saturating_sub(timestamp) <= 6 * 60 * 60;
         if renew {
-            let update = state.renew(self.identity.signing_owner()?, timestamp)?;
+            let update = state.renew(self.identity.signing_owner(&tx)?, timestamp)?;
             self.identity.apply(&tx, update)?;
         }
         tx.commit()?;
@@ -625,6 +626,7 @@ impl StoreSession<'_> {
             OwnerOp::FilesStatus => self.files_status(),
             OwnerOp::FilesClean { dry_run } => self.files_clean(dry_run),
             OwnerOp::HistoryStatus => self.history_status(),
+            OwnerOp::OwnerHandoffStatus => handoff::status(self.db, &self.state),
             OwnerOp::RecoveryChallenge => Ok(serde_json::to_value(
                 gent_crypto::recovery::RecoveryBaseline::new(&self.state, self.timestamp as u64)?,
             )?),
@@ -672,7 +674,7 @@ impl StoreSession<'_> {
             },
             OwnerOp::DelegateConfiguration { node_id, allow } => {
                 let update = self.state.delegate_configuration(
-                    self.identity.signing_owner()?,
+                    self.identity.signing_owner(self.db)?,
                     &node_id,
                     allow,
                     self.timestamp as u64,

@@ -4,6 +4,9 @@ use gent_protocol::{Effect, Permission, Rule, Selector};
 
 const NOW: u64 = 1_800_000_000;
 
+#[path = "owner_succession/candidates.rs"]
+mod candidates;
+
 fn fixture() -> (OwnerKey, [NodeIdentity; 2], VerifiedState) {
     let owner = OwnerKey::generate().unwrap();
     let nodes = [

@@ -91,6 +91,12 @@ impl OrderedEndpoint<'_> {
                 !raw_exists || saved.is_some(),
                 "cannot adopt a raw MLS operation"
             );
+            if saved.is_none() {
+                ensure!(
+                    !crate::store::handoff::frozen(session.db, &session.state)?,
+                    "owner handoff is issued; configuration grants are frozen"
+                );
+            }
             let welcome = session.create_group(request, &[peer])?;
             if let Some(packet) = saved {
                 checked_stream(session, packet.group(), Purpose::Configuration)?;

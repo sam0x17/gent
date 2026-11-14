@@ -268,7 +268,11 @@ impl Store {
     /// Local scheduling metadata only. No private offer material leaves Store.
     /// This rechecks current native authority even when service access survives.
     pub(crate) fn invitation_jobs(&mut self) -> Result<Vec<SignedOffer>> {
-        if self.identity.owner.is_none() || self.config.service.is_none() {
+        if self.config.service.is_none()
+            || !self
+                .identity
+                .is_current_owner(&self.identity.state(&self.db)?)
+        {
             return Ok(Vec::new());
         }
         if !self
@@ -335,7 +339,7 @@ impl Store {
 
     fn invitation_owner(&self, credential: &str) -> Result<()> {
         ensure!(hash(credential) == self.owner_hash, "unauthorized");
-        self.identity.signing_owner()?;
+        self.identity.signing_owner(&self.db)?;
         Ok(())
     }
     fn invitation_service(&self) -> Result<ServiceBinding> {
@@ -364,7 +368,7 @@ impl Store {
         Ok(service)
     }
     fn invitation_authority(&self, record: &Record, timestamp: u64) -> Result<VerifiedState> {
-        self.identity.signing_owner()?;
+        self.identity.signing_owner(&self.db)?;
         let state = self.identity.state(&self.db)?;
         record.offer.verify_current(&state, timestamp)?;
         ensure!(
@@ -537,7 +541,7 @@ impl Store {
             "invitation capacity reached; wait for existing offers to expire"
         );
         let owner = OwnerInvitation::issue(
-            self.identity.signing_owner()?,
+            self.identity.signing_owner(&self.db)?,
             &state,
             &self.identity.node,
             Options {

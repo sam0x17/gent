@@ -153,8 +153,35 @@ impl Identity {
         Ok(identity)
     }
 
-    pub fn signing_owner(&self) -> Result<&OwnerKey> {
-        self.owner.as_ref().context("configuration changes must reach the active owner; remote edit forwarding is not available yet")
+    pub fn is_current_owner(&self, state: &VerifiedState) -> bool {
+        self.owner.as_ref().is_some_and(|key| {
+            key.public_key() == state.state().owner_key
+                && state
+                    .state()
+                    .owner_transitions
+                    .last()
+                    .and_then(|t| t.transition.successor.as_ref())
+                    .is_none_or(|s| {
+                        s.node.id == self.node.id() && s.node.signing_key == self.node.public_key()
+                    })
+        })
+    }
+
+    pub fn signing_owner(&self, db: &Connection) -> Result<&OwnerKey> {
+        let state = self.state(db)?;
+        let owner = self
+            .owner
+            .as_ref()
+            .context("configuration changes must reach the active owner")?;
+        ensure!(
+            self.is_current_owner(&state),
+            "local owner signing key is retired or belongs to another node"
+        );
+        ensure!(
+            !crate::store::handoff::frozen(db, &state)?,
+            "owner handoff is issued; signing is frozen until activation completes"
+        );
+        Ok(owner)
     }
 
     pub fn state(&self, db: &Connection) -> Result<VerifiedState> {

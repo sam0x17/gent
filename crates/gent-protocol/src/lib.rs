@@ -549,6 +549,7 @@ pub enum OwnerOp {
     HistoryStatus,
     /// Private recovery evidence. These operations grant no replacement authority.
     RecoveryChallenge,
+    OwnerHandoffStatus,
     RecoveryObserve {
         challenge: String,
     },

@@ -135,7 +135,7 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn remove_node(&mut self, node: &str) -> Result<Value> {
-        self.identity.signing_owner()?;
+        self.identity.signing_owner(self.db)?;
         identifier(node)?;
         ensure!(
             node != self.identity.node.id(),
@@ -156,9 +156,11 @@ impl StoreSession<'_> {
             .get(node)
             .context("unknown enrolled node")?;
         let key = member.signing_key;
-        let update =
-            self.state
-                .revoke_node(self.identity.signing_owner()?, node, self.timestamp as u64)?;
+        let update = self.state.revoke_node(
+            self.identity.signing_owner(self.db)?,
+            node,
+            self.timestamp as u64,
+        )?;
         self.state = self.identity.apply(self.db, update)?;
         self.record_removal(node, &key, None)?;
         let mut result = self.removal(node)?;
@@ -204,7 +206,7 @@ impl StoreSession<'_> {
         fingerprint: [u8; 32],
         can_configure: bool,
     ) -> Result<()> {
-        self.identity.signing_owner()?;
+        self.identity.signing_owner(self.db)?;
         let target = request
             .request
             .replaces
@@ -236,7 +238,7 @@ impl StoreSession<'_> {
             return Ok(());
         }
         let update = self.state.replace_node(
-            self.identity.signing_owner()?,
+            self.identity.signing_owner(self.db)?,
             request,
             fingerprint,
             can_configure,
@@ -254,7 +256,7 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn node_removals(&self, after: Option<&str>, pending_only: bool) -> Result<Value> {
-        self.identity.signing_owner()?;
+        self.identity.signing_owner(self.db)?;
         if let Some(id) = after {
             identifier(id)?;
         }
@@ -282,7 +284,7 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn confirm_node_removal(&self, node: &str, revision: u64) -> Result<Value> {
-        self.identity.signing_owner()?;
+        self.identity.signing_owner(self.db)?;
         identifier(node)?;
         let previous = self.removal(node)?;
         ensure!(

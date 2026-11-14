@@ -6,6 +6,8 @@ pub const MAX_OWNER_CHAIN_BYTES: usize = 128 * 1024;
 pub const MAX_OWNER_TRANSITION_BYTES: usize = 4096;
 const DOMAIN: &[u8] = b"gent/owner-succession/v1\0";
 const RECORD_DOMAIN: &[u8] = b"gent/owner-succession-record/v1\0";
+mod candidate;
+pub use candidate::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +18,8 @@ pub struct OwnerTransition {
     pub previous: Digest,
     pub base: Checkpoint,
     pub owner_key: PublicKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor: Option<OwnerSuccessor>,
     pub issued_at: u64,
 }
 
@@ -83,6 +87,14 @@ pub(super) fn verify_lineage(
             seen.insert(record.owner_key),
             "owner signing key cannot be reused"
         );
+        if let Some(successor) = &record.successor {
+            id(&successor.node.id)?;
+            public_key(&successor.node.signing_key)?;
+            ensure!(
+                !seen.contains(&successor.node.signing_key) && successor.candidate != [0; 32],
+                "invalid successor node binding"
+            );
+        }
         ensure!(
             record.base.revision < MAX_SAFE_INTEGER
                 && record.base.state_hash != [0; 32]
@@ -127,6 +139,16 @@ pub(super) fn verify_step(previous: &VerifiedState, update: &SignedState) -> Res
         "owner succession cannot be removed, replaced or skipped"
     );
     let transition = &new.last().context("missing owner transition")?.transition;
+    if let Some(successor) = &transition.successor {
+        ensure!(
+            previous
+                .state()
+                .nodes
+                .get(&successor.node.id)
+                .is_some_and(|n| n.signing_key == successor.node.signing_key),
+            "successor node is not enrolled at the handoff checkpoint"
+        );
+    }
     ensure!(
         &transition.base == previous.checkpoint() && transition.issued_at == update.state.issued_at,
         "owner succession requires the exact accepted checkpoint and activation time"
@@ -206,6 +228,7 @@ impl VerifiedState {
             previous,
             base: self.checkpoint().clone(),
             owner_key: key,
+            successor: None,
             issued_at: now,
         };
         let signature = owner
@@ -217,13 +240,29 @@ impl VerifiedState {
             )?)
             .to_bytes()
             .to_vec();
+        self.sign_owner_transition(
+            successor,
+            SignedOwnerTransition {
+                transition,
+                signature,
+            },
+        )
+    }
+
+    fn sign_owner_transition(
+        &self,
+        successor: &OwnerKey,
+        transition: SignedOwnerTransition,
+    ) -> Result<SignedState> {
+        let now = transition.transition.issued_at;
+        ensure!(
+            transition.transition.owner_key == successor.public_key(),
+            "wrong successor signing key"
+        );
         let mut state = self.state().clone();
         state.version = 2;
-        state.owner_key = key;
-        state.owner_transitions.push(SignedOwnerTransition {
-            transition,
-            signature,
-        });
+        state.owner_key = successor.public_key();
+        state.owner_transitions.push(transition);
         state.revision = state.revision.checked_add(1).context("revision overflow")?;
         state.previous = Some(self.checkpoint().state_hash);
         state.issued_at = now;

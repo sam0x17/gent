@@ -17,6 +17,8 @@ mod tests;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Inspect local owner handoff preparation and its write fence.
+    Status,
     /// Pin this node's accepted checkpoint in a new private challenge file.
     Challenge {
         #[arg(long)]
@@ -82,6 +84,7 @@ pub fn inspect(challenge: &Path, reports: &[PathBuf]) -> Result<Value> {
 
 pub async fn execute(home: &Path, command: Command) -> Result<Value> {
     match command {
+        Command::Status => crate::owner(home, OwnerOp::OwnerHandoffStatus).await,
         Command::Challenge { out } => {
             let out = destination(&out)?;
             let value = crate::owner(home, OwnerOp::RecoveryChallenge).await?;

@@ -11,7 +11,7 @@ impl Store {
     /// must transport requests and responses over an authenticated private channel.
     pub(super) fn pair(&mut self, cluster: &str, action: PairingOp) -> Result<Value> {
         ensure!(cluster == self.config.cluster.id, "wrong pairing cluster");
-        self.identity.signing_owner()?;
+        self.identity.signing_owner(&self.db)?;
         self.maintain()?;
         self.pair_authorized(action, true, now() as u64)
     }
@@ -120,7 +120,7 @@ impl Store {
                         timestamp,
                     )?;
                 } else {
-                    let owner = self.identity.signing_owner()?;
+                    let owner = self.identity.signing_owner(&tx)?;
                     let update = if can_configure {
                         state.enroll_configurator(owner, &request, fingerprint, timestamp)?
                     } else {
@@ -148,7 +148,7 @@ impl Store {
                 let package = STANDARD.decode(key_package)?;
                 let invitation = OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?
                     .create_configuration(
-                        self.identity.signing_owner()?,
+                        self.identity.signing_owner(&self.db)?,
                         uuid::Uuid::parse_str(&request_id)?,
                         (&peer, &package),
                         timestamp,

@@ -433,6 +433,18 @@ impl ClusterState {
         id(&self.cluster_id)?;
         label(&self.name)?;
         public_key(&self.owner_key)?;
+        if let Some(successor) = self
+            .owner_transitions
+            .last()
+            .and_then(|t| t.transition.successor.as_ref())
+        {
+            ensure!(
+                self.nodes
+                    .get(&successor.node.id)
+                    .is_some_and(|n| n.signing_key == successor.node.signing_key),
+                "active owner node cannot be removed or replaced before another handoff"
+            );
+        }
         ensure!(
             self.revision <= MAX_SAFE_INTEGER && (self.revision == 0) == self.previous.is_none(),
             "invalid revision"

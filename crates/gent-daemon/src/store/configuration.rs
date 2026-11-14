@@ -158,6 +158,29 @@ fn fingerprint(edit: &ConfigurationEdit) -> Result<String> {
 }
 impl StoreSession<'_> {
     pub(super) fn configuration_writer(&self) -> Result<String> {
+        if let Some(successor) = self
+            .state
+            .state()
+            .owner_transitions
+            .last()
+            .and_then(|t| t.transition.successor.as_ref())
+        {
+            // The signed handoff pins the new writer even before its replacement
+            // configuration streams arrive. Old streams remain recovery history.
+            ensure!(
+                self.state
+                    .state()
+                    .nodes
+                    .get(&successor.node.id)
+                    .is_some_and(|n| n.signing_key == successor.node.signing_key),
+                "configuration writer is no longer enrolled"
+            );
+            return Ok(successor.node.id.clone());
+        }
+        ensure!(
+            self.state.owner_epoch() == 0,
+            "owner epoch has no runtime writer binding"
+        );
         let mut writers = std::collections::BTreeSet::new();
         let mut query = self.db.prepare("SELECT grant FROM configuration_streams")?;
         for grant in query.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
@@ -224,7 +247,7 @@ impl StoreSession<'_> {
                 "cannot change active identities while daemon runs"
             );
         }
-        if self.identity.owner.is_some() {
+        if self.identity.is_current_owner(&self.state) {
             self.accept_configuration(&origin, request, edit)?;
         } else {
             ensure!(
@@ -263,7 +286,7 @@ impl StoreSession<'_> {
         self.configuration_status(id)
     }
     fn revision_for_edit(&self, origin: &str, edit: &ConfigurationEdit) -> Result<SignedState> {
-        let owner = self.identity.signing_owner()?;
+        let owner = self.identity.signing_owner(self.db)?;
         validate(edit)?;
         if origin != self.identity.node.id() && administration::edit_identity(edit).is_none() {
             self.state.require_fresh(self.timestamp as u64)?;
@@ -457,7 +480,6 @@ impl StoreSession<'_> {
         request: Uuid,
         edit: ConfigurationEdit,
     ) -> Result<()> {
-        self.identity.signing_owner()?;
         ensure!(!request.is_nil(), "invalid configuration request identity");
         let id = request.to_string();
         if let Some((administrator, request_id)) = administration::edit_identity(&edit) {
@@ -486,6 +508,10 @@ impl StoreSession<'_> {
             ensure!(previous == fingerprint, "conflicting configuration request");
             serde_json::from_slice::<EditResult>(&result)?
         } else {
+            // A handoff pauses new decisions. Propagate the pause without
+            // recording a terminal rejection; the same request must survive it.
+            // Already committed decisions can still return their exact result.
+            self.identity.signing_owner(self.db)?;
             let result = match self.revision_for_edit(origin, &edit) {
                 Ok(update) => {
                     // Storage failures propagate and roll back the entire import,

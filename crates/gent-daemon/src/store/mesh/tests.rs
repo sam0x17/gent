@@ -249,7 +249,7 @@ async fn mesh_discards_bootstrap_overtaken_by_revocation() {
     let state = owner.identity.state(&owner.db).unwrap();
     let update = state
         .revoke_node(
-            owner.identity.signing_owner().unwrap(),
+            owner.identity.signing_owner(&owner.db).unwrap(),
             &origin,
             now() as u64,
         )

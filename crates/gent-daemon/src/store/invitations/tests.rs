@@ -523,7 +523,11 @@ fn revocation_privilege_changes_service_changes_and_retirement_deny_existing_ses
                 .unwrap(),
             1 | 2 => {
                 let state = fixture.store.identity.state(&fixture.store.db).unwrap();
-                let owner = fixture.store.identity.signing_owner().unwrap();
+                let owner = fixture
+                    .store
+                    .identity
+                    .signing_owner(&fixture.store.db)
+                    .unwrap();
                 let update = if change == 1 {
                     state
                         .delegate_configuration(owner, node.id(), false, now() as u64)
@@ -1131,7 +1135,7 @@ fn migration_preserves_state_and_refuses_missing_established_invitation_journals
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
             .unwrap(),
-        17
+        18
     );
     assert_eq!(
         fs::read(fixture.home.path().join("identity.key")).unwrap(),
