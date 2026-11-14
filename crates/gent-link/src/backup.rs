@@ -128,6 +128,42 @@ pub fn execute(command: Command, home: Option<&Path>, context: Option<&str>) -> 
     }
 }
 
+pub async fn import_history(
+    home: &Path,
+    archive: &Path,
+    identity: &Path,
+    source_agent: String,
+    target_agent: String,
+    restore_revision: Option<u64>,
+) -> Result<Value> {
+    use sha2::{Digest as _, Sha256};
+    let scratch = tempfile::Builder::new()
+        .prefix("gent-history-import-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()?;
+    let directory = scratch.path().join("history");
+    history::export(archive, identity, &directory)?;
+    let directory = fs::canonicalize(directory)?;
+    let manifest_sha256 = format!(
+        "{:x}",
+        Sha256::digest(fs::read(directory.join("history.json"))?)
+    );
+    crate::owner(
+        home,
+        gent_protocol::OwnerOp::HistoryImport {
+            directory: directory
+                .to_str()
+                .context("history path must be UTF-8")?
+                .into(),
+            manifest_sha256,
+            source_agent,
+            target_agent,
+            restore_revision,
+        },
+    )
+    .await
+}
+
 fn create(home: &Path, archive: &Path, identity: &Path) -> Result<Value> {
     let home = managed_file::normalize(home)?;
     recovery::ensure_active(&home)?;

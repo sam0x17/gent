@@ -27,6 +27,7 @@ mod mesh;
 mod network;
 mod pairing;
 mod permissions;
+mod recovered;
 mod relay;
 pub(crate) mod removals;
 mod requests;
@@ -111,6 +112,7 @@ impl Store {
         files::schema(&mut db)?;
         requests::schema(&db, now())?;
         history::schema(&db)?;
+        recovered::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -523,6 +525,24 @@ impl StoreSession<'_> {
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
+            OwnerOp::HistoryImports => self.recovered_imports(None),
+            OwnerOp::HistoryImport {
+                directory,
+                manifest_sha256,
+                source_agent,
+                target_agent,
+                restore_revision,
+            } => self.recovered_import(
+                Path::new(&directory),
+                &manifest_sha256,
+                &source_agent,
+                &target_agent,
+                restore_revision,
+            ),
+            OwnerOp::HistoryRemove {
+                import_id,
+                expected_revision,
+            } => self.recovered_remove(&import_id, expected_revision),
             OwnerOp::Pair { .. } | OwnerOp::Invitation { .. } | OwnerOp::Diagnose => {
                 anyhow::bail!("pairing must use its owner-authenticated entry point")
             }
@@ -699,6 +719,21 @@ impl StoreSession<'_> {
                     .filter(|other| self.config.policy.visible(&who, other))
                     .collect::<Vec<_>>()
             )),
+            AgentOp::HistoryImports => self.recovered_imports(Some(&who)),
+            AgentOp::HistoryMessages { import_id, after } => {
+                self.recovered_messages(&who, &import_id, after)
+            }
+            AgentOp::HistoryFileRead {
+                import_id,
+                message_id,
+                file_index,
+                chunk_index,
+            } => self.recovered_file_read(&who, &import_id, &message_id, file_index, chunk_index),
+            AgentOp::HistoryFileView {
+                import_id,
+                message_id,
+                file_index,
+            } => self.recovered_file_view(&who, &import_id, &message_id, file_index),
             AgentOp::PermissionCheck { peer } => self.permission_check(&who, &peer),
             AgentOp::PermissionAdminCheck { actor, peer } => {
                 self.permission_admin_check(&who, &actor, &peer)

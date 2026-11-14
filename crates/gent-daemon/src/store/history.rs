@@ -196,6 +196,7 @@ impl StoreSession<'_> {
             "network":network::retention::status(self.db,self.timestamp)?,
             "configuration_edits":configuration::storage::status(self.db)?,
             "mesh_jobs":mesh::storage::status(self.db)?,
+            "recovered":recovered::status(self.db)?,
             "scope":"Gent messages, agent retries, node event queues, configuration edits and peer setup jobs; encrypted streams, signed authority history, and provider histories are separate"}),
         )
     }

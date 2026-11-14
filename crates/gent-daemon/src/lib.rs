@@ -32,6 +32,17 @@ use tokio::{
 
 pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value> {
     recovery::ensure_active(home)?;
+    let timeout = if matches!(
+        &request,
+        Request::Owner {
+            action: gent_protocol::OwnerOp::HistoryImport { .. },
+            ..
+        }
+    ) {
+        Duration::from_secs(185)
+    } else {
+        Duration::from_secs(15)
+    };
     let operation = async {
         let mut socket = UnixStream::connect(home.join("daemon.sock"))
             .await
@@ -53,7 +64,7 @@ pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value>
             Response::Error(message) => Err(anyhow::anyhow!(message)),
         }
     };
-    tokio::time::timeout(Duration::from_secs(15), operation)
+    tokio::time::timeout(timeout, operation)
         .await
         .context("daemon request timed out")?
 }
@@ -98,7 +109,7 @@ pub async fn run(home: &Path) -> Result<()> {
                 let uploads=uploads.clone();
                 tokio::spawn(async move {
                     let _permit=permit;
-                    let _=tokio::time::timeout(Duration::from_secs(10),serve(stream,store,uploads)).await;
+                    let _=serve(stream,store,uploads).await;
                 });
             }
         }
@@ -117,17 +128,35 @@ async fn serve(
     store: Arc<Mutex<store::Store>>,
     uploads: Arc<Semaphore>,
 ) -> Result<()> {
+    let started = tokio::time::Instant::now();
     let mut stream = BufReader::new(stream);
     let mut frame = Vec::new();
-    (&mut stream)
-        .take(MAX_FRAME_BYTES as u64 + 1)
-        .read_until(b'\n', &mut frame)
-        .await?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        (&mut stream)
+            .take(MAX_FRAME_BYTES as u64 + 1)
+            .read_until(b'\n', &mut frame),
+    )
+    .await
+    .context("request frame timed out")??;
     ensure!(
         frame.len() <= MAX_FRAME_BYTES && frame.last() == Some(&b'\n'),
         "invalid request frame"
     );
-    let response = match serde_json::from_slice::<Request>(&frame) {
+    let decoded = serde_json::from_slice::<Request>(&frame);
+    let deadline = started
+        + if matches!(
+            &decoded,
+            Ok(Request::Owner {
+                action: gent_protocol::OwnerOp::HistoryImport { .. },
+                ..
+            })
+        ) {
+            Duration::from_secs(180)
+        } else {
+            Duration::from_secs(10)
+        };
+    let response = match decoded {
         Ok(request) => {
             if matches!(
                 &request,
@@ -136,18 +165,29 @@ async fn serve(
                     ..
                 }
             ) {
-                return receive::serve(stream, store, uploads, request).await;
+                return tokio::time::timeout_at(
+                    deadline,
+                    receive::serve(stream, store, uploads, request),
+                )
+                .await
+                .context("file receive timed out")?;
             }
-            tokio::task::spawn_blocking(move || {
-                store.lock().expect("store lock poisoned").handle(request)
-            })
-            .await?
+            tokio::time::timeout_at(
+                deadline,
+                tokio::task::spawn_blocking(move || {
+                    store.lock().expect("store lock poisoned").handle(request)
+                }),
+            )
+            .await
+            .context("daemon operation timed out")??
         }
         Err(_) => Response::Error("invalid request".into()),
     };
     let mut response = serde_json::to_vec(&response)?;
     response.push(b'\n');
     ensure!(response.len() <= MAX_FRAME_BYTES, "response too large");
-    stream.get_mut().write_all(&response).await?;
+    tokio::time::timeout_at(deadline, stream.get_mut().write_all(&response))
+        .await
+        .context("response write timed out")??;
     Ok(())
 }

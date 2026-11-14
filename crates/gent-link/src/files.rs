@@ -89,7 +89,12 @@ pub fn print_transport(value: &Value) {
 }
 
 pub fn print_history(value: &Value) {
-    if let Some(dry_run) = value["dry_run"].as_bool() {
+    if value.get("historical_imports").is_some() || value.get("import_id").is_some() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(value).expect("history result serializes")
+        );
+    } else if let Some(dry_run) = value["dry_run"].as_bool() {
         println!(
             "{} {} exchanges, {} messages ({} payload bytes), {} import retries, and {} relay attachments.",
             if dry_run { "Would retire" } else { "Retired" },
@@ -168,6 +173,17 @@ pub fn print_history(value: &Value) {
         );
         println!(
             "Message history: seven days after expiry. New request IDs: UUIDv7, first use within 24 hours."
+        );
+        let recovered = &value["recovered"];
+        println!(
+            "Historical imports: {} / {} ({} retired); {} / {} messages; {} / {} bytes.",
+            recovered["imports"],
+            recovered["max_imports"],
+            recovered["retired"],
+            recovered["messages"],
+            recovered["max_messages"],
+            recovered["bytes"],
+            recovered["max_bytes"]
         );
         let edits = &value["configuration_edits"];
         println!(

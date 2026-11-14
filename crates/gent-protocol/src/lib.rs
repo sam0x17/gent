@@ -309,6 +309,24 @@ pub enum AgentOp {
     FileView {
         file_id: String,
     },
+    /// Local historical imports explicitly assigned to this authenticated agent.
+    HistoryImports,
+    HistoryMessages {
+        import_id: String,
+        #[serde(default)]
+        after: u64,
+    },
+    HistoryFileRead {
+        import_id: String,
+        message_id: String,
+        file_index: u32,
+        chunk_index: u32,
+    },
+    HistoryFileView {
+        import_id: String,
+        message_id: String,
+        file_index: u32,
+    },
     FileExport {
         file_id: String,
     },
@@ -513,6 +531,18 @@ pub enum OwnerOp {
     Providers,
     FilesStatus,
     HistoryStatus,
+    HistoryImports,
+    HistoryImport {
+        directory: String,
+        manifest_sha256: String,
+        source_agent: String,
+        target_agent: String,
+        restore_revision: Option<u64>,
+    },
+    HistoryRemove {
+        import_id: String,
+        expected_revision: u64,
+    },
     HistoryClean {
         dry_run: bool,
     },

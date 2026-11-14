@@ -1,6 +1,6 @@
 # Backup and recovery
 
-Gent can create encrypted backups of a stopped node, verify every payload, extract the archive into a guarded offline directory, and export retained Gent history with recovered files. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Importing historical records into a new node, migrating agents or pending work, and replacing a lost cluster owner remain unfinished.
+Gent can create encrypted backups of a stopped node, verify every payload, extract the archive into a guarded offline directory, and export retained Gent history with recovered files. The owner can assign one archived agent's history to a current local agent. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Migrating agent identities, bindings or pending work, and replacing a lost cluster owner remain unfinished.
 
 ## Commands
 
@@ -76,7 +76,47 @@ The export includes expired or revoked historical records still present in the a
 
 Signing keys, local RPC credentials, account/gateway secrets, file decryption grants, MLS state, policy and live queue records are excluded. Provider-owned conversation transcripts remain outside the node archive and this export. Source IDs and hashes establish which authenticated archive the exporter read; the resulting plaintext files are not independently signed and do not prove current cluster authority or independently authenticate each historical sender.
 
-The destination must be new, with the same parent ownership/permission requirements as extraction. Directories use `0700` and files `0600`; publication refuses an existing destination, including races. Limits are 65,536 agents, 65,536 messages, 6 MiB per stored message and 1 GiB of exported JSONL/file content. Known message/file types and table layouts are checked; unsupported schemas or inconsistent records fail without publishing partial output. Interrupted processes may leave guarded temporary directories. Moving history into a fresh node still requires a separate import and identity-mapping design.
+The destination must be new, with the same parent ownership/permission requirements as extraction. Directories use `0700` and files `0600`; publication refuses an existing destination, including races. Limits are 65,536 agents, 65,536 messages, 6 MiB per stored message and 1 GiB of exported JSONL/file content. Known message/file types and table layouts are checked; unsupported schemas or inconsistent records fail without publishing partial output. Interrupted processes may leave guarded temporary directories.
+
+## Assign history to a current agent
+
+Start or enroll a fresh node normally and register its replacement agent through MCP. Use `agents.jsonl` from an offline export to identify the original agent and `gent agents` on the current node to identify the recipient. With the current daemon running, assign the selected history:
+
+```sh
+gent history import ~/gent-backups/node.age --identity ~/gent-recovery.key \
+  --from-agent OLD_AGENT_UUID --agent CURRENT_AGENT_UUID
+gent history imports
+gent history status
+```
+
+The command authenticates the entire archive and creates a private temporary history export. An owner-authenticated local request pins its manifest digest and selects exactly one archived agent and one current, nonrevoked local agent. The daemon validates JSONL counts and hashes, historical references, selected file lengths and hashes, ownership and private permissions before committing. Failure rolls back records, access and quota together. The temporary export is removed when the command exits normally; a killed process may leave guarded plaintext staging files.
+
+Only messages sent or received by the selected historical agent are assigned, along with their historical participant labels and file outcomes. Other archived conversations remain inaccessible. The recipient reads these records through `gent_history_imports` and `gent_history_messages`; pages contain at most 20 messages and 1 MiB of serialized records. Follow `next_after` while `has_more` is true. `gent_history_file_read` returns ready files in 256 KiB chunks; `gent_history_file_view` returns verified PNG, JPEG, WebP or GIF bytes up to 4 MiB as an MCP image. Missing and incomplete files remain labelled and cannot be read.
+
+The assignment is a separate read grant. It includes retained expired messages and historical labels that the recipient may lack permission to enumerate as live agents. Original message IDs, acknowledgments, timestamps and archive provenance remain attached to the records. They establish historical context only: the old agent, exchange, relay and file IDs confer no live routing or reply rights. Records never enter the current inbox or transport queues. No keys, old credentials, permissions, conversation bindings or pending work are restored. Repeating an old action requires checking current host state; the archive cannot prove that the action never ran.
+
+Imported content stays in separate tables in the current node's private SQLite database. It is plaintext at that trusted endpoint, like current Gent messages, and is not replicated to other nodes or uploaded to the relay. The selected agent can read it through either local MCP or its configured remote gateway; the existing provider/gateway trust boundary applies. Revoking that agent immediately prevents further reads. Another agent needs its own owner-issued import assignment.
+
+### Remove or restore an assignment
+
+`gent history imports` lists current and retired assignments for the owner, including their revisions. An exact repeat of the same archive/source/recipient import is a no-op. To remove revision 1:
+
+```sh
+gent history remove IMPORT_UUID --expect-revision 1
+```
+
+Removal deletes the imported message/file rows and advances the receipt to revision 2. It stops further reads and frees the content quota; it does not erase copies already read or guarantee forensic removal from storage. A small receipt remains so an old import retry cannot restore access. Explicit restoration uses the same archive/source/recipient and the current retired revision:
+
+```sh
+gent history import ~/gent-backups/node.age --identity ~/gent-recovery.key \
+  --from-agent OLD_AGENT_UUID --agent CURRENT_AGENT_UUID --restore-revision 2
+```
+
+That restoration advances the revision to 3. Exact removal/restoration retries are safe; stale revisions are refused. Recreating an archive produces a different import identity, so overlapping archives can contain the same historical messages. Use source cluster/archive provenance and original message IDs when comparing them.
+
+Each node permits 256 import receipts, including retired ones, 8,192 imported messages and 256 MiB of imported record/file content. `gent history status` reports usage. Receipt compaction is not implemented. Ordinary history expiry/cleanup leaves these explicit assignments in place until the owner removes them.
+
+**Keep the original source archives and recovery keys.** A full backup includes the imported SQLite tables, but `gent backup history` currently exports only the original live message tables. It cannot re-export previously imported history from a later backup. Restoring a raw database to recover those rows is unsafe and remains blocked by the activation guard.
 
 ## Replace a lost joined node
 
@@ -96,7 +136,7 @@ If joining is interrupted, rerun the identical command with the same home, name 
 
 Signed revocation applies as peers receive current configuration. Offline peers can retain stale authority until synchronization or lease expiry. Service credential removal follows the existing owner maintenance journal and may remain pending during service downtime. On the owner, `gent node removals` reports the old node, replacement identity and cleanup status; service confirmation does not prove that every peer has caught up. The development relay uses a shared credential and has no per-node service revocation.
 
-The new node never opens the archived runtime, resumes an old MLS ratchet or clears the recovery guard. Keep extracted archives offline. Any future import of saved history or pending work needs explicit provenance and duplicate handling; archived requests must not silently become new sends. Agent bindings and peer permissions need deliberate migration rules. Replacing a node cannot remove historical data already held by it or its backups.
+The new node never opens the archived runtime, resumes an old MLS ratchet or clears the recovery guard. Keep extracted archives offline. Use the separate history assignment above to grant a new agent read access to selected archived exchanges. Pending work, agent bindings and peer permissions still need deliberate migration rules; archived requests must not silently become new sends. Replacing a node cannot remove historical data already held by it or its backups.
 
 ## Replace through a private invitation
 
@@ -119,7 +159,7 @@ Gent enrollment uses the invitation's encrypted Noise mailbox; SSH is unnecessar
 
 ## Remaining recovery work
 
-Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, creating a new cluster and separately importing historical data is the fallback to design. Multi-user recovery authority remains future work.
+Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, a new cluster can receive selected archived history through the assignment commands above, without recovering the old cluster's authority. Agent bindings, peer permissions, pending-work reconciliation and recovery of previously imported history remain unfinished. Multi-user recovery authority remains future work.
 
 ## Validation
 
@@ -131,6 +171,13 @@ cargo test -p gent-link recovery_guard
 cargo test -p gent-link backup::
 python3 scripts/prove_recovery_guard.py --gent target/debug/gent
 python3 scripts/prove_backup.py --gent target/debug/gent
+```
+
+History-assignment tests cover recipient isolation, pagination, exact file bytes, restart persistence, removal/restoration revisions, revocation, transaction rollback, quotas and changed content. The native CLI/MCP proof creates an encrypted archive, imports selected history into an independent fresh cluster, reads the original PNG and 2 MiB file, and checks restart, removal/restoration and unchanged live identity/inbox state:
+
+```sh
+cargo test -p gent-daemon --test recovered
+python3 scripts/prove_history_import.py --gent target/debug/gent
 ```
 
 Replacement tests cover lost replies at every pairing step, owner/competing-target refusal, atomic rollback, durable key pins, interrupted publication, schema migration, invitation scope and retries after later revocation. The optional physical-machine proof adds a replacement to the existing SSH workflow:

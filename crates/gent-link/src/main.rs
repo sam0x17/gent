@@ -166,6 +166,27 @@ enum FilesCommand {
 #[derive(Subcommand)]
 enum HistoryCommand {
     Status,
+    /// List historical imports, their recipients, and access revisions.
+    Imports,
+    /// Recover one archived agent's exchanges for one current local agent.
+    Import {
+        archive: PathBuf,
+        #[arg(long)]
+        identity: PathBuf,
+        #[arg(long)]
+        from_agent: String,
+        #[arg(long)]
+        agent: String,
+        /// Explicitly restore a removed import at its last observed revision.
+        #[arg(long)]
+        restore_revision: Option<u64>,
+    },
+    /// Remove an import's records and access. Keep its revision for safe retries.
+    Remove {
+        import_id: String,
+        #[arg(long)]
+        expect_revision: u64,
+    },
     /// Retire a bounded batch of expired exchanges and inadmissible retry IDs.
     Clean {
         #[arg(long)]
@@ -649,16 +670,43 @@ async fn execute(cli: Cli) -> Result<()> {
             };
             owner(&home, action).await?
         }
-        Some(Command::History { command }) => {
-            owner(
-                &home,
-                match command.unwrap_or(HistoryCommand::Status) {
-                    HistoryCommand::Status => OwnerOp::HistoryStatus,
-                    HistoryCommand::Clean { dry_run } => OwnerOp::HistoryClean { dry_run },
-                },
-            )
-            .await?
-        }
+        Some(Command::History { command }) => match command.unwrap_or(HistoryCommand::Status) {
+            HistoryCommand::Status => owner(&home, OwnerOp::HistoryStatus).await?,
+            HistoryCommand::Clean { dry_run } => {
+                owner(&home, OwnerOp::HistoryClean { dry_run }).await?
+            }
+            HistoryCommand::Imports => owner(&home, OwnerOp::HistoryImports).await?,
+            HistoryCommand::Remove {
+                import_id,
+                expect_revision,
+            } => {
+                owner(
+                    &home,
+                    OwnerOp::HistoryRemove {
+                        import_id,
+                        expected_revision: expect_revision,
+                    },
+                )
+                .await?
+            }
+            HistoryCommand::Import {
+                archive,
+                identity,
+                from_agent,
+                agent,
+                restore_revision,
+            } => {
+                backup::import_history(
+                    &home,
+                    &archive,
+                    &identity,
+                    from_agent,
+                    agent,
+                    restore_revision,
+                )
+                .await?
+            }
+        },
         Some(Command::Transport { command }) => {
             owner(
                 &home,
