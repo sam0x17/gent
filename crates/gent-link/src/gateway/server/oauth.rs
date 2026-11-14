@@ -48,23 +48,45 @@ pub(super) async fn handle(boundary: &Boundary, request: Request<Body>) -> Respo
         return Json(json!({"resource":resource,"authorization_servers":[origin],"scopes_supported":[SCOPE],"bearer_methods_supported":["header"]})).into_response();
     }
     if path == "/.well-known/oauth-authorization-server" && method == "GET" {
-        return Json(json!({"issuer":origin,"authorization_endpoint":format!("{origin}/oauth/authorize"),
+        let mut metadata = json!({"issuer":origin,"authorization_endpoint":format!("{origin}/oauth/authorize"),
             "token_endpoint":format!("{origin}/oauth/token"),"response_types_supported":["code"],
             "grant_types_supported":["authorization_code","refresh_token"],"code_challenge_methods_supported":["S256"],
             "token_endpoint_auth_methods_supported":["client_secret_post","private_key_jwt"],
             "token_endpoint_auth_signing_alg_values_supported":["RS256"],"scopes_supported":[SCOPE],
-            "authorization_response_iss_parameter_supported":true})).into_response();
+            "authorization_response_iss_parameter_supported":true});
+        if boundary.metadata.enabled() {
+            metadata["client_id_metadata_document_supported"] = json!(true);
+        }
+        return Json(metadata).into_response();
     }
     if path == "/oauth/authorize" && method == "GET" {
         let Ok(fields) = parameters(request.uri().query().unwrap_or_default()) else {
             return error("invalid_request");
         };
+        if fields.get("resource") != Some(&resource) {
+            return error("invalid_request");
+        }
+        if let Err(failure) = boundary
+            .metadata
+            .prepare(
+                fields.get("client_id").map_or("", String::as_str),
+                fields.get("redirect_uri").map(String::as_str),
+            )
+            .await
+        {
+            return if failure.is::<crate::gateway::registry::Busy>() {
+                busy()
+            } else {
+                error("invalid_request")
+            };
+        }
         return match boundary.registry.oauth_begin(fields, resource).await {
             Ok(value) => {
                 let id = value["request"].as_str().unwrap();
                 page(&format!(
-                    "<p>Allow <strong>{}</strong> to connect to your Gent agents?</p><p>Callback: <code>{}</code></p><p>This grants a host namespace. The host selects each agent using conversation metadata; existing messaging permissions still apply.</p><p>On your Gent node, inspect <code>gent gateway oauth requests</code>. Check this request ID and callback, then approve only if you started this connection:</p><pre>gent gateway oauth approve {id}</pre><p>Request: <code>{id}</code></p><p>Your AI provider and your node can read tool content. Gent's central relay carries encrypted node traffic.</p><p><a href=\"/oauth/continue?request={id}\">Continue after approval</a></p>",
+                    "<p>Allow <strong>{}</strong> to connect to your Gent agents?</p><p>Client: <code>{}</code></p><p>Callback: <code>{}</code></p><p>This grants a host namespace. The host selects each agent using conversation metadata; existing messaging permissions still apply.</p><p>On your Gent node, inspect <code>gent gateway oauth requests</code>. Check this request ID and callback, then approve only if you started this connection:</p><pre>gent gateway oauth approve {id}</pre><p>Request: <code>{id}</code></p><p>Your AI provider and your node can read tool content. Gent's central relay carries encrypted node traffic.</p><p><a href=\"/oauth/continue?request={id}\">Continue after approval</a></p>",
                     escape(value["name"].as_str().unwrap()),
+                    escape(value["oauth_client_id"].as_str().unwrap()),
                     escape(value["redirect_uri"].as_str().unwrap())
                 ))
             }
@@ -116,6 +138,20 @@ pub(super) async fn handle(boundary: &Boundary, request: Request<Body>) -> Respo
         let Ok(fields) = parameters(text) else {
             return error("invalid_request");
         };
+        if fields.get("resource") != Some(&resource) {
+            return error("invalid_target");
+        }
+        if let Err(failure) = boundary
+            .metadata
+            .prepare(fields.get("client_id").map_or("", String::as_str), None)
+            .await
+        {
+            return if failure.is::<crate::gateway::registry::Busy>() {
+                busy()
+            } else {
+                error("invalid_client")
+            };
+        }
         return match boundary
             .registry
             .oauth_exchange(fields, resource, peer)

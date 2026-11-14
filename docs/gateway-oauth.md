@@ -1,6 +1,6 @@
 # Gateway OAuth
 
-The user-controlled gateway supports OAuth authorization-code exchange with S256 PKCE, rotating refresh tokens and discovery metadata. Clients are registered by the node owner. This version uses local CLI approval for consent and either `client_secret_post` or owner-pinned RS256 `private_key_jwt` authentication at the token endpoint. The owner can import published client metadata during setup and explicitly refresh its signing keys. Runtime Client ID Metadata Document (CIMD) registration, dynamic registration, public clients and browser account login are not implemented. Hosted ChatGPT/Claude acceptance remains unverified.
+The user-controlled gateway supports OAuth authorization-code exchange with S256 PKCE, rotating refresh tokens and discovery metadata. Clients are registered by the node owner. This version uses local CLI approval for consent and either `client_secret_post` or owner-pinned RS256 `private_key_jwt` authentication at the token endpoint. The owner can import published client metadata and opt selected hosts into runtime Client ID Metadata Document (CIMD) validation and key refresh. Automatic creation of host namespaces, dynamic registration, public clients and browser account login are not implemented. Hosted ChatGPT/Claude acceptance remains unverified.
 
 ## Register a client
 
@@ -50,7 +50,7 @@ Token requests send `client_id`, `client_assertion_type=urn:ietf:params:oauth:cl
 
 The registry consumes each valid assertion ID atomically with token processing, including grant errors after client authentication. A retry needs a new assertion. Reusing an assertion rejects authentication without revoking an otherwise valid token family. Replaying a redeemed code or spent refresh token with a fresh valid assertion retains the existing family-revocation rule. Replay digests persist across restart until assertion expiry, with a limit of 1,024 active records. Capacity exhaustion returns `503` and `Retry-After`. An optional client-certificate policy remains an additional requirement for exchange, refresh and MCP.
 
-This implements the signed token-authentication method described in [RFC 7523](https://www.rfc-editor.org/rfc/rfc7523.html). OpenAI's [authentication guide](https://developers.openai.com/plugins/build/auth#client-registration) documents RS256 keys published through ChatGPT's metadata/JWKS route. Manual key pinning does not complete CIMD onboarding, automatic key refresh, hosted consent or conversation-provenance acceptance. Gent does not advertise `client_id_metadata_document_supported` yet.
+This implements the signed token-authentication method described in [RFC 7523](https://www.rfc-editor.org/rfc/rfc7523.html). OpenAI's [authentication guide](https://developers.openai.com/plugins/build/auth#client-registration) documents RS256 keys published through ChatGPT's metadata/JWKS route. Manual key pinning alone does not enable CIMD discovery or runtime refresh. Those require the opt-in gateway mode below; hosted consent and conversation-provenance acceptance remain separate.
 
 ### Update signing keys
 
@@ -97,7 +97,26 @@ gent --home /private/path/gent-node gateway clients keys refresh CLIENT_UUID \
 
 Use the current revision from `keys show`. Refresh revalidates the document and the existing callback selection before applying a full key-set replacement with the update/recovery rules above. It can also refresh a manually pinned client whose ID is a supported metadata URL. It cannot change the resource, callbacks, agent bindings or other grant policy. Fetch or validation failure leaves the current keys in place. Repeating setup re-fetches metadata but cannot update an existing registration; use refresh after a published key change. If an export is pending and the publisher changes keys again, use `keys set` with the already committed key set and original expected revision to finish that export before applying another change.
 
-Only these explicit owner commands fetch metadata. Incoming authorization/token requests and JWT headers cannot trigger a fetch. Gent does not yet advertise `client_id_metadata_document_supported`, automatically register hosts, schedule refreshes or cache fetched documents. Importing ChatGPT's public metadata has been verified independently of actual hosted OAuth and conversation binding.
+By default, only these explicit owner commands fetch metadata. The gateway mode below permits bounded runtime fetching for selected hosts. JWT headers never choose key URLs, and Gent does not automatically create host namespaces. Importing ChatGPT's public metadata has been verified independently of actual hosted OAuth and conversation binding.
+
+### Enable CIMD for selected hosts
+
+After importing the host, start the gateway with its local UUID:
+
+```sh
+gent --home /private/path/gent-node gateway run \
+  --listen 0.0.0.0:443 --origin https://agent.example.net \
+  --tls-cert /private/path/server.pem --tls-key /private/path/server.key \
+  --client-metadata CLIENT_UUID
+```
+
+This mode advertises `client_id_metadata_document_supported: true` so the host can identify itself by its published HTTPS URL without receiving a generated client ID or secret. Repeat `--client-metadata` for up to 32 existing signed hosts. Each must be active, have a supported metadata URL and use this gateway's resource. The [MCP trust-policy rules](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#trust-policies) permit allowlists. Gent's list contains exact identities selected by the owner; unknown clients are rejected without fetching their URLs. Existing preregistered clients continue to work.
+
+The flag authorizes the publisher's validated key set to replace that host's pinned keys. Before authorization or token exchange, Gent retrieves metadata and JWKS when its previous validation has expired. It checks the exact identity and existing callbacks, then applies keys through the revision-checked update/export transaction. Callback scope, grants and agent bindings stay fixed. The consent page shows both the client URL and selected callback. Owner approval, PKCE, signed assertions and any client-certificate requirement still apply.
+
+Successful validation can be reused for at most one minute. Shorter `max-age`, response age/date, `no-cache` and `no-store` reduce or disable reuse; ambiguous freshness headers require revalidation. Local key revisions invalidate reuse. Each host permits one in-flight refresh and at most two fetch attempts per second, with four simultaneous refreshes across the gateway. A failed or cancelled attempt imposes backoff until five seconds after it started. Busy or unavailable metadata returns `503` with `Retry-After`; expired validation never authorizes a new exchange. After revalidation, removed published callbacks block new exchanges. Failed fetches leave the last committed keys intact. Already issued access tokens keep their existing lifetime; revoke the host to terminate access immediately.
+
+Cached validation exists only in memory. After restart, the first request re-fetches metadata. Include the flag on each start to retain this behavior; without it, the stored keys remain manually pinned and CIMD discovery is absent. While enabled, a later fetch may replace manual key edits with the publisher's current set. Stop this mode before switching back to manual pinning. No idle polling or scheduled refresh runs. Actual ChatGPT/Claude requests, conversation binding and hosted attachment interfaces still need acceptance tests.
 
 ## Approve a connection
 
@@ -149,6 +168,7 @@ python3 scripts/prove_gateway_oauth.py --gent target/debug/gent --private-key-jw
 python3 scripts/prove_gateway_metadata.py --gent target/debug/gent \
   --metadata https://chatgpt.com/oauth/client.json \
   --redirect-uri https://chatgpt.com/connector_platform_oauth_redirect
+# Add --exercise-gateway for loopback CIMD authorization, denial and restart.
 # Opt-in installed clients; no model calls:
 python3 scripts/prove_gateway_clients.py --gent target/debug/gent
 # Opt-in OAuth model lifecycle; six synthetic turns:
@@ -161,9 +181,11 @@ python3 scripts/prove_gateway_hosts.py --gent target/debug/gent
 
 The tests cover approval/denial, PKCE, exact callback/client/audience checks, expiry, replay and concurrent redemption, stable bindings through refresh/reconnect, host revocation, bounded malformed inputs and real HTTP discovery. The CLI proof runs separate native gateway and daemon processes and checks approval, callback issuer/state, restart, refresh, replay revocation, reconnect identity and private logs.
 
-Signed-client tests also cover signature/key/algorithm substitution, exact claims, duplicate fields, replay capacity, concurrent assertion reuse, corrupted persistence, and combined mTLS/assertion requirements. Key-update tests cover concurrent conflicts, stale retries, simulated interruption at both export-write boundaries, modified/missing exports, retired-key rejection and preserved grants/agents. The TLS test verifies that key replacement retains the certificate requirement. The native proof generates disposable OpenSSL keys, exercises overlap and retirement while the gateway runs, deletes the JWKS sources and verifies identity after restart. All 39 gateway tests, strict Clippy, normal builds, both native OAuth modes and installed-client login pass on Linux and macOS. These checks make no signed hosted-provider acceptance claim.
+Signed-client tests also cover signature/key/algorithm substitution, exact claims, duplicate fields, replay capacity, concurrent assertion reuse, corrupted persistence, and combined mTLS/assertion requirements. Key-update tests cover concurrent conflicts, stale retries, simulated interruption at both export-write boundaries, modified/missing exports, retired-key rejection and preserved grants/agents. The TLS test verifies that key replacement retains the certificate requirement. The native proof generates disposable OpenSSL keys, exercises overlap and retirement while the gateway runs, deletes the JWKS sources and verifies identity after restart. All 44 gateway tests, strict Clippy, normal builds, both native OAuth modes and installed-client login pass on Linux and macOS. These checks make no signed hosted-provider acceptance claim.
 
 Four metadata tests cover URL/DNS restrictions, mixed public/private answers, exact identity and selected callbacks, supported authentication, same-origin keys and duplicate fields. A local TLS fixture checks trust/hostname validation, redirects, response types, compression, declared/chunked size limits, timeouts and refresh nonmutation. The public metadata CLI proof imports ChatGPT's published keys into a temporary cluster, repeats setup, refreshes unchanged keys and rejects a wrong revision without changing state. It passes on both OSes without starting a gateway, requesting provider consent or sending model traffic. This external-network proof is opt-in and is not part of automatic CI.
+
+Five CIMD tests cover cache headers, owner selection, revision invalidation, revocation, cancellation, concurrent requests, fetch limits, failed refresh and conflicting local updates. The HTTP proof uses a local HTTPS metadata fixture, completes signed code exchange, replaces published keys, rejects the retired key, and preserves an agent through refresh and gateway restart. Removing an approved callback makes new exchanges fail without modifying stored grants. The public CLI proof's `--exercise-gateway` mode starts only a temporary loopback listener, accepts ChatGPT's actual published identity, denies the synthetic connection and repeats after restart. It never follows the provider callback or makes a model call. Both proof modes pass on Linux and macOS.
 
 The installed-client proof, including both OAuth model lifecycle options, and the static-bearer model proof pass on Linux with Codex 0.167.2 / Claude Code 2.1.323 and on macOS with Codex 0.167.0 / Claude Code 2.1.311. These are tested versions, not minimum supported versions.
 

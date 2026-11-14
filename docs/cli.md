@@ -112,6 +112,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent gateway clients add NAME ... --oauth-metadata URL --oauth-resource URL --redirect-uri URL` | Import published signed-client metadata and public keys, retaining only owner-selected callbacks. |
 | `gent gateway clients keys show ID` / `keys set ID --jwks FILE --expect-revision N` | Inspect or replace a signed client's keys without changing its grants or agents. |
 | `gent gateway clients keys refresh ID --expect-revision N` | Explicitly re-fetch the client's metadata and keys, preserving its callback selection. |
+| `gent gateway run ... --client-metadata ID` | Enable CIMD discovery and bounded runtime metadata/key refresh for an existing signed host. Repeat for additional hosts. |
 | `gent gateway clients list` / `gent gateway clients revoke ID` | Inspect or revoke remote host grants. |
 | `gent gateway run` | Serve Streamable HTTP in the foreground with explicit `--home` or `--cluster`; non-loopback listeners require direct TLS. |
 | `gent gateway oauth requests` | Inspect pending OAuth client requests, callback URLs and decisions without displaying codes or tokens. |

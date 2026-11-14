@@ -9,6 +9,7 @@ use tokio::{
     net::TcpStream,
     task::JoinHandle,
 };
+mod cimd;
 mod mtls;
 mod oauth;
 
@@ -55,9 +56,34 @@ impl Running {
         host: String,
         tls: Option<TlsAcceptor>,
     ) -> Self {
+        let registry = Registry::open(home).unwrap();
+        let metadata = crate::gateway::metadata::runtime::Runtime::new(
+            registry.clone(),
+            format!("{origin}/mcp"),
+            &[],
+        )
+        .await
+        .unwrap();
+        Self::start_with_metadata(home, listener, origin, host, tls, metadata).await
+    }
+    async fn start_with_metadata(
+        home: &Path,
+        listener: TcpListener,
+        origin: String,
+        host: String,
+        tls: Option<TlsAcceptor>,
+        metadata: Arc<crate::gateway::metadata::runtime::Runtime>,
+    ) -> Self {
         let stop = CancellationToken::new();
         let registry = Registry::open(home).unwrap();
-        let app = router(home.into(), registry, host, origin.clone(), stop.clone());
+        let app = router(
+            home.into(),
+            registry,
+            host,
+            origin.clone(),
+            stop.clone(),
+            metadata,
+        );
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(serve(listener, app, tls, stop.clone()));
         Self {
@@ -555,6 +581,7 @@ async fn direct_tls_requires_valid_server_trust_and_plaintext_cannot_bind_public
     config::write_private(&cert, generated.cert.pem().as_bytes()).unwrap();
     config::write_private(&key, generated.signing_key.serialize_pem().as_bytes()).unwrap();
     let mut options = Run {
+        client_metadata: vec![],
         listen: address,
         origin: Some(origin_text.clone()),
         tls_cert: Some(cert.clone()),

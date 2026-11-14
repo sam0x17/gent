@@ -14,7 +14,7 @@ use tokio_rustls::{TlsAcceptor, rustls};
 const ID: &str = "https://metadata.example/client.json";
 const RESOURCE: &str = "https://node.example/mcp";
 const CALLBACK: &str = "https://host.example/callback";
-fn published() -> Value {
+pub(crate) fn published() -> Value {
     json!({"client_id":ID,"client_name":"Fixture","redirect_uris":[CALLBACK,"https://host.example/second"],
         "jwks_uri":"https://metadata.example/jwks.json","token_endpoint_auth_method":"private_key_jwt",
         "token_endpoint_auth_methods_supported":["none","private_key_jwt"],
@@ -177,15 +177,15 @@ fn metadata_checks_identity_selected_callbacks_methods_and_same_origin_keys() {
     );
 }
 
-struct Server {
+pub(crate) struct Server {
     address: SocketAddr,
     ca: reqwest::Certificate,
     replies: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
-    requests: Arc<Mutex<Vec<String>>>,
+    pub(crate) requests: Arc<Mutex<Vec<String>>>,
     task: JoinHandle<()>,
 }
 impl Server {
-    async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let generated =
             rcgen::generate_simple_self_signed(vec!["metadata.example".into()]).unwrap();
         let ca = reqwest::Certificate::from_der(generated.cert.der()).unwrap();
@@ -250,7 +250,7 @@ impl Server {
             .build()
             .unwrap()
     }
-    fn reply(&self, path: &str, body: &[u8]) {
+    pub(crate) fn reply(&self, path: &str, body: &[u8]) {
         let mut response=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).into_bytes();
         response.extend_from_slice(body);
         self.replies.lock().unwrap().insert(path.into(), response);
@@ -260,6 +260,21 @@ impl Server {
             let client = self.client(&url);
             async move { response(&client, &url).await }
         })
+        .await
+    }
+    pub(crate) async fn import_registration(
+        &self,
+        registration: Registration,
+    ) -> Result<(Policy, Duration)> {
+        import_fresh_using(
+            &registration.assertion.as_ref().unwrap().client_id,
+            &registration.resource,
+            &registration.redirect_uris,
+            |url| {
+                let client = self.client(&url);
+                async move { fetch_response(&client, &url).await }
+            },
+        )
         .await
     }
 }

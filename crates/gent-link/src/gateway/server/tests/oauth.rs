@@ -65,6 +65,7 @@ async fn oauth_discovery_consent_pkce_refresh_and_revocation_work_through_real_h
     assert_eq!(meta["authorization_response_iss_parameter_supported"], true);
     assert_eq!(meta["code_challenge_methods_supported"], json!(["S256"]));
     assert!(meta.get("registration_endpoint").is_none());
+    assert!(meta.get("client_id_metadata_document_supported").is_none());
     let verifier = config::secret();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(&verifier));
     let fields = [

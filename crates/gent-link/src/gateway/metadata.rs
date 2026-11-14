@@ -1,5 +1,5 @@
-//! Owner-initiated client metadata import. No incoming HTTP request can choose
-//! a fetch target. Each fetch pins validated DNS answers before TLS connection.
+//! Client metadata retrieval. Only owner-selected URLs can be fetched, and
+//! every fetch pins validated DNS answers before TLS connection.
 use super::{assertion::Policy, registry::oauth::Registration};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -12,9 +12,12 @@ use url::{Host, Url};
 
 const MAX_BYTES: usize = 64 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
+const CACHE_TTL: Duration = Duration::from_secs(60);
+
+pub(crate) mod runtime;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[derive(Deserialize)]
 struct Document {
@@ -120,7 +123,98 @@ fn client(url: &Url, addresses: &[SocketAddr]) -> reqwest::ClientBuilder {
         )
 }
 
-async fn response(client: &reqwest::Client, url: &Url) -> Result<Vec<u8>> {
+struct Fetched {
+    bytes: Vec<u8>,
+    ttl: Duration,
+}
+
+// Cap publisher freshness at one minute. Invalid or revalidation-required
+// directives disable reuse; failed requests never extend an existing cache.
+fn freshness(headers: &reqwest::header::HeaderMap) -> Duration {
+    let mut ttl = CACHE_TTL.as_secs();
+    let mut max_age_seen = false;
+    for value in headers.get_all("cache-control") {
+        let Ok(value) = value.to_str() else {
+            return Duration::ZERO;
+        };
+        for directive in value.split(',') {
+            let (name, argument) = directive
+                .trim()
+                .split_once('=')
+                .map_or((directive.trim(), None), |(n, v)| {
+                    (n.trim(), Some(v.trim()))
+                });
+            if ["no-store", "no-cache"]
+                .iter()
+                .any(|v| name.eq_ignore_ascii_case(v))
+            {
+                return Duration::ZERO;
+            }
+            if name.eq_ignore_ascii_case("max-age") {
+                if max_age_seen {
+                    return Duration::ZERO;
+                }
+                max_age_seen = true;
+                let Some(age) = argument.and_then(|v| {
+                    let value = if v.starts_with('"') {
+                        v.strip_prefix('"')?.strip_suffix('"')?
+                    } else {
+                        v
+                    };
+                    decimal(value)
+                }) else {
+                    return Duration::ZERO;
+                };
+                ttl = age;
+            }
+        }
+    }
+    let mut apparent_age = Duration::ZERO;
+    let mut dates = headers.get_all("date").iter();
+    if let Some(date) = dates.next() {
+        let Some(date) = date
+            .to_str()
+            .ok()
+            .and_then(|v| httpdate::parse_http_date(v).ok())
+        else {
+            return Duration::ZERO;
+        };
+        if dates.next().is_some() {
+            return Duration::ZERO;
+        }
+        apparent_age = std::time::SystemTime::now()
+            .duration_since(date)
+            .unwrap_or_default();
+    }
+    let mut ages = headers.get_all("age").iter();
+    if let Some(age) = ages.next() {
+        let Some(age) = age.to_str().ok().and_then(decimal) else {
+            return Duration::ZERO;
+        };
+        if ages.next().is_some() {
+            return Duration::ZERO;
+        }
+        apparent_age = apparent_age.max(Duration::from_secs(age));
+    }
+    // Without max-age, an Expires header may prohibit reuse; avoid interpreting
+    // remote wall clocks and conservatively revalidate such responses.
+    if !max_age_seen && headers.contains_key("expires") {
+        return Duration::ZERO;
+    }
+    Duration::from_secs(ttl)
+        .saturating_sub(apparent_age)
+        .min(CACHE_TTL)
+}
+
+fn decimal(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
+async fn fetch_response(client: &reqwest::Client, url: &Url) -> Result<Fetched> {
+    let started = std::time::Instant::now();
     let mut response = client
         .get(url.clone())
         .header("accept", "application/json, application/jwk-set+json")
@@ -144,6 +238,7 @@ async fn response(client: &reqwest::Client, url: &Url) -> Result<Vec<u8>> {
         !response.headers().contains_key("content-encoding"),
         "encoded metadata responses are unsupported"
     );
+    let ttl = freshness(response.headers());
     ensure!(
         response
             .content_length()
@@ -162,10 +257,18 @@ async fn response(client: &reqwest::Client, url: &Url) -> Result<Vec<u8>> {
         );
         bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes)
+    Ok(Fetched {
+        bytes,
+        ttl: ttl.saturating_sub(started.elapsed()),
+    })
 }
 
-async fn fetch(url: &Url) -> Result<Vec<u8>> {
+#[cfg(test)]
+async fn response(client: &reqwest::Client, url: &Url) -> Result<Vec<u8>> {
+    Ok(fetch_response(client, url).await?.bytes)
+}
+
+async fn fetch(url: &Url) -> Result<Fetched> {
     tokio::time::timeout(TIMEOUT, async {
         let addresses = tokio::net::lookup_host((url.host_str().unwrap(), 443))
             .await
@@ -173,7 +276,7 @@ async fn fetch(url: &Url) -> Result<Vec<u8>> {
             .take(33)
             .collect();
         let addresses = destinations(addresses)?;
-        response(&client(url, &addresses).build()?, url).await
+        fetch_response(&client(url, &addresses).build()?, url).await
     })
     .await
     .context("client metadata fetch timed out")?
@@ -254,7 +357,15 @@ fn document(bytes: &[u8], id: &Url, resource: &str, callbacks: &[String]) -> Res
 }
 
 pub(crate) async fn import(id: &str, resource: &str, callbacks: &[String]) -> Result<Policy> {
-    import_using(
+    Ok(import_fresh(id, resource, callbacks).await?.0)
+}
+
+async fn import_fresh(
+    id: &str,
+    resource: &str,
+    callbacks: &[String],
+) -> Result<(Policy, Duration)> {
+    import_fresh_using(
         id,
         resource,
         callbacks,
@@ -263,6 +374,26 @@ pub(crate) async fn import(id: &str, resource: &str, callbacks: &[String]) -> Re
     .await
 }
 
+async fn import_fresh_using<F, Fut>(
+    id: &str,
+    resource: &str,
+    callbacks: &[String],
+    fetcher: F,
+) -> Result<(Policy, Duration)>
+where
+    F: Fn(Url) -> Fut,
+    Fut: std::future::Future<Output = Result<Fetched>>,
+{
+    let started = std::time::Instant::now();
+    let id = endpoint(id)?;
+    let doc = fetcher(id.clone()).await?;
+    let keys = document(&doc.bytes, &id, resource, callbacks)?;
+    let keys = fetcher(keys).await?;
+    let ttl = doc.ttl.min(keys.ttl).saturating_sub(started.elapsed());
+    Ok((Policy::from_jwks(&keys.bytes, id.as_str())?, ttl))
+}
+
+#[cfg(test)]
 async fn import_using<F, Fut>(
     id: &str,
     resource: &str,

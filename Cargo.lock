@@ -1118,6 +1118,7 @@ dependencies = [
  "gent-protocol",
  "getrandom 0.4.3",
  "hmac 0.12.1",
+ "httpdate",
  "hyper",
  "hyper-util",
  "jsonc-parser",

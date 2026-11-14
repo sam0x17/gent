@@ -42,6 +42,7 @@ struct Boundary {
     registry: Registry,
     host: String,
     origin: String,
+    metadata: Arc<super::metadata::runtime::Runtime>,
 }
 
 fn one<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -220,6 +221,7 @@ fn router(
     host: String,
     origin: String,
     stop: CancellationToken,
+    metadata: Arc<super::metadata::runtime::Runtime>,
 ) -> Router {
     let config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
@@ -242,6 +244,7 @@ fn router(
                 registry,
                 host,
                 origin,
+                metadata,
             },
             guard,
         ))
@@ -306,7 +309,13 @@ pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
     let address = listener.local_addr()?;
     let (host, origin) = origin(&options, address)?;
     let stop = CancellationToken::new();
-    let app = router(home, registry, host, origin.clone(), stop.clone());
+    let metadata = super::metadata::runtime::Runtime::new(
+        registry.clone(),
+        format!("{origin}/mcp"),
+        &options.client_metadata,
+    )
+    .await?;
+    let app = router(home, registry, host, origin.clone(), stop.clone(), metadata);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     eprintln!("Gent gateway: {origin}/mcp (user-controlled endpoint, listening on {address})");
     let result = tokio::select! {

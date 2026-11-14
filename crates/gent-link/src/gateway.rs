@@ -129,6 +129,9 @@ pub struct Run {
     /// Private PEM key (mode 0600); never sent to Gent's relay.
     #[arg(long, requires = "tls_cert")]
     tls_key: Option<PathBuf>,
+    /// Enable CIMD and bounded metadata/key refresh for this existing signed client UUID. Repeat for more hosts.
+    #[arg(long)]
+    client_metadata: Vec<String>,
 }
 
 pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Option<Value>> {

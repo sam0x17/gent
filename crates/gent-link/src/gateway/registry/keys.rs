@@ -11,7 +11,58 @@ pub(super) struct Update {
     pub(super) pending_export: Option<String>,
 }
 
+pub(crate) struct MetadataSnapshot {
+    pub(crate) registration: oauth::Registration,
+    pub(crate) revision: u64,
+    pub(crate) pending: bool,
+}
+
 impl Registry {
+    pub(crate) async fn metadata_snapshot(
+        &self,
+        id: String,
+        resource: String,
+    ) -> Result<MetadataSnapshot> {
+        self.blocking(move |registry| {
+            let state = registry.read()?;
+            let now = auth::now()?;
+            let client = state.clients.get(&id).context("unknown metadata client")?;
+            ensure!(
+                now >= state.clock && !client.revoked && now < client.expires_at,
+                "inactive metadata client"
+            );
+            let registration = client
+                .oauth
+                .as_ref()
+                .filter(|r| r.resource == resource && r.assertion.is_some())
+                .context("metadata requires a signed client for this resource")?;
+            Ok(MetadataSnapshot {
+                registration: registration.clone(),
+                revision: client.key_update.as_ref().map_or(0, |u| u.revision),
+                pending: client
+                    .key_update
+                    .as_ref()
+                    .is_some_and(|u| u.pending_export.is_some()),
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn apply_metadata_keys(
+        &self,
+        id: String,
+        policy: Policy,
+        expected: u64,
+    ) -> Result<u64> {
+        self.blocking(move |registry| {
+            let result = registry.set_verified_signing_keys(&id, policy, expected)?;
+            result["key_revision"]
+                .as_u64()
+                .context("missing key revision")
+        })
+        .await
+    }
+
     pub(crate) fn signing_registration(&self, id: &str) -> Result<oauth::Registration> {
         let state = self.read()?;
         let client = state.clients.get(id).context("unknown gateway client ID")?;
