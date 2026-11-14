@@ -1,9 +1,294 @@
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gent_crypto::files::seal;
+use gent_protocol::{AgentOp, OwnerOp, Request, Response};
 use gent_protocol::{FilePart, Message};
 use rusqlite::{Connection, params};
 use uuid::Uuid;
+
+fn response(response: Response) -> Value {
+    match response {
+        Response::Ok(value) => value,
+        Response::Error(error) => panic!("{error}"),
+    }
+}
+
+struct Recovered {
+    fixture: Fixture,
+    agent: String,
+    import: String,
+}
+
+impl Recovered {
+    fn new(directory: &Path, source: &str) -> Self {
+        let fixture = Fixture::new();
+        let mut store = Store::open(&fixture.home).unwrap();
+        let agent = response(store.handle(Request::Agent {
+            credential: config::secret(),
+            action: AgentOp::Register {
+                name: "replacement".into(),
+                provider: "generic".into(),
+            },
+        }))["agent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let pin = format!(
+            "{:x}",
+            Sha256::digest(fs::read(directory.join("history.json")).unwrap())
+        );
+        let result = response(store.handle(Request::Owner {
+            credential: config::read_private(&fixture.home.join("owner.key")).unwrap(),
+            action: OwnerOp::HistoryImport {
+                directory: directory.to_str().unwrap().into(),
+                manifest_sha256: pin,
+                source_agent: source.into(),
+                target_agent: agent.clone(),
+                restore_revision: None,
+            },
+        }));
+        Self {
+            fixture,
+            agent,
+            import: result["import_id"].as_str().unwrap().into(),
+        }
+    }
+    fn mutate(&self, sql: &str) {
+        Connection::open(self.fixture.home.join("state.sqlite3"))
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap();
+    }
+    fn export(&self) -> Result<Value> {
+        self.fixture.create();
+        history::export_import(
+            &self.fixture.archive,
+            &self.fixture.key,
+            &self.fixture.output,
+            &self.import,
+        )
+    }
+    fn owner(&self, action: OwnerOp) {
+        let mut store = Store::open(&self.fixture.home).unwrap();
+        response(store.handle(Request::Owner {
+            credential: config::read_private(&self.fixture.home.join("owner.key")).unwrap(),
+            action,
+        }));
+    }
+}
+
+#[test]
+fn imported_history_survives_two_more_archives_with_original_provenance_and_bytes() {
+    let h = History::new();
+    h.export().unwrap();
+    let original: Value =
+        serde_json::from_slice(&fs::read(h.fixture.output.join("history.json")).unwrap()).unwrap();
+    let recovered = Recovered::new(&h.fixture.output, &h.message.sender);
+    // Both saved imports contain the same original message ID. Selecting one
+    // must retain its source scope without merging the other assignment.
+    {
+        let mut store = Store::open(&recovered.fixture.home).unwrap();
+        let another = response(store.handle(Request::Agent {
+            credential: config::secret(),
+            action: AgentOp::Register {
+                name: "other-recipient".into(),
+                provider: "generic".into(),
+            },
+        }))["agent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        response(store.handle(Request::Owner {
+            credential: config::read_private(&recovered.fixture.home.join("owner.key")).unwrap(),
+            action: OwnerOp::HistoryImport {
+                directory: h.fixture.output.to_str().unwrap().into(),
+                manifest_sha256: format!(
+                    "{:x}",
+                    Sha256::digest(fs::read(h.fixture.output.join("history.json")).unwrap())
+                ),
+                source_agent: h.message.recipient.clone(),
+                target_agent: another,
+                restore_revision: None,
+            },
+        }));
+    }
+    recovered.owner(OwnerOp::Revoke {
+        agent_id: recovered.agent.clone(),
+    });
+    fs::remove_file(&h.fixture.archive).unwrap();
+    fs::remove_file(&h.fixture.key).unwrap();
+    fs::remove_dir_all(&h.fixture.output).unwrap();
+    let before = fs::read(recovered.fixture.home.join("state.sqlite3")).unwrap();
+    let report = recovered.export().unwrap();
+    assert_eq!(report["messages"], 1);
+    assert_eq!(report["files"]["exported"], 2);
+    assert_eq!(
+        before,
+        fs::read(recovered.fixture.home.join("state.sqlite3")).unwrap()
+    );
+    let listed = history::list(&recovered.fixture.archive, &recovered.fixture.key).unwrap();
+    assert_eq!(listed["live_messages"], 0);
+    assert_eq!(listed["historical_imports"].as_array().unwrap().len(), 2);
+    let selected = listed["historical_imports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["import_id"] == recovered.import)
+        .unwrap();
+    assert_eq!(selected["target_revoked"], true);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(recovered.fixture.output.join("history.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["version"], 2);
+    assert_eq!(
+        manifest["lineage"][0]["archive"]["archive_id"],
+        original["archive_id"]
+    );
+    assert_eq!(
+        manifest["lineage"][0]["archive"]["database_sha256"],
+        original["database_sha256"]
+    );
+    assert_eq!(manifest["lineage"][0]["target_agent"], recovered.agent);
+    assert_eq!(manifest["lineage"][0]["target_revoked"], true);
+    assert_eq!(manifest["lineage"][0]["revision"], 1);
+    let next = Recovered::new(&recovered.fixture.output, &h.message.sender);
+    next.export().unwrap();
+    let next_manifest: Value =
+        serde_json::from_slice(&fs::read(next.fixture.output.join("history.json")).unwrap())
+            .unwrap();
+    assert_eq!(next_manifest["lineage"].as_array().unwrap().len(), 2);
+    assert_eq!(next_manifest["lineage"][0], manifest["lineage"][0]);
+    assert_eq!(
+        next_manifest["lineage"][1]["archive"]["archive_id"],
+        manifest["archive_id"]
+    );
+    for fixture in [&recovered.fixture, &next.fixture] {
+        let record: Value = serde_json::from_str(
+            fs::read_to_string(fixture.output.join("messages.jsonl"))
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(record["message"]["id"], h.message.id);
+        assert_eq!(record["message"]["acknowledged"], true);
+        assert_eq!(record["message"]["expires_at"], 20);
+        assert_eq!(
+            fs::read(
+                fixture
+                    .output
+                    .join(record["assets"][0]["path"].as_str().unwrap())
+            )
+            .unwrap(),
+            b"inline bytes"
+        );
+        assert_eq!(
+            fs::read(
+                fixture
+                    .output
+                    .join(record["assets"][1]["path"].as_str().unwrap())
+            )
+            .unwrap(),
+            h.bytes
+        );
+        for (name, bytes) in tree(&fixture.output) {
+            assert_eq!(
+                fs::metadata(fixture.output.join(name)).unwrap().mode() & 0o777,
+                0o600
+            );
+            assert!(
+                !bytes
+                    .windows(h.private_grant.len())
+                    .any(|b| b == h.private_grant)
+            );
+        }
+        assert!(Store::open(&fixture.output).is_err());
+    }
+}
+
+#[test]
+fn removed_imports_stay_receipts_and_missing_history_files_stay_missing() {
+    for state in ["missing", "incomplete", "removed"] {
+        let h = History::new();
+        match state {
+            "missing" => h.mutate(
+                "DELETE FROM file_chunks; DELETE FROM agent_files; DELETE FROM file_objects",
+            ),
+            "incomplete" => h.mutate(
+                "UPDATE file_objects SET complete=0; DELETE FROM file_chunks WHERE position=1",
+            ),
+            _ => (),
+        }
+        h.export().unwrap();
+        let recovered = Recovered::new(&h.fixture.output, &h.message.sender);
+        if state == "removed" {
+            recovered.owner(OwnerOp::HistoryRemove {
+                import_id: recovered.import.clone(),
+                expected_revision: 1,
+            });
+            assert!(recovered.export().is_err());
+            assert!(!recovered.fixture.output.exists());
+            let listed = history::list(&recovered.fixture.archive, &recovered.fixture.key).unwrap();
+            assert_eq!(listed["historical_imports"][0]["retired"], true);
+            assert_eq!(listed["historical_imports"][0]["revision"], 2);
+        } else {
+            let report = recovered.export().unwrap();
+            assert_eq!(report["files"][state], 1);
+            let again = Recovered::new(&recovered.fixture.output, &h.message.sender);
+            assert_eq!(again.export().unwrap()["files"][state], 1);
+        }
+    }
+}
+
+#[test]
+fn recovered_export_rejects_corruption_unsupported_storage_and_wrong_provenance() {
+    let h = History::new();
+    h.export().unwrap();
+    for sql in [
+        "UPDATE recovered_chunks SET bytes=zeroblob(length(bytes)) WHERE slot=1 AND position=0",
+        "DELETE FROM recovered_chunks WHERE slot=1 AND position=1",
+        "UPDATE recovered_chunks SET digest=printf('%.*c',1048576,'x')",
+        "UPDATE recovered_files SET descriptor=json_set(descriptor,'$.name','another.bin') WHERE slot=1",
+        "UPDATE recovered_sources SET summary=json_set(summary,'$.source_agent.id','11111111-1111-4111-8111-111111111111')",
+        "UPDATE recovered_sources SET bytes=bytes+1",
+        "UPDATE recovered_messages SET payload=json_set(payload,'$.message.sender','11111111-1111-4111-8111-111111111111')",
+        "UPDATE recovered_messages SET ordinal=2",
+        "UPDATE recovered_messages SET payload=json_set(payload,'$.secret','must-not-echo')",
+        "UPDATE recovered_schema SET version=2",
+        "DROP TABLE recovered_chunks",
+        "ALTER TABLE recovered_files RENAME TO saved_recovered_files; CREATE VIEW recovered_files AS SELECT * FROM saved_recovered_files",
+    ] {
+        let recovered = Recovered::new(&h.fixture.output, &h.message.sender);
+        recovered.mutate(sql);
+        let error = recovered.export().unwrap_err().to_string();
+        assert!(!error.contains("must-not-echo"));
+        assert!(!recovered.fixture.output.exists(), "{sql}");
+        assert!(
+            !fs::read_dir(recovered.fixture._directory.path())
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gent-history-"))
+        );
+    }
+}
+
+#[test]
+fn history_listing_accepts_archives_before_recovered_storage_and_authenticates_all_bytes() {
+    let h = History::new();
+    h.mutate("DROP TABLE recovered_chunks; DROP TABLE recovered_files; DROP TABLE recovered_messages; DROP TABLE recovered_sources; DROP TABLE recovered_schema;");
+    h.fixture.create();
+    assert_eq!(
+        history::list(&h.fixture.archive, &h.fixture.key).unwrap()["historical_imports"],
+        json!([])
+    );
+    let mut bytes = fs::read(&h.fixture.archive).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    fs::write(&h.fixture.archive, bytes).unwrap();
+    assert!(history::list(&h.fixture.archive, &h.fixture.key).is_err());
+}
 
 struct History {
     fixture: Fixture,

@@ -7,6 +7,7 @@ const MAX_SOURCES: u64 = 256;
 const MAX_MESSAGES: u64 = 8192;
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PAGE_BYTES: usize = 1024 * 1024;
+const MAX_METADATA_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_REVISION: u64 = (1 << 53) - 1;
 const UNAVAILABLE: &str = "historical import, message or file unavailable";
 
@@ -18,9 +19,15 @@ pub(super) fn status(db: &Connection) -> Result<Value> {
     )?;
     let messages: u64 =
         db.query_row("SELECT COUNT(*) FROM recovered_messages", [], |r| r.get(0))?;
+    let metadata: u64 = db.query_row(
+        "SELECT COALESCE(SUM(length(CAST(summary AS BLOB))),0) FROM recovered_sources",
+        [],
+        |r| r.get(0),
+    )?;
     Ok(
         json!({"imports":sources,"retired":retired,"bytes":bytes,"messages":messages,
-        "max_imports":MAX_SOURCES,"max_bytes":MAX_BYTES,"max_messages":MAX_MESSAGES}),
+        "max_imports":MAX_SOURCES,"max_bytes":MAX_BYTES,"max_messages":MAX_MESSAGES,
+        "metadata_bytes":metadata,"max_metadata_bytes":MAX_METADATA_BYTES}),
     )
 }
 

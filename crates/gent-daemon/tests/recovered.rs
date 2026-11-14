@@ -490,3 +490,65 @@ fn receipt_and_byte_quotas_and_changed_chunks_fail_closed() {
         .unwrap();
     assert!(Store::open(&f.home).is_err());
 }
+
+#[test]
+fn lineage_is_preserved_and_invalid_or_excessive_provenance_rolls_back() {
+    for case in 0..7 {
+        let mut f = Fixture::new();
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(f.directory.join("history.json")).unwrap()).unwrap();
+        let hop = json!({"archive":{"archive_id":Uuid::new_v4(),"cluster_id":Uuid::new_v4(),"node_id":Uuid::new_v4(),"captured_at":10,"database_sha256":"22".repeat(32)},
+            "import_id":Uuid::new_v4(),"manifest_sha256":"33".repeat(32),"source_agent":f.source,"target_agent":Uuid::new_v4(),"target_revoked":false,"imported_at":11,"revision":1});
+        manifest["version"] = json!(2);
+        manifest["lineage"] = json!([hop.clone()]);
+        match case {
+            0 => (),
+            1 => manifest["lineage"][0]["source_agent"] = json!(Uuid::new_v4()),
+            2 => manifest["lineage"] = json!(vec![hop; 65]),
+            3 => manifest["lineage"][0]["revision"] = json!(0),
+            4 => manifest["version"] = json!(1),
+            5 => manifest["lineage"][0]["archive"]["database_sha256"] = json!("untrusted"),
+            6 => manifest["lineage"][0]["secret"] = json!("must-not-echo"),
+            _ => unreachable!(),
+        }
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        config::write_private(&f.directory.join("history.json"), &bytes).unwrap();
+        f.pin = sha(&bytes);
+        let before = f.counts();
+        if case == 0 {
+            assert_eq!(ok(f.import(None))["origin"]["lineage"], manifest["lineage"]);
+            f.store = Store::open(&f.home).unwrap();
+            assert_eq!(
+                ok(f.agent(0, AgentOp::HistoryImports))["historical_imports"][0]["origin"]["lineage"],
+                manifest["lineage"]
+            );
+        } else {
+            assert!(!error(f.import(None)).contains("must-not-echo"));
+            assert_eq!(f.rows(), (0, 0, 0));
+        }
+        assert_eq!(f.counts(), before);
+    }
+}
+
+#[test]
+fn aggregate_provenance_quota_preserves_readable_import_lists() {
+    let mut f = Fixture::new();
+    let db = Connection::open(f.home.join("state.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO recovered_sources VALUES(?1,?2,?3,?4,?5,2,1,0)",
+        params![
+            Uuid::new_v4().to_string(),
+            f.agents[0],
+            f.source,
+            f.pin,
+            "x".repeat(2 * 1024 * 1024)
+        ],
+    )
+    .unwrap();
+    assert!(error(f.import(None)).contains("metadata quota"));
+    assert_eq!(f.rows(), (1, 0, 0));
+    let status = ok(f.owner(OwnerOp::HistoryStatus));
+    assert_eq!(status["recovered"]["metadata_bytes"], 2 * 1024 * 1024);
+    db.execute("DELETE FROM recovered_sources", []).unwrap();
+    assert_eq!(ok(f.import(None))["messages"], 23);
+}

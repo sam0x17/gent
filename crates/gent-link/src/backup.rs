@@ -58,8 +58,14 @@ pub enum Command {
         archive: PathBuf,
         #[arg(long)]
         identity: PathBuf,
+        #[arg(long, required_unless_present = "list")]
+        output: Option<PathBuf>,
+        /// List saved imports and their recipients instead of exporting content.
+        #[arg(long, conflicts_with_all = ["output", "from_import"])]
+        list: bool,
+        /// Export one previously imported history set from this archive.
         #[arg(long)]
-        output: PathBuf,
+        from_import: Option<String>,
     },
 }
 
@@ -121,18 +127,38 @@ pub fn execute(command: Command, home: Option<&Path>, context: Option<&str>) -> 
             archive,
             identity,
             output,
+            list,
+            from_import,
         } => {
             ensure!(context.is_none(), "--cluster applies only to backup create");
-            history::export(&archive, &identity, &output)
+            if list {
+                history::list(&archive, &identity)
+            } else {
+                let output = output.context("history export requires --output")?;
+                if let Some(import) = from_import {
+                    history::export_import(&archive, &identity, &output, &import)
+                } else {
+                    history::export(&archive, &identity, &output)
+                }
+            }
         }
     }
+}
+
+#[derive(clap::Args)]
+#[group(required = true, multiple = false)]
+pub struct HistorySelection {
+    #[arg(long)]
+    pub from_agent: Option<String>,
+    #[arg(long)]
+    pub from_import: Option<String>,
 }
 
 pub async fn import_history(
     home: &Path,
     archive: &Path,
     identity: &Path,
-    source_agent: String,
+    selection: HistorySelection,
     target_agent: String,
     restore_revision: Option<u64>,
 ) -> Result<Value> {
@@ -142,7 +168,20 @@ pub async fn import_history(
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir()?;
     let directory = scratch.path().join("history");
-    history::export(archive, identity, &directory)?;
+    let source_agent = match (selection.from_agent, selection.from_import) {
+        (Some(agent), None) => {
+            history::export(archive, identity, &directory)?;
+            agent
+        }
+        (None, Some(import)) => {
+            let report = history::export_import(archive, identity, &directory, &import)?;
+            report["source_agent"]
+                .as_str()
+                .context("missing historical source agent")?
+                .to_string()
+        }
+        _ => anyhow::bail!("select exactly one of --from-agent or --from-import"),
+    };
     let directory = fs::canonicalize(directory)?;
     let manifest_sha256 = format!(
         "{:x}",

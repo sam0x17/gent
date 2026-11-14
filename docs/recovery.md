@@ -16,6 +16,7 @@ gent backup verify ~/gent-backups/node.age --identity ~/gent-recovery.key
 gent backup inspect ~/gent-backups/node.age --identity ~/gent-recovery.key --files
 gent backup extract ~/gent-backups/node.age --identity ~/gent-recovery.key --output ~/gent-recovered
 gent backup history ~/gent-backups/node.age --identity ~/gent-recovery.key --output ~/gent-history
+gent backup history ~/gent-backups/node.age --identity ~/gent-recovery.key --list
 ```
 
 Close MCP connections using bindings inside the selected node directory before creating an archive. Busy locks or database readers make creation fail without publishing an archive. Gent does not stop or restart services itself. `create` honors the selected cluster and `--cluster`; all other backup commands work without initialized node state and reject `--cluster`. All commands support `--json`.
@@ -114,9 +115,37 @@ gent history import ~/gent-backups/node.age --identity ~/gent-recovery.key \
 
 That restoration advances the revision to 3. Exact removal/restoration retries are safe; stale revisions are refused. Recreating an archive produces a different import identity, so overlapping archives can contain the same historical messages. Use source cluster/archive provenance and original message IDs when comparing them.
 
-Each node permits 256 import receipts, including retired ones, 8,192 imported messages and 256 MiB of imported record/file content. `gent history status` reports usage. Receipt compaction is not implemented. Ordinary history expiry/cleanup leaves these explicit assignments in place until the owner removes them.
+Each node permits 256 import receipts, including retired ones, 8,192 imported messages, 256 MiB of imported record/file content and 2 MiB of provenance metadata. `gent history status` reports usage. Receipt compaction is not implemented. Ordinary history expiry/cleanup leaves these explicit assignments in place until the owner removes them.
 
-**Keep the original source archives and recovery keys.** A full backup includes the imported SQLite tables, but `gent backup history` currently exports only the original live message tables. It cannot re-export previously imported history from a later backup. Restoring a raw database to recover those rows is unsafe and remains blocked by the activation guard.
+## Recover an import from a later backup
+
+A later full backup contains previously imported messages and their recovered file bytes. List those saved assignments without starting a daemon or creating a live node:
+
+```sh
+gent backup history ~/gent-backups/later.age --identity ~/later-recovery.key --list
+```
+
+The list reports the archive's live message count and saved import IDs, recipients, revisions, retirement/revocation status, byte counts and provenance. It authenticates the entire archive and reads a guarded temporary database; it does not verify each recovered file's content until that import is selected for export. The default `backup history --output` continues to export only the original live message tables. Choose a saved import explicitly:
+
+```sh
+gent backup history ~/gent-backups/later.age --identity ~/later-recovery.key \
+  --from-import SAVED_IMPORT_UUID --output ~/gent-recovered-history
+```
+
+This produces a version-2 history export with the same JSONL/file layout and an additional `lineage` array. Each entry preserves the preceding archive/cluster/node IDs, capture time, database digest, import ID, source manifest digest, original agent, assigned recipient, recipient revocation flag, import time and access revision. The top-level archive fields identify the newly read backup; the first lineage entry identifies the original source. Up to 64 assignments are retained. Exceeding that limit fails without dropping provenance. Version-1 exports remain supported; older Gent builds reject version 2.
+
+Re-export verifies the selected receipt's identity, message/participant bindings, file descriptors, chunk and whole-file hashes, stored byte counts and supported schema. Inline images retain their original bytes, and missing/incomplete attachments retain their status. It does not export unrelated assignments or combine overlapping histories, even when their original message IDs match. Removed assignments remain receipts and cannot supply content. A saved recipient revocation flag is reported as historical state; an owner may deliberately assign the retained content to a different current agent.
+
+To grant that selected history directly to a current local agent, use the later archive and its key:
+
+```sh
+gent history import ~/gent-backups/later.age --identity ~/later-recovery.key \
+  --from-import SAVED_IMPORT_UUID --agent CURRENT_AGENT_UUID
+```
+
+Choose exactly one of `--from-agent` or `--from-import`. The latter uses the selected import's original agent scope, and does not expand it to other archived conversations. The new assignment gets its own ID and access revision; its provenance includes the earlier assignment. Existing duplicate/removal/restoration rules apply to that new assignment. The old recipient, its credentials and its permissions are never reactivated.
+
+Once captured in a later backup, imported content can be recovered using that backup and its key alone. Earlier archives remain necessary for records or files that were never included in the import. A snapshot taken before removal still contains its earlier history; neither a later removal nor agent revocation can retract old archives. Restoring a raw database as live node state remains unsafe and blocked by the activation guard.
 
 ## Replace a lost joined node
 
@@ -159,7 +188,7 @@ Gent enrollment uses the invitation's encrypted Noise mailbox; SSH is unnecessar
 
 ## Remaining recovery work
 
-Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, a new cluster can receive selected archived history through the assignment commands above, without recovering the old cluster's authority. Agent bindings, peer permissions, pending-work reconciliation and recovery of previously imported history remain unfinished. Multi-user recovery authority remains future work.
+Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, a new cluster can receive selected archived history through the assignment commands above, without recovering the old cluster's authority. Agent bindings, peer permissions and pending-work reconciliation remain unfinished. Multi-user recovery authority remains future work.
 
 ## Validation
 
@@ -173,12 +202,14 @@ python3 scripts/prove_recovery_guard.py --gent target/debug/gent
 python3 scripts/prove_backup.py --gent target/debug/gent
 ```
 
-History-assignment tests cover recipient isolation, pagination, exact file bytes, restart persistence, removal/restoration revisions, revocation, transaction rollback, quotas and changed content. The native CLI/MCP proof creates an encrypted archive, imports selected history into an independent fresh cluster, reads the original PNG and 2 MiB file, and checks restart, removal/restoration and unchanged live identity/inbox state:
+History-assignment tests cover recipient isolation, pagination, exact file bytes, restart persistence, removal/restoration revisions, revocation, transaction rollback, quotas and changed content. Re-export tests cover successive archives, overlapping assignments, provenance, revoked recipients, removed imports, missing/incomplete files, schema changes and corrupt bytes. The native CLI/MCP proof creates an encrypted archive, imports selected history into an independent fresh cluster, reads the original PNG and 2 MiB file, and checks restart, removal/restoration and unchanged live identity/inbox state. It repeats recovery through two later encrypted backups with new keys, deleting the previous archive/key before each recovery, then verifies that a post-removal backup cannot restore the retired import:
 
 ```sh
 cargo test -p gent-daemon --test recovered
 python3 scripts/prove_history_import.py --gent target/debug/gent
 ```
+
+Its optional `--peer user@peer-host --remote-gent /absolute/path/to/gent` mode also exports both later archives on the peer and compares every resulting file byte for byte. It transfers only disposable proof archives/keys over SSH and removes the peer directory afterward.
 
 Replacement tests cover lost replies at every pairing step, owner/competing-target refusal, atomic rollback, durable key pins, interrupted publication, schema migration, invitation scope and retries after later revocation. The optional physical-machine proof adds a replacement to the existing SSH workflow:
 

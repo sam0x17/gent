@@ -117,7 +117,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<FilesCommand>,
     },
-    /// Inspect or prune local Gent message and agent retry history.
+    /// Inspect retained messages, recover archived history, or clean expired records.
     History {
         #[command(subcommand)]
         command: Option<HistoryCommand>,
@@ -173,8 +173,8 @@ enum HistoryCommand {
         archive: PathBuf,
         #[arg(long)]
         identity: PathBuf,
-        #[arg(long)]
-        from_agent: String,
+        #[command(flatten)]
+        selection: backup::HistorySelection,
         #[arg(long)]
         agent: String,
         /// Explicitly restore a removed import at its last observed revision.
@@ -692,7 +692,7 @@ async fn execute(cli: Cli) -> Result<()> {
             HistoryCommand::Import {
                 archive,
                 identity,
-                from_agent,
+                selection,
                 agent,
                 restore_revision,
             } => {
@@ -700,7 +700,7 @@ async fn execute(cli: Cli) -> Result<()> {
                     &home,
                     &archive,
                     &identity,
-                    from_agent,
+                    selection,
                     agent,
                     restore_revision,
                 )

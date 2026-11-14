@@ -8,6 +8,8 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import tempfile
 import time
@@ -18,6 +20,8 @@ from smoke_mcp import Client, PNG
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--gent', type=Path, required=True)
+    parser.add_argument('--peer', help='Optional SSH host that independently exports each later archive')
+    parser.add_argument('--remote-gent', default='/tmp/gent-proof.9w8yGG/target/debug/gent')
     args = parser.parse_args()
     binary = str(args.gent.resolve())
     with tempfile.TemporaryDirectory(prefix='gent-recovered-', dir='/tmp') as directory:
@@ -69,6 +73,24 @@ def main():
         def close(client):
             client.close()
             clients.remove(client)
+
+        def compare_peer(archive, key, import_id, local, generation):
+            def remote(*command):
+                return subprocess.check_output(['ssh', '-o', 'BatchMode=yes', args.peer, shlex.join(map(str, command))], text=True, timeout=90)
+            directory = remote('mktemp', '-d', '/tmp/gent-history-peer.XXXXXXXX').strip()
+            assert re.fullmatch(r'/tmp/gent-history-peer\.[A-Za-z0-9]{8}', directory), directory
+            try:
+                subprocess.run(['rsync', '-a', '--', str(archive), str(key), f'{args.peer}:{directory}/'], check=True, timeout=90)
+                remote(args.remote_gent, '--json', 'backup', 'history', f'{directory}/{archive.name}',
+                       '--identity', f'{directory}/{key.name}', '--from-import', import_id, '--output', f'{directory}/history')
+                copied = root / f'peer-{generation}'
+                copied.mkdir(mode=0o700)
+                subprocess.run(['rsync', '-a', '--', f'{args.peer}:{directory}/history/', str(copied) + '/'], check=True, timeout=90)
+                def tree(path):
+                    return {str(p.relative_to(path)): p.read_bytes() for p in path.rglob('*') if p.is_file()}
+                assert tree(local) == tree(copied)
+            finally:
+                remote('rm', '-rf', '--', directory)
 
         try:
             cli(old, 'cluster', 'new', 'old-history', '--local')
@@ -159,8 +181,80 @@ def main():
             status = cli(fresh, 'history', 'status')
             assert status['messages'] == 0 and status['recovered']['imports'] == 1
             print('PASS: restart persistence, safe duplicate import, immediate removal, explicit restoration, stale-revision refusal and unchanged current keys', flush=True)
+
+            # Each generation uses a new archive key. Remove earlier archive/key
+            # material before importing, so later recovery must be self-contained.
+            previous = []
+            for generation in (1, 2):
+                close(target)
+                stop(process)
+                later_key = root / f'generation-{generation}.key'
+                later_archive = root / f'generation-{generation}.age'
+                cli(fresh, 'backup', 'keygen', '--output', later_key)
+                cli(fresh, 'backup', 'create', later_archive, '--identity', later_key)
+                archive.unlink()
+                key.unlink()
+                archive, key = later_archive, later_key
+                listing = cli(fresh, 'backup', 'history', archive, '--identity', key, '--list')
+                assert listing['live_messages'] == 0
+                receipts = listing['historical_imports']
+                assert len(receipts) == 1 and receipts[0]['import_id'] == import_id and not receipts[0]['retired']
+                offline = root / f'generation-{generation}-history'
+                cli(fresh, 'backup', 'history', archive, '--identity', key, '--from-import', import_id, '--output', offline)
+                manifest = json.loads((offline / 'history.json').read_text())
+                assert manifest['version'] == 2 and len(manifest['lineage']) == generation
+                assert manifest['lineage'][:-1] == previous
+                assert manifest['lineage'][-1]['import_id'] == import_id
+                assert manifest['lineage'][-1]['target_agent'] == target_id
+                assert manifest['lineage'][0]['revision'] == 3
+                previous = manifest['lineage']
+                record = json.loads((offline / 'messages.jsonl').read_text())
+                assert record['message']['id'] == sent['message_id']
+                for asset in record['assets']:
+                    assert (offline / asset['path']).read_bytes() == expected[asset.get('file', asset)['name']]
+                if args.peer:
+                    compare_peer(archive, key, import_id, offline, generation)
+                fresh = root / f'replacement-{generation}'
+                cli(fresh, 'cluster', 'new', f'generation-{generation}', '--local')
+                process = start(fresh)
+                target, target_id = connect(fresh, 'replacement')
+                replacement_key = (fresh / 'identity.key').read_bytes()
+                command = ['history', 'import', archive, '--identity', key, '--from-import', import_id, '--agent', target_id]
+                cli(fresh, *command, '--from-agent', source_id, error=True)
+                result = cli(fresh, *command)
+                import_id = result['import_id']
+                assert result['origin']['lineage'] == previous and result['origin']['source_agent']['id'] == source_id
+                assert cli(fresh, *command)['duplicate']
+                assert target.call('gent_history_messages', {'import_id': import_id})[0]['messages'] == page['messages']
+                assert target.call('gent_inbox')[0] == [] and target.call('gent_agents')[0] == []
+                for file in page['messages'][0]['files']:
+                    recovered = bytearray()
+                    chunk = 0
+                    base = {'import_id': import_id, 'message_id': sent['message_id'], 'file_index': file['file_index']}
+                    while chunk is not None:
+                        part = target.call('gent_history_file_read', dict(base, chunk_index=chunk))[0]
+                        recovered.extend(base64.b64decode(part['data_base64']))
+                        chunk = part['next_chunk_index']
+                    assert bytes(recovered) == expected[file['name']]
+                    if file['media_type'] == 'image/png':
+                        _, content = target.call('gent_history_file_view', base)
+                        assert [base64.b64decode(block['data']) for block in content['content'] if block['type'] == 'image'] == [expected['pixel.png']]
+                assert (fresh / 'identity.key').read_bytes() == replacement_key
+            cli(fresh, 'history', 'remove', import_id, '--expect-revision', '1')
+            close(target)
+            stop(process)
+            retired = root / 'retired.age'
+            cli(fresh, 'backup', 'create', retired, '--identity', key)
+            listing = cli(fresh, 'backup', 'history', retired, '--identity', key, '--list')
+            assert listing['historical_imports'][0]['retired'] and listing['historical_imports'][0]['revision'] == 2
+            cli(fresh, 'backup', 'history', retired, '--identity', key, '--from-import', import_id,
+                '--output', root / 'must-not-restore', error=True)
+            assert not (root / 'must-not-restore').exists()
+            print('PASS: two later encrypted backups recover identical history/files without original archives or keys, preserve full lineage and refuse removed imports', flush=True)
+            if args.peer:
+                print('PASS: SSH peer independently exports byte-identical provenance, messages and files from both later archives', flush=True)
             print(json.dumps({'status': 'passed', 'proof': 'history-import', 'source_agent': source_id,
-                              'target_agent': target_id, 'native_file_bytes': len(payload)}), flush=True)
+                              'target_agent': target_id, 'native_file_bytes': len(payload), 'later_generations': 2, 'peer': args.peer}), flush=True)
         finally:
             for client in list(clients):
                 close(client)

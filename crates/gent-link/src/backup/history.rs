@@ -19,11 +19,41 @@ use zeroize::Zeroizing;
 
 const MAX_RECORDS: u64 = 65_536;
 const MAX_OUTPUT_BYTES: u64 = 1024 * 1024 * 1024;
+mod recovered;
 
 pub(super) fn export(archive: &Path, identity: &Path, output: &Path) -> Result<Value> {
+    export_selected(archive, identity, output, None)
+}
+
+pub(super) fn export_import(
+    archive: &Path,
+    identity: &Path,
+    output: &Path,
+    import: &str,
+) -> Result<Value> {
+    id(import)?;
+    export_selected(archive, identity, output, Some(import))
+}
+
+pub(super) fn list(archive: &Path, identity: &Path) -> Result<Value> {
+    let (source, manifest) = source(archive, identity, &std::env::temp_dir())?;
+    let db = database(&source.path().join("state.sqlite3"), &manifest)?;
+    let imports = recovered::inventory(&db, &manifest)?;
+    let live: u64 = db.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
+    drop(db);
+    source.close()?;
+    Ok(
+        json!({"archive_id":manifest.archive_id,"live_messages":live,"historical_imports":imports,
+        "scope":"archived receipts; content is verified when selected for export; no current authority"}),
+    )
+}
+
+fn source(
+    archive: &Path,
+    identity: &Path,
+    parent: &Path,
+) -> Result<(tempfile::TempDir, format::Manifest)> {
     let key = read_key(identity)?;
-    let output = destination(output)?;
-    let parent = output.parent().context("missing history output parent")?;
     let source = tempfile::Builder::new()
         .prefix(".gent-history-source-")
         .permissions(fs::Permissions::from_mode(0o700))
@@ -40,6 +70,18 @@ pub(super) fn export(archive: &Path, identity: &Path, output: &Path) -> Result<V
         )),
         "archived database has journal sidecars"
     );
+    Ok((source, manifest))
+}
+
+fn export_selected(
+    archive: &Path,
+    identity: &Path,
+    output: &Path,
+    selected: Option<&str>,
+) -> Result<Value> {
+    let output = destination(output)?;
+    let parent = output.parent().context("missing history output parent")?;
+    let (source, manifest) = source(archive, identity, parent)?;
     let staging = tempfile::Builder::new()
         .prefix(".gent-history-export-")
         .permissions(fs::Permissions::from_mode(0o700))
@@ -49,11 +91,16 @@ pub(super) fn export(archive: &Path, identity: &Path, output: &Path) -> Result<V
         b"{\"version\":1,\"state\":\"historical_export\"}\n",
     )?;
     config::private_dir(&staging.path().join("files"))?;
-    let report = export_database(
-        &source.path().join("state.sqlite3"),
-        &manifest,
-        staging.path(),
-    )?;
+    let report = if let Some(import) = selected {
+        let db = database(&source.path().join("state.sqlite3"), &manifest)?;
+        recovered::export(&db, &manifest, staging.path(), import)?
+    } else {
+        export_database(
+            &source.path().join("state.sqlite3"),
+            &manifest,
+            staging.path(),
+        )?
+    };
     config::write_private(
         &staging.path().join("history.json"),
         &serde_json::to_vec_pretty(&report)?,
@@ -65,12 +112,15 @@ pub(super) fn export(archive: &Path, identity: &Path, output: &Path) -> Result<V
     File::open(staging.path())?.sync_all()?;
     publish_directory(staging.path(), &output)?;
     File::open(parent)?.sync_all()?;
-    Ok(
-        json!({"state":"exported_history", "archive_id":manifest.archive_id,
+    let mut result = json!({"state":"exported_history", "archive_id":manifest.archive_id,
         "output":output, "agents":report["agents"]["records"],
         "messages":report["messages"]["records"], "files":report["files"],
-        "activation":"unsupported", "scope":"offline Gent history; no provider conversation history or live authority"}),
-    )
+        "activation":"unsupported", "scope":"offline Gent history; no provider conversation history or live authority"});
+    if let Some(last) = report["lineage"].as_array().and_then(|a| a.last()) {
+        result["source_agent"] = last["source_agent"].clone();
+        result["from_import"] = last["import_id"].clone();
+    }
+    Ok(result)
 }
 
 fn table(db: &Connection, name: &str) -> Result<()> {
@@ -109,7 +159,7 @@ fn descriptor(file: &FileDescriptor) -> Result<()> {
     Ok(())
 }
 
-fn export_database(path: &Path, manifest: &format::Manifest, output: &Path) -> Result<Value> {
+fn database(path: &Path, manifest: &format::Manifest) -> Result<Connection> {
     let mut uri = url::Url::from_file_path(path)
         .map_err(|_| anyhow::anyhow!("invalid archive database path"))?;
     uri.set_query(Some("mode=ro&immutable=1"));
@@ -139,6 +189,11 @@ fn export_database(path: &Path, manifest: &format::Manifest, output: &Path) -> R
             "archived database identity differs from manifest"
         );
     }
+    Ok(db)
+}
+
+fn export_database(path: &Path, manifest: &format::Manifest, output: &Path) -> Result<Value> {
+    let db = database(path, manifest)?;
     for name in ["agents", "messages"] {
         let count: u64 = db.query_row(&format!("SELECT COUNT(*) FROM {name}"), [], |r| r.get(0))?;
         ensure!(

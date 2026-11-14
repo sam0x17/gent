@@ -1,5 +1,6 @@
 use super::*;
 use anyhow::bail;
+use gent_protocol::history::{Assignment, valid_lineage};
 use rustix::fs::{Mode, OFlags, open, openat};
 use serde::Deserialize;
 use std::{
@@ -47,6 +48,8 @@ struct Manifest {
     scope: String,
     provenance: String,
     activation: String,
+    #[serde(default)]
+    lineage: Vec<Assignment>,
 }
 
 #[derive(Deserialize)]
@@ -104,7 +107,8 @@ fn digest(value: &str) -> Result<()> {
 impl Manifest {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 1
+            ((self.version == 1 && self.lineage.is_empty())
+                || (self.version == 2 && !self.lineage.is_empty()))
                 && self.kind == "gent_offline_history"
                 && self.activation == "unsupported",
             "unsupported history export"
@@ -325,6 +329,10 @@ impl StoreSession<'_> {
         let manifest: Manifest = serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("invalid history manifest"))?;
         manifest.validate()?;
+        ensure!(
+            valid_lineage(&manifest.lineage, source),
+            "invalid historical provenance lineage"
+        );
         let files: File = openat(
             &root,
             "files",
@@ -348,19 +356,31 @@ impl StoreSession<'_> {
         let original = agents
             .get(source)
             .context("archived agent is absent from this history")?;
-        let summary = json!({"archive_id":manifest.archive_id,"cluster_id":manifest.cluster_id,"node_id":manifest.node_id,
+        let mut summary = json!({"archive_id":manifest.archive_id,"cluster_id":manifest.cluster_id,"node_id":manifest.node_id,
             "captured_at":manifest.captured_at,"database_sha256":manifest.database_sha256,
             "source_agent":original,"target_agent":target,"imported_at":self.timestamp,
             "provenance":"owner-supplied archive history; historical labels, not current identities or authority"});
+        if !manifest.lineage.is_empty() {
+            summary["lineage"] = serde_json::to_value(&manifest.lineage)?;
+        }
+        let encoded_summary = summary.to_string();
+        let metadata: u64 = self.db.query_row(
+            "SELECT COALESCE(SUM(length(CAST(summary AS BLOB))),0) FROM recovered_sources WHERE id<>?1",
+            [&id], |r| r.get(0))?;
+        ensure!(
+            encoded_summary.len() <= gent_protocol::history::MAX_METADATA_BYTES
+                && metadata.saturating_add(encoded_summary.len() as u64) <= MAX_METADATA_BYTES,
+            "historical provenance metadata quota exceeded"
+        );
         if previous.is_none() {
             self.db.execute(
                 "INSERT INTO recovered_sources VALUES(?1,?2,?3,?4,?5,?6,0,0)",
-                params![id, target, source, pin, summary.to_string(), revision],
+                params![id, target, source, pin, encoded_summary, revision],
             )?;
         } else {
             self.db.execute(
                 "UPDATE recovered_sources SET summary=?2,revision=?3,retired=0 WHERE id=?1",
-                params![id, summary.to_string(), revision],
+                params![id, encoded_summary, revision],
             )?;
         }
         let used: u64 = self.db.query_row(

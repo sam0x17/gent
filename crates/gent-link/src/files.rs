@@ -185,6 +185,10 @@ pub fn print_history(value: &Value) {
             recovered["bytes"],
             recovered["max_bytes"]
         );
+        println!(
+            "History provenance: {} / {} bytes.",
+            recovered["metadata_bytes"], recovered["max_metadata_bytes"],
+        );
         let edits = &value["configuration_edits"];
         println!(
             "Configuration edit retries: {} / {}; reserved bytes: {} / {}; pending results: {}; legacy bodies: {}.",
