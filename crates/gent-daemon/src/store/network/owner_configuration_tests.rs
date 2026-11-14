@@ -175,7 +175,7 @@ async fn issued_handoff_allows_exact_stream_retries_but_never_new_owner_grants()
     let store = &pair.stores[1];
     assert!(store.identity.apply(&store.db, completed).is_err());
     assert_eq!(status(&mut pair, 0)["signing_frozen"], true);
-    assert_eq!(status(&mut pair, 1)["activation_supported"], false);
+    assert_eq!(status(&mut pair, 1)["activation_supported"], true);
     let id = Uuid::new_v4().to_string();
     let result = configure(
         &mut pair,

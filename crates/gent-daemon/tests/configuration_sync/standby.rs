@@ -378,7 +378,7 @@ fn standby_quota_and_schema_migration_preserve_existing_stream_retries() {
         f.db(1)
             .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
             .unwrap(),
-        21
+        22
     );
     let candidate = candidate(&f);
     let package = f.endpoint(2).key_package(Uuid::new_v4(), f.now).unwrap();

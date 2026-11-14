@@ -44,6 +44,8 @@ fn transfer(
 
 #[path = "owner_journal_tests.rs"]
 mod journal_tests;
+#[path = "owner_activation_tests.rs"]
+mod owner_activation_tests;
 #[path = "owner_configuration_tests.rs"]
 mod owner_configuration_tests;
 #[path = "pending_configuration_tests.rs"]
@@ -177,7 +179,7 @@ async fn separate_node_preparation_fences_all_owner_handles_and_survives_delayed
         completed.encode().unwrap()
     );
     assert_eq!(status(&mut pair, 1)["completed_candidates"], 1);
-    assert_eq!(status(&mut pair, 1)["activation_supported"], false);
+    assert_eq!(status(&mut pair, 1)["activation_supported"], true);
     for (i, original) in identities.iter().enumerate() {
         pair.stores[i].maintain().unwrap();
         assert_eq!(
@@ -457,7 +459,7 @@ async fn version_seventeen_migration_preserves_keys_and_checkpoint_before_first_
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        21
+        22
     );
     let candidate = prepare(&mut pair);
     issue(&mut pair, &candidate);
@@ -548,7 +550,11 @@ async fn successor_writer_selection_uses_signed_binding_instead_of_old_streams_o
                 .unwrap(),
             candidate.candidate.node.id
         );
-        assert!(!store.identity.is_current_owner(&state));
+        assert_eq!(
+            store.identity.is_current_owner(&state),
+            store.identity.node.id() == candidate.candidate.node.id
+        );
+        assert!(store.identity.signing_owner(&store.db).is_err());
     }
 }
 

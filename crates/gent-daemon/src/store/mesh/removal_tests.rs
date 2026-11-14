@@ -280,7 +280,7 @@ async fn replacement_schema_migrates_existing_removals_and_refuses_missing_curre
             .db
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        21
+        22
     );
     mesh.stores[0]
         .db

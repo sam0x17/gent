@@ -193,9 +193,14 @@ fn progress(db: &Connection, id: &str, manifest: &Manifest) -> Result<Value> {
     let missing: Vec<usize> = (0..manifest.pages.len())
         .filter(|i| indices.binary_search(i).is_err())
         .collect();
+    let activated: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_epochs WHERE local_candidate=?1)",
+        [id],
+        |r| r.get(0),
+    )?;
     Ok(
         json!({"request_id":id,"pages":manifest.pages.len(),"received":indices.len(),
-        "missing":missing,"pages_complete":missing.is_empty(),"entries":manifest.entries,"bytes":manifest.bytes,"activated":false}),
+        "missing":missing,"pages_complete":missing.is_empty(),"entries":manifest.entries,"bytes":manifest.bytes,"activated":activated}),
     )
 }
 
@@ -204,7 +209,7 @@ pub(super) fn require_complete(
     baseline: &VerifiedState,
     candidate: &SignedOwnerCandidate,
     authorization: &SignedOwnerTransition,
-) -> Result<()> {
+) -> Result<(usize, Vec<u8>)> {
     let (manifest, saved) = load(db, &candidate.candidate.id, false)?;
     ensure!(
         saved == *authorization,
@@ -224,7 +229,8 @@ pub(super) fn require_complete(
         baseline.checkpoint(),
         manifest.entries,
         &body,
-    )
+    )?;
+    Ok((manifest.entries, body))
 }
 
 impl Store {
@@ -233,11 +239,7 @@ impl Store {
         ensure!(hash(credential) == self.owner_hash, "unauthorized");
         let tx = self.db.unchecked_transaction()?;
         self.identity.state(&tx)?;
-        let record = issued(&tx)?.context("owner handoff is not issued")?;
-        ensure!(
-            record.candidate.candidate.id == id,
-            "another owner handoff is issued"
-        );
+        issued_for(&tx, id)?;
         Ok(load(&tx, id, true)?.0)
     }
 
@@ -245,11 +247,7 @@ impl Store {
         ensure!(hash(credential) == self.owner_hash, "unauthorized");
         let tx = self.db.unchecked_transaction()?;
         self.identity.state(&tx)?;
-        let record = issued(&tx)?.context("owner handoff is not issued")?;
-        ensure!(
-            record.candidate.candidate.id == id,
-            "another owner handoff is issued"
-        );
+        issued_for(&tx, id)?;
         page(&tx, id, &load(&tx, id, true)?.0, index)
     }
 

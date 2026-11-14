@@ -12,7 +12,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::unix::fs::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
 
@@ -32,6 +32,21 @@ pub(crate) struct Identity {
     pub node: NodeIdentity,
     pub owner: Option<OwnerKey>,
     pub initial: VerifiedState,
+    home: PathBuf,
+}
+
+pub(crate) enum SigningOwner<'a> {
+    Bootstrap(&'a OwnerKey),
+    Successor(Box<OwnerKey>),
+}
+impl std::ops::Deref for SigningOwner<'_> {
+    type Target = OwnerKey;
+    fn deref(&self) -> &OwnerKey {
+        match self {
+            Self::Bootstrap(key) => key,
+            Self::Successor(key) => key,
+        }
+    }
 }
 
 impl Identity {
@@ -148,31 +163,42 @@ impl Identity {
             node,
             owner,
             initial,
+            home: home.into(),
         };
         identity.state(db)?;
         Ok(identity)
     }
 
     pub fn is_current_owner(&self, state: &VerifiedState) -> bool {
-        self.owner.as_ref().is_some_and(|key| {
-            key.public_key() == state.state().owner_key
-                && state
-                    .state()
-                    .owner_transitions
-                    .last()
-                    .and_then(|t| t.transition.successor.as_ref())
-                    .is_none_or(|s| {
-                        s.node.id == self.node.id() && s.node.signing_key == self.node.public_key()
-                    })
-        })
+        if let Some(successor) = state
+            .state()
+            .owner_transitions
+            .last()
+            .and_then(|t| t.transition.successor.as_ref())
+        {
+            return successor.node.id == self.node.id()
+                && successor.node.signing_key == self.node.public_key();
+        }
+        state.owner_epoch() == 0
+            && self
+                .owner
+                .as_ref()
+                .is_some_and(|key| key.public_key() == state.state().owner_key)
     }
 
-    pub fn signing_owner(&self, db: &Connection) -> Result<&OwnerKey> {
-        let state = self.state(db)?;
-        let owner = self
-            .owner
+    pub fn was_owner(&self, state: &VerifiedState) -> bool {
+        self.owner
             .as_ref()
-            .context("configuration changes must reach the active owner")?;
+            .is_some_and(|key| key.public_key() == state.anchor().owner_key)
+            || state.state().owner_transitions.iter().any(|t| {
+                t.transition.successor.as_ref().is_some_and(|s| {
+                    s.node.id == self.node.id() && s.node.signing_key == self.node.public_key()
+                })
+            })
+    }
+
+    pub fn signing_owner(&self, db: &Connection) -> Result<SigningOwner<'_>> {
+        let state = self.state(db)?;
         ensure!(
             self.is_current_owner(&state),
             "local owner signing key is retired or belongs to another node"
@@ -181,7 +207,16 @@ impl Identity {
             !crate::store::handoff::frozen(db, &state)?,
             "owner handoff is issued; signing is frozen until activation completes"
         );
-        Ok(owner)
+        if state.owner_epoch() == 0 {
+            return Ok(SigningOwner::Bootstrap(
+                self.owner
+                    .as_ref()
+                    .context("owner signing key is missing")?,
+            ));
+        }
+        Ok(SigningOwner::Successor(Box::new(
+            crate::store::handoff::active_key(&self.home, db, &state, &self.node)?,
+        )))
     }
 
     pub fn state(&self, db: &Connection) -> Result<VerifiedState> {

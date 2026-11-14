@@ -60,6 +60,8 @@ pub enum Event {
         request_id: Uuid,
         fingerprint: String,
         result: EditResult,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decided_by: Option<String>,
     },
     Registration {
         agent: Registration,

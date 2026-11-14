@@ -541,7 +541,7 @@ impl Store {
             "invitation capacity reached; wait for existing offers to expire"
         );
         let owner = OwnerInvitation::issue(
-            self.identity.signing_owner(&self.db)?,
+            &*self.identity.signing_owner(&self.db)?,
             &state,
             &self.identity.node,
             Options {

@@ -375,7 +375,7 @@ async fn pruned_remote_request_cannot_return_with_original_or_rewritten_timestam
     let state = pair.stores[1].identity.state(&pair.stores[1].db).unwrap();
     let renewal = state
         .renew(
-            pair.stores[0]
+            &pair.stores[0]
                 .identity
                 .signing_owner(&pair.stores[0].db)
                 .unwrap(),
@@ -781,7 +781,7 @@ async fn queued_message_uses_retained_authority_digest_after_full_history_compac
             .apply(
                 &tx,
                 state
-                    .renew(store.identity.signing_owner(&tx).unwrap(), now() as u64)
+                    .renew(&store.identity.signing_owner(&tx).unwrap(), now() as u64)
                     .unwrap(),
             )
             .unwrap();

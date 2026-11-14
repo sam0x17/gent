@@ -87,7 +87,7 @@ impl Store {
             );
             return Ok(grant);
         }
-        let owner = self.identity.signing_owner(&tx)?;
+        let owner = &*self.identity.signing_owner(&tx)?;
         let timestamp = requests::clock(&tx, now())? as u64;
         let grant = owner.authorize_standby_configuration_stream(
             &state,

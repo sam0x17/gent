@@ -176,6 +176,11 @@ fn floor(db: &Connection, state: &VerifiedState, node: &str) -> Result<(u64, Vec
         if signed.grant.owner_candidate.is_some() && !signed.can_publish(state)? {
             continue;
         }
+        if ordered::configuration::publication_limit(&signed, state)
+            .is_some_and(|last| revision >= last && offset == 0)
+        {
+            continue;
+        }
         let grant = signed.grant;
         ensure!(
             grant.group == group && grant.writer == node,

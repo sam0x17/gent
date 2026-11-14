@@ -2,6 +2,8 @@ use super::*;
 use crate::pairing::{self, Peer};
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "owner_activation_tests.rs"]
+mod owner_activation_tests;
 #[path = "removal_tests.rs"]
 mod removal_tests;
 #[path = "storage_tests.rs"]
@@ -249,7 +251,7 @@ async fn mesh_discards_bootstrap_overtaken_by_revocation() {
     let state = owner.identity.state(&owner.db).unwrap();
     let update = state
         .revoke_node(
-            owner.identity.signing_owner(&owner.db).unwrap(),
+            &owner.identity.signing_owner(&owner.db).unwrap(),
             &origin,
             now() as u64,
         )

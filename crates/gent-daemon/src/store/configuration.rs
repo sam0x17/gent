@@ -5,6 +5,7 @@ use gent_crypto::{SignedConfigurationGrant, SignedState, scoped_id};
 use uuid::Uuid;
 
 pub(super) mod pending;
+pub(super) mod routing;
 pub(super) mod storage;
 
 pub(super) fn schema(db: &Connection) -> Result<()> {
@@ -274,23 +275,12 @@ impl StoreSession<'_> {
                 None,
             )?;
             pending::retain(self.db, &origin, id, &edit)?;
-            self.queue(
-                &writer,
-                scoped_id(
-                    b"gent/configuration-request/v1\0",
-                    &[origin.as_bytes(), request.as_bytes()],
-                ),
-                Event::ConfigurationRequest {
-                    request_id: request,
-                    edit: Box::new(edit),
-                },
-                None,
-            )?;
+            self.queue_configuration(&origin, request, &writer, edit)?;
         }
         self.configuration_status(id)
     }
     fn revision_for_edit(&self, origin: &str, edit: &ConfigurationEdit) -> Result<SignedState> {
-        let owner = self.identity.signing_owner(self.db)?;
+        let owner = &*self.identity.signing_owner(self.db)?;
         validate(edit)?;
         if origin != self.identity.node.id() && administration::edit_identity(edit).is_none() {
             self.state.require_fresh(self.timestamp as u64)?;
@@ -486,6 +476,9 @@ impl StoreSession<'_> {
     ) -> Result<()> {
         ensure!(!request.is_nil(), "invalid configuration request identity");
         let id = request.to_string();
+        if !self.identity.is_current_owner(&self.state) && self.identity.was_owner(&self.state) {
+            return self.retain_retired_request(origin, request, &edit);
+        }
         if let Some((administrator, request_id)) = administration::edit_identity(&edit) {
             validate(&edit)?;
             // Do not attribute audit records or charge an agent's quota to a
@@ -500,17 +493,25 @@ impl StoreSession<'_> {
             );
         }
         let fingerprint = fingerprint(&edit)?;
-        let saved: Option<(String, Vec<u8>)> = self
+        let saved: Option<(String, Option<Vec<u8>>, String)> = self
             .db
             .query_row(
-                "SELECT fingerprint,result FROM configuration_edits WHERE origin=?1 AND id=?2",
+                "SELECT fingerprint,result,writer FROM configuration_edits WHERE origin=?1 AND id=?2",
                 params![origin, id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let result = if let Some((previous, result)) = saved {
-            ensure!(previous == fingerprint, "conflicting configuration request");
-            serde_json::from_slice::<EditResult>(&result)?
+        if let Some((previous, _, _)) = &saved {
+            ensure!(
+                *previous == fingerprint,
+                "conflicting configuration request"
+            );
+        }
+        let (result, decided_by) = if let Some((_, Some(result), writer)) = &saved {
+            (
+                serde_json::from_slice::<EditResult>(result)?,
+                writer.clone(),
+            )
         } else {
             // A handoff pauses new decisions. Propagate the pause without
             // recording a terminal rejection; the same request must survive it.
@@ -529,28 +530,42 @@ impl StoreSession<'_> {
                     reason: storage::rejection_reason(error.to_string()),
                 },
             };
-            storage::insert(
-                self.db,
-                origin,
-                &id,
-                self.identity.node.id(),
-                &fingerprint,
-                &edit,
-                Some(&serde_json::to_vec(&result)?),
-            )?;
-            result
+            if saved.is_some() {
+                let encoded = serde_json::to_vec(&result)?;
+                storage::result_size(&encoded)?;
+                self.db.execute(
+                    "UPDATE configuration_edits SET writer=?1,result=?2 WHERE origin=?3 AND id=?4",
+                    params![self.identity.node.id(), encoded, origin, id],
+                )?;
+                pending::release(self.db, origin, &id)?;
+            } else {
+                storage::insert(
+                    self.db,
+                    origin,
+                    &id,
+                    self.identity.node.id(),
+                    &fingerprint,
+                    &edit,
+                    Some(&serde_json::to_vec(&result)?),
+                )?;
+            }
+            (result, self.identity.node.id().to_owned())
         };
         if origin != self.identity.node.id() {
             self.queue(
                 origin,
-                scoped_id(
-                    b"gent/configuration-result/v1\0",
-                    &[origin.as_bytes(), request.as_bytes()],
+                routing::event_id(
+                    true,
+                    self.state.owner_epoch(),
+                    origin,
+                    request,
+                    self.identity.node.id(),
                 ),
                 Event::ConfigurationResult {
                     request_id: request,
                     fingerprint,
                     result,
+                    decided_by: (decided_by != self.identity.node.id()).then_some(decided_by),
                 },
                 None,
             )?;
@@ -564,14 +579,58 @@ impl StoreSession<'_> {
         fingerprint: &str,
         result: EditResult,
     ) -> Result<()> {
+        self.import_routed_configuration_result(peer, request, fingerprint, result, None)
+    }
+    pub(super) fn import_routed_configuration_result(
+        &self,
+        peer: &str,
+        request: Uuid,
+        fingerprint: &str,
+        result: EditResult,
+        decided_by: Option<&str>,
+    ) -> Result<()> {
         let (writer, expected, previous): (String, String, Option<Vec<u8>>) = self.db.query_row(
             "SELECT writer,fingerprint,result FROM configuration_edits WHERE origin=?1 AND id=?2",
             params![self.identity.node.id(), request.to_string()],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         ensure!(
-            writer == peer && expected == fingerprint,
+            (writer == peer
+                || routing::known_route(
+                    self.db,
+                    self.identity.node.id(),
+                    &request.to_string(),
+                    peer
+                )?)
+                && expected == fingerprint,
             "configuration result belongs to another request or writer"
+        );
+        let decided_by = decided_by.unwrap_or(peer);
+        ensure!(
+            Uuid::parse_str(decided_by)
+                .is_ok_and(|id| !id.is_nil() && id.to_string() == decided_by),
+            "invalid deciding writer"
+        );
+        if let Some(previous) = &previous {
+            ensure!(
+                writer == decided_by && *previous == serde_json::to_vec(&result)?,
+                "configuration result changed"
+            );
+            return Ok(());
+        }
+        if self.state.owner_epoch() > 0 && peer != self.configuration_writer()? {
+            return Ok(());
+        }
+        ensure!(
+            writer == peer
+                && (decided_by == peer
+                    || routing::known_route(
+                        self.db,
+                        self.identity.node.id(),
+                        &request.to_string(),
+                        decided_by
+                    )?),
+            "configuration decision has no matching delivery route"
         );
         match &result {
             EditResult::Applied { checkpoint } => {
@@ -598,8 +657,13 @@ impl StoreSession<'_> {
             "configuration result changed"
         );
         self.db.execute(
-            "UPDATE configuration_edits SET result=?1 WHERE origin=?2 AND id=?3",
-            params![encoded, self.identity.node.id(), request.to_string()],
+            "UPDATE configuration_edits SET result=?1,writer=?4 WHERE origin=?2 AND id=?3",
+            params![
+                encoded,
+                self.identity.node.id(),
+                request.to_string(),
+                decided_by
+            ],
         )?;
         pending::release(self.db, self.identity.node.id(), &request.to_string())?;
         Ok(())

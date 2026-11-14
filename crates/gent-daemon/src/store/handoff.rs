@@ -1,6 +1,7 @@
-//! Owner-authenticated preparation for a later coordinated activation workflow.
+//! Owner-authenticated preparation and local successor activation.
 //! Private successor keys stay on their node. Issuing authority durably fences
-//! the source before any signature is returned. There is no activation/abort API.
+//! the source before any signature is returned. Network orchestration and abort
+//! are not implemented.
 use super::*;
 use gent_crypto::{
     OwnerKey, SignedState,
@@ -16,8 +17,10 @@ use zeroize::Zeroizing;
 
 const LIMIT: usize = 64;
 const MAGIC: &[u8] = b"GENTOWN1";
+mod activation;
 mod journal;
 mod streams;
+pub(crate) use activation::{active_key, admit_epochs, check_epochs};
 
 pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
     let count: usize = db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('owner_handoff_control','owner_handoffs','owner_candidates')", [], |r| r.get(0))?;
@@ -42,7 +45,8 @@ pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
             "owner handoff fence is missing; do not resume signing"
         );
     }
-    journal::schema(db, previous)
+    journal::schema(db, previous)?;
+    activation::schema(db, previous)
 }
 
 fn restore(candidate: &SignedOwnerCandidate, baseline: &[u8]) -> Result<VerifiedState> {
@@ -70,7 +74,14 @@ fn issued(db: &Connection) -> Result<Option<Issued>> {
         ensure!(count == 0, "owner handoff fence lost its record pin");
         return Ok(None);
     };
-    ensure!(count == 1, "owner handoff history is missing or ambiguous");
+    ensure!(
+        (1..=LIMIT).contains(&count),
+        "owner handoff history is missing or exceeds capacity"
+    );
+    issued_for(db, &id).map(Some)
+}
+
+fn issued_for(db: &Connection, id: &str) -> Result<Issued> {
     let (baseline, candidate, authorization): (Vec<u8>, Vec<u8>, Vec<u8>) = db.query_row(
         "SELECT baseline,candidate,authorization FROM owner_handoffs WHERE id=?1",
         [&id],
@@ -85,11 +96,11 @@ fn issued(db: &Connection) -> Result<Option<Issued>> {
     let authorization = SignedOwnerTransition::decode(&authorization)?;
     base.verify_owner_authorization(&candidate, &authorization)?;
     journal::check_source(db, &base, &candidate, &authorization)?;
-    Ok(Some(Issued {
+    Ok(Issued {
         base,
         candidate,
         authorization,
-    }))
+    })
 }
 
 pub(crate) fn frozen(db: &Connection, state: &VerifiedState) -> Result<bool> {
@@ -100,6 +111,35 @@ pub(crate) fn frozen(db: &Connection, state: &VerifiedState) -> Result<bool> {
         state.anchor() == record.base.anchor(),
         "owner handoff belongs to another cluster"
     );
+    let mut archived =
+        db.prepare("SELECT id,candidate,authorization FROM owner_handoffs WHERE id!=?1")?;
+    for row in archived.query_map([&record.candidate.candidate.id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Vec<u8>>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+        ))
+    })? {
+        let (id, candidate, authorization) = row?;
+        let candidate = SignedOwnerCandidate::decode(&candidate)?;
+        let authorization = SignedOwnerTransition::decode(&authorization)?;
+        ensure!(
+            authorization.transition.epoch > 0
+                && authorization.transition.epoch <= record.base.owner_epoch()
+                && candidate.candidate.id == id
+                && authorization
+                    .transition
+                    .successor
+                    .as_ref()
+                    .is_some_and(|s| candidate.digest().is_ok_and(|d| d == s.candidate))
+                && state
+                    .state()
+                    .owner_transitions
+                    .get(authorization.transition.epoch as usize - 1)
+                    == Some(&authorization),
+            "archived signing stop conflicts with accepted owner history"
+        );
+    }
     if state.owner_epoch() == record.base.owner_epoch() {
         ensure!(
             state.checkpoint() == record.base.checkpoint(),
@@ -144,7 +184,7 @@ pub(super) fn status(db: &Connection, state: &VerifiedState) -> Result<Value> {
         "prepared_candidates":candidates,"completed_candidates":completed,
         "journal_transfer":journal::usage(db)?,
         "configuration_preparation":{"records":stream_records,"stored_bytes":stream_bytes},
-        "activation_supported":false}),
+        "activation_supported":true}),
     )
 }
 
@@ -253,10 +293,7 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = self.identity.state(&tx)?;
         ensure!(
-            self.identity
-                .owner
-                .as_ref()
-                .is_none_or(|k| k.public_key() != state.state().owner_key),
+            !self.identity.is_current_owner(&state),
             "prepare the successor on a different enrolled node"
         );
         let previous: Option<(Vec<u8>, Vec<u8>)> = tx
@@ -331,7 +368,13 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = self.identity.state(&tx)?;
-        if let Some(previous) = issued(&tx)? {
+        let previous: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM owner_handoffs WHERE id=?1)",
+            [&candidate.candidate.id],
+            |r| r.get(0),
+        )?;
+        if previous {
+            let previous = issued_for(&tx, &candidate.candidate.id)?;
             ensure!(
                 previous.candidate == *candidate,
                 "a different owner handoff is already issued"
@@ -339,10 +382,16 @@ impl Store {
             return Ok(previous.authorization);
         }
         ensure!(
+            tx.query_row("SELECT COUNT(*) FROM owner_handoffs", [], |r| r
+                .get::<_, usize>(0))?
+                < LIMIT,
+            "owner handoff history is full"
+        );
+        ensure!(
             candidate.candidate.node.id != self.identity.node.id(),
             "owner handoff requires another node"
         );
-        let owner = self.identity.signing_owner(&tx)?;
+        let owner = &*self.identity.signing_owner(&tx)?;
         let timestamp = requests::clock(&tx, now())? as u64;
         let (manifest, body) = journal::capture(&tx, &state, candidate)?;
         let authorization = state.authorize_owner_candidate_with_journal(
@@ -398,6 +447,26 @@ impl Store {
             "owner candidate changed"
         );
         let pinned = restore(&candidate, &baseline)?;
+        pinned.verify_owner_authorization(&candidate, authorization)?;
+        if let Some(previous) = &completed
+            && state.owner_epoch() >= authorization.transition.epoch
+        {
+            ensure!(
+                state
+                    .state()
+                    .owner_transitions
+                    .get(authorization.transition.epoch as usize - 1)
+                    == Some(authorization),
+                "another owner handoff was accepted"
+            );
+            let result =
+                pinned.accept_owner_authorization(&key, &candidate, authorization, now() as u64)?;
+            ensure!(
+                *previous == result.encode()?,
+                "owner authorization changed after completion"
+            );
+            return Ok(result);
+        }
         ensure!(
             state.anchor() == pinned.anchor() && state.checkpoint() == pinned.checkpoint(),
             "local state changed since owner preparation"

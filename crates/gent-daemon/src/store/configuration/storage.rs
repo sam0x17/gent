@@ -163,6 +163,7 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS configuration_edits_format ON configuration_edits(compact)",
     )?;
     pending::schema(&tx, 0)?;
+    super::routing::schema(&tx, 0)?;
     tx.commit()?;
     Ok(())
 }
@@ -194,7 +195,7 @@ pub(in crate::store) fn status(db: &Connection) -> Result<Value> {
         json!({"records":used.records,"pending":used.pending,"legacy_records":used.legacy,
         "stored_bytes":used.bytes,"reserved_bytes":used.reserved,"max_records":MAX_RECORDS,
         "max_reserved_bytes":MAX_BYTES,"pending_result_reservation_bytes":RESULT_RESERVE,
-        "cleanup_batch_limit":CLEAN_BATCH,"pending_payloads":pending::status(db)?,"agent_administration":{"records":agent_records,"reserved_bytes":agent_bytes,
+        "cleanup_batch_limit":CLEAN_BATCH,"pending_payloads":pending::status(db)?,"retired_inputs":super::routing::retired_status(db)?,"agent_administration":{"records":agent_records,"reserved_bytes":agent_bytes,
         "max_records":MAX_AGENT_RECORDS,"max_reserved_bytes":MAX_AGENT_BYTES,"max_records_per_agent":MAX_PER_AGENT,
         "max_pending_per_agent":MAX_AGENT_PENDING}}),
     )

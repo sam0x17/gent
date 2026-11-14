@@ -129,7 +129,14 @@ pub(in crate::store) fn verify_snapshot(
         ).optional()?;
         if let Some((writer, fingerprint, edit, result, compact)) = saved {
             ensure!(
-                writer == decision.writer
+                (writer == decision.writer
+                    || (result.is_none()
+                        && super::super::routing::known_route(
+                            db,
+                            &decision.origin,
+                            &decision.id,
+                            &decision.writer
+                        )?))
                     && fingerprint == decision.fingerprint
                     && summary(&edit, compact, &fingerprint)? == decision.summary,
                 "owner decision conflicts with local request history"
@@ -164,6 +171,28 @@ pub(in crate::store) fn verify_snapshot(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// Authenticated migration can exceed ordinary admission quotas. Existing
+/// decisions and pending inputs survive; ordinary admission then remains closed
+/// until capacity is available. The incoming journal has its own strict bound.
+pub(in crate::store) fn adopt(
+    db: &Connection,
+    base: &Checkpoint,
+    entries: usize,
+    body: &[u8],
+) -> Result<()> {
+    verify_snapshot(db, base, entries, body)?;
+    for decision in serde_json::from_slice::<Vec<Decision>>(body)? {
+        let summary = serde_json::to_vec(&decision.summary)?;
+        let result = serde_json::to_vec(&decision.result)?;
+        db.execute("INSERT INTO configuration_edits(origin,id,writer,fingerprint,edit,result,compact) VALUES(?1,?2,?3,?4,?5,?6,1)
+            ON CONFLICT(origin,id) DO UPDATE SET writer=excluded.writer,edit=excluded.edit,result=excluded.result,compact=1",
+            params![decision.origin,decision.id,decision.writer,decision.fingerprint,summary,result])?;
+        super::super::pending::release(db, &decision.origin, &decision.id)?;
+        super::super::routing::cancel_requests(db, &decision.origin, &decision.id)?;
     }
     Ok(())
 }

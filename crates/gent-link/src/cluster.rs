@@ -305,10 +305,7 @@ pub async fn connect(home: &Path, name: Option<&str>) -> Result<Value> {
     setup.initial = None;
     setup.save(&home)?;
     // Keys and signed genesis are durable before any service cluster is created.
-    match setup.role {
-        SetupRole::Owner => Store::open(&home)?.require_provisioning_owner()?,
-        SetupRole::Joined => Store::open(&home)?.require_provisioning_joined()?,
-    }
+    Store::open(&home)?.require_service_setup_role(setup.role == SetupRole::Owner)?;
     let mut config = config::load(&home)?;
     setup.verify_config(&config)?;
     let config_snapshot = private_snapshot(&config::path(&home))?;

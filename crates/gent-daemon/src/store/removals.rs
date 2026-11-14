@@ -157,7 +157,7 @@ impl StoreSession<'_> {
             .context("unknown enrolled node")?;
         let key = member.signing_key;
         let update = self.state.revoke_node(
-            self.identity.signing_owner(self.db)?,
+            &*self.identity.signing_owner(self.db)?,
             node,
             self.timestamp as u64,
         )?;
@@ -238,7 +238,7 @@ impl StoreSession<'_> {
             return Ok(());
         }
         let update = self.state.replace_node(
-            self.identity.signing_owner(self.db)?,
+            &*self.identity.signing_owner(self.db)?,
             request,
             fingerprint,
             can_configure,

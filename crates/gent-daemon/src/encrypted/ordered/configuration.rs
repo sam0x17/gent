@@ -39,6 +39,21 @@ pub struct ConfigurationStream {
     pub outgoing: bool,
 }
 
+/// A replacement stream carries the next owner's activation. Older streams
+/// finish their accepted epoch without racing that separately prepared route.
+pub(crate) fn publication_limit(
+    signed: &SignedConfigurationGrant,
+    state: &VerifiedState,
+) -> Option<u64> {
+    let epoch =
+        signed.grant.owner_transitions.len() + usize::from(signed.grant.owner_candidate.is_some());
+    state
+        .state()
+        .owner_transitions
+        .get(epoch)
+        .map(|signed| signed.transition.base.revision)
+}
+
 impl OrderedEndpoint<'_> {
     /// Only established, still-authorized configuration streams are eligible.
     /// Expiry alone does not hide the recovery route; known revocation does.
@@ -222,6 +237,9 @@ impl OrderedEndpoint<'_> {
             let cursor = progress(session.db, group)?;
             ensure!(cursor.grant.can_publish(&session.state)?, "standby configuration candidate is not active");
             let revision = cursor.revision.checked_add(1).context("revision overflow")?;
+            if publication_limit(&cursor.grant, &session.state).is_some_and(|last| revision > last) {
+                return Ok(None);
+            }
             let Some(record) = history(session.db, revision)? else { return Ok(None); };
             let checkpoint = record.verified_checkpoint(session.state.anchor())?;
             ensure!(record.state.previous == Some(cursor.hash), "configuration publication history fork");
@@ -466,6 +484,13 @@ fn receive_fragment(session: &Session<'_>, group: &[u8], body: &[u8]) -> Result<
     } else {
         let mut next = session.state.clone();
         next.advance_history(std::slice::from_ref(&update))?;
+        crate::store::handoff::admit_epochs(
+            session.db,
+            session.signer,
+            &next,
+            false,
+            Some(&cursor.grant),
+        )?;
         persist_authority(session.db, session.signer, &next, &[update])?;
     }
     session.db.execute(

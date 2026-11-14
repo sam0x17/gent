@@ -349,19 +349,8 @@ pub(crate) fn authority(db: &Connection, signer: &NodeIdentity) -> Result<Verifi
     let checkpoint: Checkpoint = serde_json::from_slice(&checkpoint)?;
     let state = VerifiedState::restore(anchor, checkpoint, SignedState::decode(&state)?)?;
     crate::store::handoff::check_state(db, &state)?;
-    require_runtime_authority(&state)?;
+    crate::store::handoff::check_epochs(db, signer, &state)?;
     Ok(state)
-}
-
-// Signer succession is verified by the protocol and standalone Replica. Live
-// activation additionally needs atomic runtime-key installation, peer stream
-// migration and service retirement. Do not persist a half-activated daemon.
-fn require_runtime_authority(state: &VerifiedState) -> Result<()> {
-    ensure!(
-        state.owner_epoch() == 0,
-        "owner succession requires coordinated daemon activation, which is not implemented yet"
-    );
-    Ok(())
 }
 
 fn credential(state: &VerifiedState, signer: &NodeIdentity) -> Result<CredentialWithKey> {
@@ -953,7 +942,7 @@ pub(crate) fn persist_authority(
     updates: &[SignedState],
 ) -> Result<()> {
     crate::store::handoff::check_state(db, state)?;
-    require_runtime_authority(state)?;
+    crate::store::handoff::admit_epochs(db, identity, state, false, None)?;
     // All callers own a transaction. Cleanup may release records required only
     // by peers revoked in this update; a capacity or cleanup failure restores
     // the previous authority together with its history.
@@ -1054,7 +1043,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        matches!(version, 0..=21),
+        matches!(version, 0..=22),
         "unsupported MLS database version"
     );
     crate::storage::configure(&db)?;
@@ -1119,12 +1108,13 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
           CREATE TABLE IF NOT EXISTS stream_confirmed (
             group_id BLOB PRIMARY KEY,reader TEXT NOT NULL,reader_key BLOB NOT NULL,
             sequence INTEGER NOT NULL,digest BLOB NOT NULL,receipt BLOB NOT NULL);
-          PRAGMA user_version=21;",
+          PRAGMA user_version=22;",
         )?;
     crate::store::invitations::schema(&schema, version)?;
     crate::store::removals::schema(&schema, version)?;
     crate::store::handoff::schema(&schema, version)?;
     crate::store::pending_configuration_schema(&schema, version)?;
+    crate::store::configuration_routing_schema(&schema, version)?;
     ordered::configuration::standby::schema(&schema, version)?;
     let has_purpose = {
         let mut columns = schema.prepare("PRAGMA table_info(streams)")?;
@@ -1158,7 +1148,7 @@ pub(crate) fn initialize_authority(
     identity: &NodeIdentity,
     state: &VerifiedState,
 ) -> Result<()> {
-    require_runtime_authority(state)?;
+    crate::store::handoff::admit_epochs(db, identity, state, true, None)?;
     db.execute(
         "INSERT INTO authority VALUES(1,?1,?2,?3,?4,?5)",
         params![

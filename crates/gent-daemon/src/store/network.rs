@@ -375,7 +375,17 @@ impl StoreSession<'_> {
                 request_id,
                 fingerprint,
                 result,
-            } => self.import_configuration_result(peer, request_id, &fingerprint, result),
+                decided_by,
+            } => match decided_by {
+                None => self.import_configuration_result(peer, request_id, &fingerprint, result),
+                Some(writer) => self.import_routed_configuration_result(
+                    peer,
+                    request_id,
+                    &fingerprint,
+                    result,
+                    Some(&writer),
+                ),
+            },
             Event::Registration { agent } => self.import_registration(peer, &agent),
             Event::Receipt {
                 message_id,

@@ -20,6 +20,7 @@ use tokio::sync::Notify;
 mod administration;
 mod configuration;
 pub(crate) use configuration::pending::schema as pending_configuration_schema;
+pub(crate) use configuration::routing::schema as configuration_routing_schema;
 mod diagnostics;
 mod files;
 pub(crate) mod handoff;
@@ -89,6 +90,19 @@ impl Store {
             "the existing owner cannot be replaced by a joined identity"
         );
         self.require_provisioning_member()
+    }
+
+    /// Service setup records describe enrollment history. A signed handoff can
+    /// change the configuration writer without changing account ownership or
+    /// removing either node's relay access.
+    pub fn require_service_setup_role(&self, originally_owner: bool) -> Result<()> {
+        if self.identity.state(&self.db)?.owner_epoch() > 0 {
+            self.require_provisioning_member()
+        } else if originally_owner {
+            self.require_provisioning_owner()
+        } else {
+            self.require_provisioning_joined()
+        }
     }
 
     pub fn open(home: &Path) -> Result<Self> {
@@ -336,14 +350,15 @@ impl Store {
             && !handoff::frozen(&tx, &state)?
             && state.state().expires_at.saturating_sub(timestamp) <= 6 * 60 * 60;
         if renew {
-            let update = state.renew(self.identity.signing_owner(&tx)?, timestamp)?;
+            let update = state.renew(&*self.identity.signing_owner(&tx)?, timestamp)?;
             self.identity.apply(&tx, update)?;
         }
         tx.commit()?;
         if renew {
             self.sync_wakeup.notify_one();
         }
-        self.project_config()
+        self.project_config()?;
+        self.reconcile_configuration()
     }
 
     /// Trusted enrollment API. The supplied authority must already be verified
@@ -445,6 +460,7 @@ impl Store {
         drop(endpoint);
         if !pending.is_empty() {
             self.project_config()?;
+            self.reconcile_configuration()?;
             self.sync_wakeup.notify_one();
         }
         next
@@ -456,7 +472,8 @@ impl Store {
         endpoint.stage_configuration(packet, timestamp)?;
         endpoint.drain_configuration(packet.group(), 1, timestamp)?;
         self.sync_wakeup.notify_one();
-        self.project_config()
+        self.project_config()?;
+        self.reconcile_configuration()
     }
 }
 
@@ -677,7 +694,7 @@ impl StoreSession<'_> {
             },
             OwnerOp::DelegateConfiguration { node_id, allow } => {
                 let update = self.state.delegate_configuration(
-                    self.identity.signing_owner(self.db)?,
+                    &*self.identity.signing_owner(self.db)?,
                     &node_id,
                     allow,
                     self.timestamp as u64,

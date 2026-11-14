@@ -120,7 +120,7 @@ impl Store {
                         timestamp,
                     )?;
                 } else {
-                    let owner = self.identity.signing_owner(&tx)?;
+                    let owner = &*self.identity.signing_owner(&tx)?;
                     let update = if can_configure {
                         state.enroll_configurator(owner, &request, fingerprint, timestamp)?
                     } else {
@@ -148,7 +148,7 @@ impl Store {
                 let package = STANDARD.decode(key_package)?;
                 let invitation = OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?
                     .create_configuration(
-                        self.identity.signing_owner(&self.db)?,
+                        &*self.identity.signing_owner(&self.db)?,
                         uuid::Uuid::parse_str(&request_id)?,
                         (&peer, &package),
                         timestamp,
