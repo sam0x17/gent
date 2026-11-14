@@ -58,6 +58,7 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
             actor,
             peer,
             permissions,
+            selector_rules,
             lifetime_seconds,
         } => {
             let mut policy = Policy::default();
@@ -75,6 +76,7 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
                     actor: actor.clone(),
                     peer: peer.clone(),
                     permissions: permissions.clone(),
+                    selector_rules: *selector_rules,
                     issued_at: 0,
                     expires_at: *lifetime_seconds,
                 },
@@ -88,6 +90,14 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
         } => {
             administration::request_id(administrator, request_id)?;
             administration::validate_changes(changes)?;
+        }
+        ConfigurationEdit::AgentPermissionRules {
+            administrator,
+            request_id,
+            changes,
+        } => {
+            administration::request_id(administrator, request_id)?;
+            administration::rules::validate_changes(changes)?;
         }
     }
     ensure!(
@@ -152,18 +162,13 @@ impl StoreSession<'_> {
             return self.configuration_status(id);
         }
         validate(&edit)?;
-        if let ConfigurationEdit::AgentPermissions {
-            administrator,
-            request_id,
-            changes,
-        } = &edit
-        {
+        if let Some((administrator, request_id)) = administration::edit_identity(&edit) {
             ensure!(
                 administration::request_id(administrator, request_id)? == request,
                 "invalid agent configuration request identity"
             );
             requests::admit(request_id, self.timestamp)?;
-            self.agent_permission_policy(&origin, administrator, changes)?;
+            self.validate_agent_configuration(&origin, &edit)?;
         }
         if matches!(&edit, ConfigurationEdit::Replace { .. }) {
             let disk = config::load_for_runtime(self.home)?;
@@ -176,7 +181,7 @@ impl StoreSession<'_> {
             self.accept_configuration(&origin, request, edit)?;
         } else {
             ensure!(
-                matches!(&edit, ConfigurationEdit::AgentPermissions { .. })
+                administration::edit_identity(&edit).is_some()
                     || self
                         .state
                         .state()
@@ -213,9 +218,7 @@ impl StoreSession<'_> {
     fn revision_for_edit(&self, origin: &str, edit: &ConfigurationEdit) -> Result<SignedState> {
         let owner = self.identity.signing_owner()?;
         validate(edit)?;
-        if origin != self.identity.node.id()
-            && !matches!(edit, ConfigurationEdit::AgentPermissions { .. })
-        {
+        if origin != self.identity.node.id() && administration::edit_identity(edit).is_none() {
             self.state.require_fresh(self.timestamp as u64)?;
             ensure!(
                 self.state
@@ -292,6 +295,7 @@ impl StoreSession<'_> {
                 actor,
                 peer,
                 permissions,
+                selector_rules,
                 lifetime_seconds,
             } => {
                 let admin = self.get_agent(administrator)?;
@@ -308,6 +312,7 @@ impl StoreSession<'_> {
                         actor: actor.clone(),
                         peer: peer.clone(),
                         permissions: permissions.clone(),
+                        selector_rules: *selector_rules,
                         issued_at: timestamp,
                         expires_at: timestamp
                             .checked_add(*lifetime_seconds)
@@ -325,12 +330,9 @@ impl StoreSession<'_> {
                 );
                 self.state.set_policy(owner, policy, timestamp)
             }
-            ConfigurationEdit::AgentPermissions {
-                administrator,
-                changes,
-                ..
-            } => {
-                let policy = self.agent_permission_policy(origin, administrator, changes)?;
+            ConfigurationEdit::AgentPermissions { .. }
+            | ConfigurationEdit::AgentPermissionRules { .. } => {
+                let policy = self.validate_agent_configuration(origin, edit)?;
                 self.state.set_policy(owner, policy, timestamp)
             }
         }
@@ -344,13 +346,8 @@ impl StoreSession<'_> {
         self.identity.signing_owner()?;
         ensure!(!request.is_nil(), "invalid configuration request identity");
         let id = request.to_string();
-        if let ConfigurationEdit::AgentPermissions {
-            administrator,
-            request_id,
-            changes,
-        } = &edit
-        {
-            administration::validate_changes(changes)?;
+        if let Some((administrator, request_id)) = administration::edit_identity(&edit) {
+            validate(&edit)?;
             // Do not attribute audit records or charge an agent's quota to a
             // proposal from a different hosting node, even when rejecting it.
             ensure!(
@@ -464,6 +461,25 @@ impl StoreSession<'_> {
     }
     pub(super) fn configuration_status(&self, id: &str) -> Result<Value> {
         self.configuration_status_for(self.identity.node.id(), id)
+    }
+    fn validate_agent_configuration(
+        &self,
+        origin: &str,
+        edit: &ConfigurationEdit,
+    ) -> Result<Policy> {
+        match edit {
+            ConfigurationEdit::AgentPermissions {
+                administrator,
+                changes,
+                ..
+            } => self.agent_permission_policy(origin, administrator, changes),
+            ConfigurationEdit::AgentPermissionRules {
+                administrator,
+                changes,
+                ..
+            } => self.agent_permission_rule_policy(origin, administrator, changes),
+            _ => anyhow::bail!("not an agent configuration edit"),
+        }
     }
     pub(super) fn configuration_status_for(&self, origin: &str, id: &str) -> Result<Value> {
         let (writer, edit, result, compact): (String, Vec<u8>, Option<Vec<u8>>, bool) = self

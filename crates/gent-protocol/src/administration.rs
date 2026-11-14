@@ -12,6 +12,9 @@ pub struct AdminGrant {
     pub actor: Selector,
     pub peer: Selector,
     pub permissions: Vec<Permission>,
+    /// Separate opt-in to manage selector rules, including future matches.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub selector_rules: bool,
     pub issued_at: u64,
     pub expires_at: u64,
 }
@@ -33,6 +36,16 @@ pub struct PermissionChange {
     pub grant_id: String,
     pub actor: String,
     pub peer: String,
+    pub permission: Permission,
+    pub decision: RuleDecision,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionRuleChange {
+    pub grant_id: String,
+    pub actor: Selector,
+    pub peer: Selector,
     pub permission: Permission,
     pub decision: RuleDecision,
 }
@@ -63,24 +76,94 @@ impl Policy {
     /// original policy before invoking this. Only exact agent-pair rules change.
     pub fn apply_permission_changes(&mut self, changes: &[PermissionChange]) {
         for change in changes {
-            let actor = Selector::Agent(change.actor.clone());
-            let peer = Selector::Agent(change.peer.clone());
-            self.rules.retain(|r| {
-                r.actor != actor || r.peer != peer || r.permission != change.permission
+            self.replace_rule(
+                Selector::Agent(change.actor.clone()),
+                Selector::Agent(change.peer.clone()),
+                change.permission,
+                change.decision,
+            );
+        }
+    }
+    pub fn apply_permission_rules(&mut self, changes: &[PermissionRuleChange]) {
+        for change in changes {
+            self.replace_rule(
+                change.actor.clone(),
+                change.peer.clone(),
+                change.permission,
+                change.decision,
+            );
+        }
+    }
+    fn replace_rule(
+        &mut self,
+        actor: Selector,
+        peer: Selector,
+        permission: Permission,
+        decision: RuleDecision,
+    ) {
+        self.rules
+            .retain(|r| r.actor != actor || r.peer != peer || r.permission != permission);
+        let effect = match decision {
+            RuleDecision::Allow => Some(Effect::Allow),
+            RuleDecision::Deny => Some(Effect::Deny),
+            RuleDecision::Inherit => None,
+        };
+        if let Some(effect) = effect {
+            self.rules.push(Rule {
+                actor,
+                peer,
+                permission,
+                effect,
             });
-            let effect = match change.decision {
-                RuleDecision::Allow => Some(Effect::Allow),
-                RuleDecision::Deny => Some(Effect::Deny),
-                RuleDecision::Inherit => None,
-            };
-            if let Some(effect) = effect {
-                self.rules.push(Rule {
-                    actor,
-                    peer,
-                    permission: change.permission,
-                    effect,
-                });
+        }
+    }
+    pub fn admin_allows_rule(
+        &self,
+        grant: &AdminGrant,
+        administrator: &Agent,
+        change: &PermissionRuleChange,
+        known: &BTreeMap<String, Agent>,
+        now: u64,
+    ) -> bool {
+        !administrator.revoked
+            && grant.administrator == administrator.id
+            && grant.selector_rules
+            && grant.issued_at <= now
+            && now < grant.expires_at
+            && grant.permissions.contains(&change.permission)
+            && self.selector_within(&grant.actor, &change.actor, &change.peer, known)
+            && self.selector_within(&grant.peer, &change.peer, &change.actor, known)
+    }
+    fn selector_within(
+        &self,
+        scope: &Selector,
+        subject: &Selector,
+        other: &Selector,
+        known: &BTreeMap<String, Agent>,
+    ) -> bool {
+        if *scope == Selector::All || scope == subject {
+            return true;
+        }
+        match (scope, subject) {
+            (Selector::Node(node), Selector::Agent(id)) => {
+                known.get(id).is_some_and(|a| a.node_id == *node)
             }
+            (Selector::Group(group), Selector::Agent(id)) => self
+                .groups
+                .get(group)
+                .is_some_and(|members| members.contains(id)),
+            (Selector::SameNode, _) => {
+                if *other == Selector::SameNode {
+                    return true;
+                }
+                let node = |selector: &Selector| match selector {
+                    Selector::Node(id) => Some(id.clone()),
+                    Selector::Agent(id) => known.get(id).map(|a| a.node_id.clone()),
+                    _ => None,
+                };
+                node(subject).is_some_and(|n| Some(n) == node(other))
+            }
+            _ => false,
         }
     }
 }

@@ -18,6 +18,9 @@ pub(crate) enum Command {
         peer: String,
         #[arg(long, value_enum, num_args=1.., required=true)]
         permission: Vec<PermissionName>,
+        /// Also permit selector-rule edits affecting hidden and future matching agents.
+        #[arg(long)]
+        selector_rules: bool,
         #[arg(long, default_value_t = 86400)]
         ttl_seconds: u64,
     },
@@ -50,6 +53,7 @@ pub(crate) async fn run(
             actor,
             peer,
             permission,
+            selector_rules,
             ttl_seconds,
         } => {
             configure(
@@ -68,6 +72,7 @@ pub(crate) async fn run(
                             PermissionName::Send => Permission::Send,
                         })
                         .collect(),
+                    selector_rules,
                     lifetime_seconds: ttl_seconds,
                 },
             )

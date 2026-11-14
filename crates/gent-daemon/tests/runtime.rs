@@ -17,6 +17,8 @@ use uuid::Uuid;
 mod administration;
 #[path = "runtime/permissions.rs"]
 mod permissions;
+#[path = "runtime/rule_administration.rs"]
+mod rule_administration;
 
 struct Fixture {
     home: tempfile::TempDir,

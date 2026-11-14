@@ -64,6 +64,48 @@ def exercise(a, b, aid, bid, owner, restart, wait_for):
     assert len(audit) == 3 and all(r['state'] == 'applied' and r['changes'] and r['revision'] for r in audit)
 
 
+def exercise_rules(a, b, aid, bid, owner, restart, wait_for):
+    """Opt-in broad rules over the same authenticated MCP and owner flow."""
+    grant = owner('permission', 'admin', 'grant', aid, '*', '*', '--selector-rules',
+                  '--permission', 'enumerate', 'receive', 'send')['grant_id']
+    wait_for(lambda: any(g['grant_id'] == grant for g in a.call('gent_permission_rule_scopes')[0]['grants']))
+    assert b.call('gent_permission_rule_scopes')[0]['grants'] == []
+    anode = a.call('gent_identity')[0]['agent']['node_id']
+    bnode = b.call('gent_identity')[0]['agent']['node_id']
+    changes = [dict(grant_id=grant, actor={'kind': 'node', 'id': bnode},
+                    peer={'kind': 'node', 'id': anode}, permission='receive', decision='deny')]
+    preview = a.call('gent_permission_rule_preview', {'changes': changes})[0]
+    assert preview['changes'] == changes and not {'relationships', 'members', 'revision'} & preview.keys()
+    assert bid not in json.dumps(preview)
+    request = {'request_id': a.request_id(), 'changes': changes}
+    b.call('gent_permission_rule_apply', request, error=True)
+    a.call('gent_permission_rule_apply', dict(request, administrator=bid), error=True)
+    a.call('gent_permission_rule_apply', request)
+    wait_for(lambda: a.call('gent_permission_request', {'request_id': request['request_id']})[0]['state'] == 'applied')
+    wait_for(lambda: not a.call('gent_permission_check', {'peer': bid})[0]['policy']['send_unsolicited']['allowed'])
+    a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'blocked by node rule'}, error=True)
+    result = a.call('gent_permission_request', {'request_id': request['request_id']})[0]
+    assert not {'revision', 'writer', 'config_saved', 'config_error'} & result.keys()
+    a.call('gent_permission_apply', {'request_id': request['request_id'], 'changes': [
+        dict(grant_id=grant, actor=bid, peer=aid, permission='receive', decision='deny')]}, error=True)
+    restart()
+    assert a.call('gent_permission_rule_apply', request)[0] == result
+    for decision in ('allow', 'inherit'):
+        changed = {'request_id': a.request_id(), 'changes': [dict(changes[0], decision=decision)]}
+        a.call('gent_permission_rule_apply', changed)
+        wait_for(lambda: a.call('gent_permission_request', {'request_id': changed['request_id']})[0]['state'] == 'applied')
+        wait_for(lambda: a.call('gent_permission_check', {'peer': bid})[0]['policy']['send_unsolicited']['allowed'])
+        sent = a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'node rule ' + decision})[0]
+        wait_for(lambda: any(m['id'] == sent['message_id'] for m in b.call('gent_inbox')[0]))
+        b.call('gent_ack', {'message_id': sent['message_id']})
+    owner('permission', 'admin', 'revoke', grant)
+    wait_for(lambda: a.call('gent_permission_rule_scopes')[0]['grants'] == [])
+    assert a.call('gent_permission_rule_apply', request)[0] == result
+    a.call('gent_permission_rule_apply', dict(request, request_id=a.request_id()), error=True)
+    records = [r for r in owner('permission', 'admin', 'history', '--agent', aid)['entries'] if r.get('selector_rules')]
+    assert len(records) == 3 and all(r['state'] == 'applied' and r['changes'] and r['revision'] for r in records)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--gent', type=Path, required=True)
@@ -122,12 +164,14 @@ def main():
             cli('permission', 'allow', aid, bid, '--permission', 'enumerate')
             cli('permission', 'allow', bid, aid, '--permission', 'enumerate')
             exercise(a, b, aid, bid, cli, restart, wait_for)
+            exercise_rules(a, b, aid, bid, cli, restart, wait_for)
             audit = [r for r in cli('config', 'requests') if r.get('administrator') == aid]
-            assert len(audit) == 3 and all(r['state'] == 'applied' and r['changes'] and r['revision'] for r in audit)
+            assert len(audit) == 6 and all(r['state'] == 'applied' and r['changes'] and r['revision'] for r in audit)
             print(json.dumps({'status': 'passed', 'proof': 'agent administration', 'platform': os.uname().sysname,
                               'checks': ['owner CLI grants', 'scoped preview', 'bound identity', 'atomic batches',
                                          'private request status', 'actual messages and replies',
-                                         'exact retries', 'restart', 'deny and inherit', 'revocation', 'owner audit']}))
+                                         'exact retries', 'restart', 'deny and inherit', 'revocation', 'owner audit',
+                                         'selector-rule opt-in', 'node selectors', 'shared request namespace']}))
         finally:
             for client in clients:
                 client.close()

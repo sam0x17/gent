@@ -12,6 +12,7 @@ fn fixture() -> (OwnerKey, VerifiedState, String, Policy) {
     policy.admin_grants.insert(
         id.clone(),
         AdminGrant {
+            selector_rules: false,
             administrator: Uuid::new_v4().to_string(),
             actor: Selector::All,
             peer: Selector::SameNode,
@@ -35,6 +36,9 @@ fn administration_grants_are_immutable_retired_and_verified_on_receipt() {
     let (owner, mut state, id, policy) = fixture();
     let next = state.set_policy(&owner, policy.clone(), NOW).unwrap();
     state.apply_chain(&[next], NOW).unwrap();
+    let mut widened = policy.clone();
+    widened.admin_grants.get_mut(&id).unwrap().selector_rules = true;
+    assert!(state.set_policy(&owner, widened, NOW).is_err());
     let mut changed = policy.clone();
     changed.admin_grants.get_mut(&id).unwrap().peer = Selector::All;
     assert!(state.set_policy(&owner, changed.clone(), NOW).is_err());
@@ -58,6 +62,11 @@ fn administration_grants_are_immutable_retired_and_verified_on_receipt() {
 #[test]
 fn administration_grants_reject_invalid_scope_lifetime_and_permissions() {
     let (owner, state, id, policy) = fixture();
+    assert!(
+        serde_json::to_value(&policy).unwrap()["admin_grants"][&id]
+            .get("selector_rules")
+            .is_none()
+    );
     for lifetime in [0, MAX_ADMIN_GRANT_LIFETIME + 1] {
         let mut bad = policy.clone();
         bad.admin_grants.get_mut(&id).unwrap().expires_at = NOW + lifetime;

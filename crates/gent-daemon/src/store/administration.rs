@@ -2,6 +2,23 @@
 use super::*;
 use gent_protocol::administration::{MAX_PERMISSION_CHANGES, PermissionChange};
 use uuid::Uuid;
+pub(super) mod rules;
+
+pub(super) fn edit_identity(edit: &ConfigurationEdit) -> Option<(&str, &str)> {
+    match edit {
+        ConfigurationEdit::AgentPermissions {
+            administrator,
+            request_id,
+            ..
+        }
+        | ConfigurationEdit::AgentPermissionRules {
+            administrator,
+            request_id,
+            ..
+        } => Some((administrator, request_id)),
+        _ => None,
+    }
+}
 
 pub(super) fn request_id(administrator: &str, request: &str) -> Result<Uuid> {
     ensure!(
@@ -44,7 +61,7 @@ impl StoreSession<'_> {
         before: Option<u64>,
     ) -> Result<Value> {
         let rows = self.db.prepare("SELECT rowid,origin,id FROM configuration_edits WHERE
-            CASE WHEN json_valid(edit) THEN json_extract(edit,'$.op') END='agent_permissions'
+            CASE WHEN json_valid(edit) THEN json_extract(edit,'$.op') END IN ('agent_permissions','agent_permission_rules')
             AND (?1 IS NULL OR json_extract(edit,'$.administrator')=?1) AND rowid<?2 ORDER BY rowid DESC LIMIT 100")?
             .query_map(params![administrator,before.unwrap_or(i64::MAX as u64)],|r| Ok((r.get::<_,u64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;

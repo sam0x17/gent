@@ -684,6 +684,14 @@ impl StoreSession<'_> {
                 changes,
             } => self.permission_apply(&who, &request_id, changes),
             AgentOp::PermissionRequest { request_id } => self.permission_request(&who, &request_id),
+            AgentOp::PermissionRuleScopes => self.permission_rule_scopes(&who),
+            AgentOp::PermissionRulePreview { changes } => {
+                self.permission_rule_preview(&who, &changes)
+            }
+            AgentOp::PermissionRuleApply {
+                request_id,
+                changes,
+            } => self.permission_rule_apply(&who, &request_id, changes),
             AgentOp::RequestIds { count } => self.request_ids(count),
             AgentOp::FilePaths => self.file_paths(&who),
             AgentOp::FileImport {

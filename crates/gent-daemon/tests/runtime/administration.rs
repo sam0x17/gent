@@ -28,6 +28,7 @@ fn setup() -> (Fixture, String, Vec<PermissionChange>) {
         OwnerOp::Configure {
             request_id: grant.clone(),
             edit: ConfigurationEdit::GrantPermissionAdmin {
+                selector_rules: false,
                 grant_id: grant.clone(),
                 administrator: f.agents[0].clone(),
                 actor: Selector::All,

@@ -20,7 +20,7 @@ fn agent_usage(db: &Connection, administrator: &str) -> Result<(u64, u64, u64, u
         COALESCE(SUM(json_extract(edit,'$.administrator')=?1 AND result IS NULL),0),
         COALESCE(SUM(length(CAST(origin AS BLOB))+length(CAST(id AS BLOB))+length(CAST(writer AS BLOB))+
         length(CAST(fingerprint AS BLOB))+length(edit)+COALESCE(length(result),?2)),0)
-        FROM configuration_edits WHERE CASE WHEN json_valid(edit) THEN json_extract(edit,'$.op') END='agent_permissions'",
+        FROM configuration_edits WHERE CASE WHEN json_valid(edit) THEN json_extract(edit,'$.op') END IN ('agent_permissions','agent_permission_rules')",
         params![administrator, RESULT_RESERVE], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?)
 }
 
@@ -50,6 +50,11 @@ enum Summary {
         request_id: String,
         changes: Vec<gent_protocol::administration::PermissionChange>,
     },
+    AgentPermissionRules {
+        administrator: String,
+        request_id: String,
+        changes: Vec<gent_protocol::administration::PermissionRuleChange>,
+    },
 }
 
 impl From<&ConfigurationEdit> for Summary {
@@ -78,6 +83,15 @@ impl From<&ConfigurationEdit> for Summary {
                 request_id,
                 changes,
             } => Self::AgentPermissions {
+                administrator: administrator.clone(),
+                request_id: request_id.clone(),
+                changes: changes.clone(),
+            },
+            ConfigurationEdit::AgentPermissionRules {
+                administrator,
+                request_id,
+                changes,
+            } => Self::AgentPermissionRules {
                 administrator: administrator.clone(),
                 request_id: request_id.clone(),
                 changes: changes.clone(),
@@ -184,7 +198,7 @@ pub(super) fn insert(
         used.records < MAX_RECORDS && used.reserved.saturating_add(bytes) <= MAX_BYTES,
         "configuration edit history quota exhausted; inspect gent history status; clean legacy bodies with gent history clean; retry records remain retained"
     );
-    if let ConfigurationEdit::AgentPermissions { administrator, .. } = edit {
+    if let Some((administrator, _)) = administration::edit_identity(edit) {
         // Keep agent requests from consuming the owner history budget. Retained
         // audit records and retries cannot be evicted to admit new mutations.
         let (records, own, pending, reserved) = agent_usage(db, administrator)?;
@@ -255,6 +269,16 @@ pub(super) fn describe(body: &[u8], compact: bool, status: &mut Value) -> Result
             status["administrator"] = administrator.into();
             status["agent_request_id"] = request_id.into();
             status["changes"] = json!(changes);
+        }
+        Summary::AgentPermissionRules {
+            administrator,
+            request_id,
+            changes,
+        } => {
+            status["administrator"] = administrator.into();
+            status["agent_request_id"] = request_id.into();
+            status["changes"] = json!(changes);
+            status["selector_rules"] = true.into();
         }
         _ => {}
     }

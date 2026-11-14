@@ -159,7 +159,7 @@ Additional command families should follow the same grammar as their functionalit
 | --- | --- |
 | `gent agents` | List agents the caller may discover in the selected cluster. |
 | `gent permission explain ACTOR_UUID PEER_UUID` | Explain current signed policy gates and matching rules under local owner authority. See [permission checks](permissions.md). |
-| `gent permission admin grant ADMIN_UUID ACTOR_SELECTOR PEER_SELECTOR --permission ...` | Delegate expiring exact-pair permission editing within the selected scope. See [agent administration](administration.md). |
+| `gent permission admin grant ADMIN_UUID ACTOR_SELECTOR PEER_SELECTOR --permission ...` | Delegate expiring exact-pair permission editing within the selected scope; `--selector-rules` also permits persistent selector rules affecting hidden and future matches. See [agent administration](administration.md). |
 | `gent permission admin list` / `revoke GRANT_UUID` | Inspect or revoke editing grants; already accepted rules remain in force. |
 | `gent permission admin history [--agent UUID] [--before ROW]` | Page through local and received agent-edit audit records under owner authority. |
 | `gent agent show <agent>` | Show permitted identity, location, availability, MCP/host capabilities, and connection security mode. |

@@ -62,6 +62,13 @@ fn tools() -> Vec<Tool> {
         "properties":{"grant_id":{"type":"string","format":"uuid"},"actor":{"type":"string","format":"uuid"},
             "peer":{"type":"string","format":"uuid"},"permission":{"type":"string","enum":["enumerate","receive","send"]},
             "decision":{"type":"string","enum":["allow","deny","inherit"]}}}});
+    let selector = json!({"oneOf":[
+        {"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"enum":["all","same_node"]}}},
+        {"type":"object","additionalProperties":false,"required":["kind","id"],"properties":{"kind":{"enum":["agent","node","group"]},"id":{"type":"string","minLength":1,"maxLength":128}}}
+    ]});
+    let mut rule_changes = permission_changes.clone();
+    rule_changes["items"]["properties"]["actor"] = selector.clone();
+    rule_changes["items"]["properties"]["peer"] = selector;
     let text = json!({"type":"string","maxLength":65536});
     let file = json!({"type":"object","additionalProperties":false,"required":["name","media_type","data_base64"],"properties":{"name":{"type":"string"},"media_type":{"type":"string"},"data_base64":{"type":"string"}}});
     let file_ids = json!({"type":"array","maxItems":4,"uniqueItems":true,"items":{"type":"string","format":"uuid"}});
@@ -155,6 +162,24 @@ fn tools() -> Vec<Tool> {
             "Inspect this authenticated agent's own saved permission-edit request. Applied records a past accepted batch, not a guarantee that its rules are still current. Queued work remains pending. No cluster revision, writer identity or other agent's request is exposed.",
             json!({"request_id":{"type":"string","format":"uuid"}}),
             vec!["request_id"],
+        ),
+        (
+            "gent_permission_rule_scopes",
+            "List this authenticated agent's active owner grants explicitly enabled for selector-rule editing. Returns only granted selectors, permission types and expiry, never group membership, matching agents or counts. A grant naming a hidden agent is omitted. These grants can authorize changes affecting hidden and future matches; they do not themselves grant enumeration.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "gent_permission_rule_preview",
+            "Preview 1-32 selector-rule changes within an explicit selector-rule delegation. Each actor/peer is {kind:all|same_node} or {kind:agent|node|group,id:...}. Use groups named in active rule scopes and nodes from those scopes, your node, or visible agents. Named agents must already be visible or yourself. Scope containment is checked structurally; a node or group can narrow to a visible member, but group/node subsets are never inferred from current contents. Matching hidden/future agents can be affected, but none are listed. Other overlapping rules still apply.",
+            json!({"changes":rule_changes.clone()}),
+            vec!["changes"],
+        ),
+        (
+            "gent_permission_rule_apply",
+            "Apply a user-authorized batch previously reviewed with gent_permission_rule_preview. Requires the owner's separate selector-rule opt-in. Allow/deny replace rules with the exact selectors and permission; inherit removes them. Other rules remain. Uses a new UUIDv7 from gent_request_ids, retained for identical retries. Acceptance rechecks current scope and visibility atomically. Queued results use gent_permission_request. Rules cover future matching agents and persist after grant revocation.",
+            json!({"request_id":{"type":"string","format":"uuid"},"changes":rule_changes}),
+            vec!["request_id", "changes"],
         ),
         (
             "gent_send",

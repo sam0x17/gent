@@ -8,6 +8,11 @@ fn agent_administration_has_independent_record_pending_and_byte_limits() {
         request_id: Uuid::now_v7().to_string(),
         changes: vec![],
     };
+    let rule_edit = ConfigurationEdit::AgentPermissionRules {
+        administrator: admin.clone(),
+        request_id: Uuid::now_v7().to_string(),
+        changes: vec![],
+    };
     let summary = serde_json::to_vec(&Summary::from(&edit)).unwrap();
     let result = serde_json::to_vec(&EditResult::Rejected {
         reason: "\0".repeat(1000),
@@ -24,11 +29,13 @@ fn agent_administration_has_independent_record_pending_and_byte_limits() {
         db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?1)
             INSERT INTO configuration_edits(origin,id,writer,fingerprint,edit,result,compact)
             SELECT 'seed',CAST(x AS TEXT),'writer','hash',
-            CASE WHEN ?2 THEN ?3 ELSE CAST(json_set(?3,'$.administrator',CAST(x AS TEXT)) AS BLOB) END,
+            CAST(json_set(CASE WHEN ?2 THEN ?3 ELSE json_set(?3,'$.administrator',CAST(x AS TEXT)) END,
+                '$.op',CASE WHEN x%2=0 THEN 'agent_permissions' ELSE 'agent_permission_rules' END) AS BLOB),
             CASE WHEN ?4 THEN NULL ELSE ?5 END,1 FROM n",
             params![rows,same_admin,summary,pending,if large {result.as_slice()} else {b"{}"}]).unwrap();
         let before = status(&db).unwrap();
         assert!(insert(&db, "node", "agent-new", "writer", "hash", &edit, None).is_err());
+        assert!(insert(&db, "node", "rules-new", "writer", "hash", &rule_edit, None).is_err());
         assert_eq!(status(&db).unwrap(), before);
         insert(
             &db,
@@ -48,13 +55,13 @@ fn agent_administration_has_independent_record_pending_and_byte_limits() {
 fn compact_agent_audit_preserves_actor_request_and_changes_through_legacy_migration() {
     use gent_protocol::administration::*;
     let db = database();
-    let edit = ConfigurationEdit::AgentPermissions {
+    let edit = ConfigurationEdit::AgentPermissionRules {
         administrator: Uuid::new_v4().to_string(),
         request_id: Uuid::now_v7().to_string(),
-        changes: vec![PermissionChange {
+        changes: vec![PermissionRuleChange {
             grant_id: Uuid::new_v4().to_string(),
-            actor: Uuid::new_v4().to_string(),
-            peer: Uuid::new_v4().to_string(),
+            actor: Selector::Node(Uuid::new_v4().to_string()),
+            peer: Selector::Group("workers".into()),
             permission: Permission::Send,
             decision: RuleDecision::Deny,
         }],
@@ -76,6 +83,7 @@ fn compact_agent_audit_preserves_actor_request_and_changes_through_legacy_migrat
     assert_eq!(before, after);
     assert!(after["administrator"].is_string());
     assert_eq!(after["changes"][0]["decision"], "deny");
+    assert_eq!(after["selector_rules"], true);
 }
 
 fn database() -> Connection {

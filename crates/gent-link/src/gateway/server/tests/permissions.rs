@@ -2,6 +2,15 @@ use super::*;
 
 #[tokio::test]
 async fn delegated_edits_bind_each_http_call_and_keep_request_status_private() {
+    delegated_edits(false).await;
+}
+
+#[tokio::test]
+async fn selector_edits_bind_each_http_call_and_keep_request_status_private() {
+    delegated_edits(true).await;
+}
+
+async fn delegated_edits(selector_rules: bool) {
     let f = Fixture::new();
     let daemon = Daemon::start(&f.home).await;
     let server = f.start().await;
@@ -35,26 +44,59 @@ async fn delegated_edits_bind_each_http_call_and_keep_request_status_private() {
         OwnerOp::Configure {
             request_id: grant.clone(),
             edit: gent_protocol::ConfigurationEdit::GrantPermissionAdmin {
+                selector_rules,
                 grant_id: grant.clone(),
                 administrator: ids[0].clone(),
-                actor: Selector::Agent(ids[0].clone()),
-                peer: Selector::Agent(ids[1].clone()),
+                actor: if selector_rules {
+                    Selector::All
+                } else {
+                    Selector::Agent(ids[0].clone())
+                },
+                peer: if selector_rules {
+                    Selector::SameNode
+                } else {
+                    Selector::Agent(ids[1].clone())
+                },
                 permissions: vec![Permission::Send],
                 lifetime_seconds: 60,
             },
         },
     )
     .await;
-    let args = json!({"request_id":request_id(),"changes":[{"grant_id":grant,"actor":ids[0],"peer":ids[1],"permission":"send","decision":"allow"}]});
+    let apply_tool = if selector_rules {
+        "gent_permission_rule_apply"
+    } else {
+        "gent_permission_apply"
+    };
+    let preview_tool = if selector_rules {
+        "gent_permission_rule_preview"
+    } else {
+        "gent_permission_preview"
+    };
+    let scope_tool = if selector_rules {
+        "gent_permission_rule_scopes"
+    } else {
+        "gent_permission_admin_check"
+    };
+    let scope_args = if selector_rules {
+        json!({})
+    } else {
+        json!({"actor":ids[0],"peer":ids[1]})
+    };
+    let actor = if selector_rules {
+        json!({"kind":"all"})
+    } else {
+        json!(ids[0])
+    };
+    let peer = if selector_rules {
+        json!({"kind":"same_node"})
+    } else {
+        json!(ids[1])
+    };
+    let args = json!({"request_id":request_id(),"changes":[{"grant_id":grant,"actor":actor,"peer":peer,"permission":"send","decision":"allow"}]});
     for chat in ["a", "b"] {
         let scope = server
-            .call(
-                &client,
-                &f.token,
-                chat,
-                "gent_permission_admin_check",
-                json!({"actor":ids[0],"peer":ids[1]}),
-            )
+            .call(&client, &f.token, chat, scope_tool, scope_args.clone())
             .await;
         assert_eq!(
             scope["grants"].as_array().unwrap().len(),
@@ -62,14 +104,10 @@ async fn delegated_edits_bind_each_http_call_and_keep_request_status_private() {
         );
     }
     for (name, arguments, meta) in [
+        (apply_tool, args.clone(), json!({"test/conversation":"b"})),
+        (apply_tool, args.clone(), json!({})),
         (
-            "gent_permission_apply",
-            args.clone(),
-            json!({"test/conversation":"b"}),
-        ),
-        ("gent_permission_apply", args.clone(), json!({})),
-        (
-            "gent_permission_apply",
+            apply_tool,
             {
                 let mut forged = args.clone();
                 forged["administrator"] = json!(ids[0]);
@@ -93,19 +131,13 @@ async fn delegated_edits_bind_each_http_call_and_keep_request_status_private() {
             &client,
             &f.token,
             "a",
-            "gent_permission_preview",
+            preview_tool,
             json!({"changes":args["changes"]}),
         )
         .await;
     assert!(preview.get("revision").is_none());
     let result = server
-        .call(
-            &client,
-            &f.token,
-            "a",
-            "gent_permission_apply",
-            args.clone(),
-        )
+        .call(&client, &f.token, "a", apply_tool, args.clone())
         .await;
     assert_eq!(result["state"], "applied");
     assert!(result.get("revision").is_none());
@@ -133,9 +165,7 @@ async fn delegated_edits_bind_each_http_call_and_keep_request_status_private() {
     )
     .await;
     assert_eq!(
-        server
-            .call(&client, &f.token, "a", "gent_permission_apply", args)
-            .await,
+        server.call(&client, &f.token, "a", apply_tool, args).await,
         result
     );
     server.close().await;

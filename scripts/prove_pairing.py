@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from smoke_mcp import Client, PNG
 from relay_checks import exercise_turns
 import edit_storage_checks
-from prove_administration import exercise as exercise_administration
+from prove_administration import exercise as exercise_administration, exercise_rules
 from transport_checks import (RESTORE_COPIES, ADVANCE_EVENT_CLOCK, exercise_storage,
                               exercise_authority_history, exercise_event_retention)
 
@@ -350,9 +350,10 @@ def main():
                 admin_owner('node', 'admin', 'revoke', node_id)
                 wait_for(lambda: not next(n for n in cli('nodes') if n['id'] == node_id)['can_configure'])
                 exercise_administration(a, b, aid, bid, admin_owner, restart_relay_nodes, wait_for)
+                exercise_rules(a, b, aid, bid, admin_owner, restart_relay_nodes, wait_for)
                 admin_owner('node', 'admin', 'grant', node_id)
                 wait_for(lambda: next(n for n in cli('nodes') if n['id'] == node_id)['can_configure'])
-                print('PASS: delegated MCP administration across encrypted nodes without node-admin authority, owner audit, restart and revocation')
+                print('PASS: delegated pair and selector-rule MCP administration across encrypted nodes without node-admin authority, owner audit, restart and revocation')
             if args.transport_storage or args.configuration_storage or args.event_storage or args.edit_storage:
                 def owner_cli(*command):
                     return json.loads(remote(owner + list(command)).stdout)

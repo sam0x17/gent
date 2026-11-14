@@ -13,7 +13,7 @@ Selectors use the existing grammar: an agent UUID, `'*'`, `same-node`, `node:UUI
 
 The owner explicitly selects editable permission types. A grant permits `allow`, `deny`, and `inherit` decisions for those types. It lasts 24 hours by default; `--ttl-seconds` accepts up to seven days. The global `--request-id UUID` supports exact CLI retries and becomes the grant ID. Existing grant IDs are immutable. Change scope or extend lifetime by revoking a grant and creating a new one. Retired IDs cannot be restored.
 
-Revocation and expiry stop future edits. Previously accepted rules remain in force. Use permission changes to undo them. An administrator can replace exact-pair rules within its scope, including exact rules originally written by the owner. Broader rules remain in force, including explicit denials. Agents cannot edit group membership, blanket/node/group rules, other delegation grants, relay grants, membership, names or keys through these tools. Those settings still use owner commands or TOML proposals.
+Revocation and expiry stop future edits. Previously accepted rules remain in force. Use permission changes to undo them. An administrator can replace exact-pair rules within its scope, including exact rules originally written by the owner. Broader rules remain in force, including explicit denials. A separate opt-in described below permits editing selector rules. Group membership, other delegation grants, relay grants, node membership, names and keys still use owner commands or TOML proposals.
 
 ## MCP workflow
 
@@ -28,7 +28,39 @@ All changes in a batch apply atomically. Scope and visibility checks use the pre
 
 A joined node needs an established encrypted link to the signing owner. The delegated agent does not need its hosting node to have general configuration-management authority. Queued requests and exact retries survive restarts. New local submission requires a UUIDv7 first used within 24 hours; retained results remain readable and retryable after grant expiry or revocation while the agent itself remains authenticated under fresh membership. Do not generate a replacement ID merely to retry uncertain work.
 
-Agent status is restricted to that authenticated agent's own requests. It omits global revisions, writer identities and raw owner rejection details. Hidden, unknown and revoked endpoints return the same unavailable result. Agents receive neither raw scope selectors nor group membership. A peer message claiming owner authority cannot grant editing rights.
+Agent status is restricted to that authenticated agent's own requests. It omits global revisions, writer identities and raw owner rejection details. Hidden, unknown and revoked endpoints return the same unavailable result. The pair tools return no raw scope selectors or membership lists. A peer message claiming owner authority cannot grant editing rights.
+
+## Selector rules
+
+The owner can additionally allow persistent rules over nodes, groups, all agents or agents on the same node:
+
+```sh
+gent permission admin grant ADMIN_UUID '*' same-node --selector-rules --permission enumerate receive send
+```
+
+This example allows rules for pairs on the same node, including agents hidden from the administrator and agents registered later. `same-node` compares the rule's actor and peer; it is not limited to the administrator's own machine. Use `node:UUID` on both sides to restrict changes to one machine. Without `--selector-rules`, grants retain their original exact-pair behavior.
+
+Call `gent_permission_rule_scopes` to obtain active grants and their authorized selectors. The result contains permission types and expiry, with no member list or matching counts. A grant naming a hidden agent is omitted. Only group names explicitly selected in an active visible rule grant may be used, even under a wildcard grant. Nodes must be enrolled and either host this administrator, host a visible agent, or appear in an active visible rule grant. Named agents must already be visible or be the administrator itself.
+
+Use `gent_permission_rule_preview {changes}`, then `gent_permission_rule_apply {request_id, changes}`. Changes have the same fields as pair edits, but actor and peer are selector objects:
+
+```json
+{
+  "grant_id": "OWNER_ISSUED_GRANT_UUID",
+  "actor": {"kind": "all"},
+  "peer": {"kind": "same_node"},
+  "permission": "enumerate",
+  "decision": "allow"
+}
+```
+
+Other selector objects are `{"kind":"agent","id":"UUID"}`, `{"kind":"node","id":"UUID"}` and `{"kind":"group","id":"NAME"}`. A rule must fit within the grant on both sides. Equal selectors and narrowing from `all` are accepted. Node and group scopes can narrow to a known agent currently inside that scope. Same-node scopes accept rules constrained to same-node pairs. Different groups, or a group and a node, are never treated as interchangeable merely because their current members overlap: future membership could widen the rule.
+
+Preview validates the requested changes without listing matching agents or computing aggregate effects. Checking whether a visible agent fits a granted group scope can reveal that particular agent's eligibility; it does not expose hidden identities or a membership directory. Every change is validated against pre-edit policy, so a batch cannot grant discovery and then use a previously hidden ID. The signing owner repeats checks at acceptance, including current group membership, visibility and expiry.
+
+`allow` and `deny` replace rules with exactly the selected actor/peer/permission tuple; `inherit` removes them. Other overlapping rules remain, and any matching denial still wins. Rules continue to affect future matches after the editing grant expires or is revoked. Scope grants do not automatically grant enumeration, messaging or further delegation.
+
+Both editing tool families share `gent_permission_request`, retry IDs, owner audit and storage limits. Reusing a request ID for a different operation is a conflict. Rule audit entries include `selector_rules: true` and the original selector changes.
 
 ## Audit and storage
 
@@ -44,4 +76,4 @@ Signed policy supports up to 1,024 current administration grants and 8,192 retir
 python3 scripts/prove_administration.py --gent target/debug/gent
 ```
 
-The disposable proof uses actual CLI/MCP processes for grants, previews, changes, messaging, replies, private request status, owner audit, restart, exact retries and revocation. `scripts/prove_pairing.py --agent-administration` adds the same workflow across physical machines through the encrypted relay, temporarily removing the joined node's general administration right. Rust tests cover signed grant transitions, scoped selectors, hidden-peer isolation, atomic rollback, queued revocation, origin binding, HTTP conversation binding and storage admission. Provider-native GUI/mobile acceptance and broader agent configuration remain unfinished.
+The disposable proof uses actual CLI/MCP processes for grants, previews, changes, messaging, replies, private request status, owner audit, restart, exact retries and revocation. `scripts/prove_pairing.py --agent-administration` adds the same workflow across physical machines through the encrypted relay, temporarily removing the joined node's general administration right. The process proof includes opt-in node rules, allow/deny/inherit, cross-tool retry conflicts and rule audit. Rust tests cover signed grant transitions, structural containment, hidden-peer isolation, future agents, atomic rollback, queued revocation/expiry/group changes, origin binding, HTTP conversation binding and shared storage admission. Provider-native GUI/mobile acceptance and broader agent configuration remain unfinished.

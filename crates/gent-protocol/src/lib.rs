@@ -248,6 +248,14 @@ pub enum AgentOp {
     PermissionRequest {
         request_id: String,
     },
+    PermissionRuleScopes,
+    PermissionRulePreview {
+        changes: Vec<administration::PermissionRuleChange>,
+    },
+    PermissionRuleApply {
+        request_id: String,
+        changes: Vec<administration::PermissionRuleChange>,
+    },
     Agents,
     RequestIds {
         #[serde(default = "one_request_id")]
@@ -390,6 +398,8 @@ pub enum ConfigurationEdit {
         actor: Selector,
         peer: Selector,
         permissions: Vec<Permission>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        selector_rules: bool,
         lifetime_seconds: u64,
     },
     RevokePermissionAdmin {
@@ -401,6 +411,11 @@ pub enum ConfigurationEdit {
         administrator: String,
         request_id: String,
         changes: Vec<administration::PermissionChange>,
+    },
+    AgentPermissionRules {
+        administrator: String,
+        request_id: String,
+        changes: Vec<administration::PermissionRuleChange>,
     },
 }
 
