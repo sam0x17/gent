@@ -135,6 +135,9 @@ The host invokes `gent_register` with a display `name` and arbitrary `provider` 
 | `gent_identity` | Inspect its bound identity and node. |
 | `gent_agents` | List peers allowed by enumeration policy. |
 | `gent_permission_check` | Explain this agent's policy gates with one visible peer, without exposing private rules. See [permission checks](permissions.md). |
+| `gent_permission_admin_check` | Inspect this agent's editing grants for one visible pair. |
+| `gent_permission_preview` / `gent_permission_apply` | Preview or atomically submit scoped exact-pair changes under separate delegation. See [agent administration](administration.md). |
+| `gent_permission_request` | Inspect this agent's own queued, applied or rejected edit request. |
 | `gent_send` | Open an authorized exchange with text and optional file bytes. |
 | `gent_reply` | Reply to a received message within its bounded exchange. |
 | `gent_inbox` | Retrieve pending permitted messages and files. |

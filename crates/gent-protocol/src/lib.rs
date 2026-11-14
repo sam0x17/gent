@@ -1,6 +1,7 @@
 //! Portable identities, local RPC types, and endpoint permission semantics.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+pub mod administration;
 pub mod file_objects;
 pub mod permissions;
 pub mod service;
@@ -73,6 +74,10 @@ pub struct Policy {
     /// Messaging permissions still apply. Empty maps preserve old signed bytes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub relay_grants: BTreeMap<String, RelayGrant>,
+    /// Editing authority is separate from message permissions. Empty maps keep
+    /// previously signed policy bytes unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub admin_grants: BTreeMap<String, administration::AdminGrant>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -229,6 +234,20 @@ pub enum AgentOp {
     PermissionCheck {
         peer: String,
     },
+    PermissionAdminCheck {
+        actor: String,
+        peer: String,
+    },
+    PermissionPreview {
+        changes: Vec<administration::PermissionChange>,
+    },
+    PermissionApply {
+        request_id: String,
+        changes: Vec<administration::PermissionChange>,
+    },
+    PermissionRequest {
+        request_id: String,
+    },
     Agents,
     RequestIds {
         #[serde(default = "one_request_id")]
@@ -365,6 +384,24 @@ pub enum ConfigurationEdit {
     RevokeRelay {
         grant_id: String,
     },
+    GrantPermissionAdmin {
+        grant_id: String,
+        administrator: String,
+        actor: Selector,
+        peer: Selector,
+        permissions: Vec<Permission>,
+        lifetime_seconds: u64,
+    },
+    RevokePermissionAdmin {
+        grant_id: String,
+    },
+    /// Internal authenticated proposal; MCP supplies neither administrator nor
+    /// origin node. The owner rechecks both and every grant before accepting it.
+    AgentPermissions {
+        administrator: String,
+        request_id: String,
+        changes: Vec<administration::PermissionChange>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -399,6 +436,11 @@ pub enum OwnerOp {
     PermissionExplain {
         actor: String,
         peer: String,
+    },
+    PermissionAdmins,
+    PermissionAdminHistory {
+        administrator: Option<String>,
+        before: Option<u64>,
     },
     Nodes,
     Agents,

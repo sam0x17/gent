@@ -9,16 +9,47 @@ const MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const MAX_REASON_BYTES: usize = 1024;
 // Includes JSON escaping of a rejection (up to six bytes per input byte).
 const RESULT_RESERVE: usize = 8192;
+const MAX_AGENT_RECORDS: u64 = 8192;
+const MAX_PER_AGENT: u64 = 1024;
+const MAX_AGENT_PENDING: u64 = 64;
+const MAX_AGENT_BYTES: u64 = 16 * 1024 * 1024;
+
+fn agent_usage(db: &Connection, administrator: &str) -> Result<(u64, u64, u64, u64)> {
+    Ok(db.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(json_extract(edit,'$.administrator')=?1),0),
+        COALESCE(SUM(json_extract(edit,'$.administrator')=?1 AND result IS NULL),0),
+        COALESCE(SUM(length(CAST(origin AS BLOB))+length(CAST(id AS BLOB))+length(CAST(writer AS BLOB))+
+        length(CAST(fingerprint AS BLOB))+length(edit)+COALESCE(length(result),?2)),0)
+        FROM configuration_edits WHERE CASE WHEN json_valid(edit) THEN json_extract(edit,'$.op') END='agent_permissions'",
+        params![administrator, RESULT_RESERVE], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?)
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Summary {
     Policy,
     Replace,
-    RenameNode { name: String },
+    RenameNode {
+        name: String,
+    },
     Renew,
-    GrantRelay { grant_id: String },
-    RevokeRelay { grant_id: String },
+    GrantRelay {
+        grant_id: String,
+    },
+    RevokeRelay {
+        grant_id: String,
+    },
+    GrantPermissionAdmin {
+        grant_id: String,
+    },
+    RevokePermissionAdmin {
+        grant_id: String,
+    },
+    AgentPermissions {
+        administrator: String,
+        request_id: String,
+        changes: Vec<gent_protocol::administration::PermissionChange>,
+    },
 }
 
 impl From<&ConfigurationEdit> for Summary {
@@ -33,6 +64,23 @@ impl From<&ConfigurationEdit> for Summary {
             },
             ConfigurationEdit::RevokeRelay { grant_id } => Self::RevokeRelay {
                 grant_id: grant_id.clone(),
+            },
+            ConfigurationEdit::GrantPermissionAdmin { grant_id, .. } => {
+                Self::GrantPermissionAdmin {
+                    grant_id: grant_id.clone(),
+                }
+            }
+            ConfigurationEdit::RevokePermissionAdmin { grant_id } => Self::RevokePermissionAdmin {
+                grant_id: grant_id.clone(),
+            },
+            ConfigurationEdit::AgentPermissions {
+                administrator,
+                request_id,
+                changes,
+            } => Self::AgentPermissions {
+                administrator: administrator.clone(),
+                request_id: request_id.clone(),
+                changes: changes.clone(),
             },
         }
     }
@@ -77,11 +125,14 @@ fn usage(db: &Connection) -> Result<Usage> {
 
 pub(in crate::store) fn status(db: &Connection) -> Result<Value> {
     let used = usage(db)?;
+    let (agent_records, _, _, agent_bytes) = agent_usage(db, "")?;
     Ok(
         json!({"records":used.records,"pending":used.pending,"legacy_records":used.legacy,
         "stored_bytes":used.bytes,"reserved_bytes":used.reserved,"max_records":MAX_RECORDS,
         "max_reserved_bytes":MAX_BYTES,"pending_result_reservation_bytes":RESULT_RESERVE,
-        "cleanup_batch_limit":CLEAN_BATCH}),
+        "cleanup_batch_limit":CLEAN_BATCH,"agent_administration":{"records":agent_records,"reserved_bytes":agent_bytes,
+        "max_records":MAX_AGENT_RECORDS,"max_reserved_bytes":MAX_AGENT_BYTES,"max_records_per_agent":MAX_PER_AGENT,
+        "max_pending_per_agent":MAX_AGENT_PENDING}}),
     )
 }
 
@@ -133,6 +184,18 @@ pub(super) fn insert(
         used.records < MAX_RECORDS && used.reserved.saturating_add(bytes) <= MAX_BYTES,
         "configuration edit history quota exhausted; inspect gent history status; clean legacy bodies with gent history clean; retry records remain retained"
     );
+    if let ConfigurationEdit::AgentPermissions { administrator, .. } = edit {
+        // Keep agent requests from consuming the owner history budget. Retained
+        // audit records and retries cannot be evicted to admit new mutations.
+        let (records, own, pending, reserved) = agent_usage(db, administrator)?;
+        ensure!(
+            records < MAX_AGENT_RECORDS
+                && own < MAX_PER_AGENT
+                && (result.is_some() || pending < MAX_AGENT_PENDING)
+                && reserved.saturating_add(bytes) <= MAX_AGENT_BYTES,
+            "agent administration history capacity exhausted; inspect gent history status"
+        );
+    }
     db.execute("INSERT INTO configuration_edits(origin,id,writer,fingerprint,edit,result,compact) VALUES(?1,?2,?3,?4,?5,?6,1)",
         params![origin,id,writer,fingerprint,summary,result])?;
     Ok(())
@@ -180,8 +243,18 @@ pub(super) fn describe(body: &[u8], compact: bool, status: &mut Value) -> Result
     };
     match summary {
         Summary::RenameNode { name } => status["name"] = name.into(),
-        Summary::GrantRelay { grant_id } | Summary::RevokeRelay { grant_id } => {
-            status["grant_id"] = grant_id.into()
+        Summary::GrantRelay { grant_id }
+        | Summary::RevokeRelay { grant_id }
+        | Summary::GrantPermissionAdmin { grant_id }
+        | Summary::RevokePermissionAdmin { grant_id } => status["grant_id"] = grant_id.into(),
+        Summary::AgentPermissions {
+            administrator,
+            request_id,
+            changes,
+        } => {
+            status["administrator"] = administrator.into();
+            status["agent_request_id"] = request_id.into();
+            status["changes"] = json!(changes);
         }
         _ => {}
     }

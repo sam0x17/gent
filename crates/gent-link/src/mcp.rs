@@ -57,6 +57,11 @@ impl GentMcp {
 }
 
 fn tools() -> Vec<Tool> {
+    let permission_changes = json!({"type":"array","minItems":1,"maxItems":32,"items":{
+        "type":"object","additionalProperties":false,"required":["grant_id","actor","peer","permission","decision"],
+        "properties":{"grant_id":{"type":"string","format":"uuid"},"actor":{"type":"string","format":"uuid"},
+            "peer":{"type":"string","format":"uuid"},"permission":{"type":"string","enum":["enumerate","receive","send"]},
+            "decision":{"type":"string","enum":["allow","deny","inherit"]}}}});
     let text = json!({"type":"string","maxLength":65536});
     let file = json!({"type":"object","additionalProperties":false,"required":["name","media_type","data_base64"],"properties":{"name":{"type":"string"},"media_type":{"type":"string"},"data_base64":{"type":"string"}}});
     let file_ids = json!({"type":"array","maxItems":4,"uniqueItems":true,"items":{"type":"string","format":"uuid"}});
@@ -126,6 +131,30 @@ fn tools() -> Vec<Tool> {
             "Check current enumeration, unsolicited send/receive and reply-policy gates with a peer from gent_agents. Hidden and unknown peers are indistinguishable. No policy editing or rule/group disclosure. Reply-policy approval still requires an accepted unexpired received message and remaining exchange capacity; this tool issues no grant and does not prove delivery or connectivity.",
             json!({"peer":{"type":"string","format":"uuid"}}),
             vec!["peer"],
+        ),
+        (
+            "gent_permission_admin_check",
+            "Check this authenticated agent's owner-issued editing grants for an actor/peer pair. Use only this agent's own ID or peers visible in gent_agents. Actor/peer select the relationship to edit, not the administrator's identity. No hidden agents, raw rules or group membership are disclosed. Grants permit exact-pair edits only; broader rules still apply.",
+            json!({"actor":{"type":"string","format":"uuid"},"peer":{"type":"string","format":"uuid"}}),
+            vec!["actor", "peer"],
+        ),
+        (
+            "gent_permission_preview",
+            "Preview an authorized batch of 1-32 exact-pair permission changes without applying it. Use grant IDs from gent_permission_admin_check. Allow/deny replace exact-pair rules for that permission; inherit removes them. Broader rules remain. Include needed mutual enumeration in a proposed messaging change when authorized. All visibility/scope checks use the pre-edit policy; preview reserves nothing.",
+            json!({"changes":permission_changes.clone()}),
+            vec!["changes"],
+        ),
+        (
+            "gent_permission_apply",
+            "Apply a user-authorized batch of exact-pair permission changes under this agent's delegated scope. Preview first. Use a fresh UUIDv7 from gent_request_ids and keep it with identical changes for retries. The owner applies the whole batch atomically after rechecking current grants, visibility and expiry. Queued is pending: check gent_permission_request without resubmitting. Changes persist when the editing grant expires or is revoked.",
+            json!({"request_id":{"type":"string","format":"uuid"},"changes":permission_changes}),
+            vec!["request_id", "changes"],
+        ),
+        (
+            "gent_permission_request",
+            "Inspect this authenticated agent's own saved permission-edit request. Applied records a past accepted batch, not a guarantee that its rules are still current. Queued work remains pending. No cluster revision, writer identity or other agent's request is exposed.",
+            json!({"request_id":{"type":"string","format":"uuid"}}),
+            vec!["request_id"],
         ),
         (
             "gent_send",

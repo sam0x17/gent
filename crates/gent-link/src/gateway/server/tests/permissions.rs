@@ -1,6 +1,148 @@
 use super::*;
 
 #[tokio::test]
+async fn delegated_edits_bind_each_http_call_and_keep_request_status_private() {
+    let f = Fixture::new();
+    let daemon = Daemon::start(&f.home).await;
+    let server = f.start().await;
+    let client = client();
+    let mut ids = Vec::new();
+    for chat in ["a", "b"] {
+        let v = server
+            .call(
+                &client,
+                &f.token,
+                chat,
+                "gent_register",
+                json!({"name":chat,"provider":"test"}),
+            )
+            .await;
+        ids.push(v["agent"]["id"].as_str().unwrap().to_owned());
+    }
+    let policy = Policy {
+        rules: vec![Rule {
+            actor: Selector::All,
+            peer: Selector::All,
+            permission: Permission::Enumerate,
+            effect: Effect::Allow,
+        }],
+        ..Default::default()
+    };
+    owner(&f.home, OwnerOp::SetPolicy { policy }).await;
+    let grant = uuid::Uuid::new_v4().to_string();
+    owner(
+        &f.home,
+        OwnerOp::Configure {
+            request_id: grant.clone(),
+            edit: gent_protocol::ConfigurationEdit::GrantPermissionAdmin {
+                grant_id: grant.clone(),
+                administrator: ids[0].clone(),
+                actor: Selector::Agent(ids[0].clone()),
+                peer: Selector::Agent(ids[1].clone()),
+                permissions: vec![Permission::Send],
+                lifetime_seconds: 60,
+            },
+        },
+    )
+    .await;
+    let args = json!({"request_id":request_id(),"changes":[{"grant_id":grant,"actor":ids[0],"peer":ids[1],"permission":"send","decision":"allow"}]});
+    for chat in ["a", "b"] {
+        let scope = server
+            .call(
+                &client,
+                &f.token,
+                chat,
+                "gent_permission_admin_check",
+                json!({"actor":ids[0],"peer":ids[1]}),
+            )
+            .await;
+        assert_eq!(
+            scope["grants"].as_array().unwrap().len(),
+            usize::from(chat == "a")
+        );
+    }
+    for (name, arguments, meta) in [
+        (
+            "gent_permission_apply",
+            args.clone(),
+            json!({"test/conversation":"b"}),
+        ),
+        ("gent_permission_apply", args.clone(), json!({})),
+        (
+            "gent_permission_apply",
+            {
+                let mut forged = args.clone();
+                forged["administrator"] = json!(ids[0]);
+                forged
+            },
+            json!({"test/conversation":"b"}),
+        ),
+    ] {
+        let r = server
+            .rpc(
+                &client,
+                &f.token,
+                "tools/call",
+                json!({"name":name,"arguments":arguments,"_meta":meta}),
+            )
+            .await;
+        assert_eq!(r["result"]["isError"], true, "{r}");
+    }
+    let preview = server
+        .call(
+            &client,
+            &f.token,
+            "a",
+            "gent_permission_preview",
+            json!({"changes":args["changes"]}),
+        )
+        .await;
+    assert!(preview.get("revision").is_none());
+    let result = server
+        .call(
+            &client,
+            &f.token,
+            "a",
+            "gent_permission_apply",
+            args.clone(),
+        )
+        .await;
+    assert_eq!(result["state"], "applied");
+    assert!(result.get("revision").is_none());
+    assert!(result.get("config_saved").is_none());
+    assert_eq!(
+        server
+            .call(
+                &client,
+                &f.token,
+                "a",
+                "gent_permission_request",
+                json!({"request_id":args["request_id"]})
+            )
+            .await,
+        result
+    );
+    let denied=server.rpc(&client,&f.token,"tools/call",json!({"name":"gent_permission_request","arguments":{"request_id":args["request_id"]},"_meta":{"test/conversation":"b"}})).await;
+    assert_eq!(denied["result"]["isError"], true);
+    owner(
+        &f.home,
+        OwnerOp::Configure {
+            request_id: request_id(),
+            edit: gent_protocol::ConfigurationEdit::RevokePermissionAdmin { grant_id: grant },
+        },
+    )
+    .await;
+    assert_eq!(
+        server
+            .call(&client, &f.token, "a", "gent_permission_apply", args)
+            .await,
+        result
+    );
+    server.close().await;
+    daemon.close(&f.home).await;
+}
+
+#[tokio::test]
 async fn permission_check_uses_each_calls_bound_agent_and_never_exports_policy() {
     let f = Fixture::new();
     let daemon = Daemon::start(&f.home).await;

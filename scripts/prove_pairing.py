@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from smoke_mcp import Client, PNG
 from relay_checks import exercise_turns
 import edit_storage_checks
+from prove_administration import exercise as exercise_administration
 from transport_checks import (RESTORE_COPIES, ADVANCE_EVENT_CLOCK, exercise_storage,
                               exercise_authority_history, exercise_event_retention)
 
@@ -143,6 +144,7 @@ def main():
     parser.add_argument('--configuration-storage', action='store_true', help='Also prove signed configuration history compaction across both machines and restarts')
     parser.add_argument('--event-storage', action='store_true', help='Finally advance disposable request clocks to prove node event retry cleanup')
     parser.add_argument('--edit-storage', action='store_true', help='Also prove compact configuration edits and migration while the owner is offline')
+    parser.add_argument('--agent-administration', action='store_true', help='Also prove delegated agent edits, private status, owner audit, revocation and restart across both machines')
     parser.add_argument('--remote-relay-port', type=int, default=18789)
     args = parser.parse_args()
     if args.event_storage and args.remote_join_helper:
@@ -239,7 +241,9 @@ def main():
             assert cli(*join)['joined']
             identity = (home / 'identity.key').read_bytes()
             assert identity.startswith(b'GENTKEY2')
-            assert cli(*join)['already_joined']
+            repeated_join = cli(*join)
+            assert repeated_join['joined'] and repeated_join['already_configured']
+            assert repeated_join['cluster']['id'] == setup['cluster']
             assert (home / 'identity.key').read_bytes() == identity
             if service_auth:
                 assert auth_path.read_bytes() == auth_before
@@ -338,6 +342,17 @@ def main():
 
             exercise_turns(a, b, attached['attachment']['id'], files, wait_for, restart_relay_nodes)
             print('PASS: two-machine ordered relay turns, PNG forwarding, restart recovery, cancellation, final outcomes, and exact retries')
+            if args.agent_administration:
+                def admin_owner(*command):
+                    return json.loads(remote(owner + list(command)).stdout)
+
+                node_id = cli('cluster')['node']['id']
+                admin_owner('node', 'admin', 'revoke', node_id)
+                wait_for(lambda: not next(n for n in cli('nodes') if n['id'] == node_id)['can_configure'])
+                exercise_administration(a, b, aid, bid, admin_owner, restart_relay_nodes, wait_for)
+                admin_owner('node', 'admin', 'grant', node_id)
+                wait_for(lambda: next(n for n in cli('nodes') if n['id'] == node_id)['can_configure'])
+                print('PASS: delegated MCP administration across encrypted nodes without node-admin authority, owner audit, restart and revocation')
             if args.transport_storage or args.configuration_storage or args.event_storage or args.edit_storage:
                 def owner_cli(*command):
                     return json.loads(remote(owner + list(command)).stdout)

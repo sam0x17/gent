@@ -34,7 +34,7 @@ The shared local and remote MCP tool is:
 
 Get the peer ID from `gent_agents`. The daemon supplies the actor from the authenticated conversation binding. The tool cannot accept a different actor. It returns the pair's policy gates and their blockers, without raw rules, rule indices, group names, membership lists, counts or cluster revision metadata. Hidden, unknown and revoked peers all return `recipient or message unavailable`. Normal fresh authority and registration checks still apply.
 
-This tool does not edit policy. Agent-scoped configuration administration remains unfinished; use the [owner configuration commands](local-proof.md#configuration-administration) for now.
+This tool does not edit policy. [Delegated permission editing](administration.md) uses separate owner-issued grants and MCP tools for exact agent-pair changes. Broader configuration still uses the [owner commands](local-proof.md#configuration-administration).
 
 ## Verification
 

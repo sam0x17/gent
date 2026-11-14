@@ -11,6 +11,7 @@ mod managed_file;
 mod mcp;
 mod node;
 mod pairing;
+mod permission_admin;
 mod service;
 mod setup;
 
@@ -316,6 +317,11 @@ enum PermissionName {
 }
 #[derive(Subcommand)]
 enum PermissionCommand {
+    /// Delegate bounded permission editing to an agent, or revoke a delegation.
+    Admin {
+        #[command(subcommand)]
+        command: permission_admin::Command,
+    },
     /// Explain effective policy between two registered agent IDs, including matching rules.
     Explain { actor: String, peer: String },
     /// Add grants. Selectors: agent UUID, *, same-node, node:UUID, group:NAME.
@@ -771,9 +777,14 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Permission {
             command: PermissionCommand::Explain { actor, peer },
         }) => owner(&home, OwnerOp::PermissionExplain { actor, peer }).await?,
+        Some(Command::Permission {
+            command: PermissionCommand::Admin { command },
+        }) => permission_admin::run(&home, &request_id, command).await?,
         Some(Command::Permission { command }) => {
             let (actor, peer, permissions, effect) = match command {
-                PermissionCommand::Explain { .. } => unreachable!(),
+                PermissionCommand::Explain { .. } | PermissionCommand::Admin { .. } => {
+                    unreachable!()
+                }
                 PermissionCommand::Allow {
                     actor,
                     peer,

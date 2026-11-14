@@ -17,6 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Notify;
+mod administration;
 mod configuration;
 mod diagnostics;
 mod files;
@@ -245,6 +246,7 @@ impl Store {
             state,
             timestamp,
         };
+        let owner_request = matches!(&request, Request::Owner { .. });
         let mut value = match request {
             Request::Owner { action, .. } => session.owner(action)?,
             Request::Agent { credential, action } => {
@@ -262,7 +264,10 @@ impl Store {
         // Filesystem projection is retryable after the authoritative commit.
         // A caller must not interpret a projection failure as an unapplied edit.
         let projected = self.project_config();
-        if value.get("applied") == Some(&Value::Bool(true)) || value.get("config_saved").is_some() {
+        if owner_request
+            && (value.get("applied") == Some(&Value::Bool(true))
+                || value.get("config_saved").is_some())
+        {
             value["config_saved"] = json!(projected.is_ok());
             if let Err(error) = projected {
                 value["config_error"] = json!(error.to_string());
@@ -513,6 +518,14 @@ impl StoreSession<'_> {
                 json!({"process_id":std::process::id(),"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
             OwnerOp::PermissionExplain { actor, peer } => self.permission_explain(&actor, &peer),
+            OwnerOp::PermissionAdmins => {
+                Ok(json!({"grants":self.state.state().policy.admin_grants,
+                "retired":self.state.state().retired_admin_grants,"revision":self.state.checkpoint().revision}))
+            }
+            OwnerOp::PermissionAdminHistory {
+                administrator,
+                before,
+            } => self.permission_admin_history(administrator.as_deref(), before),
             OwnerOp::Nodes => {
                 let links = self
                     .db
@@ -662,6 +675,15 @@ impl StoreSession<'_> {
                     .collect::<Vec<_>>()
             )),
             AgentOp::PermissionCheck { peer } => self.permission_check(&who, &peer),
+            AgentOp::PermissionAdminCheck { actor, peer } => {
+                self.permission_admin_check(&who, &actor, &peer)
+            }
+            AgentOp::PermissionPreview { changes } => self.permission_preview(&who, &changes),
+            AgentOp::PermissionApply {
+                request_id,
+                changes,
+            } => self.permission_apply(&who, &request_id, changes),
+            AgentOp::PermissionRequest { request_id } => self.permission_request(&who, &request_id),
             AgentOp::RequestIds { count } => self.request_ids(count),
             AgentOp::FilePaths => self.file_paths(&who),
             AgentOp::FileImport {

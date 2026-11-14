@@ -1,5 +1,83 @@
 use super::*;
 
+#[test]
+fn agent_administration_has_independent_record_pending_and_byte_limits() {
+    let admin = Uuid::new_v4().to_string();
+    let edit = ConfigurationEdit::AgentPermissions {
+        administrator: admin.clone(),
+        request_id: Uuid::now_v7().to_string(),
+        changes: vec![],
+    };
+    let summary = serde_json::to_vec(&Summary::from(&edit)).unwrap();
+    let result = serde_json::to_vec(&EditResult::Rejected {
+        reason: "\0".repeat(1000),
+    })
+    .unwrap();
+    // Distinct caps must leave the ordinary owner's history budget available.
+    for (rows, same_admin, pending, large) in [
+        (1024, true, false, false),
+        (64, true, true, false),
+        (8192, false, false, false),
+        (3000, false, false, true),
+    ] {
+        let db = database();
+        db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?1)
+            INSERT INTO configuration_edits(origin,id,writer,fingerprint,edit,result,compact)
+            SELECT 'seed',CAST(x AS TEXT),'writer','hash',
+            CASE WHEN ?2 THEN ?3 ELSE CAST(json_set(?3,'$.administrator',CAST(x AS TEXT)) AS BLOB) END,
+            CASE WHEN ?4 THEN NULL ELSE ?5 END,1 FROM n",
+            params![rows,same_admin,summary,pending,if large {result.as_slice()} else {b"{}"}]).unwrap();
+        let before = status(&db).unwrap();
+        assert!(insert(&db, "node", "agent-new", "writer", "hash", &edit, None).is_err());
+        assert_eq!(status(&db).unwrap(), before);
+        insert(
+            &db,
+            "node",
+            "owner-new",
+            "writer",
+            "hash",
+            &ConfigurationEdit::Renew,
+            None,
+        )
+        .unwrap();
+        assert_eq!(status(&db).unwrap()["records"], rows + 1);
+    }
+}
+
+#[test]
+fn compact_agent_audit_preserves_actor_request_and_changes_through_legacy_migration() {
+    use gent_protocol::administration::*;
+    let db = database();
+    let edit = ConfigurationEdit::AgentPermissions {
+        administrator: Uuid::new_v4().to_string(),
+        request_id: Uuid::now_v7().to_string(),
+        changes: vec![PermissionChange {
+            grant_id: Uuid::new_v4().to_string(),
+            actor: Uuid::new_v4().to_string(),
+            peer: Uuid::new_v4().to_string(),
+            permission: Permission::Send,
+            decision: RuleDecision::Deny,
+        }],
+    };
+    let body = serde_json::to_vec(&edit).unwrap();
+    db.execute(
+        "INSERT INTO configuration_edits VALUES('node','id','writer',?1,?2,NULL,0)",
+        params![fingerprint(&edit).unwrap(), body],
+    )
+    .unwrap();
+    let mut before = json!({});
+    describe(&body, false, &mut before).unwrap();
+    clean(&db, false).unwrap();
+    let saved: Vec<u8> = db
+        .query_row("SELECT edit FROM configuration_edits", [], |r| r.get(0))
+        .unwrap();
+    let mut after = json!({});
+    describe(&saved, true, &mut after).unwrap();
+    assert_eq!(before, after);
+    assert!(after["administrator"].is_string());
+    assert_eq!(after["changes"][0]["decision"], "deny");
+}
+
 fn database() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     schema(&db).unwrap();

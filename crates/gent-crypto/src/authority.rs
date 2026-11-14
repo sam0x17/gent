@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use gent_protocol::administration::MAX_ADMIN_GRANT_LIFETIME;
 use gent_protocol::{MAX_RELAY_GRANT_LIFETIME, Policy, Selector};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
@@ -74,6 +75,8 @@ pub struct ClusterState {
     pub retired_keys: BTreeSet<PublicKey>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub retired_relay_grants: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub retired_admin_grants: BTreeSet<String>,
     pub policy: Policy,
 }
 
@@ -303,7 +306,8 @@ pub fn validate_policy(policy: &Policy) -> Result<()> {
     ensure!(
         policy.rules.len() <= 4096
             && policy.groups.len() <= 256
-            && policy.relay_grants.len() <= 1024,
+            && policy.relay_grants.len() <= 1024
+            && policy.admin_grants.len() <= 1024,
         "policy exceeds limits"
     );
     for (name, members) in &policy.groups {
@@ -315,16 +319,19 @@ pub fn validate_policy(policy: &Policy) -> Result<()> {
             ensure!(distinct.insert(member), "duplicate group member");
         }
     }
-    for rule in &policy.rules {
-        for selector in [&rule.actor, &rule.peer] {
-            match selector {
-                Selector::Agent(value) | Selector::Node(value) => id(value)?,
-                Selector::Group(name) => {
-                    label(name)?;
-                    ensure!(policy.groups.contains_key(name), "unknown policy group");
-                }
-                Selector::All | Selector::SameNode => {}
+    for selector in policy.rules.iter().flat_map(|r| [&r.actor, &r.peer]).chain(
+        policy
+            .admin_grants
+            .values()
+            .flat_map(|g| [&g.actor, &g.peer]),
+    ) {
+        match selector {
+            Selector::Agent(value) | Selector::Node(value) => id(value)?,
+            Selector::Group(name) => {
+                label(name)?;
+                ensure!(policy.groups.contains_key(name), "unknown policy group");
             }
+            Selector::All | Selector::SameNode => {}
         }
     }
     for (grant_id, grant) in &policy.relay_grants {
@@ -336,6 +343,21 @@ pub fn validate_policy(policy: &Policy) -> Result<()> {
             "relay endpoints must differ"
         );
         lifetime(grant.issued_at, grant.expires_at, MAX_RELAY_GRANT_LIFETIME)?;
+    }
+    for (grant_id, grant) in &policy.admin_grants {
+        id(grant_id)?;
+        id(&grant.administrator)?;
+        ensure!(
+            !grant.permissions.is_empty() && grant.permissions.len() <= 3,
+            "invalid administration permissions"
+        );
+        for (i, permission) in grant.permissions.iter().enumerate() {
+            ensure!(
+                !grant.permissions[..i].contains(permission),
+                "duplicate administration permission"
+            );
+        }
+        lifetime(grant.issued_at, grant.expires_at, MAX_ADMIN_GRANT_LIFETIME)?;
     }
     Ok(())
 }
@@ -358,7 +380,8 @@ impl ClusterState {
         ensure!(
             self.retired_nodes.len() <= 8192
                 && self.retired_keys.len() <= 8192
-                && self.retired_relay_grants.len() <= 8192,
+                && self.retired_relay_grants.len() <= 8192
+                && self.retired_admin_grants.len() <= 8192,
             "retirement history exceeds limits"
         );
         let mut keys = BTreeSet::new();
@@ -393,6 +416,19 @@ impl ClusterState {
             ensure!(
                 grant.issued_at <= self.issued_at,
                 "relay grant issued after its configuration"
+            );
+        }
+        for retired in &self.retired_admin_grants {
+            id(retired)?;
+            ensure!(
+                !self.policy.admin_grants.contains_key(retired),
+                "retired administration grant cannot be restored"
+            );
+        }
+        for grant in self.policy.admin_grants.values() {
+            ensure!(
+                grant.issued_at <= self.issued_at,
+                "administration grant issued after its configuration"
             );
         }
         validate_policy(&self.policy)
@@ -508,6 +544,7 @@ impl OwnerKey {
             retired_nodes: BTreeSet::new(),
             retired_keys: BTreeSet::new(),
             retired_relay_grants: BTreeSet::new(),
+            retired_admin_grants: BTreeSet::new(),
             policy,
         };
         let signed = self.sign(state)?;
@@ -841,7 +878,10 @@ impl VerifiedState {
                         .is_subset(&update.state.retired_nodes)
                     && previous
                         .retired_relay_grants
-                        .is_subset(&update.state.retired_relay_grants),
+                        .is_subset(&update.state.retired_relay_grants)
+                    && previous
+                        .retired_admin_grants
+                        .is_subset(&update.state.retired_admin_grants),
                 "retirement history cannot be removed"
             );
             for (node_id, member) in &previous.nodes {
@@ -864,6 +904,17 @@ impl VerifiedState {
                     None => ensure!(
                         update.state.retired_relay_grants.contains(id),
                         "removed relay grant requires retirement"
+                    ),
+                }
+            }
+            for (id, grant) in &previous.policy.admin_grants {
+                match update.state.policy.admin_grants.get(id) {
+                    Some(next) => {
+                        ensure!(next == grant, "administration grant identity is immutable")
+                    }
+                    None => ensure!(
+                        update.state.retired_admin_grants.contains(id),
+                        "removed administration grant requires retirement"
                     ),
                 }
             }
@@ -900,6 +951,14 @@ impl VerifiedState {
                 Some(next) => ensure!(next == grant, "relay grant identity is immutable"),
                 None => {
                     state.retired_relay_grants.insert(id.clone());
+                }
+            }
+        }
+        for (id, grant) in &self.state().policy.admin_grants {
+            match state.policy.admin_grants.get(id) {
+                Some(next) => ensure!(next == grant, "administration grant identity is immutable"),
+                None => {
+                    state.retired_admin_grants.insert(id.clone());
                 }
             }
         }

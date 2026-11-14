@@ -13,6 +13,8 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "runtime/administration.rs"]
+mod administration;
 #[path = "runtime/permissions.rs"]
 mod permissions;
 

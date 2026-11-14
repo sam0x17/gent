@@ -1,4 +1,4 @@
-//! Durable owner-authenticated proposals, serialized by the active signing owner.
+//! Durable owner and scoped-agent proposals, serialized by the active signing owner.
 use super::*;
 use crate::messages::{EditResult, Event};
 use gent_crypto::{SignedConfigurationGrant, SignedState, scoped_id};
@@ -44,12 +44,50 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
             };
             gent_crypto::validate_policy(&policy)?;
         }
-        ConfigurationEdit::RevokeRelay { grant_id } => {
+        ConfigurationEdit::RevokeRelay { grant_id }
+        | ConfigurationEdit::RevokePermissionAdmin { grant_id } => {
             let id = Uuid::parse_str(grant_id).context("relay grant ID must be a UUID")?;
             ensure!(
                 !id.is_nil() && id.to_string() == *grant_id,
                 "invalid relay grant ID"
             );
+        }
+        ConfigurationEdit::GrantPermissionAdmin {
+            grant_id,
+            administrator,
+            actor,
+            peer,
+            permissions,
+            lifetime_seconds,
+        } => {
+            let mut policy = Policy::default();
+            // Validate input shape before queuing. Actual group existence is
+            // checked against signed policy when the owner accepts the edit.
+            for selector in [actor, peer] {
+                if let Selector::Group(name) = selector {
+                    policy.groups.insert(name.clone(), vec![]);
+                }
+            }
+            policy.admin_grants.insert(
+                grant_id.clone(),
+                gent_protocol::administration::AdminGrant {
+                    administrator: administrator.clone(),
+                    actor: actor.clone(),
+                    peer: peer.clone(),
+                    permissions: permissions.clone(),
+                    issued_at: 0,
+                    expires_at: *lifetime_seconds,
+                },
+            );
+            gent_crypto::validate_policy(&policy)?;
+        }
+        ConfigurationEdit::AgentPermissions {
+            administrator,
+            request_id,
+            changes,
+        } => {
+            administration::request_id(administrator, request_id)?;
+            administration::validate_changes(changes)?;
         }
     }
     ensure!(
@@ -114,6 +152,19 @@ impl StoreSession<'_> {
             return self.configuration_status(id);
         }
         validate(&edit)?;
+        if let ConfigurationEdit::AgentPermissions {
+            administrator,
+            request_id,
+            changes,
+        } = &edit
+        {
+            ensure!(
+                administration::request_id(administrator, request_id)? == request,
+                "invalid agent configuration request identity"
+            );
+            requests::admit(request_id, self.timestamp)?;
+            self.agent_permission_policy(&origin, administrator, changes)?;
+        }
         if matches!(&edit, ConfigurationEdit::Replace { .. }) {
             let disk = config::load_for_runtime(self.home)?;
             ensure!(
@@ -125,11 +176,13 @@ impl StoreSession<'_> {
             self.accept_configuration(&origin, request, edit)?;
         } else {
             ensure!(
-                self.state
-                    .state()
-                    .nodes
-                    .get(&origin)
-                    .is_some_and(|n| n.can_configure),
+                matches!(&edit, ConfigurationEdit::AgentPermissions { .. })
+                    || self
+                        .state
+                        .state()
+                        .nodes
+                        .get(&origin)
+                        .is_some_and(|n| n.can_configure),
                 "node lacks configuration-management grant; grant it on the owner node"
             );
             let writer = self.configuration_writer()?;
@@ -160,7 +213,9 @@ impl StoreSession<'_> {
     fn revision_for_edit(&self, origin: &str, edit: &ConfigurationEdit) -> Result<SignedState> {
         let owner = self.identity.signing_owner()?;
         validate(edit)?;
-        if origin != self.identity.node.id() {
+        if origin != self.identity.node.id()
+            && !matches!(edit, ConfigurationEdit::AgentPermissions { .. })
+        {
             self.state.require_fresh(self.timestamp as u64)?;
             ensure!(
                 self.state
@@ -231,6 +286,53 @@ impl StoreSession<'_> {
                 );
                 self.state.set_policy(owner, policy, timestamp)
             }
+            ConfigurationEdit::GrantPermissionAdmin {
+                grant_id,
+                administrator,
+                actor,
+                peer,
+                permissions,
+                lifetime_seconds,
+            } => {
+                let admin = self.get_agent(administrator)?;
+                ensure!(!admin.revoked, UNAVAILABLE);
+                let mut policy = self.config.policy.clone();
+                ensure!(
+                    !policy.admin_grants.contains_key(grant_id),
+                    "administration grant ID already exists"
+                );
+                policy.admin_grants.insert(
+                    grant_id.clone(),
+                    gent_protocol::administration::AdminGrant {
+                        administrator: administrator.clone(),
+                        actor: actor.clone(),
+                        peer: peer.clone(),
+                        permissions: permissions.clone(),
+                        issued_at: timestamp,
+                        expires_at: timestamp
+                            .checked_add(*lifetime_seconds)
+                            .context("administration expiry overflow")?,
+                    },
+                );
+                self.state.set_policy(owner, policy, timestamp)
+            }
+            ConfigurationEdit::RevokePermissionAdmin { grant_id } => {
+                let mut policy = self.config.policy.clone();
+                ensure!(
+                    policy.admin_grants.remove(grant_id).is_some()
+                        || self.state.state().retired_admin_grants.contains(grant_id),
+                    "unknown administration grant ID"
+                );
+                self.state.set_policy(owner, policy, timestamp)
+            }
+            ConfigurationEdit::AgentPermissions {
+                administrator,
+                changes,
+                ..
+            } => {
+                let policy = self.agent_permission_policy(origin, administrator, changes)?;
+                self.state.set_policy(owner, policy, timestamp)
+            }
         }
     }
     pub(super) fn accept_configuration(
@@ -242,6 +344,24 @@ impl StoreSession<'_> {
         self.identity.signing_owner()?;
         ensure!(!request.is_nil(), "invalid configuration request identity");
         let id = request.to_string();
+        if let ConfigurationEdit::AgentPermissions {
+            administrator,
+            request_id,
+            changes,
+        } = &edit
+        {
+            administration::validate_changes(changes)?;
+            // Do not attribute audit records or charge an agent's quota to a
+            // proposal from a different hosting node, even when rejecting it.
+            ensure!(
+                self.get_agent(administrator)?.node_id == origin,
+                UNAVAILABLE
+            );
+            ensure!(
+                administration::request_id(administrator, request_id)? == request,
+                "invalid agent configuration request identity"
+            );
+        }
         let fingerprint = fingerprint(&edit)?;
         let saved: Option<(String, Vec<u8>)> = self
             .db
@@ -343,11 +463,14 @@ impl StoreSession<'_> {
         Ok(())
     }
     pub(super) fn configuration_status(&self, id: &str) -> Result<Value> {
+        self.configuration_status_for(self.identity.node.id(), id)
+    }
+    pub(super) fn configuration_status_for(&self, origin: &str, id: &str) -> Result<Value> {
         let (writer, edit, result, compact): (String, Vec<u8>, Option<Vec<u8>>, bool) = self
             .db
             .query_row(
                 "SELECT writer,edit,result,compact FROM configuration_edits WHERE origin=?1 AND id=?2",
-                params![self.identity.node.id(), id],
+                params![origin, id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?
