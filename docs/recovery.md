@@ -1,6 +1,6 @@
 # Backup and recovery
 
-Gent can create encrypted backups of a stopped node, verify every payload, and extract the archive into a guarded offline directory. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Importing archived agents, history or pending work, and replacing a lost cluster owner remain unfinished.
+Gent can create encrypted backups of a stopped node, verify every payload, extract the archive into a guarded offline directory, and export retained Gent history with recovered files. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Importing historical records into a new node, migrating agents or pending work, and replacing a lost cluster owner remain unfinished.
 
 ## Commands
 
@@ -15,6 +15,7 @@ gent daemon start
 gent backup verify ~/gent-backups/node.age --identity ~/gent-recovery.key
 gent backup inspect ~/gent-backups/node.age --identity ~/gent-recovery.key --files
 gent backup extract ~/gent-backups/node.age --identity ~/gent-recovery.key --output ~/gent-recovered
+gent backup history ~/gent-backups/node.age --identity ~/gent-recovery.key --output ~/gent-history
 ```
 
 Close MCP connections using bindings inside the selected node directory before creating an archive. Busy locks or database readers make creation fail without publishing an archive. Gent does not stop or restart services itself. `create` honors the selected cluster and `--cluster`; all other backup commands work without initialized node state and reject `--cluster`. All commands support `--json`.
@@ -58,6 +59,24 @@ Verification checks the complete authenticated age stream, canonical manifest, e
 Extraction writes into a new private staging directory with the recovery guard present before the first payload file. After complete verification and file/directory synchronization, an atomic rename publishes it without replacing another path. A filesystem lacking the required no-replace operation causes failure. Directories use mode `0700`; files use `0600`, regardless of original executable or other mode bits. Failed extraction removes only its own staging files. Interrupted processes may leave a guarded staging directory for manual inspection/removal.
 
 The extracted copy retains historical keys and credentials. It must remain offline. Message/file expiry and deletion on live nodes do not remove historical archive copies; archive retention and recovery-key custody remain the user's responsibility.
+
+## Export offline history
+
+`gent backup history ARCHIVE --identity KEY --output NEW_DIRECTORY` creates a private plaintext export of the Gent records retained in that archive. It verifies the complete authenticated archive, including payloads it does not extract. Only `state.sqlite3` is materialized in a guarded temporary directory. The reader opens it with SQLite's read-only, immutable mode, disables SQLite's trusted-schema setting, and performs no runtime initialization, migration, expiry cleanup, network call or queue processing. It removes that temporary database before publishing the export.
+
+The output contains:
+
+- `history.json`: format version, archive/cluster/node IDs, capture time, source database digest, JSONL hashes/counts and file outcomes.
+- `agents.jsonl`: historical agent IDs, node IDs, names, providers, activity times and revocation flags. No credentials or credential hashes.
+- `messages.jsonl`: original message IDs, participants, exchange/reply/relay references, text, timestamps, inline file contents and attachment descriptors. The saved acknowledgment column supplies the historical acknowledgment flag. Each record also lists recovered file paths and outcomes.
+- `files/`: inline files and complete native attachments, named with generated identity-based paths. Original filenames and media types remain in the JSON records. Native files pass chunk authentication and whole-file SHA-256 verification before publication.
+- `recovery-required.json`: the offline activation guard. The export is historical data and has no command that activates it as node state.
+
+The export includes expired or revoked historical records still present in the archive. It does not renew their authorization, resubmit messages, issue reply rights, or recreate bindings. A missing native object is marked `missing`; an object saved as unfinished is marked `incomplete`, with no partial plaintext exported. An object marked complete but missing chunks, corrupt ciphertext, mismatched descriptors or wrong message binding makes the entire export fail. The reader does not retrieve absent files from peers or the service. Files that were imported but never attached to a retained message are outside this history export.
+
+Signing keys, local RPC credentials, account/gateway secrets, file decryption grants, MLS state, policy and live queue records are excluded. Provider-owned conversation transcripts remain outside the node archive and this export. Source IDs and hashes establish which authenticated archive the exporter read; the resulting plaintext files are not independently signed and do not prove current cluster authority or independently authenticate each historical sender.
+
+The destination must be new, with the same parent ownership/permission requirements as extraction. Directories use `0700` and files `0600`; publication refuses an existing destination, including races. Limits are 65,536 agents, 65,536 messages, 6 MiB per stored message and 1 GiB of exported JSONL/file content. Known message/file types and table layouts are checked; unsupported schemas or inconsistent records fail without publishing partial output. Interrupted processes may leave guarded temporary directories. Moving history into a fresh node still requires a separate import and identity-mapping design.
 
 ## Replace a lost joined node
 
@@ -104,7 +123,7 @@ Owner replacement additionally needs current authenticated cluster checkpoints, 
 
 ## Validation
 
-Recovery tests cover marker forms, nested and aliased paths, missing directories, configuration mutation, database entry points, and refusal before local socket access. Archive tests additionally cover encryption and origin authentication, strict parsing, corruption, truncation, unsafe paths, file changes, busy locks/databases, private extraction, exclusions, cleanup and publication races. The native backup proof captures real MCP text/image/native-file state, recovers crash-left WAL and hot journals, verifies exact bytes, checks guarded extraction, and restarts only the original node:
+Recovery tests cover marker forms, nested and aliased paths, missing directories, configuration mutation, database entry points, and refusal before local socket access. Archive tests additionally cover encryption and origin authentication, strict parsing, corruption, truncation, unsafe paths, file changes, busy locks/databases, private extraction, exclusions, cleanup and publication races. History-export tests cover expired content, acknowledgment state, omitted secrets, selective extraction, missing/incomplete files, corrupt content and unsupported layouts. The native backup proof captures real MCP text/image/native-file state, exports exact historical PNG/native-file bytes, recovers crash-left WAL and hot journals, checks guarded extraction, and restarts only the original node. Its optional `--peer` mode independently exports the same archive on the peer and compares every output file byte for byte:
 
 ```sh
 cargo test -p gent-daemon --test recovery

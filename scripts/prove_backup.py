@@ -4,6 +4,7 @@
 Uses disposable state and generic MCP clients. Never activates extracted state.
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -113,6 +114,39 @@ d.execute('INSERT INTO backup_probe VALUES (1, ?)', (b'committed-wal',)); d.comm
             assert inspected['archive_id'] == created['archive_id']
             assert not (folder / 'absent').exists()
             assert cli('backup', 'verify', archive, '--identity', key)['state'] == 'verified'
+            history = folder / 'history'
+            state_digest = hashlib.sha256((home / 'state.sqlite3').read_bytes()).hexdigest()
+            exported = cli('backup', 'history', archive, '--identity', key, '--output', history, state=folder / 'absent')
+            assert exported['state'] == 'exported_history' and exported['archive_id'] == created['archive_id']
+            assert not (folder / 'absent').exists()
+            assert hashlib.sha256((home / 'state.sqlite3').read_bytes()).hexdigest() == state_digest
+            metadata = json.loads((history / 'history.json').read_text())
+            assert metadata['database_sha256'] == state_digest
+            assert metadata['files'] == {'exported': 2, 'missing': 0, 'incomplete': 0}
+            agent_records = [json.loads(line) for line in (history / 'agents.jsonl').read_text().splitlines()]
+            assert {agent['id'] for agent in agent_records} == {aid, bid}
+            records = [json.loads(line) for line in (history / 'messages.jsonl').read_text().splitlines()]
+            assert len(records) == 1 and records[0]['message']['text'] == 'pending visual review'
+            expected_files = {'visual-data.bin': payload, 'pixel.png': base64.b64decode(PNG)}
+            for asset in records[0]['assets']:
+                description = asset.get('file', asset)
+                content = (history / asset['path']).read_bytes()
+                assert content == expected_files.pop(description['name'])
+                assert hashlib.sha256(content).hexdigest() == description['sha256']
+            assert not expected_files
+            def exported_tree(directory):
+                return {str(path.relative_to(directory)): path.read_bytes()
+                        for path in directory.rglob('*') if path.is_file()}
+            history_bytes = exported_tree(history)
+            assert 'state.sqlite3' not in history_bytes and 'identity.key' not in history_bytes
+            for path in history.rglob('*'):
+                assert path.stat().st_mode & 0o777 == (0o700 if path.is_dir() else 0o600)
+            for command in [('daemon', 'run'), ('mcp', 'serve')]:
+                assert 'offline recovery directory' in cli(*command, state=history, error=True)
+            cli('backup', 'history', archive, '--identity', key, '--output', history, error=True)
+            assert exported_tree(history) == history_bytes
+            assert not list(folder.glob('.gent-history-*'))
+            print('PASS: offline history preserves agent/message identities, exact PNG/native file bytes, provenance and private modes; no runtime activation', flush=True)
             assert cli('backup', 'extract', archive, '--identity', key, '--output', restored)['activation'] == 'unsupported'
             if args.peer:
                 remote = subprocess.check_output(['ssh', args.peer, 'mktemp -d /tmp/gent-backup-cross.XXXXXXXX'], text=True, timeout=15).strip()
@@ -136,6 +170,14 @@ d.execute('INSERT INTO backup_probe VALUES (1, ?)', (b'committed-wal',)); d.comm
                     subprocess.run(['scp', args.peer + ':' + remote_output + '/state.sqlite3', str(copied)], check=True, timeout=60,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                     assert copied.read_bytes() == (restored / 'state.sqlite3').read_bytes()
+                    remote_history = remote + '/history'
+                    assert remote_cli('backup', 'history', remote_archive, '--identity', remote_key, '--output', remote_history)['state'] == 'exported_history'
+                    remote_cli('--home', remote_history, 'daemon', 'run', error=True)
+                    copied_history = folder / 'peer-history'
+                    subprocess.run(['scp', '-r', args.peer + ':' + remote_history, str(copied_history)], check=True, timeout=60,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    assert exported_tree(copied_history) == history_bytes
+                    print('PASS: peer independently exports byte-identical history and files from the same archive', flush=True)
                 finally:
                     subprocess.run(['ssh', args.peer, shlex.join(['rm', '-rf', '--', remote])], check=True, timeout=15)
             for entry in inspected['entries']:

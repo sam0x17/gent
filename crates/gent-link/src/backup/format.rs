@@ -220,6 +220,25 @@ pub(super) fn read(
     key: &age::x25519::Identity,
     destination: Option<&Path>,
 ) -> Result<Manifest> {
+    read_selected(archive, key, destination, false)
+}
+
+/// Authenticate every payload, materializing only the database needed for a
+/// historical export. The caller must guard the temporary directory first.
+pub(super) fn read_database(
+    archive: &Path,
+    key: &age::x25519::Identity,
+    destination: &Path,
+) -> Result<Manifest> {
+    read_selected(archive, key, Some(destination), true)
+}
+
+fn read_selected(
+    archive: &Path,
+    key: &age::x25519::Identity,
+    destination: Option<&Path>,
+    only_database: bool,
+) -> Result<Manifest> {
     let file = open_regular(archive, false)?;
     let before = super::capture::Stamp::from(&file.metadata()?);
     ensure!(
@@ -258,7 +277,7 @@ pub(super) fn read(
     let mut reader = decryptor
         .decrypt(std::iter::once(key as &dyn age::Identity))
         .map_err(|_| anyhow::anyhow!("archive decryption failed; check the recovery identity"))?;
-    let manifest = read_payload(&mut reader, key, destination)?;
+    let manifest = read_payload(&mut reader, key, destination, only_database)?;
     ensure!(
         super::capture::Stamp::from(&file.metadata()?) == before,
         "archive changed during verification"
@@ -270,6 +289,7 @@ fn read_payload(
     reader: &mut impl Read,
     key: &age::x25519::Identity,
     destination: Option<&Path>,
+    only_database: bool,
 ) -> Result<Manifest> {
     let mut magic = [0; 8];
     reader.read_exact(&mut magic)?;
@@ -297,6 +317,7 @@ fn read_payload(
     );
     manifest.validate()?;
     for entry in &manifest.entries {
+        let destination = destination.filter(|_| !only_database || entry.path == "state.sqlite3");
         if entry.is_dir() {
             if let Some(destination) = destination {
                 fs::DirBuilder::new()

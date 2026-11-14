@@ -3,6 +3,8 @@ use fs2::FileExt;
 use gent_daemon::store::Store;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, os::unix::fs::symlink};
+#[path = "tests/history.rs"]
+mod history_export;
 
 struct Fixture {
     _directory: tempfile::TempDir,

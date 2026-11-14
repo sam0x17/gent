@@ -1,6 +1,7 @@
 //! Offline archives. Never open saved runtime/MLS state through operational APIs.
 mod capture;
 mod format;
+mod history;
 #[cfg(test)]
 mod tests;
 
@@ -46,6 +47,14 @@ pub enum Command {
     },
     /// Verify and extract into a new, guarded offline directory. Does not activate it.
     Extract {
+        archive: PathBuf,
+        #[arg(long)]
+        identity: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Export archived Gent messages and files as offline history, without keys or live queues.
+    History {
         archive: PathBuf,
         #[arg(long)]
         identity: PathBuf,
@@ -107,6 +116,14 @@ pub fn execute(command: Command, home: Option<&Path>, context: Option<&str>) -> 
         } => {
             ensure!(context.is_none(), "--cluster applies only to backup create");
             extract(&archive, &identity, &output)
+        }
+        Command::History {
+            archive,
+            identity,
+            output,
+        } => {
+            ensure!(context.is_none(), "--cluster applies only to backup create");
+            history::export(&archive, &identity, &output)
         }
     }
 }
