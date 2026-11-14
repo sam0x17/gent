@@ -97,8 +97,11 @@ impl Policy {
         std::fs::File::open(path)?
             .take((MAX_JWKS + 1) as u64)
             .read_to_end(&mut bytes)?;
+        Self::from_jwks(&bytes, client_id)
+    }
+    pub(crate) fn from_jwks(bytes: &[u8], client_id: &str) -> Result<Self> {
         ensure!(bytes.len() <= MAX_JWKS, "client JWKS is too large");
-        let jwks: Jwks = serde_json::from_slice(&bytes).context("invalid public client JWKS")?;
+        let jwks: Jwks = serde_json::from_slice(bytes).context("invalid public client JWKS")?;
         let policy = Self {
             client_id: client_id.into(),
             keys: jwks.keys,

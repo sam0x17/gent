@@ -1,6 +1,6 @@
 # Gateway OAuth
 
-The user-controlled gateway supports OAuth authorization-code exchange with S256 PKCE, rotating refresh tokens and discovery metadata. Clients are registered by the node owner. This version uses local CLI approval for consent and either `client_secret_post` or owner-pinned RS256 `private_key_jwt` authentication at the token endpoint. Dynamic registration, Client ID Metadata Document fetching, public clients and browser account login are not implemented. Hosted ChatGPT/Claude acceptance remains unverified.
+The user-controlled gateway supports OAuth authorization-code exchange with S256 PKCE, rotating refresh tokens and discovery metadata. Clients are registered by the node owner. This version uses local CLI approval for consent and either `client_secret_post` or owner-pinned RS256 `private_key_jwt` authentication at the token endpoint. The owner can import published client metadata during setup and explicitly refresh its signing keys. Runtime Client ID Metadata Document (CIMD) registration, dynamic registration, public clients and browser account login are not implemented. Hosted ChatGPT/Claude acceptance remains unverified.
 
 ## Register a client
 
@@ -14,7 +14,7 @@ gent --home /private/path/gent-node gateway clients add hosted-client \
   --out /private/path/gent-node/hosted-client.json
 ```
 
-For an OAuth client, the private export's `client` is its client ID and `token` is its client secret. Configure both in the host's OAuth settings, outside prompts and tool arguments. The client secret cannot be used as an MCP bearer. The export also records the resource and allowed callbacks. Repeating the same command preserves the registration; changed callbacks, audience, mode or original options fail. Repeat `--redirect-uri` for up to eight callbacks, matched exactly. URLs must be canonical HTTPS, with numeric loopback HTTP allowed for local tests. Native callbacks also accept `http://localhost:PORT/callback` with an explicit nonzero port, as used by Claude Code. This exception applies only to callbacks; resource URLs and gateway listeners retain their existing rules. No hostname, port or path substitution is allowed. Wildcard matching and outbound metadata fetching are absent.
+For an OAuth client, the private export's `client` is its client ID and `token` is its client secret. Configure both in the host's OAuth settings, outside prompts and tool arguments. The client secret cannot be used as an MCP bearer. The export also records the resource and allowed callbacks. Repeating the same command preserves the registration; changed callbacks, audience, mode or original options fail. Repeat `--redirect-uri` for up to eight callbacks, matched exactly. URLs must be canonical HTTPS, with numeric loopback HTTP allowed for local tests. Native callbacks also accept `http://localhost:PORT/callback` with an explicit nonzero port, as used by Claude Code. This exception applies only to callbacks; resource URLs and gateway listeners retain their existing rules. No hostname, port or path substitution is allowed. Wildcard matching is absent; this command fetches no metadata unless `--oauth-metadata` is supplied.
 
 Start the daemon and [direct TLS gateway](gateway.md#direct-tls). The client discovers:
 
@@ -68,7 +68,36 @@ For planned rotation, first supply a set containing both old and new keys, then 
 
 Gent commits the keys and revision to the registry before updating the private export. An interruption after that commit can leave `export_pending: true` in `keys show` (`key_export_pending` in `clients list`). The committed keys are already in effect. Retry the same command and original expected revision to finish the export. Gent accepts the recorded previous export or the completed new export; it preserves changed files and requires missing files to be restored before retry. Finish a pending export before starting a different key update. An exact retry can finish this local export after host expiry or revocation without reactivating the host. An expired or revoked host cannot receive a new key set.
 
-Updated registries use version 5 and exports use version 4. A per-client marker rejects missing revision records even when other clients retain newer schema versions. An updated export cannot recreate a missing registry client. Keep registry backups consistent; key-update retries are not a mechanism for rolling back registry state. Automatic JWKS fetching and scheduled key refresh remain future work.
+Updated registries use version 5 and exports use version 4. A per-client marker rejects missing revision records even when other clients retain newer schema versions. An updated export cannot recreate a missing registry client. Keep registry backups consistent; key-update retries are not a mechanism for rolling back registry state. Scheduled key refresh remains future work.
+
+### Import published client metadata
+
+If the host publishes its client ID as an HTTPS metadata URL, Gent can retrieve and validate its public keys during owner-initiated setup:
+
+```sh
+gent --home /private/path/gent-node gateway clients add published-host \
+  --conversation-key test/conversation \
+  --oauth-resource https://agent.example.net/mcp \
+  --redirect-uri https://host.example/callback \
+  --oauth-metadata https://host.example/oauth/client.json \
+  --out /private/path/gent-node/published-host.json
+```
+
+Use the host's actual metadata URL and callback from its setup page. `test/conversation` is a synthetic example; the host's conversation metadata and its provenance need separate verification. `--oauth-metadata` replaces both `--oauth-client-id` and `--oauth-jwks`. The document's `client_id` must equal its exact URL, support RS256 `private_key_jwt` and publish every selected callback. Only the callbacks supplied on the command line enter the registration. A published callback list cannot expand the owner's selection. The resulting signed registration has no shared secret or static bearer fallback.
+
+Metadata and `jwks_uri` must use canonical HTTPS URLs on port 443, with DNS hostnames and non-root paths, without credentials, queries or fragments. The JWKS must have the same origin as the metadata. Each fetch accepts at most 32 resolved addresses, rejects the entire set if any address is private or reserved, and pins the validated addresses for the TLS connection. Proxies, redirects and compression are disabled. Responses must be HTTP 200 with a JSON content type, and are limited to 64 KiB and ten seconds per fetch, including DNS and body reads. Other document URLs, including logos, are ignored. Inline JWKS is unsupported. TLS authenticates the selected publisher; choosing the intended host URL remains the owner's responsibility.
+
+Refresh an existing signed client's keys using its exact OAuth client ID URL:
+
+```sh
+gent --home /private/path/gent-node gateway clients keys show CLIENT_UUID
+gent --home /private/path/gent-node gateway clients keys refresh CLIENT_UUID \
+  --expect-revision 0
+```
+
+Use the current revision from `keys show`. Refresh revalidates the document and the existing callback selection before applying a full key-set replacement with the update/recovery rules above. It can also refresh a manually pinned client whose ID is a supported metadata URL. It cannot change the resource, callbacks, agent bindings or other grant policy. Fetch or validation failure leaves the current keys in place. Repeating setup re-fetches metadata but cannot update an existing registration; use refresh after a published key change. If an export is pending and the publisher changes keys again, use `keys set` with the already committed key set and original expected revision to finish that export before applying another change.
+
+Only these explicit owner commands fetch metadata. Incoming authorization/token requests and JWT headers cannot trigger a fetch. Gent does not yet advertise `client_id_metadata_document_supported`, automatically register hosts, schedule refreshes or cache fetched documents. Importing ChatGPT's public metadata has been verified independently of actual hosted OAuth and conversation binding.
 
 ## Approve a connection
 
@@ -116,6 +145,10 @@ cargo test -p gent-link gateway
 cargo build -p gent-link
 python3 scripts/prove_gateway_oauth.py --gent target/debug/gent
 python3 scripts/prove_gateway_oauth.py --gent target/debug/gent --private-key-jwt
+# Opt-in public HTTPS metadata import; no listener or model calls:
+python3 scripts/prove_gateway_metadata.py --gent target/debug/gent \
+  --metadata https://chatgpt.com/oauth/client.json \
+  --redirect-uri https://chatgpt.com/connector_platform_oauth_redirect
 # Opt-in installed clients; no model calls:
 python3 scripts/prove_gateway_clients.py --gent target/debug/gent
 # Opt-in OAuth model lifecycle; six synthetic turns:
@@ -128,7 +161,9 @@ python3 scripts/prove_gateway_hosts.py --gent target/debug/gent
 
 The tests cover approval/denial, PKCE, exact callback/client/audience checks, expiry, replay and concurrent redemption, stable bindings through refresh/reconnect, host revocation, bounded malformed inputs and real HTTP discovery. The CLI proof runs separate native gateway and daemon processes and checks approval, callback issuer/state, restart, refresh, replay revocation, reconnect identity and private logs.
 
-Signed-client tests also cover signature/key/algorithm substitution, exact claims, duplicate fields, replay capacity, concurrent assertion reuse, corrupted persistence, and combined mTLS/assertion requirements. Key-update tests cover concurrent conflicts, stale retries, simulated interruption at both export-write boundaries, modified/missing exports, retired-key rejection and preserved grants/agents. The TLS test verifies that key replacement retains the certificate requirement. The native proof generates disposable OpenSSL keys, exercises overlap and retirement while the gateway runs, deletes the JWKS sources and verifies identity after restart. All 35 gateway tests, strict Clippy, normal builds, both native OAuth modes and installed-client login pass on Linux and macOS. These checks make no signed hosted-provider acceptance claim.
+Signed-client tests also cover signature/key/algorithm substitution, exact claims, duplicate fields, replay capacity, concurrent assertion reuse, corrupted persistence, and combined mTLS/assertion requirements. Key-update tests cover concurrent conflicts, stale retries, simulated interruption at both export-write boundaries, modified/missing exports, retired-key rejection and preserved grants/agents. The TLS test verifies that key replacement retains the certificate requirement. The native proof generates disposable OpenSSL keys, exercises overlap and retirement while the gateway runs, deletes the JWKS sources and verifies identity after restart. All 39 gateway tests, strict Clippy, normal builds, both native OAuth modes and installed-client login pass on Linux and macOS. These checks make no signed hosted-provider acceptance claim.
+
+Four metadata tests cover URL/DNS restrictions, mixed public/private answers, exact identity and selected callbacks, supported authentication, same-origin keys and duplicate fields. A local TLS fixture checks trust/hostname validation, redirects, response types, compression, declared/chunked size limits, timeouts and refresh nonmutation. The public metadata CLI proof imports ChatGPT's published keys into a temporary cluster, repeats setup, refreshes unchanged keys and rejects a wrong revision without changing state. It passes on both OSes without starting a gateway, requesting provider consent or sending model traffic. This external-network proof is opt-in and is not part of automatic CI.
 
 The installed-client proof, including both OAuth model lifecycle options, and the static-bearer model proof pass on Linux with Codex 0.167.2 / Claude Code 2.1.323 and on macOS with Codex 0.167.0 / Claude Code 2.1.311. These are tested versions, not minimum supported versions.
 

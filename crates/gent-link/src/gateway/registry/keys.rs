@@ -12,6 +12,16 @@ pub(super) struct Update {
 }
 
 impl Registry {
+    pub(crate) fn signing_registration(&self, id: &str) -> Result<oauth::Registration> {
+        let state = self.read()?;
+        let client = state.clients.get(id).context("unknown gateway client ID")?;
+        let registration = client
+            .oauth
+            .as_ref()
+            .filter(|r| r.assertion.is_some())
+            .context("this client does not use signed OAuth authentication")?;
+        Ok(registration.clone())
+    }
     pub(crate) fn signing_keys(&self, id: &str) -> Result<Value> {
         let state = self.read()?;
         self.keys_summary(&state, id)
@@ -31,6 +41,29 @@ impl Registry {
         )
     }
     pub(crate) fn set_signing_keys(&self, id: &str, jwks: &Path, expected: u64) -> Result<Value> {
+        self.update_signing_keys(id, expected, |client| Policy::load(jwks, client))
+    }
+    pub(crate) fn set_verified_signing_keys(
+        &self,
+        id: &str,
+        policy: Policy,
+        expected: u64,
+    ) -> Result<Value> {
+        self.update_signing_keys(id, expected, |client| {
+            ensure!(
+                policy.client_id == client,
+                "imported metadata belongs to a different OAuth client"
+            );
+            policy.validate()?;
+            Ok(policy)
+        })
+    }
+    fn update_signing_keys(
+        &self,
+        id: &str,
+        expected: u64,
+        load: impl FnOnce(&str) -> Result<Policy>,
+    ) -> Result<Value> {
         directory_check(&self.directory())?;
         let _lock = managed_file::lock(&self.directory().join("state.lock"))?;
         let mut state = self.read()?;
@@ -42,7 +75,7 @@ impl Registry {
             .as_ref()
             .and_then(|r| r.assertion.as_ref())
             .context("this client does not use signed OAuth authentication")?;
-        let policy = Policy::load(jwks, &old.client_id)?;
+        let policy = load(&old.client_id)?;
         let revision = client.key_update.as_ref().map_or(0, |u| u.revision);
         let same = old.equivalent(&policy);
         let retry = expected.checked_add(1) == Some(revision) && same;
@@ -62,7 +95,7 @@ impl Registry {
                     .key_update
                     .as_ref()
                     .is_none_or(|u| u.pending_export.is_none()),
-                "finish the pending key export by retrying keys set with its original arguments"
+                "finish the pending key export with the same keys and original expected revision"
             );
             let original = snapshot(&client.export)?;
             let text = original
@@ -95,7 +128,7 @@ impl Registry {
             .as_ref()
             .is_some_and(|u| u.pending_export.is_some());
         if pending {
-            self.finish_key_export(&mut state, id).context("signing keys are committed; private export is pending; retry the same keys set command")?;
+            self.finish_key_export(&mut state, id).context("signing keys are committed; private export is pending; retry with the same keys and original expected revision")?;
         } else {
             self.finish_key_export(&mut state, id)?;
         }

@@ -1,6 +1,7 @@
 //! User-controlled remote MCP. The HTTP credential authenticates a trusted host
 //! namespace; every agent call also needs that host's conversation metadata.
 mod assertion;
+mod metadata;
 mod mtls;
 pub(crate) mod registry;
 mod server;
@@ -76,6 +77,10 @@ pub enum ClientCommand {
         /// Pin a local public RSA JWKS (RS256). Gent never fetches keys from request headers.
         #[arg(long, requires = "oauth_client_id")]
         oauth_jwks: Option<PathBuf>,
+        /// Fetch this HTTPS client metadata document and its same-origin public JWKS.
+        /// Only the explicitly selected callbacks are registered.
+        #[arg(long, requires = "oauth_resource", conflicts_with_all = ["oauth_client_id", "oauth_jwks"])]
+        oauth_metadata: Option<String>,
         /// Pin one client CA certificate. The peer must also have the exact --tls-client-name DNS SAN.
         #[arg(long, requires = "tls_client_name")]
         tls_client_ca: Option<PathBuf>,
@@ -100,6 +105,12 @@ pub enum KeyCommand {
         #[arg(long)]
         jwks: PathBuf,
         /// Revision from keys show; prevents a stale update from replacing newer keys.
+        #[arg(long)]
+        expect_revision: u64,
+    },
+    /// Fetch this client's metadata/JWKS again and replace keys after checking its existing callbacks.
+    Refresh {
+        client: String,
         #[arg(long)]
         expect_revision: u64,
     },
@@ -162,42 +173,59 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
                     redirect_uri,
                     oauth_client_id,
                     oauth_jwks,
+                    oauth_metadata,
                     tls_client_ca,
                     tls_client_name,
                 }),
-        } => Ok(Some(registry::add_client(
-            &home,
-            &name,
-            &conversation_key,
-            &out,
-            ttl_hours,
-            oauth_resource
-                .map(|resource| -> Result<_> {
-                    Ok(registry::oauth::Registration {
-                        resource,
-                        redirect_uris: redirect_uri,
-                        assertion: oauth_jwks
-                            .map(|path| {
-                                assertion::Policy::load(
-                                    &path,
-                                    oauth_client_id.as_deref().expect("clap requires client ID"),
-                                )
-                            })
-                            .transpose()?,
-                    })
-                })
-                .transpose()?,
-            tls_client_ca
-                .map(|path| {
-                    mtls::Policy::load(
-                        &path,
-                        tls_client_name
-                            .as_deref()
-                            .expect("clap requires client name"),
+        } => {
+            let imported = if let Some(id) = oauth_metadata {
+                Some(
+                    metadata::import(
+                        &id,
+                        oauth_resource.as_deref().expect("clap requires resource"),
+                        &redirect_uri,
                     )
-                })
-                .transpose()?,
-        )?)),
+                    .await?,
+                )
+            } else {
+                None
+            };
+            Ok(Some(registry::add_client(
+                &home,
+                &name,
+                &conversation_key,
+                &out,
+                ttl_hours,
+                oauth_resource
+                    .map(|resource| -> Result<_> {
+                        Ok(registry::oauth::Registration {
+                            resource,
+                            redirect_uris: redirect_uri,
+                            assertion: imported.or(oauth_jwks
+                                .map(|path| {
+                                    assertion::Policy::load(
+                                        &path,
+                                        oauth_client_id
+                                            .as_deref()
+                                            .expect("clap requires client ID"),
+                                    )
+                                })
+                                .transpose()?),
+                        })
+                    })
+                    .transpose()?,
+                tls_client_ca
+                    .map(|path| {
+                        mtls::Policy::load(
+                            &path,
+                            tls_client_name
+                                .as_deref()
+                                .expect("clap requires client name"),
+                        )
+                    })
+                    .transpose()?,
+            )?))
+        }
         Command::Clients {
             command: Some(ClientCommand::Keys { command }),
         } => {
@@ -209,6 +237,19 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
                     jwks,
                     expect_revision,
                 } => registry.set_signing_keys(&client, &jwks, expect_revision)?,
+                KeyCommand::Refresh {
+                    client,
+                    expect_revision,
+                } => {
+                    let registration = registry.signing_registration(&client)?;
+                    let policy = metadata::import(
+                        &registration.assertion.as_ref().unwrap().client_id,
+                        &registration.resource,
+                        &registration.redirect_uris,
+                    )
+                    .await?;
+                    registry.set_verified_signing_keys(&client, policy, expect_revision)?
+                }
             }))
         }
         Command::Clients {
