@@ -126,6 +126,7 @@ impl Journal {
                     && old.issuer_key == new.issuer_key
                     && old.service == new.service
                     && old.can_configure == new.can_configure
+                    && old.replaces == new.replaces
                     && saved.node.is_some()
                     && saved.receipt.is_none()
                     && !saved.superseded.contains(&new.id)
@@ -185,6 +186,12 @@ impl Journal {
             ensure!(
                 *node == claim,
                 "continuation requires the original staged node identity"
+            );
+        }
+        if let Some(target) = &self.saved.offer.offer.replaces {
+            ensure!(
+                claim.id != target.id && claim.key != target.signing_key,
+                "replacement invitation requires a fresh identity and key"
             );
         }
         self.saved.node = Some(claim);

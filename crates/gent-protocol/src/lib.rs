@@ -553,6 +553,8 @@ pub enum InvitationOp {
         request_id: String,
         can_configure: bool,
         continuation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replace_node: Option<String>,
     },
     Activate {
         id: String,

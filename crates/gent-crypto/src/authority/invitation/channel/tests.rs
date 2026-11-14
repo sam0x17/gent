@@ -12,10 +12,103 @@ fn service() -> ServiceBinding {
 }
 fn options() -> Options {
     Options {
+        replaces: None,
         service: service(),
         purpose: Purpose::NewNode,
         can_configure: true,
     }
+}
+
+#[test]
+fn replacement_offers_bind_old_key_and_reject_old_identity_owner_and_privilege_escalation() {
+    let (owner, issuer, mut state, ordinary) = fixture();
+    assert!(
+        !String::from_utf8(ordinary.invitation().encode().unwrap().to_vec())
+            .unwrap()
+            .contains("replaces")
+    );
+    let old = NodeIdentity::generate().unwrap();
+    let enroll = old
+        .request_enrollment(state.anchor(), state.checkpoint(), "lost", NOW)
+        .unwrap();
+    let update = state
+        .enroll(&owner, &enroll, enroll.fingerprint().unwrap(), NOW)
+        .unwrap();
+    state.apply_chain(&[update], NOW).unwrap();
+    let target = ReplacedNode {
+        id: old.id().into(),
+        signing_key: old.public_key(),
+    };
+    let make = |target: ReplacedNode, configure| {
+        let mut options = options();
+        options.replaces = Some(target);
+        options.can_configure = configure;
+        options
+    };
+    assert!(
+        OwnerInvitation::issue(&owner, &state, &issuer, make(target.clone(), true), NOW).is_err()
+    );
+    assert!(
+        OwnerInvitation::issue(
+            &owner,
+            &state,
+            &issuer,
+            make(
+                ReplacedNode {
+                    id: issuer.id().into(),
+                    signing_key: issuer.public_key()
+                },
+                false
+            ),
+            NOW
+        )
+        .is_err()
+    );
+    let invite =
+        OwnerInvitation::issue(&owner, &state, &issuer, make(target.clone(), false), NOW).unwrap();
+    let mut wire: Value = serde_json::from_slice(&invite.invitation().encode().unwrap()).unwrap();
+    wire["offer"]["offer"]["replaces"]["id"] = json!(issuer.id());
+    assert!(Invitation::decode(&serde_jcs::to_vec(&wire).unwrap()).is_err());
+    let (init, hello) = Initiator::start(invite.invitation(), NOW).unwrap();
+    let (_, reply) = invite.respond(&hello, NOW).unwrap();
+    assert!(init.finish(&reply, &old, "joined", NOW).is_err());
+    let new = NodeIdentity::generate().unwrap();
+    let (_, admission, claim) = pending(&invite, &new);
+    admission.accept(&claim, NOW, |_, _| Ok(())).unwrap();
+    let replacement = new
+        .request_replacement(
+            state.anchor(),
+            state.checkpoint(),
+            "joining node",
+            target.clone(),
+            NOW,
+        )
+        .unwrap();
+    let update = state
+        .replace_node(
+            &owner,
+            &replacement,
+            replacement.fingerprint().unwrap(),
+            false,
+            NOW,
+        )
+        .unwrap();
+    state.apply_chain(&[update], NOW).unwrap();
+    assert!(
+        OwnerInvitation::issue(&owner, &state, &issuer, make(target.clone(), false), NOW).is_err()
+    );
+    let mut options = make(target.clone(), false);
+    options.purpose = Purpose::Continue {
+        node: ClaimedNode {
+            id: new.id().into(),
+            key: new.public_key(),
+            name: "joining node".into(),
+        },
+    };
+    let continued = OwnerInvitation::issue(&owner, &state, &issuer, options, NOW).unwrap();
+    assert_eq!(continued.invitation().offer().offer.replaces, Some(target));
+    let (_, pending, claim) = pending(&continued, &new);
+    pending.accept(&claim, NOW, |_, _| Ok(())).unwrap();
 }
 fn fixture() -> (OwnerKey, NodeIdentity, VerifiedState, OwnerInvitation) {
     let owner = OwnerKey::generate().unwrap();

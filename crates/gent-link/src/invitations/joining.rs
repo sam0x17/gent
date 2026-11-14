@@ -108,6 +108,13 @@ impl Peer for Remote {
         Ok(())
     }
     async fn call(&mut self, action: PairingOp) -> Result<Value> {
+        if let PairingOp::Enroll { request } = &action {
+            let request = gent_crypto::SignedEnrollment::decode(&STANDARD.decode(request)?)?;
+            ensure!(
+                request.request.replaces == self.offer.offer.replaces,
+                "owner snapshot changed the invitation's replacement target key"
+            );
+        }
         self.send(Action::Pair { action }).await
     }
     async fn published(&mut self, node: &NodeIdentity, name: &str) -> Result<()> {
@@ -166,7 +173,11 @@ pub async fn join(
     let mut result = pairing::join(
         &home,
         pairing::Options {
-            replace_node: None,
+            replace_node: offer
+                .offer
+                .replaces
+                .as_ref()
+                .map(|target| target.id.as_str()),
             cluster: &offer.offer.anchor.cluster_id,
             name,
             relay_endpoint: None,
@@ -174,6 +185,16 @@ pub async fn join(
         &mut remote,
     )
     .await?;
+    let replacement = pairing::installed_replacement(&home)?;
+    ensure!(
+        replacement == offer.offer.replaces,
+        "installed replacement differs from the invitation"
+    );
+    if let Some(target) = replacement {
+        result["replaced_node"] = json!(target.id);
+        result["recovery"] =
+            json!("fresh identity and streams; historical agents and work were not imported");
+    }
     if let Some(receipt) = remote.journal.receipt() {
         result["invitation_receipt"] = receipt.clone();
     } else if let Some(error) = remote.receipt_error {

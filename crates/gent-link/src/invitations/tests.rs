@@ -35,6 +35,105 @@ fn issue(store: &mut Store, credential: &str) -> Invitation {
 }
 
 #[test]
+fn replacement_join_journal_cannot_drop_or_change_target_and_continuation_keeps_scope() {
+    use gent_crypto::{SignedState, VerifiedState};
+    use gent_daemon::pairing::Snapshot as PairingSnapshot;
+    use gent_protocol::{Request, Response};
+    let (root, mut store, credential) = fixture();
+    let cluster = config::load(&root.path().join("owner")).unwrap().cluster.id;
+    let pair = |store: &mut Store, action| match store.handle(Request::Owner {
+        credential: credential.clone(),
+        action: OwnerOp::Pair {
+            cluster_id: cluster.clone(),
+            action,
+        },
+    }) {
+        Response::Ok(value) => value,
+        Response::Error(error) => panic!("{error}"),
+    };
+    let state = |store: &mut Store| {
+        let snapshot: PairingSnapshot =
+            serde_json::from_value(pair(store, PairingOp::Snapshot)).unwrap();
+        VerifiedState::restore(
+            snapshot.anchor,
+            snapshot.checkpoint,
+            SignedState::decode(&STANDARD.decode(snapshot.state).unwrap()).unwrap(),
+        )
+        .unwrap()
+    };
+    let original = NodeIdentity::generate().unwrap();
+    let before = state(&mut store);
+    let request = original
+        .request_enrollment(
+            before.anchor(),
+            before.checkpoint(),
+            "old",
+            auth::now().unwrap(),
+        )
+        .unwrap();
+    pair(
+        &mut store,
+        PairingOp::Enroll {
+            request: STANDARD.encode(request.encode().unwrap()),
+        },
+    );
+    let create = |store: &mut Store, target| {
+        Invitation::decode(
+            &store
+                .create_invitation_with_replacement(
+                    &credential,
+                    &Uuid::now_v7().to_string(),
+                    true,
+                    None,
+                    target,
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let first = create(&mut store, Some(original.id()));
+    let ordinary = create(&mut store, None);
+    let home = root.path().join("joining");
+    let new = NodeIdentity::generate().unwrap();
+    let mut journal = journal::Journal::open(&home, first.offer(), "new", "login", false).unwrap();
+    assert!(journal.bind(&original, "new").is_err());
+    journal.bind(&new, "new").unwrap();
+    drop(journal);
+    assert!(journal::Journal::open(&home, ordinary.offer(), "new", "login", true).is_err());
+    let before = state(&mut store);
+    let request = new
+        .request_replacement(
+            before.anchor(),
+            before.checkpoint(),
+            "new",
+            first.offer().offer.replaces.clone().unwrap(),
+            auth::now().unwrap(),
+        )
+        .unwrap();
+    pair(
+        &mut store,
+        PairingOp::Enroll {
+            request: STANDARD.encode(request.encode().unwrap()),
+        },
+    );
+    let next = Invitation::decode(
+        &store
+            .create_invitation(
+                &credential,
+                &Uuid::now_v7().to_string(),
+                true,
+                Some(new.id()),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(journal::Journal::open(&home, next.offer(), "new", "login", false).is_err());
+    let journal = journal::Journal::open(&home, next.offer(), "new", "login", true).unwrap();
+    assert_eq!(journal.node().unwrap().id, new.id());
+    assert_eq!(next.offer().offer.replaces, first.offer().offer.replaces);
+}
+
+#[test]
 fn process_restart_preserves_uncertain_inputs_ids_and_completion_receipt() {
     let (root, mut store, credential) = fixture();
     let invitation = issue(&mut store, &credential);

@@ -1,6 +1,6 @@
 # Backup and recovery
 
-Gent can create encrypted backups of a stopped node, verify every payload, and extract the archive into a guarded offline directory. A lost joined node can be replaced through authenticated SSH using a fresh identity and fresh encrypted streams. Importing archived agents, history or pending work, and replacing a lost cluster owner remain unfinished.
+Gent can create encrypted backups of a stopped node, verify every payload, and extract the archive into a guarded offline directory. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Importing archived agents, history or pending work, and replacing a lost cluster owner remain unfinished.
 
 ## Commands
 
@@ -69,7 +69,7 @@ gent --home ~/.gent-replacement cluster join CLUSTER_UUID \
 gent --home ~/.gent-replacement daemon install
 ```
 
-The owner daemon and its configured relay must be available. SSH uses strict host-key verification and the existing owner's local authority. The usual `--remote-gent`, `--remote-home`, and development-only `--relay-endpoint` options apply. Service-backed clusters require login to the same account/service before joining. The active signing owner cannot be replaced by this command. Invitation files do not authorize replacement.
+The owner daemon and its configured relay must be available. SSH uses strict host-key verification and the existing owner's local authority. The usual `--remote-gent`, `--remote-home`, and development-only `--relay-endpoint` options apply. Service-backed clusters require login to the same account/service before joining. The active signing owner cannot be replaced by this command. Ordinary invitation files do not authorize replacement; the scoped invitation flow below does.
 
 One signed revision retires the old node ID and signing key and enrolls the fresh identity. A durable removal record commits in the same database transaction and binds the old ID/key to the replacement ID/key. A retry after a lost reply reuses that identity; another fresh directory cannot replace the same retired node. Configuration administration is preserved only if the old node had it. Old node-specific rules, agent IDs, message history, pending sends, reply grants and conversation bindings are not transferred. Existing blanket and same-node rules apply normally to newly registered agents. Configure any new explicit permissions deliberately.
 
@@ -78,6 +78,25 @@ If joining is interrupted, rerun the identical command with the same home, name 
 Signed revocation applies as peers receive current configuration. Offline peers can retain stale authority until synchronization or lease expiry. Service credential removal follows the existing owner maintenance journal and may remain pending during service downtime. On the owner, `gent node removals` reports the old node, replacement identity and cleanup status; service confirmation does not prove that every peer has caught up. The development relay uses a shared credential and has no per-node service revocation.
 
 The new node never opens the archived runtime, resumes an old MLS ratchet or clears the recovery guard. Keep extracted archives offline. Any future import of saved history or pending work needs explicit provenance and duplicate handling; archived requests must not silently become new sends. Agent bindings and peer permissions need deliberate migration rules. Replacing a node cannot remove historical data already held by it or its backups.
+
+## Replace through a private invitation
+
+On the current owner, create an invitation for the exact lost node. Transfer the file privately to the replacement machine, then join from a fresh directory signed into the same account and service:
+
+```sh
+# Current owner
+gent cluster invite --replace-node OLD_NODE_UUID --out /private/replacement.gent-invite
+
+# Replacement machine, after private transfer and login
+gent --home ~/.gent-replacement cluster join \
+  --invite-file /private/replacement.gent-invite --name laptop
+```
+
+The signed offer pins the old ID and signing key. Claiming it selects one fresh identity; enrollment retires the old member and records the replacement in the same transaction used by SSH. Issuing or claiming the offer alone does not remove the old node. The default preserves the old node's configuration rights; `--no-configure` can restrict the replacement further. Neither a normal invitation nor an altered enrollment request can retire a node. A changed target key, loss of configuration rights needed by the offer, competing replacement or retired replacement identity stops admission.
+
+Interrupted joins reuse the same private file and directory. If the offer expires or is revoked after enrollment committed, the owner issues `gent cluster invite --continue-node NEW_NODE_UUID --out NEW_FILE`, adding `--no-configure` when the enrolled replacement is restricted. This continuation includes the original retirement target from the durable removal record. Transfer it and rerun joining with `--continue`, the same name and the same directory. Before enrollment, a new `--replace-node OLD_NODE_UUID` offer can continue the saved fresh identity instead. The joining journal refuses any offer that drops or changes the original replacement scope.
+
+Gent enrollment uses the invitation's encrypted Noise mailbox; SSH is unnecessary for that path. File transfer still needs an independently trusted private channel. Replacement and continuation offers expire after 15 minutes. Account authentication and service-node credentials remain separate from native replacement authority. Upgrade both endpoints before using replacement invitations; older builds reject the new signed field. Ordinary offers keep their original signed encoding.
 
 ## Remaining recovery work
 
@@ -104,3 +123,5 @@ python3 scripts/prove_pairing.py --owner user@owner-host \
 ```
 
 This uses temporary nodes and a local development relay, checks fresh keys/streams and preserved administration limits, exchanges MCP images and a 2 MiB native file after both daemon restarts, and keeps the old archive guarded. It does not prove deployed service cleanup, archive import or owner replacement.
+
+A separate service-backed physical proof passes replacement and scoped continuation in both Linux/Mac directions through local account/relay Workers. It verifies independent transport credentials, automatic old-node service revocation through outages and lost replies, retained privilege limits, PNG delivery, relay turns and exact 2 MiB file bytes across restarts. This uses synthetic GitHub login; it does not establish live consent or deployed service behavior.

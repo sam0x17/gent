@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 mod dispatch;
+mod replacement;
 #[cfg(test)]
 mod tests;
 
@@ -218,12 +219,14 @@ impl Store {
                 request_id,
                 can_configure,
                 continuation,
+                replace_node,
             } => {
-                let bytes = self.create_invitation(
+                let bytes = self.create_invitation_with_replacement(
                     credential,
                     &request_id,
                     can_configure,
                     continuation.as_deref(),
+                    replace_node.as_deref(),
                 )?;
                 Ok(json!({"private_invitation": STANDARD.encode(bytes.as_slice())}))
             }
@@ -250,8 +253,12 @@ impl Store {
                 );
                 let records = ids.iter().map(|id| {
                     let row = record(&self.db, id)?;
-                    Ok(json!({"id":id,"phase":row.phase,"expires_at":row.offer.offer.expires_at,
-                        "can_configure":row.offer.offer.can_configure,"node":row.claim}))
+                    let mut value = json!({"id":id,"phase":row.phase,"expires_at":row.offer.offer.expires_at,
+                        "can_configure":row.offer.offer.can_configure,"node":row.claim});
+                    if let Some(target) = &row.offer.offer.replaces {
+                        value["replaces"] = json!(target);
+                    }
+                    Ok(value)
                 }).collect::<Result<Vec<_>>>()?;
                 Ok(json!({"invitations":records}))
             }
@@ -372,6 +379,7 @@ impl Store {
             timestamp,
         )?;
         ensure!(record.phase != "revoked", "invitation revoked");
+        self.invitation_replacement(record, &state, timestamp)?;
         if let Some(node) = &record.claim {
             ensure!(
                 !state.state().retired_nodes.contains(&node.id)
@@ -405,22 +413,54 @@ impl Store {
         can_configure: bool,
         continuation: Option<&str>,
     ) -> Result<Zeroizing<Vec<u8>>> {
+        self.create_invitation_with_replacement(
+            credential,
+            request,
+            can_configure,
+            continuation,
+            None,
+        )
+    }
+
+    pub fn create_invitation_with_replacement(
+        &mut self,
+        credential: &str,
+        request: &str,
+        can_configure: bool,
+        continuation: Option<&str>,
+        replace_node: Option<&str>,
+    ) -> Result<Zeroizing<Vec<u8>>> {
         self.invitation_owner(credential)?;
         self.maintain()?;
-        self.create_invitation_at(request, can_configure, continuation, now() as u64)
+        self.create_invitation_at(
+            request,
+            can_configure,
+            continuation,
+            replace_node,
+            now() as u64,
+        )
     }
     fn create_invitation_at(
         &mut self,
         request: &str,
         can_configure: bool,
         continuation: Option<&str>,
+        replace_node: Option<&str>,
         wall: u64,
     ) -> Result<Zeroizing<Vec<u8>>> {
         let _lock = config::state_lock(&self.home, "invitation.lock")?;
         let timestamp = observe(&self.db, wall)?;
         let service = self.invitation_service()?;
-        let intent: [u8; 32] =
-            Sha256::digest(serde_jcs::to_vec(&(can_configure, continuation, &service))?).into();
+        ensure!(
+            continuation.is_none() || replace_node.is_none(),
+            "choose replacement or continuation, not both"
+        );
+        // Preserve the original ordinary-invitation retry fingerprint.
+        let intent: [u8; 32] = Sha256::digest(match replace_node {
+            None => serde_jcs::to_vec(&(can_configure, continuation, &service))?,
+            Some(target) => serde_jcs::to_vec(&(can_configure, continuation, &service, target))?,
+        })
+        .into();
         let previous: Option<(String, Vec<u8>)> = self
             .db
             .query_row(
@@ -463,6 +503,32 @@ impl Store {
                 }
             }
         };
+        let (replaces, can_configure) = match (&purpose, replace_node) {
+            (Purpose::NewNode, Some(id)) => {
+                ensure!(
+                    id != self.identity.node.id(),
+                    "cannot replace the signing owner through an invitation"
+                );
+                let member = state
+                    .state()
+                    .nodes
+                    .get(id)
+                    .context("replacement target is unavailable")?;
+                (
+                    Some(gent_crypto::ReplacedNode {
+                        id: id.into(),
+                        signing_key: member.signing_key,
+                    }),
+                    can_configure && member.can_configure,
+                )
+            }
+            (Purpose::Continue { node }, None) => (
+                removals::replacement_target(&self.db, &state, &node.id, &node.key)?,
+                can_configure,
+            ),
+            (Purpose::NewNode, None) => (None, can_configure),
+            _ => unreachable!("exclusive replacement and continuation checked"),
+        };
         let tx = self.db.unchecked_transaction()?;
         ensure!(
             tx.query_row("SELECT COUNT(*) FROM invitations", [], |r| r
@@ -478,6 +544,7 @@ impl Store {
                 service,
                 purpose,
                 can_configure,
+                replaces,
             },
             timestamp,
         )?;

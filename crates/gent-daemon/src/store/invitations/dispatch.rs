@@ -209,8 +209,8 @@ impl Store {
                     signed.fingerprint()?;
                     let request = signed.request;
                     ensure!(
-                        request.replaces.is_none(),
-                        "invitation does not authorize node replacement"
+                        request.replaces == row.offer.offer.replaces,
+                        "enrollment replacement does not match the invitation scope"
                     );
                     ensure!(
                         request.anchor == row.offer.offer.anchor

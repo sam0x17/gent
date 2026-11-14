@@ -72,6 +72,12 @@ impl ClaimedNode {
                 && self.key != offer.anchor.owner_key,
             "invitation requires a separate joining identity"
         );
+        if let Some(target) = &offer.replaces {
+            ensure!(
+                self.id != target.id && self.key != target.signing_key,
+                "replacement invitation requires a fresh identity and key"
+            );
+        }
         Ok(())
     }
 }
@@ -87,6 +93,7 @@ pub struct Options {
     pub service: ServiceBinding,
     pub purpose: Purpose,
     pub can_configure: bool,
+    pub replaces: Option<ReplacedNode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +109,8 @@ pub struct Offer {
     pub routing_digest: Digest,
     pub purpose: Purpose,
     pub can_configure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<ReplacedNode>,
     pub issued_at: u64,
     pub expires_at: u64,
 }
@@ -144,6 +153,16 @@ impl SignedOffer {
         );
         channel::validate_public_key(&offer.responder_key)?;
         offer.service.validate()?;
+        if let Some(target) = &offer.replaces {
+            id(&target.id)?;
+            public_key(&target.signing_key)?;
+            ensure!(
+                target.id != offer.issuer_id
+                    && target.signing_key != offer.issuer_key
+                    && target.signing_key != offer.anchor.owner_key,
+                "invitation cannot replace the signing owner"
+            );
+        }
         if let Purpose::Continue { node } = &offer.purpose {
             node.validate(offer)?;
         }
@@ -233,6 +252,28 @@ impl OwnerInvitation {
                 "continuation must preserve the existing node and privileges"
             );
         }
+        if let Some(target) = &options.replaces {
+            match &options.purpose {
+                Purpose::NewNode => {
+                    let member = state
+                        .state()
+                        .nodes
+                        .get(&target.id)
+                        .context("replacement target is unavailable")?;
+                    ensure!(
+                        member.signing_key == target.signing_key
+                            && (!options.can_configure || member.can_configure),
+                        "replacement target key or configuration privileges changed"
+                    );
+                }
+                Purpose::Continue { .. } => ensure!(
+                    !state.state().nodes.contains_key(&target.id)
+                        && state.state().retired_nodes.contains(&target.id)
+                        && state.state().retired_keys.contains(&target.signing_key),
+                    "replacement continuation requires signed retirement"
+                ),
+            }
+        }
         let private = random_secret()?;
         let routing = random_secret()?;
         let psk = random_secret()?;
@@ -247,6 +288,7 @@ impl OwnerInvitation {
             routing_digest: Sha256::digest(routing.as_ref()).into(),
             purpose: options.purpose,
             can_configure: options.can_configure,
+            replaces: options.replaces,
             issued_at: now,
             expires_at: now
                 .checked_add(OFFER_LIFETIME)

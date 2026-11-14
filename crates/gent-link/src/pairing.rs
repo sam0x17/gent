@@ -116,6 +116,10 @@ impl JoinArgs {
         if let Some(file) = &self.invite_file {
             let saved = crate::invitations::installation(home)?
                 .context("invitation setup record is missing")?;
+            ensure!(
+                replacement == saved.offer.offer.replaces,
+                "installed replacement differs from the invitation"
+            );
             if !saved.complete {
                 return Ok(None);
             }

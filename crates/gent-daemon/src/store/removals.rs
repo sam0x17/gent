@@ -52,6 +52,40 @@ fn identifier(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Bind a continuation to the original replacement decision, even after its
+/// invitation has expired. The current identity is independently authorized.
+pub(super) fn replacement_target(
+    db: &Connection,
+    state: &VerifiedState,
+    node: &str,
+    key: &[u8; 32],
+) -> Result<Option<gent_crypto::ReplacedNode>> {
+    let saved: Option<(String, Vec<u8>, Vec<u8>)> = db
+        .query_row(
+            "SELECT node,signing_key,replacement_key FROM node_removals WHERE replacement_node=?1",
+            [node],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    saved
+        .map(|(id, old_key, replacement_key)| {
+            identifier(&id)?;
+            let signing_key: [u8; 32] = old_key
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid replacement target key"))?;
+            ensure!(
+                replacement_key == key
+                    && id != node
+                    && !state.state().nodes.contains_key(&id)
+                    && state.state().retired_nodes.contains(&id)
+                    && state.state().retired_keys.contains(&signing_key),
+                "replacement mapping differs from signed retirement or current identity"
+            );
+            Ok(gent_crypto::ReplacedNode { id, signing_key })
+        })
+        .transpose()
+}
+
 impl StoreSession<'_> {
     pub(super) fn removal(&self, node: &str) -> Result<Value> {
         let (cluster, key, revision, created_at, service, confirmed):

@@ -32,6 +32,9 @@ pub struct InviteArgs {
     /// Explicitly continue an interrupted join for this already-enrolled node ID.
     #[arg(long)]
     continue_node: Option<String>,
+    /// Authorize a fresh identity to replace this exact lost joined node.
+    #[arg(long, conflicts_with = "continue_node")]
+    replace_node: Option<String>,
 }
 #[derive(Subcommand)]
 pub enum Command {
@@ -80,6 +83,8 @@ struct Creation {
     session: String,
     configure: bool,
     continuation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replace_node: Option<String>,
 }
 
 fn clean_creation_records(directory: &Path, retain: &Path) -> Result<usize> {
@@ -162,6 +167,7 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
                 session: service.session_hash(),
                 configure: !args.no_configure,
                 continuation: args.continue_node.clone(),
+                replace_node: args.replace_node.clone(),
             };
             saved.write(&serde_json::to_string(&value)?)?;
             value
@@ -174,7 +180,8 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
             && record.node == cfg.node.id
             && record.session == service.session_hash()
             && record.configure == !args.no_configure
-            && record.continuation == args.continue_node,
+            && record.continuation == args.continue_node
+            && record.replace_node == args.replace_node,
         "invitation retry options or issuing login changed; use the original options and login, or a new output file"
     );
     let value = local(
@@ -183,6 +190,7 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
             request_id: record.request.clone(),
             can_configure: record.configure,
             continuation: record.continuation.clone(),
+            replace_node: record.replace_node.clone(),
         },
     )
     .await?;
@@ -200,8 +208,22 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
     ensure!(
         offer.anchor.cluster_id == cfg.cluster.id
             && offer.issuer_id == cfg.node.id
-            && offer.can_configure == record.configure,
+            && (offer.can_configure == record.configure
+                || (record.replace_node.is_some() && record.configure && !offer.can_configure)),
         "local invitation identity changed"
+    );
+    use gent_crypto::invitation::Purpose;
+    ensure!(
+        match (&offer.purpose, &record.continuation, &record.replace_node) {
+            (Purpose::NewNode, None, None) => offer.replaces.is_none(),
+            (Purpose::NewNode, None, Some(id)) => offer
+                .replaces
+                .as_ref()
+                .is_some_and(|target| &target.id == id),
+            (Purpose::Continue { node }, Some(id), None) => &node.id == id,
+            _ => false,
+        },
+        "local invitation purpose changed"
     );
     ensure!(
         destination
@@ -221,7 +243,7 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
     destination.write(text)?;
     Ok(
         json!({"invitation":offer.id,"file":output,"expires_at":offer.expires_at,
-        "can_configure":offer.can_configure,"next":"Transfer this private file through a trusted channel, then run gent cluster join --invite-file FILE --name NODE."}),
+        "can_configure":offer.can_configure,"replaces":offer.replaces,"next":"Transfer this private file through a trusted channel, then run gent cluster join --invite-file FILE --name NODE."}),
     )
 }
 

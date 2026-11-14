@@ -5,6 +5,7 @@ use gent_crypto::{
     invitation::{Invitation, channel::Initiator},
 };
 use std::{fs, os::unix::fs::PermissionsExt};
+mod replacement;
 
 struct Fixture {
     home: tempfile::TempDir,
@@ -191,6 +192,7 @@ fn ordinary_invitations_cannot_replace_existing_members_even_with_configuration_
 fn local_rpc_requires_owner_authority_and_listing_excludes_invitation_secrets() {
     let mut fixture = Fixture::new();
     let create = InvitationOp::Create {
+        replace_node: None,
         request_id: Uuid::now_v7().to_string(),
         can_configure: true,
         continuation: None,
@@ -577,7 +579,7 @@ fn expiry_cleanup_commits_its_clock_and_cannot_recreate_old_creation_requests() 
     assert!(
         fixture
             .store
-            .create_invitation_at(&request, true, None, before)
+            .create_invitation_at(&request, true, None, None, before)
             .is_err()
     );
     assert_eq!(
@@ -687,10 +689,11 @@ impl Peer for EncryptedPeer {
 }
 async fn joined(home: &Path, peer: &mut EncryptedPeer) -> Result<Value> {
     let cluster = peer.invitation.offer().offer.anchor.cluster_id.clone();
+    let replacement = peer.invitation.offer().offer.replaces.clone();
     pairing::join(
         home,
         pairing::Options {
-            replace_node: None,
+            replace_node: replacement.as_ref().map(|target| target.id.as_str()),
             cluster: &cluster,
             name: "joined",
             relay_endpoint: None,
@@ -1241,7 +1244,7 @@ fn invitation_and_handshake_capacity_preserve_retries_revocation_and_expiry_clea
     assert!(
         fixture
             .store
-            .create_invitation_at(&request, true, None, expires)
+            .create_invitation_at(&request, true, None, None, expires)
             .is_err()
     );
 }
