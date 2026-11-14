@@ -1123,6 +1123,7 @@ dependencies = [
  "jsonc-parser",
  "rcgen",
  "reqwest",
+ "ring",
  "rmcp",
  "rustix",
  "rustls-pemfile",

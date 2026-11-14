@@ -23,6 +23,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gent", type=Path, required=True)
+    parser.add_argument("--private-key-jwt", action="store_true")
     args = parser.parse_args()
     binary = args.gent.resolve()
     with tempfile.TemporaryDirectory(prefix="gent-go-", dir="/tmp") as temporary:
@@ -31,6 +32,21 @@ def main():
         log_paths = []
         private_values = []
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+        def authentication():
+            if not args.private_key_jwt:
+                return {"client_secret": client_secret}
+            now = int(time.time())
+            header = {"alg": "RS256", "kid": "synthetic", "typ": "JWT"}
+            claims = {"iss": client_id, "sub": client_id, "aud": origin + "/oauth/token",
+                      "iat": now, "exp": now + 120, "jti": secrets.token_hex(16)}
+            encoded = [base64.urlsafe_b64encode(json.dumps(v).encode()).decode().rstrip("=") for v in (header, claims)]
+            signing = ".".join(encoded).encode()
+            signature = subprocess.check_output(["openssl", "dgst", "-sha256", "-sign", str(signing_key)], input=signing)
+            assertion = signing.decode() + "." + base64.urlsafe_b64encode(signature).decode().rstrip("=")
+            private_values.append(assertion)
+            return {"client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                    "client_assertion": assertion}
 
         def cli(*arguments):
             completed = subprocess.run([str(binary), "--home", str(home), "--json", *arguments],
@@ -102,7 +118,7 @@ def main():
             code = values["code"][0]
             private_values.append(code)
             _, body = http("/oauth/token", form={"grant_type": "authorization_code", "client_id": client_id,
-                                               "client_secret": client_secret, "resource": resource,
+                                               **authentication(), "resource": resource,
                                                "redirect_uri": callback, "code": code, "code_verifier": verifier})
             token = json.loads(body)
             private_values.extend([token["access_token"], token["refresh_token"]])
@@ -117,12 +133,32 @@ def main():
             resource = origin + "/mcp"
             callback = "https://synthetic.invalid/callback"
             export = home / "oauth.json"
+            extra = []
+            if args.private_key_jwt:
+                signing_key = home / "synthetic.pem"
+                subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+                                "-out", str(signing_key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                modulus = subprocess.check_output(["openssl", "rsa", "-in", str(signing_key), "-noout", "-modulus"],
+                                                  stderr=subprocess.DEVNULL).decode().strip().split("=", 1)[1]
+                jwks = home / "jwks.json"
+                jwks.write_text(json.dumps({"keys": [{"kty": "RSA", "alg": "RS256", "use": "sig", "kid": "synthetic",
+                    "n": base64.urlsafe_b64encode(bytes.fromhex(modulus)).decode().rstrip("="), "e": "AQAB"}]}))
+                extra = ["--oauth-client-id", "https://synthetic.invalid/client.json", "--oauth-jwks", str(jwks)]
             added = cli("gateway", "clients", "add", "synthetic-oauth", "--conversation-key", "test/conversation",
-                        "--out", str(export), "--oauth-resource", resource, "--redirect-uri", callback)
+                        "--out", str(export), "--oauth-resource", resource, "--redirect-uri", callback, *extra)
             exported = json.loads(export.read_text())
-            client_id, client_secret = exported["client"], exported["token"]
-            private_values.append(client_secret)
-            assert client_secret not in json.dumps(added)
+            local_client_id = exported["client"]
+            if args.private_key_jwt:
+                client_id = exported["oauth"]["assertion"]["client_id"]
+                assert "token" not in exported and exported["version"] == 3
+                # Prove that setup pins the key material and exact retries keep it.
+                assert cli("gateway", "clients", "add", "synthetic-oauth", "--conversation-key", "test/conversation",
+                           "--out", str(export), "--oauth-resource", resource, "--redirect-uri", callback, *extra) == added
+                jwks.unlink()
+            else:
+                client_id, client_secret = local_client_id, exported["token"]
+                private_values.append(client_secret)
+                assert client_secret not in json.dumps(added)
             daemon = start("daemon", "run")
             for _ in range(200):
                 assert daemon.poll() is None
@@ -138,8 +174,13 @@ def main():
                 except urllib.error.URLError:
                     time.sleep(0.025)
             assert json.loads(body)["resource"] == resource
+            _, metadata = http("/.well-known/oauth-authorization-server")
+            assert "private_key_jwt" in json.loads(metadata)["token_endpoint_auth_methods_supported"]
+            assert json.loads(metadata).get("client_id_metadata_document_supported") is not True
             headers, _ = http("/mcp", status=401)
             assert "resource_metadata" in headers["WWW-Authenticate"]
+            if args.private_key_jwt:
+                http("/mcp", bearer=authentication()["client_assertion"], status=401)
             token = authorize()
             first = call(token["access_token"], "gent_register", {"name": "hosted", "provider": "synthetic"})
             stop(gateway)
@@ -151,7 +192,7 @@ def main():
                     break
                 except urllib.error.URLError:
                     time.sleep(0.025)
-            refresh = {"grant_type": "refresh_token", "client_id": client_id, "client_secret": client_secret,
+            refresh = {"grant_type": "refresh_token", "client_id": client_id, **authentication(),
                        "resource": resource, "refresh_token": token["refresh_token"]}
             _, body = http("/oauth/token", form=refresh)
             rotated = json.loads(body)
@@ -159,18 +200,36 @@ def main():
             assert call(rotated["access_token"], "gent_identity", {})["agent"]["id"] == first["agent"]["id"]
             http("/mcp", bearer=token["access_token"], status=401)
             http("/oauth/token", form=refresh, status=400)
+            if args.private_key_jwt:
+                # Replaying client authentication alone must not revoke the grant.
+                assert call(rotated["access_token"], "gent_identity", {})["agent"]["id"] == first["agent"]["id"]
+                stop(gateway)
+                gateway = start("gateway", "run", "--listen", address)
+                for _ in range(200):
+                    assert gateway.poll() is None
+                    try:
+                        http("/.well-known/oauth-authorization-server")
+                        break
+                    except urllib.error.URLError:
+                        time.sleep(0.025)
+                http("/oauth/token", form=refresh, status=400)
+                assert call(rotated["access_token"], "gent_identity", {})["agent"]["id"] == first["agent"]["id"]
+                # A new assertion authenticates a spent refresh-token replay.
+                http("/oauth/token", form={**refresh, **authentication()}, status=400)
             http("/mcp", bearer=rotated["access_token"], status=401)
             fresh = authorize()
             assert call(fresh["access_token"], "gent_identity", {})["agent"]["id"] == first["agent"]["id"]
-            cli("gateway", "clients", "revoke", client_id)
+            cli("gateway", "clients", "revoke", local_client_id)
             http("/mcp", bearer=fresh["access_token"], status=401)
             stop(gateway)
             stop(daemon)
             for log in log_paths:
                 assert not any(value in log.read_text() for value in private_values)
-            print(json.dumps({"status": "passed", "proof": "gateway-oauth-cli", "checks": [
+            print(json.dumps({"status": "passed", "proof": "gateway-oauth-cli",
+                "authentication": "private_key_jwt" if args.private_key_jwt else "client_secret_post", "checks": [
                 "discovery", "local owner consent", "PKCE", "issuer and state callback", "restart",
-                "refresh", "replay revocation", "reconnect identity", "host revocation", "private logs"]}))
+                "refresh", "replay revocation", "reconnect identity", "host revocation", "private logs"] + ([
+                "pinned JWKS", "no shared secret", "persistent assertion replay rejection"] if args.private_key_jwt else [])}))
         finally:
             for process in processes:
                 if process.poll() is None:

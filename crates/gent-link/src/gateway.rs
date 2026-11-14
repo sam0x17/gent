@@ -1,5 +1,6 @@
 //! User-controlled remote MCP. The HTTP credential authenticates a trusted host
 //! namespace; every agent call also needs that host's conversation metadata.
+mod assertion;
 mod mtls;
 pub(crate) mod registry;
 mod server;
@@ -46,14 +47,14 @@ pub enum OAuthCommand {
 #[derive(Subcommand)]
 pub enum ClientCommand {
     List,
-    /// Issue a private host credential. Transfer it to the host outside model prompts.
+    /// Register a trusted host and write its private connection configuration.
     Add {
         name: String,
         /// Host-owned per-call MCP metadata field, e.g. gent/conversation or Codex threadId.
         /// Provider support and metadata provenance must be verified separately.
         #[arg(long)]
         conversation_key: String,
-        /// Private credential export; an identical retry preserves its token.
+        /// Private registration export; an identical retry preserves its identity and credentials.
         #[arg(long)]
         out: PathBuf,
         #[arg(long, default_value_t=720, value_parser=clap::value_parser!(u64).range(1..=8760))]
@@ -64,6 +65,12 @@ pub enum ClientCommand {
         /// Exact OAuth callback URL; repeat for additional callbacks. No wildcards.
         #[arg(long, requires = "oauth_resource")]
         redirect_uri: Vec<String>,
+        /// Exact HTTPS OAuth client identifier for private_key_jwt authentication.
+        #[arg(long, requires_all = ["oauth_resource", "oauth_jwks"])]
+        oauth_client_id: Option<String>,
+        /// Pin a local public RSA JWKS (RS256). Gent never fetches keys from request headers.
+        #[arg(long, requires = "oauth_client_id")]
+        oauth_jwks: Option<PathBuf>,
         /// Pin one client CA certificate. The peer must also have the exact --tls-client-name DNS SAN.
         #[arg(long, requires = "tls_client_name")]
         tls_client_ca: Option<PathBuf>,
@@ -132,6 +139,8 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
                     ttl_hours,
                     oauth_resource,
                     redirect_uri,
+                    oauth_client_id,
+                    oauth_jwks,
                     tls_client_ca,
                     tls_client_name,
                 }),
@@ -141,10 +150,22 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
             &conversation_key,
             &out,
             ttl_hours,
-            oauth_resource.map(|resource| registry::oauth::Registration {
-                resource,
-                redirect_uris: redirect_uri,
-            }),
+            oauth_resource
+                .map(|resource| -> Result<_> {
+                    Ok(registry::oauth::Registration {
+                        resource,
+                        redirect_uris: redirect_uri,
+                        assertion: oauth_jwks
+                            .map(|path| {
+                                assertion::Policy::load(
+                                    &path,
+                                    oauth_client_id.as_deref().expect("clap requires client ID"),
+                                )
+                            })
+                            .transpose()?,
+                    })
+                })
+                .transpose()?,
             tls_client_ca
                 .map(|path| {
                     mtls::Policy::load(

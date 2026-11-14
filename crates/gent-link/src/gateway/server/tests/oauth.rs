@@ -21,6 +21,7 @@ async fn oauth_discovery_consent_pkce_refresh_and_revocation_work_through_real_h
         Some(registry::oauth::Registration {
             resource: resource.clone(),
             redirect_uris: vec![redirect.into()],
+            assertion: None,
         }),
         None,
     )

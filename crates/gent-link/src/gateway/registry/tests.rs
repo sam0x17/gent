@@ -21,14 +21,14 @@ impl Fixture {
         let export = home.join("host.json");
         let result = add(&home, "host", "test/conversation", &export, 24).unwrap();
         let record: Export = serde_json::from_slice(&fs::read(&export).unwrap()).unwrap();
-        assert!(!result.to_string().contains(&record.token));
+        assert!(!result.to_string().contains(record.token.as_ref().unwrap()));
         let registry = Registry::open(&home).unwrap();
         Self {
             _temp: temp,
             home,
             export,
             registry,
-            token: record.token,
+            token: record.token.unwrap(),
             id: record.client,
         }
     }
@@ -51,7 +51,10 @@ fn host_namespaces_and_conversations_are_durable_and_cannot_be_selected_by_argum
     let second = f.home.join("second.json");
     add(&f.home, "second", "test/conversation", &second, 24).unwrap();
     let export: Export = serde_json::from_slice(&fs::read(second).unwrap()).unwrap();
-    let permit = f.registry.authenticate(&export.token).unwrap();
+    let permit = f
+        .registry
+        .authenticate(export.token.as_deref().unwrap())
+        .unwrap();
     assert_ne!(
         a,
         f.registry
@@ -296,7 +299,9 @@ fn concurrent_first_setup_and_binding_allocation_preserve_one_identity() {
                 let export: Export =
                     serde_json::from_slice(&fs::read(home.join("host.json")).unwrap()).unwrap();
                 let registry = Registry::open(home).unwrap();
-                let permit = registry.authenticate(&export.token).unwrap();
+                let permit = registry
+                    .authenticate(export.token.as_deref().unwrap())
+                    .unwrap();
                 registry
                     .credential(&permit, &json!({"test/conversation":"same"}))
                     .unwrap()

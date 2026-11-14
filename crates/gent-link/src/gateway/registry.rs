@@ -71,7 +71,8 @@ struct State {
 struct Client {
     name: String,
     conversation_key: String,
-    token_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_hash: Option<String>,
     created_at: u64,
     expires_at: u64,
     export: PathBuf,
@@ -96,7 +97,8 @@ struct Export {
     client: String,
     name: String,
     conversation_key: String,
-    token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
     created_at: u64,
     expires_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,9 +190,15 @@ impl State {
     fn validate(&self) -> Result<()> {
         let oauth = self.oauth.is_some() || self.clients.values().any(|c| c.oauth.is_some());
         let mtls = self.clients.values().any(|c| c.mtls.is_some());
+        let assertions = self
+            .clients
+            .values()
+            .any(|c| c.oauth.as_ref().is_some_and(|r| r.assertion.is_some()));
         ensure!(
             self.version
-                == if mtls {
+                == if assertions {
+                    4
+                } else if mtls {
                     3
                 } else if oauth {
                     2
@@ -204,13 +212,19 @@ impl State {
             "invalid gateway registry"
         );
         let mut names = std::collections::BTreeSet::new();
+        let mut oauth_ids = std::collections::BTreeSet::new();
         let mut count = 0;
         for (id, client) in &self.clients {
             config::label(&client.name)?;
             metadata_key(&client.conversation_key)?;
             if let Some(registration) = &client.oauth {
                 registration.validate()?;
+                ensure!(
+                    oauth_ids.insert(registration.client_id(id)),
+                    "duplicate OAuth client identity"
+                );
             }
+            let signed = client.oauth.as_ref().is_some_and(|r| r.assertion.is_some());
             if let Some(policy) = &client.mtls {
                 policy.validate()?;
             }
@@ -221,7 +235,11 @@ impl State {
             ensure!(
                 uuid(id)
                     && names.insert(&client.name)
-                    && hash(&client.token_hash)
+                    && if signed {
+                        client.token_hash.is_none()
+                    } else {
+                        client.token_hash.as_deref().is_some_and(hash)
+                    }
                     && client.created_at <= client.expires_at
                     && client.expires_at - client.created_at <= MAX_LIFETIME
                     && client.created_at <= self.clock
@@ -242,6 +260,10 @@ impl State {
         if let Some(records) = &self.oauth {
             records.validate(self)?;
         }
+        ensure!(
+            !assertions || self.oauth.is_some(),
+            "assertion replay state is missing"
+        );
         Ok(())
     }
 }
@@ -381,7 +403,10 @@ impl Registry {
             oauth::check_access(state, permit, now).is_ok()
         } else {
             client.oauth.is_none()
-                && bool::from(client.token_hash.as_bytes().ct_eq(permit.hash.as_bytes()))
+                && client
+                    .token_hash
+                    .as_ref()
+                    .is_some_and(|hash| bool::from(hash.as_bytes().ct_eq(permit.hash.as_bytes())))
         };
         ensure!(
             !client.revoked && now < client.expires_at && valid,
@@ -491,6 +516,7 @@ pub(super) fn add_client(
     oauth: Option<oauth::Registration>,
     mtls: Option<TlsPolicy>,
 ) -> Result<Value> {
+    let signed = oauth.as_ref().is_some_and(|r| r.assertion.is_some());
     if let Some(registration) = &oauth {
         registration.validate()?;
     }
@@ -568,14 +594,24 @@ pub(super) fn add_client(
         );
         let id = Uuid::new_v4().to_string();
         Export {
-            version: if mtls.is_some() { 2 } else { 1 },
+            version: if signed {
+                3
+            } else if mtls.is_some() {
+                2
+            } else {
+                1
+            },
             registry: registry.id.clone(),
             cluster: registry.cluster.clone(),
             node: registry.node.clone(),
             client: id.clone(),
             name: name.into(),
             conversation_key: key.into(),
-            token: format!("gent_g1.{id}.{}", config::secret()),
+            token: if signed {
+                None
+            } else {
+                Some(format!("gent_g1.{id}.{}", config::secret()))
+            },
             created_at: now,
             expires_at: now + hours * 3600,
             oauth: oauth.clone(),
@@ -583,20 +619,35 @@ pub(super) fn add_client(
         }
     };
     ensure!(
-        value.version == if mtls.is_some() { 2 } else { 1 }
+        value.version
+            == if signed {
+                3
+            } else if mtls.is_some() {
+                2
+            } else {
+                1
+            }
             && value.registry == registry.id
             && value.cluster == registry.cluster
             && value.node == registry.node
+            && uuid(&value.client)
             && value.name == name
             && value.conversation_key == key
             && value.oauth == oauth
             && value.mtls == mtls
-            && token_id(&value.token)? == value.client
+            && if signed {
+                value.token.is_none()
+            } else {
+                value
+                    .token
+                    .as_deref()
+                    .is_some_and(|t| token_id(t).is_ok_and(|id| id == value.client))
+            }
             && value.created_at <= now
             && value.expires_at.checked_sub(value.created_at) == Some(hours * 3600),
         "gateway credential export does not match this node or original options"
     );
-    let hash = digest(&value.token);
+    let hash = value.token.as_deref().map(digest);
     if let Some(client) = state.clients.get(&value.client) {
         ensure!(
             client.name == name
@@ -616,6 +667,15 @@ pub(super) fn add_client(
             "revoked gateway credentials cannot be reactivated"
         );
     } else {
+        if let Some(registration) = &oauth {
+            ensure!(
+                !state.clients.iter().any(|(id, c)| c
+                    .oauth
+                    .as_ref()
+                    .is_some_and(|r| r.client_id(id) == registration.client_id(&value.client))),
+                "OAuth client identity already registered"
+            );
+        }
         ensure!(
             state.clients.len() < MAX_CLIENTS && !state.clients.values().any(|c| c.name == name),
             "gateway client name or capacity conflict"
@@ -627,13 +687,21 @@ pub(super) fn add_client(
         // Export first, registry second. A retry after either write reuses the
         // same secret. No bearer or signing key is printed by the command.
         exported.write(&(serde_json::to_string(&value)? + "\n"))?;
-        state.version = state.version.max(if mtls.is_some() {
+        state.version = state.version.max(if signed {
+            4
+        } else if mtls.is_some() {
             3
         } else if oauth.is_some() {
             2
         } else {
             1
         });
+        if signed {
+            state
+                .oauth
+                .get_or_insert_with(oauth::Records::default)
+                .enable_assertions();
+        }
         state.clients.insert(
             value.client.clone(),
             Client {

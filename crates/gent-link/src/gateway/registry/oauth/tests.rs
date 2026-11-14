@@ -7,11 +7,241 @@ struct Fixture {
     home: PathBuf,
     registry: Registry,
     client: String,
+    oauth_client: String,
     secret: String,
     verifier: String,
 }
+
+#[test]
+fn signed_code_and_refresh_preserve_agents_and_assertion_replays_do_not_revoke_grants() {
+    let f = Fixture::with_assertions(true);
+    let code = f.code();
+    for key in ["client_assertion", "client_assertion_type"] {
+        let mut invalid = code.clone();
+        invalid.remove(key);
+        assert!(f.registry.exchange(&invalid, RESOURCE).is_err());
+    }
+    for (key, value) in [
+        ("client_secret", config::secret()),
+        ("client_id", f.client.clone()),
+        ("client_assertion_type", "wrong-type".into()),
+    ] {
+        let mut invalid = code.clone();
+        invalid.insert(key.into(), value);
+        assert!(f.registry.exchange(&invalid, RESOURCE).is_err());
+    }
+    let issued = f.registry.exchange(&code, RESOURCE).unwrap();
+    let binding = f
+        .registry
+        .credential(&f.permit(&issued), &json!({"test/conversation":"same"}))
+        .unwrap();
+    let reopened = Registry::open(&f.home).unwrap();
+    assert!(reopened.exchange(&code, RESOURCE).is_err());
+    f.permit(&issued);
+    let refresh = f.refresh(&issued);
+    let rotated = reopened.exchange(&refresh, RESOURCE).unwrap();
+    assert!(
+        Registry::open(&f.home)
+            .unwrap()
+            .exchange(&refresh, RESOURCE)
+            .is_err()
+    );
+    assert_eq!(
+        binding,
+        f.registry
+            .credential(&f.permit(&rotated), &json!({"test/conversation":"same"}))
+            .unwrap()
+    );
+    // A fresh assertion authenticates a replay of a spent refresh token. The
+    // existing token-family replay rule still revokes that family.
+    assert!(f.registry.exchange(&f.refresh(&issued), RESOURCE).is_err());
+    assert!(
+        f.registry
+            .authenticate_at(rotated["access_token"].as_str().unwrap(), Some(RESOURCE))
+            .is_err()
+    );
+    let reauthorized = f.grant();
+    assert_eq!(
+        binding,
+        f.registry
+            .credential(
+                &f.permit(&reauthorized),
+                &json!({"test/conversation":"same"})
+            )
+            .unwrap()
+    );
+    f.registry.revoke(&f.client).unwrap();
+    assert!(
+        f.registry
+            .exchange(&f.refresh(&reauthorized), RESOURCE)
+            .is_err()
+    );
+}
+
+#[test]
+fn concurrent_assertion_replay_consumes_once_without_revoking_the_successful_family() {
+    let f = Fixture::with_assertions(true);
+    let code = f.code();
+    let barrier = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let jobs: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    f.registry.exchange(&code, RESOURCE)
+                })
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|j| j.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    f.permit(results.iter().find_map(|r| r.as_ref().ok()).unwrap());
+    let state = f.registry.read().unwrap();
+    assert_eq!(
+        state
+            .oauth
+            .as_ref()
+            .unwrap()
+            .assertions
+            .as_ref()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn signed_policies_have_no_secret_fallback_and_replay_state_cannot_disappear() {
+    let f = Fixture::with_assertions(true);
+    let registration = f.registry.read().unwrap().clients[&f.client]
+        .oauth
+        .clone()
+        .unwrap();
+    assert!(
+        add_client(
+            &f.home,
+            "duplicate",
+            "test/conversation",
+            &f.home.join("duplicate.json"),
+            24,
+            Some(registration.clone()),
+            None
+        )
+        .is_err()
+    );
+    assert!(!f.home.join("duplicate.json").exists());
+    let mut second = registration.clone();
+    second.assertion.as_mut().unwrap().client_id = "https://second.example/client.json".into();
+    add_client(
+        &f.home,
+        "second",
+        "test/conversation",
+        &f.home.join("second.json"),
+        24,
+        Some(second),
+        None,
+    )
+    .unwrap();
+    let path = f.home.join("gateway/state.json");
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let export: Value =
+        serde_json::from_slice(&fs::read(f.home.join("host.json")).unwrap()).unwrap();
+    assert_eq!(original["version"], 4);
+    assert_eq!(export["version"], 3);
+    assert!(export.get("token").is_none());
+    for change in 0..5 {
+        let mut corrupt = original.clone();
+        match change {
+            0 => {
+                corrupt["clients"][&f.client]["oauth"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("assertion");
+            }
+            1 => {
+                corrupt["clients"][&f.client]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("oauth");
+            }
+            2 => {
+                corrupt["clients"][&f.client]["token_hash"] = json!(digest("invented-secret"));
+            }
+            3 => {
+                corrupt["oauth"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("assertions");
+            }
+            _ => {
+                corrupt["version"] = json!(3);
+            }
+        }
+        fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+        assert!(
+            Registry::open(&f.home).is_err(),
+            "accepted corruption {change}"
+        );
+    }
+    fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    Registry::open(&f.home).unwrap();
+    let mut fallback = registration;
+    fallback.assertion = None;
+    assert!(
+        add_client(
+            &f.home,
+            "host",
+            "test/conversation",
+            &f.home.join("host.json"),
+            720,
+            Some(fallback),
+            None
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn assertion_replay_capacity_expires_and_invalid_requests_cannot_downgrade_authentication() {
+    let f = Fixture::with_assertions(true);
+    let code = f.code();
+    let mut state = f.registry.read().unwrap();
+    let now = auth::now().unwrap();
+    state.clock = now;
+    *state.oauth.as_mut().unwrap().assertions.as_mut().unwrap() = (0..MAX_ASSERTIONS)
+        .map(|i| (digest(&i.to_string()), now + 60))
+        .collect();
+    f.registry.save(&state).unwrap();
+    let failure = f.registry.exchange(&code, RESOURCE).unwrap_err();
+    assert_eq!(
+        failure.downcast_ref::<Failure>().unwrap().0,
+        "temporarily_unavailable"
+    );
+    state
+        .oauth
+        .as_mut()
+        .unwrap()
+        .assertions
+        .as_mut()
+        .unwrap()
+        .insert(digest("0"), now - 1);
+    f.registry.save(&state).unwrap();
+    f.registry.exchange(&code, RESOURCE).unwrap();
+    let ordinary = Fixture::new();
+    let mut valid = ordinary.code();
+    valid.extend(f.authentication());
+    assert!(ordinary.registry.exchange(&valid, RESOURCE).is_err());
+    let mut authorization = f.authorization();
+    authorization.extend(f.authentication());
+    assert!(f.registry.begin(&authorization, RESOURCE).is_err());
+}
 impl Fixture {
     fn new() -> Self {
+        Self::with_assertions(false)
+    }
+    fn with_assertions(signed: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("node");
         config::initialize(&home, "oauth").unwrap();
@@ -19,6 +249,7 @@ impl Fixture {
         let registration = Registration {
             resource: RESOURCE.into(),
             redirect_uris: vec![REDIRECT.into()],
+            assertion: signed.then(assertion::tests::policy),
         };
         let result = add_client(
             &home,
@@ -45,19 +276,26 @@ impl Fixture {
         );
         assert!(add(&home, "host", "test/conversation", &out, 720).is_err());
         let export: Export = serde_json::from_slice(&fs::read(out).unwrap()).unwrap();
+        let oauth_client = export
+            .oauth
+            .as_ref()
+            .unwrap()
+            .client_id(&export.client)
+            .to_string();
         Self {
             _temp: temp,
             registry: Registry::open(&home).unwrap(),
             home,
             client: export.client,
-            secret: export.token,
+            oauth_client,
+            secret: export.token.unwrap_or_default(),
             verifier: config::secret(),
         }
     }
     fn authorization(&self) -> Parameters {
         [
             ("response_type", "code".into()),
-            ("client_id", self.client.clone()),
+            ("client_id", self.oauth_client.clone()),
             ("redirect_uri", REDIRECT.into()),
             ("resource", RESOURCE.into()),
             ("scope", SCOPE.into()),
@@ -106,10 +344,9 @@ impl Fixture {
         assert_eq!(fields["tenant"], "one");
         assert_eq!(fields["state"], "private-state");
         assert_eq!(fields["iss"], "https://node.example");
-        [
+        let mut fields: Parameters = [
             ("grant_type", "authorization_code".into()),
-            ("client_id", self.client.clone()),
-            ("client_secret", self.secret.clone()),
+            ("client_id", self.oauth_client.clone()),
             ("resource", RESOURCE.into()),
             ("redirect_uri", REDIRECT.into()),
             ("code", fields["code"].clone()),
@@ -117,16 +354,17 @@ impl Fixture {
         ]
         .into_iter()
         .map(|(k, v)| (k.into(), v))
-        .collect()
+        .collect();
+        fields.extend(self.authentication());
+        fields
     }
     fn grant(&self) -> Value {
         self.registry.exchange(&self.code(), RESOURCE).unwrap()
     }
     fn refresh(&self, token: &Value) -> Parameters {
-        [
+        let mut fields: Parameters = [
             ("grant_type", "refresh_token".into()),
-            ("client_id", self.client.clone()),
-            ("client_secret", self.secret.clone()),
+            ("client_id", self.oauth_client.clone()),
             ("resource", RESOURCE.into()),
             (
                 "refresh_token",
@@ -135,7 +373,23 @@ impl Fixture {
         ]
         .into_iter()
         .map(|(k, v)| (k.into(), v))
-        .collect()
+        .collect();
+        fields.extend(self.authentication());
+        fields
+    }
+    fn authentication(&self) -> Parameters {
+        if self.secret.is_empty() {
+            [
+                ("client_assertion_type".into(), assertion::TYPE.into()),
+                (
+                    "client_assertion".into(),
+                    assertion::tests::token(assertion::tests::claims()),
+                ),
+            ]
+            .into()
+        } else {
+            [("client_secret".into(), self.secret.clone())].into()
+        }
     }
     fn permit(&self, token: &Value) -> Permit {
         self.registry
@@ -346,7 +600,8 @@ fn untrusted_inputs_and_request_capacity_are_bounded_without_redirect_or_grant_c
         assert!(
             Registration {
                 resource: RESOURCE.into(),
-                redirect_uris: vec![bad.into()]
+                redirect_uris: vec![bad.into()],
+                assertion: None,
             }
             .validate()
             .is_err()
@@ -396,6 +651,7 @@ fn native_localhost_callbacks_require_an_exact_registered_url() {
             Registration {
                 resource: RESOURCE.into(),
                 redirect_uris: vec![bad.into()],
+                assertion: None,
             }
             .validate()
             .is_err(),
@@ -406,6 +662,7 @@ fn native_localhost_callbacks_require_an_exact_registered_url() {
         Registration {
             resource: "http://localhost:49152/mcp".into(),
             redirect_uris: vec![callback.into()],
+            assertion: None,
         }
         .validate()
         .is_err()

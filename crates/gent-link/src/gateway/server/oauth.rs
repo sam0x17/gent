@@ -51,7 +51,8 @@ pub(super) async fn handle(boundary: &Boundary, request: Request<Body>) -> Respo
         return Json(json!({"issuer":origin,"authorization_endpoint":format!("{origin}/oauth/authorize"),
             "token_endpoint":format!("{origin}/oauth/token"),"response_types_supported":["code"],
             "grant_types_supported":["authorization_code","refresh_token"],"code_challenge_methods_supported":["S256"],
-            "token_endpoint_auth_methods_supported":["client_secret_post"],"scopes_supported":[SCOPE],
+            "token_endpoint_auth_methods_supported":["client_secret_post","private_key_jwt"],
+            "token_endpoint_auth_signing_alg_values_supported":["RS256"],"scopes_supported":[SCOPE],
             "authorization_response_iss_parameter_supported":true})).into_response();
     }
     if path == "/oauth/authorize" && method == "GET" {
@@ -122,11 +123,16 @@ pub(super) async fn handle(boundary: &Boundary, request: Request<Body>) -> Respo
         {
             Ok(value) => Json(value).into_response(),
             Err(failure) if failure.is::<crate::gateway::registry::Busy>() => busy(),
-            Err(failure) => error(
-                failure
+            Err(failure) => {
+                let code = failure
                     .downcast_ref::<crate::gateway::registry::oauth::Failure>()
-                    .map_or("invalid_grant", |f| f.0),
-            ),
+                    .map_or("invalid_grant", |f| f.0);
+                if code == "temporarily_unavailable" {
+                    busy()
+                } else {
+                    error(code)
+                }
+            }
         };
     }
     StatusCode::NOT_FOUND.into_response()

@@ -2,6 +2,7 @@
 //! revocation and agent bindings. Consent is an authenticated local-owner CLI
 //! action; neither a public authorization URL nor a client secret grants it.
 use super::*;
+use crate::gateway::assertion;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 
@@ -13,6 +14,7 @@ const GRANT_TTL: u64 = 30 * 24 * 3600;
 const MAX_REQUESTS: usize = 64;
 const MAX_GRANTS: usize = 128;
 const MAX_PER_CLIENT: usize = 4;
+const MAX_ASSERTIONS: usize = 1024;
 #[cfg(test)]
 mod tests;
 
@@ -30,6 +32,8 @@ impl std::error::Error for Failure {}
 pub(crate) struct Registration {
     pub resource: String,
     pub redirect_uris: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertion: Option<assertion::Policy>,
 }
 
 fn url(value: &str, callback: bool) -> Result<url::Url> {
@@ -54,7 +58,15 @@ fn url(value: &str, callback: bool) -> Result<url::Url> {
     Ok(url)
 }
 impl Registration {
+    pub(crate) fn client_id<'a>(&'a self, local_id: &'a str) -> &'a str {
+        self.assertion
+            .as_ref()
+            .map_or(local_id, |p| p.client_id.as_str())
+    }
     pub(crate) fn validate(&self) -> Result<()> {
+        if let Some(policy) = &self.assertion {
+            policy.validate()?;
+        }
         let resource = url(&self.resource, false)?;
         ensure!(
             resource.path() == "/mcp" && resource.query().is_none(),
@@ -84,6 +96,8 @@ impl Registration {
 pub(super) struct Records {
     requests: BTreeMap<String, Authorization>,
     grants: BTreeMap<String, Grant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assertions: Option<BTreeMap<String, u64>>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,7 +148,30 @@ fn equal(a: &str, b: &str) -> bool {
 }
 
 impl Records {
+    pub(super) fn enable_assertions(&mut self) {
+        self.assertions.get_or_insert_with(BTreeMap::new);
+    }
     pub(super) fn validate(&self, state: &State) -> Result<()> {
+        let signed = state
+            .clients
+            .values()
+            .any(|c| c.oauth.as_ref().is_some_and(|r| r.assertion.is_some()));
+        ensure!(
+            signed == self.assertions.is_some(),
+            "assertion replay state is missing or inconsistent"
+        );
+        if let Some(assertions) = &self.assertions {
+            ensure!(
+                assertions.len() <= MAX_ASSERTIONS
+                    && assertions.iter().all(|(id, expires)| hash(id)
+                        && *expires > 0
+                        && *expires
+                            <= state
+                                .clock
+                                .saturating_add(assertion::MAX_LIFETIME + assertion::CLOCK_SKEW)),
+                "invalid assertion replay state"
+            );
+        }
         ensure!(
             self.requests.len() <= MAX_REQUESTS && self.grants.len() <= MAX_GRANTS,
             "OAuth capacity exceeded"
@@ -199,6 +236,9 @@ impl Records {
     fn prune(&mut self, now: u64) {
         self.requests.retain(|_, r| now < r.expires_at);
         self.grants.retain(|_, g| now < g.expires_at);
+        if let Some(assertions) = &mut self.assertions {
+            assertions.retain(|_, expires| now < *expires);
+        }
     }
 }
 
@@ -306,6 +346,19 @@ fn active_client<'a>(state: &'a State, id: &str, resource: &str, now: u64) -> Re
     );
     Ok(client)
 }
+fn registered_client<'a>(
+    state: &'a State,
+    id: &str,
+    resource: &str,
+    now: u64,
+) -> Result<(&'a str, &'a Client)> {
+    let (local, _) = state
+        .clients
+        .iter()
+        .find(|(local, c)| c.oauth.as_ref().is_some_and(|r| r.client_id(local) == id))
+        .context("unknown OAuth client")?;
+    Ok((local, active_client(state, local, resource, now)?))
+}
 fn refresh(id: &str, grant: &Grant) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(grant.refresh_key.as_bytes()).expect("HMAC accepts key");
@@ -350,7 +403,10 @@ impl Registry {
             "invalid OAuth authorization parameters"
         );
         ensure!(
-            !p.contains_key("client_secret") && !p.contains_key("access_token"),
+            !p.contains_key("client_secret")
+                && !p.contains_key("access_token")
+                && !p.contains_key("client_assertion")
+                && !p.contains_key("client_assertion_type"),
             "credentials cannot appear in the authorization URL"
         );
         scope(p)?;
@@ -362,25 +418,27 @@ impl Registry {
             "invalid OAuth state"
         );
         self.oauth_transaction(|state,now| {
-            let client=active_client(state,id,resource,now)?;
+            let (local,client)=registered_client(state,id,resource,now)?;
+            let local=local.to_string();
             ensure!(client.oauth.as_ref().unwrap().redirect_uris.iter().any(|r|r==redirect),"unregistered OAuth callback");
             let name=client.name.clone();
             let records=state.oauth.get_or_insert_with(Records::default);
             records.prune(now);
-            ensure!(records.requests.len()<MAX_REQUESTS && records.requests.values().filter(|r|r.client==id).count()<MAX_PER_CLIENT,
+            ensure!(records.requests.len()<MAX_REQUESTS && records.requests.values().filter(|r|r.client==local).count()<MAX_PER_CLIENT,
                 "OAuth pending request capacity reached");
             let request=Uuid::new_v4().to_string();
-            records.requests.insert(request.clone(),Authorization {client:id.into(),resource:resource.into(),redirect:redirect.into(),
+            records.requests.insert(request.clone(),Authorization {client:local.clone(),resource:resource.into(),redirect:redirect.into(),
                 state:state_param,challenge:required(p,"code_challenge")?.into(),created_at:now,expires_at:now+REQUEST_TTL,
                 decision:None,code_secret:None,code_hash:None,code_expires_at:None,grant:None});
-            Ok(json!({"request":request,"client":id,"name":name,"redirect_uri":redirect,"expires_at":now+REQUEST_TTL}))
+            Ok(json!({"request":request,"client":local,"oauth_client_id":id,"name":name,"redirect_uri":redirect,"expires_at":now+REQUEST_TTL}))
         })
     }
     pub(crate) fn oauth_requests(&self) -> Result<Value> {
         let state = self.read()?;
         let now = auth::now()?.max(state.clock);
         let requests:Vec<_>=state.oauth.iter().flat_map(|o|&o.requests).filter(|(_,r)|now<r.expires_at).map(|(id,r)| {
-            json!({"request":id,"client":r.client,"name":state.clients[&r.client].name,"resource":r.resource,"redirect_uri":r.redirect,
+            json!({"request":id,"client":r.client,"oauth_client_id":state.clients[&r.client].oauth.as_ref().unwrap().client_id(&r.client),
+                "name":state.clients[&r.client].name,"resource":r.resource,"redirect_uri":r.redirect,
                 "expires_at":r.expires_at,"decision":r.decision,"redeemed":r.grant.is_some()})
         }).collect();
         Ok(json!({"requests":requests,"scope":SCOPE}))
@@ -471,25 +529,68 @@ impl Registry {
         );
         scope(p).map_err(|_| Failure("invalid_scope"))?;
         let client_id = required(p, "client_id").map_err(|_| Failure("invalid_client"))?;
-        let client_secret = required(p, "client_secret").map_err(|_| Failure("invalid_client"))?;
         let kind = required(p, "grant_type")?;
         ensure!(
             matches!(kind, "authorization_code" | "refresh_token"),
             Failure("unsupported_grant_type")
         );
         self.oauth_transaction(|state, now| {
-            let client = active_client(state, client_id, resource, now)
+            let (local, client) = registered_client(state, client_id, resource, now)
                 .map_err(|_| Failure("invalid_client"))?;
-            ensure!(
-                equal(&client.token_hash, &digest(client_secret)),
-                Failure("invalid_client")
-            );
+            let local = local.to_string();
+            let assertion = if let Some(policy) = &client.oauth.as_ref().unwrap().assertion {
+                ensure!(
+                    !p.contains_key("client_secret")
+                        && p.get("client_assertion_type").map(String::as_str)
+                            == Some(assertion::TYPE),
+                    Failure("invalid_client")
+                );
+                Some(
+                    policy
+                        .verify(
+                            required(p, "client_assertion")
+                                .map_err(|_| Failure("invalid_client"))?,
+                            resource,
+                            now,
+                        )
+                        .map_err(|_| Failure("invalid_client"))?,
+                )
+            } else {
+                ensure!(
+                    !p.contains_key("client_assertion") && !p.contains_key("client_assertion_type"),
+                    Failure("invalid_client")
+                );
+                let secret = required(p, "client_secret").map_err(|_| Failure("invalid_client"))?;
+                ensure!(
+                    client
+                        .token_hash
+                        .as_deref()
+                        .is_some_and(|hash| equal(hash, &digest(secret))),
+                    Failure("invalid_client")
+                );
+                None
+            };
             if let Some(policy) = &client.mtls {
                 policy
                     .verify(peer, now)
                     .map_err(|_| Failure("invalid_client"))?;
             }
             let client_expiry = client.expires_at;
+            if let Some((jti, expires)) = assertion {
+                let replays = state
+                    .oauth
+                    .as_mut()
+                    .and_then(|r| r.assertions.as_mut())
+                    .context("assertion replay state missing")?;
+                replays.retain(|_, expiry| now < *expiry);
+                let id = digest(&format!("gent-oauth-assertion-v1\0{local}\0{jti}"));
+                ensure!(!replays.contains_key(&id), Failure("invalid_client"));
+                ensure!(
+                    replays.len() < MAX_ASSERTIONS,
+                    Failure("temporarily_unavailable")
+                );
+                replays.insert(id, expires);
+            }
             match kind {
                 "authorization_code" => {
                     let code = required(p, "code")?;
@@ -499,7 +600,7 @@ impl Registry {
                     let records = state.oauth.as_mut().context("no OAuth grants")?;
                     let request = records.requests.get_mut(id).context("unknown OAuth code")?;
                     ensure!(
-                        request.client == client_id
+                        request.client == local
                             && request.resource == resource
                             && request.redirect == required(p, "redirect_uri")?
                             && now < request.expires_at
@@ -529,7 +630,7 @@ impl Registry {
                     let access = format!("gent_a1.{grant_id}.{}", config::secret());
                     let expires_at = (now + GRANT_TTL).min(client_expiry);
                     let grant = Grant {
-                        client: client_id.into(),
+                        client: local.clone(),
                         resource: resource.into(),
                         created_at: now,
                         expires_at,
@@ -568,7 +669,7 @@ impl Registry {
                         .context("unknown refresh grant")?;
                     ensure!(
                         !grant.revoked
-                            && grant.client == client_id
+                            && grant.client == local
                             && grant.resource == resource
                             && now < grant.expires_at,
                         "inactive refresh grant"

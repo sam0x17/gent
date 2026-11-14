@@ -148,7 +148,7 @@ fn grant(
     let export: Value = serde_json::from_slice(&fs::read(out).unwrap()).unwrap();
     (
         added["client"].as_str().unwrap().into(),
-        export["token"].as_str().unwrap().into(),
+        export["token"].as_str().unwrap_or_default().into(),
     )
 }
 
@@ -415,6 +415,7 @@ fn mtls_registration_is_durable_and_retries_cannot_remove_or_replace_the_policy(
         Some(registry::oauth::Registration {
             resource: "https://gateway.example/mcp".into(),
             redirect_uris: vec!["https://host.example/cb".into()],
+            assertion: None,
         }),
         None,
     )
@@ -456,6 +457,15 @@ fn mtls_registration_is_durable_and_retries_cannot_remove_or_replace_the_policy(
 
 #[tokio::test]
 async fn mtls_oauth_keeps_browser_consent_open_but_binds_exchange_refresh_and_mcp_to_the_peer() {
+    oauth_peer(false).await;
+}
+
+#[tokio::test]
+async fn mtls_and_signed_assertions_are_both_required_when_configured() {
+    oauth_peer(true).await;
+}
+
+async fn oauth_peer(signed: bool) {
     let f = Fixture::new();
     let daemon = Daemon::start(&f.home).await;
     let ca = Ca::new("allowed");
@@ -474,9 +484,31 @@ async fn mtls_oauth_keeps_browser_consent_open_but_binds_exchange_refresh_and_mc
         Some(registry::oauth::Registration {
             resource: resource.clone(),
             redirect_uris: vec![callback.into()],
+            assertion: signed.then(crate::gateway::assertion::tests::policy),
         }),
     );
     let server = endpoint.start(&f).await;
+    let client_id = if signed {
+        crate::gateway::assertion::tests::CLIENT
+    } else {
+        &id
+    };
+    let authenticate = |fields: &mut std::collections::BTreeMap<String, String>| {
+        if signed {
+            let mut claims = crate::gateway::assertion::tests::claims();
+            claims["aud"] = json!(format!("{origin}/oauth/token"));
+            fields.insert(
+                "client_assertion_type".into(),
+                crate::gateway::assertion::TYPE.into(),
+            );
+            fields.insert(
+                "client_assertion".into(),
+                crate::gateway::assertion::tests::token(claims),
+            );
+        } else {
+            fields.insert("client_secret".into(), secret.clone());
+        }
+    };
     let browser = endpoint.client(None);
     let host = endpoint.client(Some(&ca.good()));
     let verifier = config::secret();
@@ -497,7 +529,7 @@ async fn mtls_oauth_keeps_browser_consent_open_but_binds_exchange_refresh_and_mc
     }
     let fields = [
         ("response_type", "code"),
-        ("client_id", &id),
+        ("client_id", client_id),
         ("redirect_uri", callback),
         ("resource", &resource),
         ("code_challenge_method", "S256"),
@@ -531,15 +563,18 @@ async fn mtls_oauth_keeps_browser_consent_open_but_binds_exchange_refresh_and_mc
         .collect();
     assert_eq!(values["state"], "roundtrip");
     assert_eq!(values["iss"], origin);
-    let form = [
+    let mut form: std::collections::BTreeMap<String, String> = [
         ("grant_type", "authorization_code"),
-        ("client_id", &id),
-        ("client_secret", &secret),
+        ("client_id", client_id),
         ("resource", &resource),
         ("redirect_uri", callback),
         ("code", &values["code"]),
         ("code_verifier", &verifier),
-    ];
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.into(), v.into()))
+    .collect();
+    authenticate(&mut form);
     let token_url = format!("{origin}/oauth/token");
     let denied: Value = browser
         .post(&token_url)
@@ -551,6 +586,20 @@ async fn mtls_oauth_keeps_browser_consent_open_but_binds_exchange_refresh_and_mc
         .await
         .unwrap();
     assert_eq!(denied["error"], "invalid_client");
+    if signed {
+        let mut missing = form.clone();
+        missing.remove("client_assertion");
+        let rejected: Value = host
+            .post(&token_url)
+            .form(&missing)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rejected["error"], "invalid_client");
+    }
     let token: Value = host
         .post(&token_url)
         .form(&form)
@@ -581,13 +630,16 @@ async fn mtls_oauth_keeps_browser_consent_open_but_binds_exchange_refresh_and_mc
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    let refresh = [
+    let mut refresh: std::collections::BTreeMap<String, String> = [
         ("grant_type", "refresh_token"),
-        ("client_id", &id),
-        ("client_secret", &secret),
+        ("client_id", client_id),
         ("resource", &resource),
         ("refresh_token", token["refresh_token"].as_str().unwrap()),
-    ];
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.into(), v.into()))
+    .collect();
+    authenticate(&mut refresh);
     let denied: Value = browser
         .post(&token_url)
         .form(&refresh)
