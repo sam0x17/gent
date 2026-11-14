@@ -188,6 +188,8 @@ Messages carry an explicit authenticated user or agent identity. Do not infer se
 
 Configuration mutations accept `--request-id UUID` for retrying an identical proposal. A retry returns the original result; reusing the ID with different content fails. The CLI waits about five seconds for acceptance, then reports a durable `queued` request if the owner remains unavailable. Queued edits survive daemon restarts and do not change effective policy before acceptance. Rejected mutations exit nonzero; `gent config request` can inspect their recorded reason. See [configuration administration](local-proof.md#configuration-administration) for grants, retries, and offline behavior.
 
+Queued status includes `payload_retained`, indicating whether this node still has the full input after transport cleanup. New requests retain it until their authenticated result commits. Older missing payloads can be restored by retrying the identical proposal with its original request ID; a summary alone cannot recreate a policy. `gent history` reports the separate pending-payload budget and missing count. Automatic rerouting to a successor is still part of the unfinished owner-activation workflow.
+
 Incoming delivery wakes or resumes idle agents where the host supports it, queues for busy agents, and never interrupts automatically. Expose pending state and the reason when the host requires a future user turn or inbox check. Bound automatic exchanges and report when a limit is reached.
 
 Distinguish a mobile notification from an agent turn or user response. A notification can invite the user to return without starting a turn. Server coordinators use the ordinary wake/queue policy and can continue authorized work while the phone is unavailable.

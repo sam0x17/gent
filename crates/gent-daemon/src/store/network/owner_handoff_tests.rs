@@ -44,6 +44,8 @@ fn transfer(
 
 #[path = "owner_journal_tests.rs"]
 mod journal_tests;
+#[path = "pending_configuration_tests.rs"]
+mod pending_configuration_tests;
 
 fn status(pair: &mut Pair, i: usize) -> Value {
     let credential = credential(pair, i);
@@ -453,7 +455,7 @@ async fn version_seventeen_migration_preserves_keys_and_checkpoint_before_first_
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        20
     );
     let candidate = prepare(&mut pair);
     issue(&mut pair, &candidate);

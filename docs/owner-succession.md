@@ -18,6 +18,8 @@ New configuration requests remain pending while signing is frozen. Previously co
 
 The signed successor binding supplies the future configuration-writer address, independent of old streams. Runtime owner-role checks compare the local key and node against accepted authority. The active successor node cannot be removed or replaced until another handoff changes that binding. These checks do not enable successor epochs in the live store.
 
+Origins now [retain full pending proposals](security.md#configuration-edit-storage) until an authenticated result commits, independently of transport retirement. This supplies the input needed for future rerouting. Older requests whose local bodies were already retired report `payload_retained: false`; an exact resubmission can restore the input. Activation must reconcile these cases rather than assume a compact summary is sufficient to retry an edit.
+
 ## Completed-request journal transfer
 
 A result lost during handoff must not cause the successor to execute the same edit again. The source snapshots every completed configuration request, including rejections, in the transaction that stops signing. Each entry retains its origin, request ID, deciding writer, fingerprint, compact edit summary and exact result. Full legacy edits are reduced to summaries after checking their fingerprints. Pending requests are excluded because they have no decision yet.

@@ -4,6 +4,7 @@ use crate::messages::{EditResult, Event};
 use gent_crypto::{SignedConfigurationGrant, SignedState, scoped_id};
 use uuid::Uuid;
 
+pub(super) mod pending;
 pub(super) mod storage;
 
 pub(super) fn schema(db: &Connection) -> Result<()> {
@@ -229,6 +230,7 @@ impl StoreSession<'_> {
                 previous == fingerprint(&edit)?,
                 "configuration request_id already used with another edit"
             );
+            pending::retain(self.db, &origin, id, &edit)?;
             return self.configuration_status(id);
         }
         validate(&edit)?;
@@ -270,6 +272,7 @@ impl StoreSession<'_> {
                 &edit,
                 None,
             )?;
+            pending::retain(self.db, &origin, id, &edit)?;
             self.queue(
                 &writer,
                 scoped_id(
@@ -597,6 +600,7 @@ impl StoreSession<'_> {
             "UPDATE configuration_edits SET result=?1 WHERE origin=?2 AND id=?3",
             params![encoded, self.identity.node.id(), request.to_string()],
         )?;
+        pending::release(self.db, self.identity.node.id(), &request.to_string())?;
         Ok(())
     }
     pub(super) fn configuration_status(&self, id: &str) -> Result<Value> {
@@ -637,6 +641,9 @@ impl StoreSession<'_> {
             .optional()?
             .context("unknown configuration request")?;
         let mut status = json!({"request_id":id,"writer":writer,"state":"queued","applied":false});
+        if result.is_none() {
+            status["payload_retained"] = pending::ready(self.db, origin, id)?.into();
+        }
         if let Some(result) = result {
             match serde_json::from_slice(&result)? {
                 EditResult::Applied { checkpoint } => {

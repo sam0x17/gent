@@ -162,6 +162,7 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
     tx.execute_batch(
         "CREATE INDEX IF NOT EXISTS configuration_edits_format ON configuration_edits(compact)",
     )?;
+    pending::schema(&tx, 0)?;
     tx.commit()?;
     Ok(())
 }
@@ -193,7 +194,7 @@ pub(in crate::store) fn status(db: &Connection) -> Result<Value> {
         json!({"records":used.records,"pending":used.pending,"legacy_records":used.legacy,
         "stored_bytes":used.bytes,"reserved_bytes":used.reserved,"max_records":MAX_RECORDS,
         "max_reserved_bytes":MAX_BYTES,"pending_result_reservation_bytes":RESULT_RESERVE,
-        "cleanup_batch_limit":CLEAN_BATCH,"agent_administration":{"records":agent_records,"reserved_bytes":agent_bytes,
+        "cleanup_batch_limit":CLEAN_BATCH,"pending_payloads":pending::status(db)?,"agent_administration":{"records":agent_records,"reserved_bytes":agent_bytes,
         "max_records":MAX_AGENT_RECORDS,"max_reserved_bytes":MAX_AGENT_BYTES,"max_records_per_agent":MAX_PER_AGENT,
         "max_pending_per_agent":MAX_AGENT_PENDING}}),
     )
@@ -265,11 +266,11 @@ pub(super) fn insert(
 }
 
 pub(in crate::store) fn clean(db: &Connection, dry_run: bool) -> Result<Value> {
-    let rows = db.prepare("SELECT rowid,fingerprint,edit FROM configuration_edits WHERE compact=0 ORDER BY rowid LIMIT ?1")?
-        .query_map([CLEAN_BATCH], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?)))?
+    let rows = db.prepare("SELECT rowid,fingerprint,edit,origin,id,result IS NULL FROM configuration_edits WHERE compact=0 ORDER BY rowid LIMIT ?1")?
+        .query_map([CLEAN_BATCH], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut removed = 0u64;
-    for (row, expected, body) in &rows {
+    for (row, expected, body, origin, id, is_pending) in &rows {
         let edit: ConfigurationEdit =
             serde_json::from_slice(body).context("invalid legacy configuration edit")?;
         // Rejected historical edits may be invalid policies. Verify their retry
@@ -281,6 +282,9 @@ pub(in crate::store) fn clean(db: &Connection, dry_run: bool) -> Result<Value> {
         let summary = serde_json::to_vec(&Summary::from(&edit))?;
         removed += body.len().saturating_sub(summary.len()) as u64;
         if !dry_run {
+            if *is_pending {
+                pending::retain(db, origin, id, &edit)?;
+            }
             db.execute(
                 "UPDATE configuration_edits SET edit=?1,compact=1 WHERE rowid=?2",
                 params![summary, row],

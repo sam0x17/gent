@@ -19,6 +19,7 @@ use std::{
 use tokio::sync::Notify;
 mod administration;
 mod configuration;
+pub(crate) use configuration::pending::schema as pending_configuration_schema;
 mod diagnostics;
 mod files;
 pub(crate) mod handoff;
@@ -146,6 +147,7 @@ impl Store {
         }
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let identity = Identity::load_or_create(home, &config, &tx, now() as u64)?;
+        configuration::pending::recover(&tx, identity.node.id())?;
         if let Some(record) = replacement {
             record.verify_node(&identity.node)?;
             let target = record.replaces;
@@ -312,6 +314,7 @@ impl Store {
             let tx = self
                 .db
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            configuration::pending::recover(&tx, self.identity.node.id())?;
             encrypted::ordered::storage::clean(&tx, false)?;
             tx.commit()?;
         }

@@ -257,7 +257,7 @@ fn version_three_compaction_is_bounded_atomic_and_keeps_raw_receipts_and_exact_b
         w.db(0)
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        19
+        20
     );
     let preview = sender.clean_storage(true).unwrap();
     assert_eq!(preview["duplicate_copies_compacted"], 8);

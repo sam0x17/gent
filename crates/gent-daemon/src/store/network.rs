@@ -738,7 +738,7 @@ impl Store {
     }
     pub(crate) fn data_prepare(&mut self, group: &[u8]) -> Result<()> {
         let peer = self.data_peer(&self.db, group, true)?;
-        let Some((id,body,offset,mut cancelled,subject)) = self.db.query_row("SELECT id,body,offset,cancelled,subject FROM network_events WHERE peer=?1 ORDER BY rowid LIMIT 1", [&peer], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,usize>(2)?,r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?))).optional()? else { return Ok(()); };
+        let Some((id,body,offset,mut cancelled,subject,control)) = self.db.query_row("SELECT id,body,offset,cancelled,subject,traffic<>'data' FROM network_events WHERE peer=?1 ORDER BY rowid LIMIT 1", [&peer], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,usize>(2)?,r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,bool>(5)?))).optional()? else { return Ok(()); };
         let id = Uuid::parse_str(&id)?;
         let state = self.identity.state(&self.db)?;
         if let Some(subject) = &subject {
@@ -816,6 +816,9 @@ impl Store {
         // cursor write fails, retrying returns that exact packet without a ratchet step.
         let tx = self.db.unchecked_transaction()?;
         if cancelled || end == body.len() {
+            if !cancelled && control {
+                configuration::pending::capture_record(&tx, self.identity.node.id(), &body)?;
+            }
             retention::finish(&tx, id)?;
             tx.execute("DELETE FROM network_events WHERE id=?1", [id.to_string()])?;
         } else {

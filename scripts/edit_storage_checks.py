@@ -22,7 +22,7 @@ def submit(home, request, edit):
 
 
 def queue_edits(home, cli):
-    """Call while the owner is stopped; retain full bodies in the event queue."""
+    """Call while the owner is stopped; retain full bodies through queue cleanup."""
     policy = copy.deepcopy(cli('config')['policy'])
     # Rules for an absent synthetic agent leave the existing proof permissions.
     absent = str(uuid.uuid4())
@@ -32,7 +32,8 @@ def queue_edits(home, cli):
     edit = {'op': 'policy', 'policy': policy}
     requests = [str(uuid.uuid4()) for _ in range(10)]
     for request in requests:
-        assert submit(home, request, edit)['state'] == 'queued'
+        status = submit(home, request, edit)
+        assert status['state'] == 'queued' and status['payload_retained'] is True
 
     with sqlite3.connect(home / 'state.sqlite3') as db:
         # Recreate the canonical field order of the Rust protocol structs. A
@@ -53,6 +54,8 @@ def queue_edits(home, cli):
             digest, size = db.execute('SELECT fingerprint,length(edit) FROM configuration_edits WHERE id=?', (request,)).fetchone()
             assert hashlib.sha256(encoded).hexdigest() == digest
             assert len(encoded) > 256 * 1024 and size < 100
+            retained, = db.execute('SELECT body FROM configuration_pending WHERE id=?', (request,)).fetchone()
+            assert retained == encoded
             cases.append((request, encoded))
         assert len(cases) == len(requests)
 
@@ -79,7 +82,8 @@ def after_restart(cli, cases, wait_for):
     while cli('history', 'clean')['configuration_edits']['records_compacted']:
         pass
     for request, _ in cases:
-        assert cli('config', 'request', request)['state'] == 'queued'
+        status = cli('config', 'request', request)
+        assert status['state'] == 'queued' and status['payload_retained'] is True
 
 
 def completed(home, cli, owner_cli, cases):
@@ -92,7 +96,10 @@ def completed(home, cli, owner_cli, cases):
         assert usage['legacy_records'] == usage['pending'] == 0
         assert usage['stored_bytes'] < usage['records'] * 1024
         assert usage['max_records'] == 65536 and usage['max_reserved_bytes'] == 64 * 1024 * 1024
-    print('PASS: ten large offline policy edits, compact new records, bounded legacy preview/cleanup, startup maintenance, both-machine results and exact retries', flush=True)
+        assert usage['pending_payloads']['records'] == usage['pending_payloads']['missing'] == 0
+    with sqlite3.connect(home / 'state.sqlite3') as db:
+        assert db.execute('SELECT COUNT(*) FROM configuration_pending').fetchone()[0] == 0
+    print('PASS: ten large offline policy edits, retained full payloads across compaction/restart, bounded legacy cleanup, both-machine results, atomic payload release and exact retries', flush=True)
 
 
 def wait_for_results(cli, cases, wait_for):
