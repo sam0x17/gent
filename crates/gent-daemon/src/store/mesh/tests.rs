@@ -50,6 +50,7 @@ impl Mesh {
             pairing::join(
                 home.path(),
                 pairing::Options {
+                    replace_node: None,
                     cluster: &cfg.cluster.id,
                     name: "peer",
                     relay_endpoint: None,

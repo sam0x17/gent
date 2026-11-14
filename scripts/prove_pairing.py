@@ -146,10 +146,13 @@ def main():
     parser.add_argument('--event-storage', action='store_true', help='Finally advance disposable request clocks to prove node event retry cleanup')
     parser.add_argument('--edit-storage', action='store_true', help='Also prove compact configuration edits and migration while the owner is offline')
     parser.add_argument('--agent-administration', action='store_true', help='Also prove delegated agent edits, private status, owner audit, revocation and restart across both machines')
+    parser.add_argument('--node-replacement', action='store_true', help='Finally replace the joined node through SSH with fresh keys and prove MCP image/file delivery')
     parser.add_argument('--remote-relay-port', type=int, default=18789)
     args = parser.parse_args()
     if args.event_storage and args.remote_join_helper:
         parser.error('--event-storage cannot be combined with --remote-join-helper')
+    if args.node_replacement and (args.remote_join_helper or args.event_storage or args.service_auth_file):
+        parser.error('--node-replacement currently requires the development relay without peer-mesh or artificial-clock probes')
     url = urlparse(args.relay_url)
     assert url.scheme == 'http' and url.hostname == '127.0.0.1' and url.port
     assert args.remote_binary.startswith('/') and 1024 <= args.remote_relay_port < 65536
@@ -542,6 +545,22 @@ def main():
                 for text in (subprocess.check_output([binary, '--home', str(home), 'history'], text=True),
                              remote([args.remote_binary, '--home', owner_home, 'history']).stdout):
                     assert 'data node queue:' in text and 'Sent event retries:' in text
+            if args.node_replacement:
+                from replacement_checks import exercise
+                a.close()
+                stop(local_daemon)
+                local_daemon = None
+
+                def restart_owner():
+                    nonlocal owner_daemon
+                    remote(['python3', '-c', STOP_OWNER, owner_home])
+                    stop(owner_daemon)
+                    owner_daemon = start_owner()
+                    wait_for(lambda: remote(owner + ['daemon', 'status'], check=False).returncode == 0)
+
+                exercise(binary, home, join, aid, b, bid,
+                         lambda *cmd: json.loads(remote(owner + list(cmd)).stdout),
+                         restart_owner, wait_for)
             print('PASS: two-machine pairing, encrypted MCP images/replies/receipts, remote permission edits and renaming, idempotent requests, offline owner recovery, and administration revocation')
             print(f'Configuration applied in {config_latency * 1000:.0f} ms, including the SSH owner command; observation made no daemon requests')
         finally:

@@ -242,7 +242,7 @@ async fn removal_capacity_preserves_existing_retry_and_rejects_new_mutation() {
     let before = state(&mesh).checkpoint().clone();
     let tx = mesh.stores[0].db.unchecked_transaction().unwrap();
     for _ in 1..8192 {
-        tx.execute("INSERT INTO node_removals SELECT ?1,cluster,signing_key,revision,created_at,service,confirmed FROM node_removals WHERE node=?2",
+        tx.execute("INSERT INTO node_removals(node,cluster,signing_key,revision,created_at,service,confirmed) SELECT ?1,cluster,signing_key,revision,created_at,service,confirmed FROM node_removals WHERE node=?2",
             params![Uuid::new_v4().to_string(),target]).unwrap();
     }
     tx.commit().unwrap();
@@ -253,4 +253,46 @@ async fn removal_capacity_preserves_existing_retry_and_rejects_new_mutation() {
     assert!(remove(&mut mesh, 0, &next).is_err());
     assert_eq!(state(&mesh).checkpoint(), &before);
     assert!(state(&mesh).state().nodes.contains_key(&next));
+}
+
+#[tokio::test]
+async fn replacement_schema_migrates_existing_removals_and_refuses_missing_current_structure() {
+    let mut mesh = Mesh::new().await;
+    let target = mesh.stores[1].identity.node.id().to_owned();
+    let first = remove(&mut mesh, 0, &target).unwrap();
+    assert!(first["replacement"].is_null());
+    mesh.stores[0]
+        .db
+        .execute_batch(
+            "DROP INDEX node_removals_replacement;
+        ALTER TABLE node_removals DROP COLUMN replacement_key;
+        ALTER TABLE node_removals DROP COLUMN replacement_node;
+        PRAGMA user_version=16;",
+        )
+        .unwrap();
+    mesh.reopen(0);
+    let next = remove(&mut mesh, 0, &target).unwrap();
+    assert_eq!(next["revision"], first["revision"]);
+    assert!(next["replacement"].is_null());
+    assert_eq!(mesh.count(0, "node_removals"), 1);
+    assert_eq!(
+        mesh.stores[0]
+            .db
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        17
+    );
+    mesh.stores[0]
+        .db
+        .execute_batch("DROP INDEX node_removals_replacement;")
+        .unwrap();
+    assert!(Store::open(mesh.homes[0].path()).is_err());
+    mesh.stores[0]
+        .db
+        .execute_batch(
+            "CREATE UNIQUE INDEX node_removals_replacement ON node_removals(replacement_node);
+        ALTER TABLE node_removals DROP COLUMN replacement_key;",
+        )
+        .unwrap();
+    assert!(Store::open(mesh.homes[0].path()).is_err());
 }

@@ -46,6 +46,7 @@ async fn main() -> Result<()> {
     let result = pairing::join(
         &PathBuf::from(&args[1]),
         pairing::Options {
+            replace_node: None,
             cluster: &cluster,
             name: "second-mac-node",
             relay_endpoint: None,

@@ -25,6 +25,22 @@ pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
             CREATE INDEX IF NOT EXISTS node_removals_pending ON node_removals(confirmed,node);",
         )?;
     }
+    if previous < 17 {
+        let columns = db
+            .prepare("PRAGMA table_info(node_removals)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !columns.iter().any(|c| c == "replacement_node") {
+            db.execute_batch("ALTER TABLE node_removals ADD COLUMN replacement_node TEXT CHECK(replacement_node IS NULL OR length(replacement_node)=36);")?;
+        }
+        if !columns.iter().any(|c| c == "replacement_key") {
+            db.execute_batch("ALTER TABLE node_removals ADD COLUMN replacement_key BLOB CHECK((replacement_node IS NULL AND replacement_key IS NULL) OR (replacement_node IS NOT NULL AND replacement_key IS NOT NULL AND length(replacement_key)=32));")?;
+        }
+        db.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS node_removals_replacement ON node_removals(replacement_node);")?;
+    } else {
+        db.prepare("SELECT replacement_node,replacement_key FROM node_removals LIMIT 0")?;
+        ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='node_removals_replacement')", [], |r| r.get::<_, bool>(0))?, "node replacement index is missing");
+    }
     Ok(())
 }
 
@@ -37,7 +53,7 @@ fn identifier(id: &str) -> Result<()> {
 }
 
 impl StoreSession<'_> {
-    fn removal(&self, node: &str) -> Result<Value> {
+    pub(super) fn removal(&self, node: &str) -> Result<Value> {
         let (cluster, key, revision, created_at, service, confirmed):
             (String, Vec<u8>, u64, u64, Option<String>, bool) = self.db.query_row(
                 "SELECT cluster,signing_key,revision,created_at,service,confirmed FROM node_removals WHERE node=?1",
@@ -59,11 +75,28 @@ impl StoreSession<'_> {
         if let Some(pin) = &service {
             pin.validate()?;
         }
+        let replacement: (Option<String>, Option<Vec<u8>>) = self.db.query_row(
+            "SELECT replacement_node,replacement_key FROM node_removals WHERE node=?1",
+            [node],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let replacement = match replacement {
+            (None, None) => Value::Null,
+            (Some(id), Some(key)) => {
+                identifier(&id)?;
+                ensure!(
+                    id != node && key.len() == 32,
+                    "invalid node replacement record"
+                );
+                json!({"node_id":id,"signing_key":key})
+            }
+            _ => anyhow::bail!("incomplete node replacement record"),
+        };
         Ok(
             json!({"node_id":node,"cluster_id":cluster,"signing_key":key,
             "revision":revision,"created_at":created_at,"service":service,
             "service_status":if service.is_none() { "not_configured" } else if confirmed { "confirmed" } else { "pending" },
-            "membership_removed":true}),
+            "membership_removed":true,"replacement":replacement}),
         )
     }
 
@@ -89,6 +122,22 @@ impl StoreSession<'_> {
             .get(node)
             .context("unknown enrolled node")?;
         let key = member.signing_key;
+        let update =
+            self.state
+                .revoke_node(self.identity.signing_owner()?, node, self.timestamp as u64)?;
+        self.state = self.identity.apply(self.db, update)?;
+        self.record_removal(node, &key, None)?;
+        let mut result = self.removal(node)?;
+        result["applied"] = json!(true);
+        Ok(result)
+    }
+
+    pub(super) fn record_removal(
+        &self,
+        node: &str,
+        key: &[u8; 32],
+        replacement: Option<(&str, &[u8; 32])>,
+    ) -> Result<()> {
         ensure!(
             self.db
                 .query_row("SELECT COUNT(*) FROM node_removals", [], |r| r
@@ -109,15 +158,65 @@ impl StoreSession<'_> {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
-        let update =
-            self.state
-                .revoke_node(self.identity.signing_owner()?, node, self.timestamp as u64)?;
+        self.db.execute("INSERT INTO node_removals(node,cluster,signing_key,revision,created_at,service,replacement_node,replacement_key) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![node,self.config.cluster.id,key.as_slice(),self.state.checkpoint().revision,self.timestamp,service,
+                replacement.map(|r|r.0),replacement.map(|r|r.1.as_slice())])?;
+        Ok(())
+    }
+
+    pub(super) fn replace_enrollment(
+        &mut self,
+        request: &gent_crypto::SignedEnrollment,
+        fingerprint: [u8; 32],
+        can_configure: bool,
+    ) -> Result<()> {
+        self.identity.signing_owner()?;
+        let target = request
+            .request
+            .replaces
+            .as_ref()
+            .context("replacement target missing")?;
+        ensure!(
+            target.id != self.identity.node.id(),
+            "cannot replace the signing owner through node enrollment"
+        );
+        let saved: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM node_removals WHERE node=?1)",
+            [&target.id],
+            |r| r.get(0),
+        )?;
+        if saved {
+            let record = self.removal(&target.id)?;
+            ensure!(
+                record["signing_key"] == json!(target.signing_key)
+                    && record["replacement"]["node_id"] == request.request.node_id
+                    && record["replacement"]["signing_key"]
+                        == json!(request.request.member.signing_key),
+                "old node is already retired or has another replacement"
+            );
+            self.state.authorize_node(
+                &request.request.node_id,
+                &request.request.member.signing_key,
+                self.timestamp as u64,
+            )?;
+            return Ok(());
+        }
+        let update = self.state.replace_node(
+            self.identity.signing_owner()?,
+            request,
+            fingerprint,
+            can_configure,
+            self.timestamp as u64,
+        )?;
         self.state = self.identity.apply(self.db, update)?;
-        self.db.execute("INSERT INTO node_removals(node,cluster,signing_key,revision,created_at,service) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![node,self.config.cluster.id,key.as_slice(),self.state.checkpoint().revision,self.timestamp,service])?;
-        let mut result = self.removal(node)?;
-        result["applied"] = json!(true);
-        Ok(result)
+        self.record_removal(
+            &target.id,
+            &target.signing_key,
+            Some((
+                &request.request.node_id,
+                &request.request.member.signing_key,
+            )),
+        )
     }
 
     pub(super) fn node_removals(&self, after: Option<&str>, pending_only: bool) -> Result<Value> {

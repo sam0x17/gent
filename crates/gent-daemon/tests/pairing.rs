@@ -12,6 +12,8 @@ use std::{
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
 };
+#[path = "pairing/replacement.rs"]
+mod replacement;
 
 struct Owner {
     home: tempfile::TempDir,
@@ -187,6 +189,7 @@ async fn join(home: &Path, owner: &mut Owner) -> Result<Value> {
     pairing::join(
         home,
         Options {
+            replace_node: None,
             cluster: &cluster,
             name: "new-node",
             relay_endpoint: None,

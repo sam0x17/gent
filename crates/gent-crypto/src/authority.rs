@@ -112,9 +112,19 @@ pub struct EnrollmentRequest {
     pub base: Checkpoint,
     pub node_id: String,
     pub member: NodeMember,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<ReplacedNode>,
     pub nonce: String,
     pub issued_at: u64,
     pub expires_at: u64,
+}
+
+/// Public identity of a lost joined node, pinned through the owner channel.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReplacedNode {
+    pub id: String,
+    pub signing_key: PublicKey,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -687,12 +697,35 @@ impl NodeIdentity {
         name: &str,
         now: u64,
     ) -> Result<SignedEnrollment> {
+        self.enrollment_request(anchor, base, name, None, now)
+    }
+
+    pub fn request_replacement(
+        &self,
+        anchor: &TrustAnchor,
+        base: &Checkpoint,
+        name: &str,
+        replaces: ReplacedNode,
+        now: u64,
+    ) -> Result<SignedEnrollment> {
+        self.enrollment_request(anchor, base, name, Some(replaces), now)
+    }
+
+    fn enrollment_request(
+        &self,
+        anchor: &TrustAnchor,
+        base: &Checkpoint,
+        name: &str,
+        replaces: Option<ReplacedNode>,
+        now: u64,
+    ) -> Result<SignedEnrollment> {
         let request = EnrollmentRequest {
             version: 1,
             anchor: anchor.clone(),
             base: base.clone(),
             node_id: self.id.clone(),
             member: self.member(name)?,
+            replaces,
             nonce: uuid::Uuid::new_v4().to_string(),
             issued_at: now,
             expires_at: now
@@ -724,6 +757,14 @@ impl EnrollmentRequest {
         );
         public_key(&self.anchor.owner_key)?;
         public_key(&self.member.signing_key)?;
+        if let Some(replaces) = &self.replaces {
+            id(&replaces.id)?;
+            public_key(&replaces.signing_key)?;
+            ensure!(
+                replaces.id != self.node_id && replaces.signing_key != self.member.signing_key,
+                "replacement requires a fresh node identity and key"
+            );
+        }
         ensure!(
             self.member.signing_key != self.anchor.owner_key,
             "node cannot use owner signing key"
@@ -1113,6 +1154,10 @@ impl VerifiedState {
         rotation: bool,
         can_configure: bool,
     ) -> Result<SignedState> {
+        ensure!(
+            signed.request.replaces.is_none(),
+            "replacement requires explicit owner approval"
+        );
         self.require_fresh(now)?;
         ensure!(
             signed.fingerprint()? == approved,
@@ -1152,6 +1197,55 @@ impl VerifiedState {
             let member = state.nodes.remove(node_id).context("node unavailable")?;
             state.retired_nodes.insert(node_id.into());
             state.retired_keys.insert(member.signing_key);
+            Ok(())
+        })
+    }
+
+    /// Retire the pinned old identity and admit a fresh identity atomically.
+    /// Endpoint code separately refuses replacing the active signing owner.
+    pub fn replace_node(
+        &self,
+        owner: &OwnerKey,
+        signed: &SignedEnrollment,
+        approved: Digest,
+        can_configure: bool,
+        now: u64,
+    ) -> Result<SignedState> {
+        self.require_fresh(now)?;
+        ensure!(
+            signed.fingerprint()? == approved,
+            "replacement fingerprint does not match owner approval"
+        );
+        let request = &signed.request;
+        fresh(request.issued_at, request.expires_at, now)?;
+        ensure!(
+            request.anchor == self.anchor && request.base == self.checkpoint,
+            "replacement targets another cluster or stale revision"
+        );
+        let replaces = request
+            .replaces
+            .as_ref()
+            .context("replacement target is missing")?;
+        let previous = self
+            .state()
+            .nodes
+            .get(&replaces.id)
+            .context("replacement target is unavailable")?;
+        ensure!(
+            previous.signing_key == replaces.signing_key,
+            "replacement target key changed"
+        );
+        ensure!(
+            !self.state().nodes.contains_key(&request.node_id),
+            "replacement identity is already enrolled"
+        );
+        let mut member = request.member.clone();
+        member.can_configure = previous.can_configure && can_configure;
+        self.revise(owner, now, |state| {
+            state.nodes.remove(&replaces.id);
+            state.retired_nodes.insert(replaces.id.clone());
+            state.retired_keys.insert(replaces.signing_key);
+            state.nodes.insert(request.node_id.clone(), member);
             Ok(())
         })
     }

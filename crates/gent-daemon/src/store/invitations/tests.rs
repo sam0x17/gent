@@ -116,6 +116,78 @@ fn enroll_request(
 }
 
 #[test]
+fn ordinary_invitations_cannot_replace_existing_members_even_with_configuration_rights() {
+    for configure in [false, true] {
+        let mut fixture = Fixture::new();
+        let old = NodeIdentity::generate().unwrap();
+        let invite = fixture.issue(true, None);
+        let mut original = handshake(&mut fixture.store, &invite, &old, "old").unwrap();
+        let enrollment = enroll_request(&mut fixture.store, &mut original, &old, "old");
+        send(&mut fixture.store, &mut original, &enrollment).unwrap();
+        let new = NodeIdentity::generate().unwrap();
+        let invite = fixture.issue(configure, None);
+        let mut client = handshake(&mut fixture.store, &invite, &new, "new").unwrap();
+        let before = snapshot(
+            send(
+                &mut fixture.store,
+                &mut client,
+                &invocation(PairingOp::Snapshot),
+            )
+            .unwrap(),
+        );
+        let request = new
+            .request_replacement(
+                before.anchor(),
+                before.checkpoint(),
+                "new",
+                gent_crypto::ReplacedNode {
+                    id: old.id().into(),
+                    signing_key: old.public_key(),
+                },
+                now() as u64,
+            )
+            .unwrap();
+        let count = |store: &Store, table: &str| {
+            store
+                .db
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                    r.get::<_, usize>(0)
+                })
+                .unwrap()
+        };
+        let operations = count(&fixture.store, "invitation_operations");
+        let request = invocation(PairingOp::Enroll {
+            request: STANDARD.encode(request.encode().unwrap()),
+        });
+        assert!(send(&mut fixture.store, &mut client, &request).is_err());
+        assert_eq!(count(&fixture.store, "invitation_operations"), operations);
+        assert_eq!(count(&fixture.store, "node_removals"), 0);
+        assert_eq!(
+            fixture
+                .store
+                .identity
+                .state(&fixture.store.db)
+                .unwrap()
+                .checkpoint(),
+            before.checkpoint()
+        );
+        let ordinary = enroll_request(&mut fixture.store, &mut client, &new, "new");
+        send(&mut fixture.store, &mut client, &ordinary).unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .identity
+                .state(&fixture.store.db)
+                .unwrap()
+                .state()
+                .nodes
+                .len(),
+            3
+        );
+    }
+}
+
+#[test]
 fn local_rpc_requires_owner_authority_and_listing_excludes_invitation_secrets() {
     let mut fixture = Fixture::new();
     let create = InvitationOp::Create {
@@ -618,6 +690,7 @@ async fn joined(home: &Path, peer: &mut EncryptedPeer) -> Result<Value> {
     pairing::join(
         home,
         pairing::Options {
+            replace_node: None,
             cluster: &cluster,
             name: "joined",
             relay_endpoint: None,
@@ -1055,7 +1128,7 @@ fn migration_preserves_state_and_refuses_missing_established_invitation_journals
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
             .unwrap(),
-        16
+        17
     );
     assert_eq!(
         fs::read(fixture.home.path().join("identity.key")).unwrap(),

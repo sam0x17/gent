@@ -118,6 +118,19 @@ pub(super) fn check_home(home: &Path, dir: &Path) -> Result<()> {
 }
 
 pub(super) fn publish(home: &Path, pending: &Pending) -> Result<config::Config> {
+    let staged = config::load(&pending.runtime)?;
+    let replacement = replacement::check_intent(
+        &pending.runtime,
+        &staged,
+        pending.seed.replace_node.as_deref(),
+    )?;
+    ensure!(
+        replacement.as_ref().map(|record| &record.replaces) == pending.seed.replacement.as_ref(),
+        "staged replacement differs from pending enrollment"
+    );
+    if let Some(record) = replacement {
+        record.verify_node(&pending.node)?;
+    }
     let manifest = match read(&pending.dir)? {
         Some(manifest) => manifest,
         None => {

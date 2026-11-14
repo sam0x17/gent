@@ -38,6 +38,9 @@ pub struct JoinArgs {
     /// Friendly name of this new node.
     #[arg(long)]
     name: String,
+    /// Retire this lost joined node and enroll a fresh identity through SSH.
+    #[arg(long, conflicts_with = "invite_file")]
+    replace_node: Option<String>,
     /// Gent executable on the owner machine, if absent from its SSH PATH.
     #[arg(long, default_value = "gent")]
     remote_gent: String,
@@ -78,14 +81,18 @@ impl JoinArgs {
             return Self::invitation_intent(file, &self.name, self.cluster.as_deref());
         }
         remote_command(self)?;
+        let mut route = serde_json::json!({"kind":"ssh","via":self.via,"remote_home":self.remote_home,
+                "remote_gent":self.remote_gent,"relay_endpoint":self.relay_endpoint});
+        if let Some(target) = &self.replace_node {
+            route["replace_node"] = serde_json::json!(target);
+        }
         Ok(crate::contexts::provision::Intent::Join {
             cluster: self
                 .cluster
                 .clone()
                 .context("SSH joining requires a cluster ID")?,
             name: self.name.clone(),
-            route: serde_json::json!({"kind":"ssh","via":self.via,"remote_home":self.remote_home,
-                "remote_gent":self.remote_gent,"relay_endpoint":self.relay_endpoint}),
+            route,
         })
     }
     pub(crate) fn existing(&self, home: &Path, pinned_node: Option<&str>) -> Result<Option<Value>> {
@@ -99,6 +106,13 @@ impl JoinArgs {
             return Ok(None);
         }
         let cfg = crate::contexts::inspect(home)?;
+        let replacement = pairing::installed_replacement(home)?;
+        ensure!(
+            self.replace_node
+                .as_ref()
+                .is_none_or(|id| replacement.as_ref().is_some_and(|target| &target.id == id)),
+            "installed node does not match the requested replacement"
+        );
         if let Some(file) = &self.invite_file {
             let saved = crate::invitations::installation(home)?
                 .context("invitation setup record is missing")?;
@@ -124,7 +138,8 @@ impl JoinArgs {
             return Ok(None);
         }
         Ok(Some(
-            serde_json::json!({"joined":true,"already_configured":true,"cluster":cfg.cluster,"node":cfg.node}),
+            serde_json::json!({"joined":true,"already_configured":true,"cluster":cfg.cluster,"node":cfg.node,
+                "replaced_node":replacement.map(|target|target.id)}),
         ))
     }
 }
@@ -301,6 +316,7 @@ pub async fn join(home: &Path, args: JoinArgs) -> Result<Value> {
             cluster,
             name: &args.name,
             relay_endpoint: args.relay_endpoint.as_deref(),
+            replace_node: args.replace_node.as_deref(),
         },
         &mut peer,
     )
@@ -310,6 +326,13 @@ pub async fn join(home: &Path, args: JoinArgs) -> Result<Value> {
     // a failed join; the daemon can operate without the pairing process afterward.
     if let Some(child) = &mut peer.child {
         let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    }
+    let mut result = result;
+    if let Some(target) = pairing::installed_replacement(home)? {
+        result["replaced_node"] = serde_json::json!(target.id);
+        result["recovery"] = serde_json::json!(
+            "fresh identity and streams; historical agents and work were not imported"
+        );
     }
     Ok(result)
 }
@@ -381,6 +404,7 @@ mod tests {
             invite_file: None,
             continue_invitation: false,
             name: "laptop".into(),
+            replace_node: None,
             remote_gent: "/tmp/gent's bin/$(touch injected)".into(),
             remote_home: Some("/tmp/private home".into()),
             relay_endpoint: None,

@@ -158,6 +158,7 @@ async fn join(owner: &Node) -> Node {
     pairing::join(
         home.path(),
         pairing::Options {
+            replace_node: None,
             cluster: &cluster,
             name: "peer",
             relay_endpoint: None,

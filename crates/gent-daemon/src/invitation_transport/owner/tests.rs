@@ -444,6 +444,7 @@ async fn staged_pairing_and_exact_finish_receipt_use_the_background_driver() {
     let result = pairing::join(
         &home,
         pairing::Options {
+            replace_node: None,
             cluster: &cluster,
             name: "joined",
             relay_endpoint: None,

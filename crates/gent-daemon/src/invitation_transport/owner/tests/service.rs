@@ -220,6 +220,7 @@ async fn workers_enroll_native_node_and_recover_completed_receipt_after_owner_re
     let result = pairing::join(
         &joined_home,
         pairing::Options {
+            replace_node: None,
             cluster: &cfg.cluster.id,
             name: "native-invitation-joined",
             relay_endpoint: None,

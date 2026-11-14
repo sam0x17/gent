@@ -866,6 +866,9 @@ async fn execute(cli: Cli) -> Result<()> {
             "Cluster ID: {}",
             output["cluster"]["id"].as_str().unwrap_or("")
         );
+        if let Some(target) = output["replaced_node"].as_str() {
+            println!("Replaced node {target}. Old agents and history were not imported.");
+        }
         println!("Start the daemon with gent daemon install.");
     } else if files_output {
         files::print_report(&output);

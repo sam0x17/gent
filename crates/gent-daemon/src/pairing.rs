@@ -9,8 +9,8 @@ use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fs2::FileExt;
 use gent_crypto::{
-    Checkpoint, NodeIdentity, SignedConfigurationGrant, SignedState, TrustAnchor, VerifiedState,
-    stream::Packet,
+    Checkpoint, NodeIdentity, ReplacedNode, SignedConfigurationGrant, SignedState, TrustAnchor,
+    VerifiedState, stream::Packet,
 };
 use gent_protocol::{MAX_FRAME_BYTES, PairingOp};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,8 @@ use std::{
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 mod publication;
+pub(crate) mod replacement;
+pub use replacement::installed_replacement;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +144,8 @@ pub struct Options<'a> {
     pub name: &'a str,
     /// Override when the owner's loopback development relay has a different route here.
     pub relay_endpoint: Option<&'a str>,
+    /// Explicit owner-authorized replacement of a lost joined node.
+    pub replace_node: Option<&'a str>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -153,6 +157,10 @@ struct Seed {
     node: String,
     package_request: Uuid,
     stream_request: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replace_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replacement: Option<ReplacedNode>,
 }
 struct Pending {
     dir: PathBuf,
@@ -164,6 +172,12 @@ struct Pending {
 impl Pending {
     fn open(home: &Path, options: &Options<'_>) -> Result<Self> {
         config::label(options.name)?;
+        if let Some(id) = options.replace_node {
+            ensure!(
+                Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == id),
+                "replacement node must be a canonical UUID"
+            );
+        }
         ensure!(
             Uuid::parse_str(options.cluster)?.to_string() == options.cluster,
             "cluster ID must be a canonical UUID"
@@ -194,8 +208,11 @@ impl Pending {
             );
             let seed: Seed = serde_json::from_slice(&bytes[40..])?;
             ensure!(
-                seed.version == 1 && seed.cluster == options.cluster && seed.name == options.name,
-                "pending join belongs to another cluster or node name"
+                seed.version == 1
+                    && seed.cluster == options.cluster
+                    && seed.name == options.name
+                    && seed.replace_node.as_deref() == options.replace_node,
+                "pending join belongs to another cluster, node name or replacement target"
             );
             let node = NodeIdentity::from_secret_bytes(&seed.node, bytes[8..40].try_into()?)?;
             (node, seed)
@@ -213,6 +230,8 @@ impl Pending {
                 node: node.id().into(),
                 package_request: Uuid::new_v4(),
                 stream_request: Uuid::new_v4(),
+                replace_node: options.replace_node.map(str::to_owned),
+                replacement: None,
             };
             (node, seed)
         };
@@ -335,6 +354,7 @@ async fn catch_up(
 /// Join using a protected owner channel. Files stay in a sibling staging
 /// directory until membership, identity, and the configuration stream are ready.
 pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Result<Value> {
+    crate::recovery::ensure_active(home)?;
     if let Some(endpoint) = options.relay_endpoint {
         config::RelayConfig {
             endpoint: endpoint.into(),
@@ -349,6 +369,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     let _daemon_lock = config::state_lock(&home, "daemon.lock")?;
     if config::path(&home).exists() {
         let config = config::load(&home)?;
+        replacement::check_intent(&home, &config, options.replace_node)?;
         ensure!(
             config.cluster.id == options.cluster,
             "node already belongs to another cluster"
@@ -434,6 +455,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     let snapshot: Snapshot = serde_json::from_value(peer.call(PairingOp::Snapshot).await?)?;
     let mut state = snapshot.verify(options.cluster)?;
     pending.pin(&state)?;
+    pending.pin_replacement(&state, &snapshot.writer)?;
     pending.pin_service(&snapshot.service)?;
     if let Some(service) = &snapshot.service {
         ensure!(
@@ -446,12 +468,21 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
         snapshot.relay.is_some() || snapshot.service.is_some(),
         "owner has no configuration relay; configure [relay] and restart its daemon before joining"
     );
-    let request = pending.node.request_enrollment(
-        state.anchor(),
-        state.checkpoint(),
-        options.name,
-        now() as u64,
-    )?;
+    let request = match &pending.seed.replacement {
+        Some(target) => pending.node.request_replacement(
+            state.anchor(),
+            state.checkpoint(),
+            options.name,
+            target.clone(),
+            now() as u64,
+        )?,
+        None => pending.node.request_enrollment(
+            state.anchor(),
+            state.checkpoint(),
+            options.name,
+            now() as u64,
+        )?,
+    };
     let enrolled: Snapshot = serde_json::from_value(
         peer.call(PairingOp::Enroll {
             request: STANDARD.encode(request.encode()?),
@@ -462,11 +493,20 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     pending.pin(&state)?;
     pending.pin_service(&enrolled.service)?;
     state.authorize_node(pending.node.id(), &pending.node.public_key(), now() as u64)?;
+    if let Some(target) = &pending.seed.replacement {
+        ensure!(
+            !state.state().nodes.contains_key(&target.id)
+                && state.state().retired_nodes.contains(&target.id)
+                && state.state().retired_keys.contains(&target.signing_key),
+            "owner did not retire the replacement target"
+        );
+    }
     // Both snapshots arrive through an independently authenticated owner channel. This is
     // bootstrap authority only; an installed runtime advances through history.
     if !config::path(&pending.runtime).exists() {
         Store::install_joined(&pending.runtime, &pending.node, &state)?;
     }
+    pending.save_replacement()?;
     let mut endpoint = OrderedEndpoint::open_runtime(&pending.runtime, &pending.node)?;
     ensure!(
         endpoint.authority_state()?.anchor() == state.anchor(),

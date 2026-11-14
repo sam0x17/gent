@@ -100,7 +100,18 @@ impl Store {
                     request.request.anchor == *state.anchor(),
                     "wrong pairing authority"
                 );
-                if state.state().nodes.contains_key(&request.request.node_id) {
+                if request.request.replaces.is_some() {
+                    let mut session = StoreSession {
+                        db: &tx,
+                        home: &self.home,
+                        config: self.config.clone(),
+                        identity: &self.identity,
+                        state,
+                        timestamp: timestamp.try_into()?,
+                    };
+                    session.replace_enrollment(&request, fingerprint, can_configure)?;
+                    state = session.state;
+                } else if state.state().nodes.contains_key(&request.request.node_id) {
                     // A lost reply may leave a successfully enrolled node. Reusing
                     // that exact node/key is safe; it does not issue another revision.
                     state.authorize_node(

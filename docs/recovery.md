@@ -1,6 +1,6 @@
 # Backup and recovery
 
-Gent can create encrypted backups of a stopped node, verify every payload, and extract the archive into a guarded offline directory. Activating a restored node, migrating its agents or pending work, and replacing a lost cluster owner remain unfinished.
+Gent can create encrypted backups of a stopped node, verify every payload, and extract the archive into a guarded offline directory. A lost joined node can be replaced through authenticated SSH using a fresh identity and fresh encrypted streams. Importing archived agents, history or pending work, and replacing a lost cluster owner remain unfinished.
 
 ## Commands
 
@@ -59,9 +59,27 @@ Extraction writes into a new private staging directory with the recovery guard p
 
 The extracted copy retains historical keys and credentials. It must remain offline. Message/file expiry and deletion on live nodes do not remove historical archive copies; archive retention and recovery-key custody remain the user's responsibility.
 
-## Planned return to service
+## Replace a lost joined node
 
-For a lost joined node, use a fresh node identity and authenticated enrollment with the current owner. Retire the old node's authority and establish fresh streams. Any import of saved history or pending work needs explicit provenance and duplicate handling; archived requests must not silently become new sends. Agent bindings and peer permissions need deliberate migration rules.
+On the current owner, use `gent nodes` to identify the lost node. From a fresh node directory on the replacement machine:
+
+```sh
+gent --home ~/.gent-replacement cluster join CLUSTER_UUID \
+  --via user@owner-host --name laptop --replace-node OLD_NODE_UUID
+gent --home ~/.gent-replacement daemon install
+```
+
+The owner daemon and its configured relay must be available. SSH uses strict host-key verification and the existing owner's local authority. The usual `--remote-gent`, `--remote-home`, and development-only `--relay-endpoint` options apply. Service-backed clusters require login to the same account/service before joining. The active signing owner cannot be replaced by this command. Invitation files do not authorize replacement.
+
+One signed revision retires the old node ID and signing key and enrolls the fresh identity. A durable removal record commits in the same database transaction and binds the old ID/key to the replacement ID/key. A retry after a lost reply reuses that identity; another fresh directory cannot replace the same retired node. Configuration administration is preserved only if the old node had it. Old node-specific rules, agent IDs, message history, pending sends, reply grants and conversation bindings are not transferred. Existing blanket and same-node rules apply normally to newly registered agents. Configure any new explicit permissions deliberately.
+
+If joining is interrupted, rerun the identical command with the same home, name and `--replace-node` value. Keep the sibling `.joining` directory: it contains the new private identity, trusted old-key pin and retry records. A committed retirement is not rolled back if later stream or service setup fails. Losing the pending identity after that commit needs separate recovery; starting another directory is refused. Completed installations retain `node-replacement.json` and its hash in local TOML; missing or changed records are refused. These files are local recovery evidence, not cluster permission rules.
+
+Signed revocation applies as peers receive current configuration. Offline peers can retain stale authority until synchronization or lease expiry. Service credential removal follows the existing owner maintenance journal and may remain pending during service downtime. On the owner, `gent node removals` reports the old node, replacement identity and cleanup status; service confirmation does not prove that every peer has caught up. The development relay uses a shared credential and has no per-node service revocation.
+
+The new node never opens the archived runtime, resumes an old MLS ratchet or clears the recovery guard. Keep extracted archives offline. Any future import of saved history or pending work needs explicit provenance and duplicate handling; archived requests must not silently become new sends. Agent bindings and peer permissions need deliberate migration rules. Replacing a node cannot remove historical data already held by it or its backups.
+
+## Remaining recovery work
 
 Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, creating a new cluster and separately importing historical data is the fallback to design. Multi-user recovery authority remains future work.
 
@@ -77,4 +95,12 @@ python3 scripts/prove_recovery_guard.py --gent target/debug/gent
 python3 scripts/prove_backup.py --gent target/debug/gent
 ```
 
-These checks cover offline archives and the activation boundary. Restored-node enrollment and owner replacement remain unimplemented.
+Replacement tests cover lost replies at every pairing step, owner/competing-target refusal, atomic rollback, durable key pins, interrupted publication, schema migration, invitation scope and retries after later revocation. The optional physical-machine proof adds a replacement to the existing SSH workflow:
+
+```sh
+python3 scripts/prove_pairing.py --owner user@owner-host \
+  --remote-binary /absolute/path/to/gent --relay-token-file /private/relay.key \
+  --node-replacement
+```
+
+This uses temporary nodes and a local development relay, checks fresh keys/streams and preserved administration limits, exchanges MCP images and a 2 MiB native file after both daemon restarts, and keeps the old archive guarded. It does not prove deployed service cleanup, archive import or owner replacement.

@@ -209,6 +209,10 @@ impl Store {
                     signed.fingerprint()?;
                     let request = signed.request;
                     ensure!(
+                        request.replaces.is_none(),
+                        "invitation does not authorize node replacement"
+                    );
+                    ensure!(
                         request.anchor == row.offer.offer.anchor
                             && request.node_id == node.id
                             && request.member.signing_key == node.key

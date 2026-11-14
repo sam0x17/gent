@@ -90,6 +90,7 @@ impl Store {
 
     pub fn open(home: &Path) -> Result<Self> {
         let config = config::load_for_runtime(home)?;
+        let replacement = crate::pairing::replacement::check_intent(home, &config, None)?;
         let owner_hash = hash(&config::read_private(&home.join("owner.key"))?);
         ensure!(
             home.join("state.sqlite3").exists() || !home.join(runtime::KEY_FILE).exists(),
@@ -141,6 +142,17 @@ impl Store {
         }
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let identity = Identity::load_or_create(home, &config, &tx, now() as u64)?;
+        if let Some(record) = replacement {
+            record.verify_node(&identity.node)?;
+            let target = record.replaces;
+            let state = identity.state(&tx)?;
+            ensure!(
+                !state.state().nodes.contains_key(&target.id)
+                    && state.state().retired_nodes.contains(&target.id)
+                    && state.state().retired_keys.contains(&target.signing_key),
+                "replacement record does not match signed retirement"
+            );
+        }
         if identity.owner.is_none() {
             // Only the SSH owner can issue enrollment snapshots. Conservative
             // migration pins on a joined runtime cannot represent pending joins.

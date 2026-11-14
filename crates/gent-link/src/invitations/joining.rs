@@ -166,6 +166,7 @@ pub async fn join(
     let mut result = pairing::join(
         &home,
         pairing::Options {
+            replace_node: None,
             cluster: &offer.offer.anchor.cluster_id,
             name,
             relay_endpoint: None,

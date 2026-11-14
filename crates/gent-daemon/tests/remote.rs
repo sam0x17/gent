@@ -118,6 +118,7 @@ impl Pair {
         pairing::join(
             homes[1].path(),
             pairing::Options {
+                replace_node: None,
                 cluster: &cfg.cluster.id,
                 name: "peer",
                 relay_endpoint: None,
