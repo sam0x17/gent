@@ -75,17 +75,21 @@ cargo build -p gent-link
 python3 scripts/prove_gateway_oauth.py --gent target/debug/gent
 # Opt-in installed clients; no model calls:
 python3 scripts/prove_gateway_clients.py --gent target/debug/gent
-# Opt-in normal model access; four synthetic turns:
+# Opt-in OAuth model lifecycle; six synthetic turns:
+python3 scripts/prove_gateway_clients.py --gent target/debug/gent --exercise-models
+# Opt-in static-bearer model identity proof; four synthetic turns:
 python3 scripts/prove_gateway_hosts.py --gent target/debug/gent
 ```
 
 The tests cover approval/denial, PKCE, exact callback/client/audience checks, expiry, replay and concurrent redemption, stable bindings through refresh/reconnect, host revocation, bounded malformed inputs and real HTTP discovery. The CLI proof runs separate native gateway and daemon processes and checks approval, callback issuer/state, restart, refresh, replay revocation, reconnect identity and private logs.
 
-Both opt-in proofs pass on Linux with Codex 0.167.2 / Claude Code 2.1.323 and on macOS with Codex 0.167.0 / Claude Code 2.1.311. These are tested versions, not minimum supported versions.
+The installed-client proof, including its OAuth model lifecycle option, and the static-bearer model proof pass on Linux with Codex 0.167.2 / Claude Code 2.1.323 and on macOS with Codex 0.167.0 / Claude Code 2.1.311. These are tested versions, not minimum supported versions.
 
-The installed-client proof drives each CLI's actual `mcp login --no-browser` flow, approves the request through Gent, checks S256/resource/callback/scope/state and confirms code redemption in Gent's registry. Claude's callback prompt runs in a temporary terminal. Codex uses a temporary profile and a unique file-store OAuth entry, removed with `mcp logout`; Claude uses isolated configuration and file credentials with Keychain commands disabled for that subprocess. Existing provider settings remain intact. This does not test native Keychain behavior, client-driven refresh or hosted provider consent.
+The installed-client proof drives each CLI's actual `mcp login --no-browser` flow, approves the request through Gent, checks S256/resource/callback/scope/state and confirms code redemption in Gent's registry. Claude's callback prompt runs in a temporary terminal. Codex uses a temporary profile and a unique file-store OAuth entry, removed with `mcp logout`; Claude uses isolated configuration and file credentials with Keychain commands disabled for that subprocess. Existing provider settings remain intact. Native Keychain behavior and hosted provider consent remain untested.
 
-The separate model proof uses static host bearers and observes unchanged loopback HTTP tool calls. It checks Codex identity across repeated calls, a gateway/daemon restart, resume and fork, and checks Claude's missing-conversation rejection without allocating an agent. It deletes private test files on exit; provider-managed synthetic conversations remain. These proofs establish OAuth login and metadata behavior separately, not a complete OAuth-authenticated model session or mobile integration.
+With `--exercise-models`, the proof uses normal model access for three turns per host: initial OAuth tool calls, resume after server-side access expiry and gateway restart, then resume after another gateway restart. It expires only the synthetic grant's access token while the server is stopped, leaving the client credential store unchanged. Both clients recover through refresh after HTTP 401. The proof checks rotation within the original token family, unchanged authorization lifetime and actual tool results. Codex preserves one agent throughout; Claude authenticates but consistently receives the missing-conversation rejection, with no agent allocated. Proactive expiry timers and simultaneous refreshes from separate client processes remain untested.
+
+The separate model proof uses static host bearers and observes unchanged loopback HTTP tool calls. It checks Codex identity across repeated calls, a gateway/daemon restart, resume and fork, and checks Claude's missing-conversation rejection without allocating an agent. Both model proofs delete private test files on exit; provider-managed synthetic conversations remain. Neither establishes hosted or mobile integration.
 
 For installed Codex, put the preregistered client ID/secret and callback URL in the server's `oauth` settings. Let resource discovery supply `resource`: Linux Codex 0.167.2 duplicated that parameter when `oauth_resource` was explicitly set to the discovered URL. Gent continues to reject duplicates. For Claude Code, `mcp add --client-id ID --client-secret --callback-port PORT` accepts the secret through `MCP_CLIENT_SECRET`; subsequent login reads the saved secret. Its callback uses `localhost`, matched exactly. See the [Codex configuration schema](https://github.com/openai/codex/blob/main/codex-rs/core/config.schema.json) and [Claude Code preregistration instructions](https://code.claude.com/docs/en/mcp#use-pre-configured-oauth-credentials). Successful Claude login still lacks a stable HTTP conversation identifier; use its existing local hook integration for agent traffic.
 

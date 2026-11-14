@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Opt-in OAuth proof with installed Codex and Claude Code, without model calls.
+"""Opt-in OAuth proof with installed Codex and Claude Code.
 
 Uses a temporary Codex profile and a unique entry in its file OAuth store,
 removed through `mcp logout` on exit. Claude uses an isolated configuration
 directory and file storage (Keychain access is disabled for this subprocess).
 No existing provider settings are edited. Secrets never enter command arguments.
+--exercise-models uses normal model access for token-renewal and reconnect tests.
 """
 import argparse
 import json
@@ -40,6 +41,7 @@ def main():
     parser.add_argument("--gent", type=Path, required=True)
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--claude", default="claude")
+    parser.add_argument("--exercise-models", action="store_true")
     args = parser.parse_args()
     binary = str(args.gent.resolve())
     codex = shutil.which(args.codex)
@@ -169,7 +171,7 @@ def main():
             for host in ("codex", "claude"):
                 callback = f"http://{'127.0.0.1' if host == 'codex' else 'localhost'}:{free_port()}/callback"
                 export = root / (host + ".json")
-                cli("gateway", "clients", "add", host, "--conversation-key", "test/conversation",
+                cli("gateway", "clients", "add", host, "--conversation-key", "threadId" if host == "codex" else "test/conversation",
                     "--out", str(export), "--oauth-resource", resource, "--redirect-uri", callback)
                 registration = json.loads(export.read_text())
                 private.append(registration["token"])
@@ -190,6 +192,16 @@ def main():
                     return False
 
             wait_for(ready)
+
+            def restart_gateway(edit):
+                nonlocal gateway
+                gateway.terminate()
+                assert gateway.wait(timeout=15) == 0
+                edit()
+                gateway, path = start([binary, "--home", str(gent_dir), "gateway", "run",
+                                       "--listen", f"127.0.0.1:{port}"], f"gateway-{len(processes)}")
+                daemon_logs.append(path)
+                wait_for(ready)
             config_dir = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
             assert config_dir.is_dir(), "use an installed Codex configuration directory"
             name = "gent-proof-" + uuid.uuid4().hex
@@ -205,6 +217,10 @@ def main():
             results = {}
             results["codex"] = login([codex, "--profile", name, "mcp", "login", name, "--no-browser"],
                                      "codex-login", registration["client"], callback)
+            if args.exercise_models:
+                from gateway_client_lifecycle import exercise
+                results["codex"]["lifecycle"] = exercise("codex", codex, name, root, work, gent_dir, resource,
+                    registration, urllib.parse.urlsplit(callback).port, os.environ, restart_gateway, cli)
             claude_dir = root / "claude"
             claude_dir.mkdir()
             shim_dir = root / "bin"
@@ -228,6 +244,9 @@ def main():
             assert stored.exists() and registration["token"] in stored.read_text(), "Claude did not persist the client secret in the isolated file store"
             results["claude"] = login([claude, "mcp", "login", name, "--no-browser"],
                                       "claude-login", registration["client"], callback, env)
+            if args.exercise_models:
+                results["claude"]["lifecycle"] = exercise("claude", claude, name, root, work, gent_dir, resource,
+                    registration, urllib.parse.urlsplit(callback).port, env, restart_gateway, cli)
             for host, (registration, _) in clients.items():
                 cli("gateway", "clients", "revoke", registration["client"])
                 results[host]["version"] = subprocess.check_output(
@@ -241,7 +260,7 @@ def main():
             if credentials.exists():
                 assert name not in credentials.read_text(), "Codex proof credential remains"
             print(json.dumps({"status": "passed", "proof": "installed-client-oauth", "clients": results,
-                              "credential_cleanup": "passed", "model_calls": 0}))
+                              "credential_cleanup": "passed", "model_turns": 6 if args.exercise_models else 0}))
         finally:
             for process in reversed(processes):
                 if process.poll() is None:
