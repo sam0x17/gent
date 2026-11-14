@@ -599,6 +599,8 @@ The proof schedules each turn and restricts rendering to a small fixture. Arbitr
 
 ## Database capacity and journal recovery
 
+For recovery of an agent's interrupted host work, see the separate [work journal](work.md). `python3 scripts/prove_work.py --gent target/debug/gent` checks lost responses, daemon crashes, owner reconciliation and a separate reply through native CLI/MCP processes. It uses a disposable host output and makes no model calls.
+
 Run `python3 scripts/smoke_storage.py target/debug/gent` to verify the database policy through native CLI/MCP processes. It uses a disposable node, holds a read transaction until a send fails atomically, releases the reader and retries delivery, then restarts from a committed version-11 WAL left by an abruptly exited process. It checks exact retry, delivery status, schema upgrade, database integrity and the CLI page limit. It makes no model calls or permanent service changes.
 
 Gent-owned databases now use rollback journaling and a 2 GiB page ceiling. Existing larger databases preserve their current pages and reject further allocation. Avoid long direct SQLite reads while Gent is running: readers can delay commits, which fail after the five-second busy timeout. Close other database users before upgrading from WAL; SQLite must acquire locks and preserve the committed WAL itself. Never remove journal or WAL files to force startup.

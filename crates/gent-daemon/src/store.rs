@@ -33,6 +33,7 @@ pub(crate) mod removals;
 mod requests;
 #[cfg(test)]
 mod storage_tests;
+mod work;
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -113,6 +114,7 @@ impl Store {
         requests::schema(&db, now())?;
         history::schema(&db)?;
         recovered::schema(&db)?;
+        work::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -623,6 +625,14 @@ impl StoreSession<'_> {
             OwnerOp::FilesStatus => self.files_status(),
             OwnerOp::FilesClean { dry_run } => self.files_clean(dry_run),
             OwnerOp::HistoryStatus => self.history_status(),
+            OwnerOp::WorkList { after_message_id } => self.work_list(after_message_id.as_deref()),
+            OwnerOp::WorkShow { message_id } => self.work_show(&message_id),
+            OwnerOp::WorkReconcile {
+                message_id,
+                expect_revision,
+                resolution,
+                note,
+            } => self.work_reconcile(&message_id, expect_revision, resolution, &note),
             OwnerOp::HistoryClean { dry_run } => self.history_clean(dry_run),
             OwnerOp::TransportStatus => encrypted::ordered::storage::status(self.db),
             OwnerOp::TransportClean { dry_run } => {
@@ -797,6 +807,17 @@ impl StoreSession<'_> {
                 changes,
             } => self.permission_rule_apply(&who, &request_id, changes),
             AgentOp::RequestIds { count } => self.request_ids(count),
+            AgentOp::WorkStatus { message_id } => self.work_status(&who, &message_id),
+            AgentOp::WorkBegin {
+                message_id,
+                expect_revision,
+                description,
+            } => self.work_begin(&who, &message_id, expect_revision, &description),
+            AgentOp::WorkComplete {
+                message_id,
+                expect_revision,
+                note,
+            } => self.work_complete(&who, &message_id, expect_revision, &note),
             AgentOp::FilePaths => self.file_paths(&who),
             AgentOp::FileImport {
                 request_id,

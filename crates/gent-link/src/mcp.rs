@@ -269,6 +269,24 @@ fn tools() -> Vec<Tool> {
             vec!["message_id"],
         ),
         (
+            "gent_work_status",
+            "Read this recipient's local execution report for a currently accessible incoming message. No record means unknown execution history, not proof work never ran. Started means an attempt was recorded, not that it is still running. These reports do not execute work or complete a relay turn.",
+            json!({"message_id":{"type":"string","format":"uuid"}}),
+            vec!["message_id"],
+        ),
+        (
+            "gent_work_begin",
+            "Before authorized consequential work on an incoming message, persist a local start marker with a short description. Use expect_revision 0 for a new marker, or the exact retry_approved revision after explicit owner reconciliation. Act only on started_now=true and existing user/host authorization. A repeated begin returns started_now=false: do not execute again, even after a lost reply or restart. Check actual host state and ask the owner to reconcile uncertainty. An untracked message might have run before journaling was enabled. This is not an execution grant or exactly-once guarantee. Relay requests must be current and not cancelled.",
+            json!({"message_id":{"type":"string","format":"uuid"},"expect_revision":{"type":"integer","minimum":0},"description":{"type":"string","minLength":1,"maxLength":1024}}),
+            vec!["message_id", "description"],
+        ),
+        (
+            "gent_work_complete",
+            "Record that you have checked and completed the host work for an incoming message. Use the started record's exact revision and a note describing the observed outcome. Identical completion retries preserve the record. This only records your report; it does not prove external execution or send a reply. Then use the ordinary reply or relay response workflow as appropriate. Uncertain work needs owner reconciliation, never another blind begin.",
+            json!({"message_id":{"type":"string","format":"uuid"},"expect_revision":{"type":"integer","minimum":1},"note":{"type":"string","minLength":1,"maxLength":2048}}),
+            vec!["message_id", "expect_revision", "note"],
+        ),
+        (
             "gent_relay_attach",
             "Persist a target agent ID using an active owner relay grant and messaging permissions. Use a UUIDv7 request_id from gent_request_ids; an identical retry preserves the original attachment. This selects a target without sending a message.",
             json!({"target":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"}}),

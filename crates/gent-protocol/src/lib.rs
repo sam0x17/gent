@@ -6,6 +6,7 @@ pub mod file_objects;
 pub mod history;
 pub mod permissions;
 pub mod service;
+pub mod work;
 
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -350,6 +351,20 @@ pub enum AgentOp {
         file_ids: Vec<String>,
     },
     Inbox,
+    WorkStatus {
+        message_id: String,
+    },
+    WorkBegin {
+        message_id: String,
+        #[serde(default)]
+        expect_revision: u64,
+        description: String,
+    },
+    WorkComplete {
+        message_id: String,
+        expect_revision: u64,
+        note: String,
+    },
     Ack {
         message_id: String,
     },
@@ -532,6 +547,18 @@ pub enum OwnerOp {
     Providers,
     FilesStatus,
     HistoryStatus,
+    WorkList {
+        after_message_id: Option<String>,
+    },
+    WorkShow {
+        message_id: String,
+    },
+    WorkReconcile {
+        message_id: String,
+        expect_revision: u64,
+        resolution: work::WorkResolution,
+        note: String,
+    },
     HistoryImports,
     AgentRecover {
         directory: String,

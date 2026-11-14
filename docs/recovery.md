@@ -2,6 +2,8 @@
 
 Gent can create encrypted backups of a stopped node, verify every payload, extract the archive into a guarded offline directory, and export retained Gent history with recovered files. The owner can assign one archived agent's history to a current local agent or prepare a fresh conversation binding with that history. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Migrating old agent identities, peer permissions or pending work, and replacing a lost cluster owner remain unfinished.
 
+For interrupted work on an intact node, the [local work journal](work.md) records a recipient's start and checked outcome. `gent work` lists reports and `gent work reconcile` records an owner-reviewed outcome or permits a subsequent attempt. These records survive message cleanup but are not assigned through historical recovery. They do not establish exactly-once external execution or make an old database safe to resume.
+
 ## Commands
 
 Keep the recovery key outside node state and separately from the archives. Its private file contains one age X25519 secret string, optionally surrounded by whitespace; Gent never prints the secret. Losing it makes these archives unreadable. Anyone holding it can decrypt archives and create authenticated archives with the same key.

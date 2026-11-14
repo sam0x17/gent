@@ -29,12 +29,15 @@ async fn oauth_discovery_consent_pkce_refresh_and_revocation_work_through_real_h
     let value: Value = serde_json::from_slice(&fs::read(export).unwrap()).unwrap();
     let id = added["client"].as_str().unwrap();
     let secret = value["token"].as_str().unwrap();
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap();
+    let new_client = || {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
+    };
+    let client = new_client();
     let server = Running::start(&f.home, listener, origin.clone(), address.to_string(), None).await;
     let denied = client.get(&resource).send().await.unwrap();
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
@@ -167,6 +170,9 @@ async fn oauth_discovery_consent_pkce_refresh_and_revocation_work_through_real_h
     server.close().await;
     let listener = TcpListener::bind(address).await.unwrap();
     let server = Running::start(&f.home, listener, origin.clone(), address.to_string(), None).await;
+    // The old server aborted its TCP connections. Use a fresh pool to test
+    // persisted OAuth state without racing a stale keep-alive connection.
+    let client = new_client();
     let refresh_fields = [
         ("grant_type", "refresh_token"),
         ("client_id", id),

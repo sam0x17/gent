@@ -17,6 +17,7 @@ mod pairing;
 mod permission_admin;
 mod service;
 mod setup;
+mod work;
 
 use anyhow::{Context, Result, ensure};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -50,6 +51,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect local work reports and reconcile interrupted attempts.
+    Work {
+        #[command(subcommand)]
+        command: Option<work::Command>,
+    },
     /// Create, verify or extract encrypted offline node backups.
     Backup {
         #[command(subcommand)]
@@ -611,6 +617,7 @@ async fn execute(cli: Cli) -> Result<()> {
         })
     );
     let output = match cli.command {
+        Some(Command::Work { command }) => work::execute(&home, command).await?,
         Some(Command::Doctor(_) | Command::Backup { .. }) => unreachable!(),
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
