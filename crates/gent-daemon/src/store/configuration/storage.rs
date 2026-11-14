@@ -2,6 +2,7 @@
 //! Call mutations inside the proposal/result or maintenance transaction.
 use super::*;
 use serde::{Deserialize, Serialize};
+pub(in crate::store) mod handoff;
 
 const CLEAN_BATCH: usize = 8;
 const MAX_RECORDS: u64 = 65536;

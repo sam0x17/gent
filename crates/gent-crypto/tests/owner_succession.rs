@@ -7,6 +7,9 @@ const NOW: u64 = 1_800_000_000;
 #[path = "owner_succession/candidates.rs"]
 mod candidates;
 
+#[path = "owner_succession/journal.rs"]
+mod decision_journal;
+
 fn fixture() -> (OwnerKey, [NodeIdentity; 2], VerifiedState) {
     let owner = OwnerKey::generate().unwrap();
     let nodes = [

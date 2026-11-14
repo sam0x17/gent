@@ -14,10 +14,36 @@ fn prepare(pair: &mut Pair) -> SignedOwnerCandidate {
 
 fn issue(pair: &mut Pair, candidate: &SignedOwnerCandidate) -> SignedOwnerTransition {
     let key = credential(pair, 0);
-    pair.stores[0]
+    let authorization = pair.stores[0]
         .authorize_owner_handoff(&key, candidate)
-        .unwrap()
+        .unwrap();
+    transfer(pair, candidate, &authorization);
+    authorization
 }
+
+fn transfer(
+    pair: &mut Pair,
+    candidate: &SignedOwnerCandidate,
+    authorization: &SignedOwnerTransition,
+) {
+    let keys = [credential(pair, 0), credential(pair, 1)];
+    let id = &candidate.candidate.id;
+    let manifest = pair.stores[0].owner_handoff_manifest(&keys[0], id).unwrap();
+    pair.stores[1]
+        .begin_owner_handoff_import(&keys[1], id, authorization, &manifest)
+        .unwrap();
+    for index in 0..manifest.pages.len() {
+        let page = pair.stores[0]
+            .owner_handoff_page(&keys[0], id, index)
+            .unwrap();
+        pair.stores[1]
+            .import_owner_handoff_page(&keys[1], id, index, &page)
+            .unwrap();
+    }
+}
+
+#[path = "owner_journal_tests.rs"]
+mod journal_tests;
 
 fn status(pair: &mut Pair, i: usize) -> Value {
     let credential = credential(pair, i);
@@ -427,7 +453,7 @@ async fn version_seventeen_migration_preserves_keys_and_checkpoint_before_first_
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        18
+        19
     );
     let candidate = prepare(&mut pair);
     issue(&mut pair, &candidate);

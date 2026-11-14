@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 
 const LIMIT: usize = 64;
 const MAGIC: &[u8] = b"GENTOWN1";
+mod journal;
 
 pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
     let count: usize = db.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('owner_handoff_control','owner_handoffs','owner_candidates')", [], |r| r.get(0))?;
@@ -40,7 +41,7 @@ pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
             "owner handoff fence is missing; do not resume signing"
         );
     }
-    Ok(())
+    journal::schema(db, previous)
 }
 
 fn restore(candidate: &SignedOwnerCandidate, baseline: &[u8]) -> Result<VerifiedState> {
@@ -82,6 +83,7 @@ fn issued(db: &Connection) -> Result<Option<Issued>> {
     let base = restore(&candidate, &baseline)?;
     let authorization = SignedOwnerTransition::decode(&authorization)?;
     base.verify_owner_authorization(&candidate, &authorization)?;
+    journal::check_source(db, &base, &candidate, &authorization)?;
     Ok(Some(Issued {
         base,
         candidate,
@@ -138,6 +140,7 @@ pub(super) fn status(db: &Connection, state: &VerifiedState) -> Result<Value> {
         "issued_request":issued.as_ref().map(|r| &r.candidate.candidate.id),
         "successor_node":issued.as_ref().map(|r| &r.candidate.candidate.node.id),
         "prepared_candidates":candidates,"completed_candidates":completed,
+        "journal_transfer":journal::usage(db)?,
         "activation_supported":false}),
     )
 }
@@ -338,7 +341,13 @@ impl Store {
         );
         let owner = self.identity.signing_owner(&tx)?;
         let timestamp = requests::clock(&tx, now())? as u64;
-        let authorization = state.authorize_owner_candidate(owner, candidate, timestamp)?;
+        let (manifest, body) = journal::capture(&tx, &state, candidate)?;
+        let authorization = state.authorize_owner_candidate_with_journal(
+            owner,
+            candidate,
+            manifest.digest()?,
+            timestamp,
+        )?;
         tx.execute(
             "INSERT INTO owner_handoffs VALUES(?1,?2,?3,?4)",
             params![
@@ -352,6 +361,7 @@ impl Store {
             "UPDATE owner_handoff_control SET issued=?1 WHERE singleton=1",
             [&candidate.candidate.id],
         )?;
+        journal::save_source(&tx, candidate, &authorization, &manifest, &body)?;
         tx.commit()?;
         Ok(authorization)
     }
@@ -390,6 +400,14 @@ impl Store {
             "local state changed since owner preparation"
         );
         let timestamp = requests::clock(&tx, now())? as u64;
+        if authorization
+            .transition
+            .successor
+            .as_ref()
+            .is_some_and(|s| s.journal.is_some())
+        {
+            journal::require_complete(&tx, &pinned, &candidate, authorization)?;
+        }
         let result =
             pinned.accept_owner_authorization(&key, &candidate, authorization, timestamp)?;
         if let Some(previous) = completed {

@@ -11,6 +11,8 @@ const CANDIDATE_DOMAIN: &[u8] = b"gent/owner-candidate-record/v1\0";
 pub struct OwnerSuccessor {
     pub node: ReplacedNode,
     pub candidate: Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<Digest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,6 +150,28 @@ impl VerifiedState {
         candidate: &SignedOwnerCandidate,
         now: u64,
     ) -> Result<SignedOwnerTransition> {
+        self.authorize_candidate(owner, candidate, None, now)
+    }
+
+    /// The caller snapshots completed decisions in the same transaction that
+    /// freezes signing. The digest authenticates that exact transfer manifest.
+    pub fn authorize_owner_candidate_with_journal(
+        &self,
+        owner: &OwnerKey,
+        candidate: &SignedOwnerCandidate,
+        journal: Digest,
+        now: u64,
+    ) -> Result<SignedOwnerTransition> {
+        self.authorize_candidate(owner, candidate, Some(journal), now)
+    }
+
+    fn authorize_candidate(
+        &self,
+        owner: &OwnerKey,
+        candidate: &SignedOwnerCandidate,
+        journal: Option<Digest>,
+        now: u64,
+    ) -> Result<SignedOwnerTransition> {
         ensure!(
             owner.public_key() == self.state().owner_key,
             "wrong current owner authority"
@@ -173,6 +197,7 @@ impl VerifiedState {
             successor: Some(OwnerSuccessor {
                 node: candidate.candidate.node.clone(),
                 candidate: candidate.digest()?,
+                journal,
             }),
             issued_at: now,
         };
@@ -204,6 +229,11 @@ impl VerifiedState {
         let expected = OwnerSuccessor {
             node: candidate.candidate.node.clone(),
             candidate: candidate.digest()?,
+            journal: authorization
+                .transition
+                .successor
+                .as_ref()
+                .and_then(|s| s.journal),
         };
         ensure!(
             authorization.transition.base == *self.checkpoint()

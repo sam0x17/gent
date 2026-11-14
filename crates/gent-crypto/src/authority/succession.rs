@@ -8,6 +8,7 @@ const DOMAIN: &[u8] = b"gent/owner-succession/v1\0";
 const RECORD_DOMAIN: &[u8] = b"gent/owner-succession-record/v1\0";
 mod candidate;
 pub use candidate::*;
+pub mod journal;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -91,7 +92,9 @@ pub(super) fn verify_lineage(
             id(&successor.node.id)?;
             public_key(&successor.node.signing_key)?;
             ensure!(
-                !seen.contains(&successor.node.signing_key) && successor.candidate != [0; 32],
+                !seen.contains(&successor.node.signing_key)
+                    && successor.candidate != [0; 32]
+                    && successor.journal.is_none_or(|digest| digest != [0; 32]),
                 "invalid successor node binding"
             );
         }

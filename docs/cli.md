@@ -216,7 +216,7 @@ All support `--json` and use local owner authority. Authenticated receiver check
 
 ## Backup and recovery
 
-`gent recovery status` reports the selected node's owner epoch, signing stop and local handoff preparation counts. It requires local owner RPC access and returns no signing keys. Handoff preparation remains a trusted Rust API; CLI activation is unavailable. See [owner succession](owner-succession.md).
+`gent recovery status` reports the selected node's owner epoch, signing stop, local handoff preparation counts and decision-journal storage reservations. It requires local owner RPC access and returns no signing keys or journal contents. Handoff preparation remains a trusted Rust API; CLI activation is unavailable. See [owner succession](owner-succession.md).
 
 `gent recovery challenge --out FILE` pins the selected node's accepted configuration in a private challenge. `gent recovery witness CHALLENGE --out FILE` records its node-signed observation. `gent recovery inspect CHALLENGE [REPORTS...]` compares reports offline, showing missing nodes and differing or conflicting checkpoints without changing authority. Challenge and witness require local owner RPC access; inspection needs no daemon and rejects `--cluster`. Files must be private, outputs must be new, and collection must finish within 15 minutes. See [owner recovery evidence and its limits](owner-recovery.md). Owner replacement remains unfinished.
 
