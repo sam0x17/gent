@@ -19,6 +19,7 @@ pub struct Replica {
 impl Replica {
     /// One replica per cluster directory, beneath a private endpoint state directory.
     pub fn open(home: &Path) -> Result<Self> {
+        crate::recovery::ensure_active(home)?;
         crate::config::private_dir(home)?;
         let path = home.join("authority.sqlite3");
         match fs::OpenOptions::new()

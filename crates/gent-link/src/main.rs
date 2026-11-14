@@ -458,6 +458,8 @@ async fn execute(cli: Cli) -> Result<()> {
         .or_else(|| std::env::var_os("GENT_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".gent")))
         .context("cannot locate home; pass --home")?;
+    // Archived profile references must never redirect a command to live state.
+    gent_daemon::recovery::ensure_active(&root)?;
     if let Some(Command::Doctor(options)) = cli.command {
         let report = doctor::run(&root, cli.context.as_deref(), options).await;
         if cli.json {
@@ -498,6 +500,7 @@ async fn execute(cli: Cli) -> Result<()> {
     } else {
         contexts::resolve(&root, cli.context.as_deref())?
     };
+    gent_daemon::recovery::ensure_active(&home)?;
     if let Some(Command::Auth { command }) = cli.command {
         let status_only = matches!(command, None | Some(auth::Command::Status));
         let output = auth::execute(&home, command.unwrap_or(auth::Command::Status)).await?;

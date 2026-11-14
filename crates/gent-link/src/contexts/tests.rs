@@ -8,6 +8,43 @@ struct Fixture {
     root_id: String,
     peer_id: String,
 }
+
+#[test]
+fn recovery_guard_blocks_profile_redirection_and_mutation() {
+    let f = Fixture::new();
+    add(&f.root, &f.peer).unwrap();
+    switch(&f.root, Some(f.peer_id.clone()), false).unwrap();
+    let original = fs::read(config::path(&f.root)).unwrap();
+    let marker = f.root.join(gent_daemon::recovery::MARKER);
+    config::write_private(&marker, b"{}").unwrap();
+    for result in [
+        resolve(&f.root, None),
+        resolve(&f.root, Some(&f.peer_id)),
+        resolve(&f.root.join("missing"), None),
+    ] {
+        assert!(result.unwrap_err().to_string().contains("offline recovery"));
+    }
+    assert!(list(&f.root).is_err());
+    assert!(add(&f.root, &f.peer).is_err());
+    assert!(switch(&f.root, Some(f.root_id.clone()), false).is_err());
+    assert_eq!(fs::read(config::path(&f.root)).unwrap(), original);
+    assert!(!f.root.join("missing").exists());
+    fs::remove_file(marker).unwrap();
+    config::write_private(&f.peer.join(gent_daemon::recovery::MARKER), b"{}").unwrap();
+    assert!(resolve(&f.root, None).is_err());
+    assert!(add(&f.root, &f.peer).is_err());
+    assert!(switch(&f.root, Some(f.peer_id.clone()), false).is_err());
+    assert_eq!(resolve(&f.root, Some(&f.root_id)).unwrap(), f.root);
+    let listing = list(&f.root).unwrap();
+    let peer = listing["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|profile| profile["cluster_id"] == f.peer_id)
+        .unwrap();
+    assert_eq!(peer["available"], false);
+    assert_eq!(fs::read(config::path(&f.root)).unwrap(), original);
+}
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();

@@ -35,6 +35,7 @@ pub async fn receive_file(
     file: IncomingFile,
     bytes: &[u8],
 ) -> Result<Value> {
+    recovery::ensure_active(home)?;
     ensure!(
         bytes.len() <= gent_protocol::file_objects::MAX_FILE_BYTES,
         "file exceeds 32 MiB"

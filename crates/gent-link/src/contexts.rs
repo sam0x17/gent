@@ -11,6 +11,7 @@ use std::{
 pub(crate) mod provision;
 
 pub(crate) fn inspect(home: &Path) -> Result<Config> {
+    gent_daemon::recovery::ensure_active(home)?;
     // Read-only checks: status and selection never create a missing directory.
     let metadata =
         std::fs::symlink_metadata(home).context("cluster profile directory is unavailable")?;
@@ -87,6 +88,7 @@ fn find(registry: &Contexts, name: &str) -> Result<String> {
 }
 
 pub fn resolve(root: &Path, selected: Option<&str>) -> Result<PathBuf> {
+    gent_daemon::recovery::ensure_active(root)?;
     let root = managed_file::normalize(root)?;
     if Snapshot::read(&config::path(&root))?.text.is_none() {
         ensure!(
@@ -107,6 +109,7 @@ pub fn resolve(root: &Path, selected: Option<&str>) -> Result<PathBuf> {
 }
 
 pub fn list(root: &Path) -> Result<Value> {
+    gent_daemon::recovery::ensure_active(root)?;
     let root = managed_file::normalize(root)?;
     if Snapshot::read(&config::path(&root))?.text.is_none() {
         return Ok(json!({"active_cluster":null,"profiles":[]}));
@@ -139,6 +142,8 @@ pub fn list(root: &Path) -> Result<Value> {
 }
 
 pub fn add(root: &Path, directory: &Path) -> Result<Value> {
+    gent_daemon::recovery::ensure_active(root)?;
+    gent_daemon::recovery::ensure_active(directory)?;
     let root = managed_file::normalize(root)?;
     let directory = managed_file::normalize(directory)?;
     inspect(&root)?;
@@ -210,6 +215,7 @@ fn choice(reader: &mut impl BufRead, writer: &mut impl Write, listing: &Value) -
 }
 
 pub fn switch(root: &Path, cluster: Option<String>, interactive: bool) -> Result<Value> {
+    gent_daemon::recovery::ensure_active(root)?;
     let root = managed_file::normalize(root)?;
     let selected = match cluster {
         Some(cluster) => cluster,

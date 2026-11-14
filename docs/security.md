@@ -26,6 +26,8 @@ This version assumes one active configuration writer holding the cluster's owner
 
 Signed states contain private node names, membership, and policy; signatures alone do not conceal them. The configuration dispatcher encrypts these records in established MLS streams before upload. Initial grants and key packages travel through the invitation's authenticated Noise channel or trusted SSH pairing and are never published to the relay in plaintext. A future hosted bridge must receive only its agent's scoped credentials and grants, never this full configuration or the owner key.
 
+The [recovery boundary](recovery.md) refuses operational access to directories marked `recovery-required.json`, including nested profiles and aliases. It runs before profile selection, daemon startup, configuration mutation, database opening and local RPC. Archive creation, verified extraction and safe node/owner replacement remain unfinished. A copied database must not be started as the old node.
+
 ## Account sessions
 
 The account-login prototype uses a dedicated GitHub OAuth app with no requested scopes. Browser login checks state and uses S256 PKCE with an ephemeral loopback callback; headless login uses device authorization. The account Worker verifies the token's app, scopes and stable GitHub subject before issuing service access. GitHub credentials remain transient; SQL stores no raw provider tokens. Local fixture proofs pass on both OSes, but real GitHub consent and production deployment remain unverified.

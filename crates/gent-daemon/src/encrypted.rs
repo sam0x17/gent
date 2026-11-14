@@ -1014,6 +1014,7 @@ pub(crate) fn persist_authority(
 
 /// Shared runtime database: authority, MLS state, and local RPC queues.
 pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
+    crate::recovery::ensure_active(home)?;
     crate::config::private_dir(home)?;
     let path = home.join(filename);
     match fs::OpenOptions::new()

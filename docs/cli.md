@@ -211,3 +211,7 @@ All support `--json`. Cleanup runs automatically at startup and every 15 minutes
 | `gent transport clean` | Retire confirmed packet bodies, compact redundant copies and eligible full configurations, and discard old replay evidence. |
 
 All support `--json` and use local owner authority. Authenticated receiver checkpoints allow confirmed ciphertext to retire and release packet capacity. Unconfirmed packets remain available for offline peers. See [encrypted transport storage](local-proof.md#encrypted-transport-storage) for limits, migration, and recovery boundaries.
+
+## Backup and recovery
+
+Backup commands and restored-node activation remain unimplemented. The CLI refuses state marked `recovery-required.json` before selecting a cluster profile or contacting a daemon. A copied profile registry cannot redirect commands to a live external node. Removing the marker does not make old encryption state safe to resume. See [recovery requirements and the offline boundary](recovery.md).

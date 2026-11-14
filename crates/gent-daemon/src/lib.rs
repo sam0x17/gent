@@ -7,6 +7,7 @@ pub mod invitation_transport;
 pub mod messages;
 pub mod pairing;
 mod receive;
+pub mod recovery;
 pub mod replica;
 mod runtime;
 mod storage;
@@ -30,6 +31,7 @@ use tokio::{
 };
 
 pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value> {
+    recovery::ensure_active(home)?;
     let operation = async {
         let mut socket = UnixStream::connect(home.join("daemon.sock"))
             .await
@@ -57,6 +59,7 @@ pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value>
 }
 
 pub async fn run(home: &Path) -> Result<()> {
+    recovery::ensure_active(home)?;
     config::private_dir(home)?;
     let _lock = config::state_lock(home, "daemon.lock")?;
     let store = Arc::new(Mutex::new(store::Store::open(home)?));

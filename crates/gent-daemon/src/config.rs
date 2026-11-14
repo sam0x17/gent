@@ -277,6 +277,7 @@ pub fn load(home: &Path) -> Result<Config> {
 /// Read local identity/settings while allowing an unapplied shared-policy edit.
 /// Existing runtime authority comes from the verified database, not this file.
 pub(crate) fn load_for_runtime(home: &Path) -> Result<Config> {
+    crate::recovery::ensure_active(home)?;
     let config: Config = toml::from_str(
         &fs::read_to_string(path(home))
             .context("no Gent configuration; run gent cluster new <name> --local")?,
@@ -285,6 +286,7 @@ pub(crate) fn load_for_runtime(home: &Path) -> Result<Config> {
     Ok(config)
 }
 pub fn save(home: &Path, config: &Config) -> Result<()> {
+    crate::recovery::ensure_active(home)?;
     config.validate()?;
     private_dir(home)?;
     let _lock = configuration_lock(home)?;
@@ -330,6 +332,7 @@ pub fn save(home: &Path, config: &Config) -> Result<()> {
 /// the latest file under the same lock used by save, so two edits cannot merge
 /// stale copies of the registry. This does not change signed cluster policy.
 pub fn edit_local<T>(home: &Path, edit: impl FnOnce(&mut Config) -> Result<T>) -> Result<T> {
+    crate::recovery::ensure_active(home)?;
     let _lock = configuration_lock(home)?;
     let mut config = load_for_runtime(home)?;
     let result = edit(&mut config)?;
@@ -565,6 +568,7 @@ pub fn label(value: &str) -> Result<()> {
     Ok(())
 }
 pub fn initialize(home: &Path, name: &str) -> Result<Config> {
+    crate::recovery::ensure_active(home)?;
     label(name)?;
     private_dir(home)?;
     if path(home).exists() {
