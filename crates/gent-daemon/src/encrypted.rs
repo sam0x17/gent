@@ -92,6 +92,7 @@ pub struct Outgoing {
 pub enum Received {
     Application { id: Uuid, sender: String },
     ConfigurationPart { revision: u64, complete: bool },
+    OwnerHandoff,
     Commit,
     Duplicate,
 }
@@ -1043,7 +1044,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        matches!(version, 0..=23),
+        matches!(version, 0..=24),
         "unsupported MLS database version"
     );
     crate::storage::configure(&db)?;
@@ -1108,7 +1109,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
           CREATE TABLE IF NOT EXISTS stream_confirmed (
             group_id BLOB PRIMARY KEY,reader TEXT NOT NULL,reader_key BLOB NOT NULL,
             sequence INTEGER NOT NULL,digest BLOB NOT NULL,receipt BLOB NOT NULL);
-          PRAGMA user_version=23;",
+          PRAGMA user_version=24;",
         )?;
     crate::store::invitations::schema(&schema, version)?;
     crate::store::removals::schema(&schema, version)?;
@@ -1116,6 +1117,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     crate::store::pending_configuration_schema(&schema, version)?;
     crate::store::configuration_routing_schema(&schema, version)?;
     ordered::configuration::standby::schema(&schema, version)?;
+    ordered::configuration::handoff::schema(&schema, version)?;
     let has_purpose = {
         let mut columns = schema.prepare("PRAGMA table_info(streams)")?;
         columns

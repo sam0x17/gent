@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 const LIMIT: usize = 64;
 const MAGIC: &[u8] = b"GENTOWN1";
 mod activation;
-mod journal;
+pub(crate) mod journal;
 mod readiness;
 mod streams;
 pub(crate) use activation::{active_key, admit_epochs, check_epochs};
@@ -59,10 +59,10 @@ fn restore(candidate: &SignedOwnerCandidate, baseline: &[u8]) -> Result<Verified
     )
 }
 
-struct Issued {
-    base: VerifiedState,
-    candidate: SignedOwnerCandidate,
-    authorization: SignedOwnerTransition,
+pub(crate) struct Issued {
+    pub(crate) base: VerifiedState,
+    pub(crate) candidate: SignedOwnerCandidate,
+    pub(crate) authorization: SignedOwnerTransition,
 }
 
 fn issued(db: &Connection) -> Result<Option<Issued>> {
@@ -83,7 +83,7 @@ fn issued(db: &Connection) -> Result<Option<Issued>> {
     issued_for(db, &id).map(Some)
 }
 
-fn issued_for(db: &Connection, id: &str) -> Result<Issued> {
+pub(crate) fn issued_for(db: &Connection, id: &str) -> Result<Issued> {
     let (baseline, candidate, authorization): (Vec<u8>, Vec<u8>, Vec<u8>) = db.query_row(
         "SELECT baseline,candidate,authorization FROM owner_handoffs WHERE id=?1",
         [&id],
@@ -187,6 +187,7 @@ pub(super) fn status(db: &Connection, state: &VerifiedState) -> Result<Value> {
         "journal_transfer":journal::usage(db)?,
         "configuration_preparation":{"records":stream_records,"stored_bytes":stream_bytes},
         "readiness":readiness::usage(db)?,
+        "delivery":encrypted::ordered::configuration::handoff::usage(db)?,
         "activation_supported":true}),
     )
 }
@@ -498,6 +499,22 @@ impl Store {
             params![result.encode()?, id],
         )?;
         tx.commit()?;
+        Ok(result)
+    }
+}
+
+impl Store {
+    /// Trusted local owner API; no remote request can initiate a signing stop.
+    pub fn queue_owner_handoff_delivery(
+        &self,
+        credential: &str,
+        id: &str,
+    ) -> Result<serde_json::Value> {
+        ensure!(hash(credential) == self.owner_hash, "unauthorized");
+        let result =
+            encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?
+                .queue_owner_handoff(id, now() as u64)?;
+        self.sync_wakeup.notify_one();
         Ok(result)
     }
 }

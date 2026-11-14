@@ -1,7 +1,7 @@
 use super::*;
 use crate::encrypted::ordered::OrderedEndpoint;
 
-fn complete(
+pub(super) fn complete(
     pair: &mut Pair,
     from: usize,
     to: usize,
@@ -75,7 +75,7 @@ fn complete(
     (candidate, authorization, completed)
 }
 
-fn configuration_only(pair: &mut Pair, from: usize, to: usize) {
+pub(super) fn configuration_only(pair: &mut Pair, from: usize, to: usize) {
     for _ in 0..20 {
         let mut moved = false;
         for stream in pair.stores[from]
@@ -634,7 +634,7 @@ fn activation_storage_cannot_be_silently_recreated_after_upgrade() {
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, u64>(0))
             .unwrap(),
-        23
+        24
     );
 }
 

@@ -395,7 +395,12 @@ impl Store {
         let mut endpoint =
             encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
         let timestamp = now() as u64;
-        endpoint.prepare_configuration(group, None, timestamp)?;
+        if endpoint
+            .prepare_configuration(group, None, timestamp)?
+            .is_none()
+        {
+            endpoint.prepare_owner_handoff(group, timestamp)?;
+        }
         Ok(())
     }
 

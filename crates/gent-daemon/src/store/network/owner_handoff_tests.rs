@@ -88,6 +88,8 @@ mod journal_tests;
 mod owner_activation_tests;
 #[path = "owner_configuration_tests.rs"]
 mod owner_configuration_tests;
+#[path = "owner_delivery_tests.rs"]
+mod owner_delivery_tests;
 #[path = "owner_readiness_tests.rs"]
 mod owner_readiness_tests;
 #[path = "pending_configuration_tests.rs"]
@@ -502,7 +504,7 @@ async fn version_seventeen_migration_preserves_keys_and_checkpoint_before_first_
             .db
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        23
+        24
     );
     let candidate = prepare(&mut pair);
     issue(&mut pair, &candidate);

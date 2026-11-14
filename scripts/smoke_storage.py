@@ -97,7 +97,7 @@ os._exit(0)
             assert a.call('gent_send', request)[0]['message_id'] == sent['message_id']
             assert a.call('gent_message_status', {'message_id': sent['message_id']})[0]['state'] == 'delivered'
             with sqlite3.connect(home / 'state.sqlite3') as db:
-                assert db.execute('PRAGMA user_version').fetchone()[0] == 23
+                assert db.execute('PRAGMA user_version').fetchone()[0] == 24
                 assert db.execute('PRAGMA journal_mode').fetchone()[0] == 'delete'
                 assert db.execute("SELECT value FROM metadata WHERE key='storage-proof'").fetchone()[0] == 'committed in WAL'
                 assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'

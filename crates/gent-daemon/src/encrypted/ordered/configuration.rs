@@ -1,7 +1,8 @@
-//! Owner-authorized configuration recovery. Only signed authority records enter
-//! this channel; application messages never gain an expired-lease exemption.
+//! Owner-authorized configuration recovery and committed handoff journals.
+//! Application messages never gain an expired-lease exemption.
 use super::*;
 use gent_crypto::{MAX_STATE_BYTES, OwnerKey, SignedConfigurationGrant};
+pub(crate) mod handoff;
 pub mod standby;
 
 pub const MAX_FRAGMENT_BYTES: usize = 256 * 1024;
@@ -24,6 +25,13 @@ struct Fragment {
     total: usize,
     offset: usize,
     data: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConfigurationRecord {
+    State(Fragment),
+    Handoff(handoff::Record),
 }
 
 pub(super) struct Progress {
@@ -387,13 +395,18 @@ pub(super) fn receive(
     wire: &[u8],
     writer: &str,
 ) -> Result<Received> {
-    session.receive_with(group, wire, Some(writer), |_, _, body| {
-        receive_fragment(session, group, &body)
-    })
+    session.receive_with(
+        group,
+        wire,
+        Some(writer),
+        |_, _, body| match serde_json::from_slice::<ConfigurationRecord>(&body)? {
+            ConfigurationRecord::State(part) => receive_fragment(session, group, part),
+            ConfigurationRecord::Handoff(record) => handoff::receive(session, group, record),
+        },
+    )
 }
 
-fn receive_fragment(session: &Session<'_>, group: &[u8], body: &[u8]) -> Result<Received> {
-    let part: Fragment = serde_json::from_slice(body)?;
+fn receive_fragment(session: &Session<'_>, group: &[u8], part: Fragment) -> Result<Received> {
     let cursor = progress(session.db, group)?;
     ensure!(
         part.version == 1

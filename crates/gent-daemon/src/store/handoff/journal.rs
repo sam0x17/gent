@@ -31,7 +31,11 @@ pub(super) fn usage(db: &Connection) -> Result<Value> {
     Ok(json!({"snapshots":count,"reserved_bytes":bytes,"max_reserved_bytes":MAX_RESERVED_BYTES}))
 }
 
-fn load(db: &Connection, id: &str, source: bool) -> Result<(Manifest, SignedOwnerTransition)> {
+pub(crate) fn load(
+    db: &Connection,
+    id: &str,
+    source: bool,
+) -> Result<(Manifest, SignedOwnerTransition)> {
     let (wire, auth, bytes): (Vec<u8>, Vec<u8>, usize) = db.query_row(
         "SELECT manifest,authorization,bytes FROM owner_journals WHERE id=?1 AND source=?2",
         params![id, source],
@@ -142,15 +146,10 @@ pub(super) fn check_source(
     Ok(())
 }
 
-fn incoming(
+pub(crate) fn candidate(
     db: &Connection,
     id: &str,
-) -> Result<(
-    VerifiedState,
-    SignedOwnerCandidate,
-    Manifest,
-    SignedOwnerTransition,
-)> {
+) -> Result<(VerifiedState, SignedOwnerCandidate)> {
     let (baseline, candidate): (Vec<u8>, Vec<u8>) = db.query_row(
         "SELECT baseline,candidate FROM owner_candidates WHERE id=?1",
         [id],
@@ -162,12 +161,30 @@ fn incoming(
         "owner journal candidate identity changed"
     );
     let baseline = restore(&candidate, &baseline)?;
+    Ok((baseline, candidate))
+}
+
+fn incoming(
+    db: &Connection,
+    id: &str,
+) -> Result<(
+    VerifiedState,
+    SignedOwnerCandidate,
+    Manifest,
+    SignedOwnerTransition,
+)> {
+    let (baseline, candidate) = candidate(db, id)?;
     let (manifest, authorization) = load(db, id, false)?;
     manifest.verify(&baseline, &candidate, &authorization)?;
     Ok((baseline, candidate, manifest, authorization))
 }
 
-fn page(db: &Connection, id: &str, manifest: &Manifest, index: usize) -> Result<Vec<u8>> {
+pub(crate) fn page(
+    db: &Connection,
+    id: &str,
+    manifest: &Manifest,
+    index: usize,
+) -> Result<Vec<u8>> {
     ensure!(
         index < manifest.pages.len(),
         "owner journal page outside manifest"
@@ -233,6 +250,114 @@ pub(super) fn require_complete(
     Ok((manifest.entries, body))
 }
 
+/// A later checkpoint admits only exact, already imported artifacts for a
+/// locally activated transition in the accepted chain. It cannot start or
+/// repair an import after authority has moved on.
+fn check_destination(
+    db: &Connection,
+    state: &VerifiedState,
+    node: &gent_crypto::NodeIdentity,
+    baseline: &VerifiedState,
+    candidate: &SignedOwnerCandidate,
+    authorization: &SignedOwnerTransition,
+) -> Result<bool> {
+    ensure!(
+        candidate.candidate.node.id == node.id()
+            && candidate.candidate.node.signing_key == node.public_key()
+            && baseline.anchor() == state.anchor(),
+        "owner journal belongs to another node or cluster"
+    );
+    if baseline.checkpoint() == state.checkpoint() {
+        return Ok(false);
+    }
+    ensure!(
+        state
+            .state()
+            .owner_transitions
+            .get(baseline.owner_epoch() as usize)
+            == Some(authorization),
+        "owner journal local authority changed"
+    );
+    let local: Option<String> = db.query_row(
+        "SELECT local_candidate FROM owner_epochs WHERE epoch=?1",
+        [authorization.transition.epoch],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        local.as_deref() == Some(&candidate.candidate.id),
+        "owner journal was not locally activated"
+    );
+    Ok(true)
+}
+
+/// Caller must hold the receive/write transaction. No owner authority is
+/// installed here; signatures authorize only this candidate's journal import.
+pub(crate) fn begin_import(
+    db: &Connection,
+    state: &VerifiedState,
+    node: &gent_crypto::NodeIdentity,
+    id: &str,
+    authorization: &SignedOwnerTransition,
+    manifest: &Manifest,
+) -> Result<Value> {
+    let (baseline, candidate) = candidate(db, id)?;
+    manifest.verify(&baseline, &candidate, authorization)?;
+    if check_destination(db, state, node, &baseline, &candidate, authorization)? {
+        let (saved, auth) = load(db, id, false)?;
+        ensure!(
+            saved == *manifest && auth == *authorization,
+            "owner journal retry changed"
+        );
+        ensure!(
+            progress(db, id, manifest)?["pages_complete"] == true,
+            "activated owner journal is incomplete"
+        );
+    } else {
+        reserve(db, &candidate, false, authorization, manifest)?;
+    }
+    progress(db, id, manifest)
+}
+
+pub(crate) fn import_page(
+    db: &Connection,
+    state: &VerifiedState,
+    node: &gent_crypto::NodeIdentity,
+    id: &str,
+    index: usize,
+    body: &[u8],
+) -> Result<Value> {
+    ensure!(body.len() <= PAGE_BYTES, "owner journal page exceeds limit");
+    let (baseline, candidate, manifest, authorization) = incoming(db, id)?;
+    let late = check_destination(db, state, node, &baseline, &candidate, &authorization)?;
+    manifest.verify_page(index, body)?;
+    let saved: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT body FROM owner_journal_pages WHERE id=?1 AND page=?2",
+            params![id, index],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(saved) = saved {
+        ensure!(saved == body, "owner journal page changed after receipt");
+    } else {
+        ensure!(
+            !late,
+            "cannot repair an activated owner journal through import"
+        );
+        db.execute(
+            "INSERT INTO owner_journal_pages VALUES(?1,?2,?3)",
+            params![id, index, body],
+        )?;
+    }
+    let status = progress(db, id, &manifest)?;
+    if status["pages_complete"] == true {
+        require_complete(db, &baseline, &candidate, &authorization)?;
+    } else {
+        ensure!(!late, "activated owner journal is incomplete");
+    }
+    Ok(status)
+}
+
 impl Store {
     /// Owner-only private export. Contains decision summaries, never signing keys.
     pub fn owner_handoff_manifest(&self, credential: &str, id: &str) -> Result<Manifest> {
@@ -263,26 +388,14 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = self.identity.state(&tx)?;
-        let (baseline, wire): (Vec<u8>, Vec<u8>) = tx.query_row(
-            "SELECT baseline,candidate FROM owner_candidates WHERE id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+        let status = begin_import(
+            &tx,
+            &state,
+            &self.identity.node,
+            id,
+            authorization,
+            manifest,
         )?;
-        let candidate = SignedOwnerCandidate::decode(&wire)?;
-        ensure!(
-            candidate.candidate.id == id
-                && candidate.candidate.node.id == self.identity.node.id()
-                && candidate.candidate.node.signing_key == self.identity.node.public_key(),
-            "owner journal belongs to another node or request"
-        );
-        let pinned = restore(&candidate, &baseline)?;
-        ensure!(
-            pinned.anchor() == state.anchor() && pinned.checkpoint() == state.checkpoint(),
-            "owner journal checkpoint changed"
-        );
-        manifest.verify(&pinned, &candidate, authorization)?;
-        reserve(&tx, &candidate, false, authorization, manifest)?;
-        let status = progress(&tx, id, manifest)?;
         tx.commit()?;
         Ok(status)
     }
@@ -300,34 +413,7 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let state = self.identity.state(&tx)?;
-        let (baseline, candidate, manifest, authorization) = incoming(&tx, id)?;
-        ensure!(
-            baseline.anchor() == state.anchor()
-                && baseline.checkpoint() == state.checkpoint()
-                && candidate.candidate.node.id == self.identity.node.id()
-                && candidate.candidate.node.signing_key == self.identity.node.public_key(),
-            "owner journal local authority changed"
-        );
-        manifest.verify_page(index, body)?;
-        let saved: Option<Vec<u8>> = tx
-            .query_row(
-                "SELECT body FROM owner_journal_pages WHERE id=?1 AND page=?2",
-                params![id, index],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(saved) = saved {
-            ensure!(saved == body, "owner journal page changed after receipt");
-        } else {
-            tx.execute(
-                "INSERT INTO owner_journal_pages VALUES(?1,?2,?3)",
-                params![id, index, body],
-            )?;
-        }
-        let status = progress(&tx, id, &manifest)?;
-        if status["pages_complete"] == true {
-            require_complete(&tx, &baseline, &candidate, &authorization)?;
-        }
+        let status = import_page(&tx, &state, &self.identity.node, id, index, body)?;
         tx.commit()?;
         Ok(status)
     }
