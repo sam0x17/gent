@@ -314,6 +314,13 @@ pub fn save(home: &Path, config: &Config) -> Result<()> {
             );
             next.set_profile_setup(id)?;
         }
+        if let Some(id) = previous.gateway_registry()? {
+            ensure!(
+                previous.cluster.id == next.cluster.id && previous.node.id == next.node.id,
+                "cannot replace the identity of a gateway node"
+            );
+            next.set_gateway_registry(id)?;
+        }
     }
     next.validate()?;
     write_private(&path(home), toml::to_string_pretty(&next)?.as_bytes())
@@ -354,6 +361,29 @@ fn configuration_lock(home: &Path) -> Result<fs::File> {
     }
 }
 impl Config {
+    pub fn gateway_registry(&self) -> Result<Option<String>> {
+        self.extra
+            .get("gateway_registry")
+            .map(|value| {
+                let id = value.as_str().context("invalid gateway registry pin")?;
+                ensure!(
+                    uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == id),
+                    "invalid gateway registry pin"
+                );
+                Ok(id.to_string())
+            })
+            .transpose()
+    }
+    pub fn set_gateway_registry(&mut self, id: String) -> Result<()> {
+        ensure!(
+            self.gateway_registry()?
+                .is_none_or(|previous| previous == id),
+            "gateway registry changed"
+        );
+        self.extra
+            .insert("gateway_registry".into(), toml::Value::String(id));
+        self.update_local_version()
+    }
     pub fn profile_setup(&self) -> Result<Option<String>> {
         self.extra
             .get("profile_setup")
@@ -445,6 +475,9 @@ impl Config {
         if self.contexts()?.is_some() {
             features.push("contexts".into());
         }
+        if self.gateway_registry()?.is_some() {
+            features.push("gateway_registry".into());
+        }
         if self.profile_setup()?.is_some() {
             features.push("profile_setup".into());
         }
@@ -452,7 +485,10 @@ impl Config {
     }
     fn update_local_version(&mut self) -> Result<()> {
         let features = self.local_features()?;
-        if self.account_source()?.is_some() || self.profile_setup()?.is_some() {
+        if self.account_source()?.is_some()
+            || self.profile_setup()?.is_some()
+            || self.gateway_registry()?.is_some()
+        {
             self.version = 3;
             self.extra
                 .insert("local_features".into(), toml::Value::try_from(features)?);

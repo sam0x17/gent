@@ -15,12 +15,35 @@ mod binding;
 enum Credentials {
     Fixed(String),
     Host(Arc<Mutex<Bindings>>),
+    Remote(crate::gateway::Registry),
 }
 
 #[derive(Clone)]
-struct GentMcp {
+pub(crate) struct GentMcp {
     home: PathBuf,
     credentials: Credentials,
+}
+
+impl GentMcp {
+    pub(crate) fn remote(home: PathBuf, registry: crate::gateway::Registry) -> Self {
+        Self {
+            home,
+            credentials: Credentials::Remote(registry),
+        }
+    }
+
+    fn available_tools(&self) -> Vec<Tool> {
+        let mut tools = tools();
+        if matches!(self.credentials, Credentials::Remote(_)) {
+            tools.retain(|t| {
+                !matches!(
+                    t.name.as_ref(),
+                    "gent_file_paths" | "gent_file_import" | "gent_file_export"
+                )
+            });
+        }
+        tools
+    }
 }
 
 fn tools() -> Vec<Tool> {
@@ -170,6 +193,13 @@ impl ServerHandler for GentMcp {
             .split_once("\n---\n")
             .expect("bundled skill has closing frontmatter")
             .1;
+        let instructions = if matches!(self.credentials, Credentials::Remote(_)) {
+            format!(
+                "{instructions}\n\nRemote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: use inline attachments (up to 1 MiB each, four per message) and supported file retrieval tools. Native hosted file handles are not supported.\n"
+            )
+        } else {
+            instructions.to_string()
+        };
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(instructions)
     }
@@ -180,10 +210,15 @@ impl ServerHandler for GentMcp {
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         // Construction via serde tolerates SDK non-exhaustive response structs.
-        Ok(serde_json::from_value(json!({"tools":tools()})).expect("valid tools result"))
+        Ok(
+            serde_json::from_value(json!({"tools":self.available_tools()}))
+                .expect("valid tools result"),
+        )
     }
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        tools().into_iter().find(|tool| tool.name == name)
+        self.available_tools()
+            .into_iter()
+            .find(|tool| tool.name == name)
     }
 
     async fn call_tool(
@@ -211,6 +246,23 @@ impl ServerHandler for GentMcp {
         }
         let credential = match &self.credentials {
             Credentials::Fixed(credential) => credential.clone(),
+            Credentials::Remote(registry) => {
+                let permit = context
+                    .extensions
+                    .get::<axum::http::request::Parts>()
+                    .and_then(|parts| parts.extensions.get::<crate::gateway::Permit>())
+                    .cloned()
+                    .ok_or_else(|| {
+                        ErrorData::invalid_request("gateway authentication required", None)
+                    })?;
+                let meta = serde_json::to_value(&context.meta).expect("MCP metadata serializes");
+                match registry.credential_remote(permit, meta).await {
+                    Ok(credential) => credential,
+                    _ => return Ok(CallToolResult::error(vec![ContentBlock::text(
+                        "gateway authorization or conversation binding unavailable; check host metadata and credential status"
+                    )]).into()),
+                }
+            }
             Credentials::Host(bindings) => {
                 let info = context.peer.peer_info();
                 // MCP 2026-07-28 carries client information on each request;
@@ -250,7 +302,18 @@ impl ServerHandler for GentMcp {
         };
         let result = request(&self.home, Request::Agent { credential, action }).await;
         Ok(match result {
-            Ok(value) => {
+            Ok(mut value) => {
+                if matches!(self.credentials, Credentials::Remote(_))
+                    && matches!(operation, "register" | "identity" | "relay_attach" | "relay_status")
+                    && let Some(object) = value.as_object_mut()
+                {
+                    object.insert("access_route".into(), json!({
+                        "mode":"user_controlled_gateway",
+                        "plaintext_endpoints":["model_provider","user_node"],
+                        "gent_relay":"encrypted_node_traffic_only",
+                        "file_access":"inline_attachments_only; no local filesystem or native hosted file handles"
+                    }));
+                }
                 let mut content = vec![ContentBlock::text(value.to_string())];
                 if matches!(operation, "inbox" | "relay_next" | "relay_turn_status") {
                     let messages: Vec<&Value> = match operation {

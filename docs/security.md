@@ -4,6 +4,8 @@
 
 ## Trust boundary
 
+The optional [user-controlled remote MCP gateway](gateway.md) terminates hosted tool calls directly on a trusted node. Host credentials authorize conversation namespaces; per-call host metadata selects a persistent agent credential. This requires a trusted host that prevents model control of that metadata. Direct TLS, registry/node pins and revocation checks are implemented; actual provider provenance and hosted integration remain unverified. Gent's central relay continues receiving encrypted daemon traffic. The model provider and gateway node see tool plaintext. The gateway has no Gent-hosted plaintext bridge or OAuth flow.
+
 A trusted endpoint pins a cluster ID, owner verification key, and genesis-state digest. This `TrustAnchor` must arrive through an already trusted endpoint or a separately authenticated owner channel. Taking an anchor from the routing service would let that service substitute its own authority.
 
 The owner signing key authorizes membership and policy. Each node has a separate signing key and stable node ID. The local MCP binding credential and owner RPC credential remain separate from both cryptographic identities. A provider label, GitHub login, database membership row, or model-supplied node ID cannot authorize a signed revision.

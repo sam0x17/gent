@@ -82,3 +82,29 @@ fn private_tempdir() -> tempfile::TempDir {
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     directory
 }
+
+#[test]
+fn gateway_pin_survives_stale_projection_and_rejects_loss_or_identity_replacement() {
+    let root = private_tempdir();
+    let stale = config::initialize(root.path(), "gateway").unwrap();
+    let pin = uuid::Uuid::new_v4().to_string();
+    config::edit_local(root.path(), |cfg| cfg.set_gateway_registry(pin.clone())).unwrap();
+    config::save(root.path(), &stale).unwrap();
+    let saved = config::load(root.path()).unwrap();
+    assert_eq!(saved.version, 3);
+    assert_eq!(saved.gateway_registry().unwrap(), Some(pin));
+    let mut lost = saved.clone();
+    lost.extra.remove("gateway_registry");
+    assert!(lost.validate_local().is_err());
+    let mut changed = saved.clone();
+    assert!(
+        changed
+            .set_gateway_registry(uuid::Uuid::new_v4().to_string())
+            .is_err()
+    );
+    changed.node.id = uuid::Uuid::new_v4().to_string();
+    assert!(config::save(root.path(), &changed).is_err());
+    changed = saved;
+    changed.cluster.id = uuid::Uuid::new_v4().to_string();
+    assert!(config::save(root.path(), &changed).is_err());
+}

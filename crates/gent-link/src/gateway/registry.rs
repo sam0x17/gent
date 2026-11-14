@@ -1,0 +1,509 @@
+use crate::{
+    auth, contexts,
+    managed_file::{self, Snapshot},
+};
+use anyhow::{Context, Result, ensure};
+use gent_daemon::config;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use subtle::ConstantTimeEq;
+use uuid::Uuid;
+
+const MAX_CLIENTS: usize = 32;
+const MAX_BINDINGS: usize = 4096;
+const MAX_CLIENT_BINDINGS: usize = 256;
+const MAX_LIFETIME: u64 = 8760 * 3600;
+const MAX_BYTES: usize = 2 * 1024 * 1024;
+const MAX_WORKERS: usize = 16;
+
+#[cfg(test)]
+mod tests;
+
+#[derive(Clone)]
+pub(crate) struct Registry {
+    home: PathBuf,
+    id: String,
+    cluster: String,
+    node: String,
+    workers: Arc<tokio::sync::Semaphore>,
+}
+#[derive(Clone)]
+pub(crate) struct Permit {
+    client: String,
+    hash: String,
+}
+
+// These records contain private agent credentials and never implement Debug.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct State {
+    version: u32,
+    id: String,
+    cluster: String,
+    node: String,
+    clock: u64,
+    clients: BTreeMap<String, Client>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Client {
+    name: String,
+    conversation_key: String,
+    token_hash: String,
+    created_at: u64,
+    expires_at: u64,
+    export: PathBuf,
+    revoked: bool,
+    bindings: BTreeMap<String, String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Export {
+    version: u32,
+    registry: String,
+    cluster: String,
+    node: String,
+    client: String,
+    name: String,
+    conversation_key: String,
+    token: String,
+    created_at: u64,
+    expires_at: u64,
+}
+
+fn uuid(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|v| !v.is_nil() && v.to_string() == value)
+}
+fn digest(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+fn hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn metadata_key(key: &str) -> Result<()> {
+    ensure!(
+        key.len() <= 128
+            && key
+                .split_once('/')
+                .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty())
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)),
+        "conversation key must name a host-owned namespaced MCP metadata field"
+    );
+    ensure!(
+        !key.starts_with("io.modelcontextprotocol/"),
+        "protocol metadata cannot identify a conversation"
+    );
+    Ok(())
+}
+fn token_id(token: &str) -> Result<&str> {
+    let mut pieces = token.split('.');
+    ensure!(
+        pieces.next() == Some("gent_g1"),
+        "invalid gateway credential"
+    );
+    let id = pieces.next().context("invalid gateway credential")?;
+    ensure!(
+        uuid(id) && pieces.next().is_some_and(hash) && pieces.next().is_none(),
+        "invalid gateway credential"
+    );
+    Ok(id)
+}
+fn snapshot(path: &Path) -> Result<Snapshot> {
+    let value = Snapshot::read(path)?;
+    value.private()?;
+    ensure!(
+        value.text.as_ref().is_none_or(|s| s.len() <= MAX_BYTES),
+        "gateway record is too large"
+    );
+    Ok(value)
+}
+
+fn directory_check(path: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    ensure!(
+        meta.is_dir()
+            && !meta.file_type().is_symlink()
+            && meta.uid() == rustix::process::geteuid().as_raw()
+            && meta.mode() & 0o077 == 0,
+        "gateway directory must be private, owned by this user, and not a symlink"
+    );
+    Ok(())
+}
+
+impl State {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.version == 1
+                && uuid(&self.id)
+                && uuid(&self.cluster)
+                && uuid(&self.node)
+                && self.clients.len() <= MAX_CLIENTS,
+            "invalid gateway registry"
+        );
+        let mut names = std::collections::BTreeSet::new();
+        let mut count = 0;
+        for (id, client) in &self.clients {
+            config::label(&client.name)?;
+            metadata_key(&client.conversation_key)?;
+            ensure!(
+                uuid(id)
+                    && names.insert(&client.name)
+                    && hash(&client.token_hash)
+                    && client.created_at <= client.expires_at
+                    && client.expires_at - client.created_at <= MAX_LIFETIME
+                    && client.created_at <= self.clock
+                    && client.export.is_absolute()
+                    && client.bindings.len() <= MAX_CLIENT_BINDINGS,
+                "invalid gateway client record"
+            );
+            ensure!(
+                client
+                    .bindings
+                    .iter()
+                    .all(|(key, credential)| hash(key) && hash(credential)),
+                "invalid gateway binding record"
+            );
+            count += client.bindings.len();
+        }
+        ensure!(count <= MAX_BINDINGS, "gateway binding capacity exceeded");
+        Ok(())
+    }
+}
+
+impl Registry {
+    pub(crate) fn open(home: &Path) -> Result<Self> {
+        let home = managed_file::normalize(home)?;
+        let cfg = contexts::inspect(&home)?;
+        let id = cfg
+            .gateway_registry()?
+            .context("configure a host with gent gateway clients add first")?;
+        let value = Self {
+            home,
+            id,
+            cluster: cfg.cluster.id,
+            node: cfg.node.id,
+            workers: Arc::new(tokio::sync::Semaphore::new(MAX_WORKERS)),
+        };
+        value.read()?;
+        Ok(value)
+    }
+    // Hold the slot inside the blocking operation. A disconnected HTTP peer
+    // must not release capacity while its filesystem work is still running.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(Self) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let slot = self
+            .workers
+            .clone()
+            .try_acquire_owned()
+            .context("gateway is busy")?;
+        let registry = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            operation(registry)
+        })
+        .await
+        .context("gateway worker unavailable")?
+    }
+    pub(crate) async fn authenticate_remote(&self, token: String) -> Result<Permit> {
+        self.blocking(move |registry| registry.authenticate(&token))
+            .await
+    }
+    pub(crate) async fn credential_remote(&self, permit: Permit, meta: Value) -> Result<String> {
+        self.blocking(move |registry| registry.credential(&permit, &meta))
+            .await
+    }
+    fn directory(&self) -> PathBuf {
+        self.home.join("gateway")
+    }
+    fn read(&self) -> Result<State> {
+        ensure!(
+            managed_file::normalize(&self.home)? == self.home,
+            "gateway node directory changed"
+        );
+        directory_check(&self.directory())?;
+        let cfg = contexts::inspect(&self.home)?;
+        ensure!(
+            cfg.gateway_registry()?.as_ref() == Some(&self.id)
+                && cfg.cluster.id == self.cluster
+                && cfg.node.id == self.node,
+            "gateway registry or node identity changed; restore its original state"
+        );
+        let snapshot = snapshot(&self.directory().join("state.json"))?;
+        let text = snapshot
+            .text
+            .as_deref()
+            .context("gateway registry is missing; restore it from backup")?;
+        ensure!(text.len() <= MAX_BYTES, "gateway registry is too large");
+        let state: State = serde_json::from_str(text)
+            .map_err(|_| anyhow::anyhow!("invalid gateway registry; restore it from backup"))?;
+        state.validate()?;
+        ensure!(
+            state.id == self.id && state.cluster == self.cluster && state.node == self.node,
+            "gateway registry belongs to another node"
+        );
+        snapshot.verify()?;
+        Ok(state)
+    }
+    fn save(&self, state: &State) -> Result<()> {
+        state.validate()?;
+        let bytes = serde_json::to_string(state)? + "\n";
+        ensure!(bytes.len() <= MAX_BYTES, "gateway registry is too large");
+        snapshot(&self.directory().join("state.json"))?.write(&bytes)
+    }
+    pub(crate) fn authenticate(&self, token: &str) -> Result<Permit> {
+        let id = token_id(token)?;
+        directory_check(&self.directory())?;
+        let _lock = managed_file::lock(&self.directory().join("state.lock"))?;
+        let mut state = self.read()?;
+        let permit = Permit {
+            client: id.into(),
+            hash: digest(token),
+        };
+        let now = auth::now()?;
+        Self::client(&state, &permit, now)?;
+        if state.clock != now {
+            state.clock = now;
+            self.save(&state)?;
+        }
+        Ok(permit)
+    }
+    fn client<'a>(state: &'a State, permit: &Permit, now: u64) -> Result<&'a Client> {
+        ensure!(now >= state.clock, "gateway clock moved backward");
+        let client = state
+            .clients
+            .get(&permit.client)
+            .context("invalid gateway credential")?;
+        ensure!(
+            !client.revoked
+                && now < client.expires_at
+                && bool::from(client.token_hash.as_bytes().ct_eq(permit.hash.as_bytes())),
+            "inactive gateway credential"
+        );
+        Ok(client)
+    }
+    pub(crate) fn credential(&self, permit: &Permit, meta: &Value) -> Result<String> {
+        directory_check(&self.directory())?;
+        let _lock = managed_file::lock(&self.directory().join("state.lock"))?;
+        let mut state = self.read()?;
+        let now = auth::now()?;
+        let client = Self::client(&state, permit, now)?;
+        let conversation=meta.get(&client.conversation_key).and_then(Value::as_str)
+            .filter(|s|!s.trim().is_empty() && s.len()<=512 && !s.chars().any(char::is_control))
+            .context("host conversation metadata is missing or invalid; this connection cannot select an agent")?;
+        let key = digest(conversation);
+        let credential = if let Some(value) = client.bindings.get(&key) {
+            value.clone()
+        } else {
+            ensure!(
+                client.bindings.len() < MAX_CLIENT_BINDINGS
+                    && state
+                        .clients
+                        .values()
+                        .map(|c| c.bindings.len())
+                        .sum::<usize>()
+                        < MAX_BINDINGS,
+                "gateway conversation capacity reached"
+            );
+            config::secret()
+        };
+        let dirty = state.clock != now || !client.bindings.contains_key(&key);
+        if dirty {
+            state.clock = now;
+            state
+                .clients
+                .get_mut(&permit.client)
+                .expect("client checked")
+                .bindings
+                .insert(key, credential.clone());
+            self.save(&state)?;
+        }
+        Ok(credential)
+    }
+    pub(crate) fn listing(&self) -> Result<Value> {
+        let state = self.read()?;
+        let now = auth::now()?.max(state.clock);
+        let clients: Vec<_> = state
+            .clients
+            .iter()
+            .map(|(id, c)| {
+                json!({"id":id,"name":c.name,
+            "conversation_key":c.conversation_key,"expires_at":c.expires_at,"revoked":c.revoked,
+            "active":!c.revoked && now<c.expires_at,"conversations":c.bindings.len()})
+            })
+            .collect();
+        Ok(
+            json!({"configured":true,"running":"not_probed","security_mode":"user_controlled_gateway",
+            "cluster_id":self.cluster,"node_id":self.node,"clients":clients,
+            "limits":{"clients":MAX_CLIENTS,"conversations_per_client":MAX_CLIENT_BINDINGS,"conversations_total":MAX_BINDINGS}}),
+        )
+    }
+    pub(crate) fn revoke(&self, id: &str) -> Result<Value> {
+        directory_check(&self.directory())?;
+        let _lock = managed_file::lock(&self.directory().join("state.lock"))?;
+        let mut state = self.read()?;
+        let client = state
+            .clients
+            .get_mut(id)
+            .context("unknown gateway client ID")?;
+        client.revoked = true;
+        self.save(&state)?;
+        Ok(
+            json!({"client":id,"revoked":true,"scope":"future host requests; already accepted work and agent data are retained"}),
+        )
+    }
+}
+
+pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) -> Result<Value> {
+    config::label(name)?;
+    metadata_key(key)?;
+    ensure!(
+        (1..=8760).contains(&hours),
+        "invalid gateway credential lifetime"
+    );
+    let home = managed_file::normalize(home)?;
+    let home = home.as_path();
+    contexts::inspect(home)?;
+    let directory = home.join("gateway");
+    config::private_dir(&directory)?;
+    directory_check(&directory)?;
+    let _lock = managed_file::lock(&directory.join("state.lock"))?;
+    let cfg = contexts::inspect(home)?;
+    if cfg.gateway_registry()?.is_none() {
+        let file = snapshot(&directory.join("state.json"))?;
+        let state = if let Some(text) = &file.text {
+            let state: State = serde_json::from_str(text)
+                .map_err(|_| anyhow::anyhow!("invalid gateway registry"))?;
+            state.validate()?;
+            ensure!(
+                state.clients.is_empty()
+                    && state.cluster == cfg.cluster.id
+                    && state.node == cfg.node.id,
+                "gateway registry pin is missing; restore it"
+            );
+            state
+        } else {
+            State {
+                version: 1,
+                id: Uuid::new_v4().to_string(),
+                cluster: cfg.cluster.id,
+                node: cfg.node.id,
+                clock: auth::now()?,
+                clients: BTreeMap::new(),
+            }
+        };
+        file.write(&(serde_json::to_string(&state)? + "\n"))?;
+        config::edit_local(home, |cfg| {
+            ensure!(
+                cfg.cluster.id == state.cluster && cfg.node.id == state.node,
+                "gateway node identity changed"
+            );
+            cfg.set_gateway_registry(state.id.clone())
+        })?;
+    }
+    let registry = Registry::open(home)?;
+    let mut state = registry.read()?;
+    let out = managed_file::normalize(out)?;
+    let exported = snapshot(&out)?;
+    let now = auth::now()?;
+    ensure!(now >= state.clock, "gateway clock moved backward");
+    let value: Export = if let Some(text) = &exported.text {
+        serde_json::from_str(text)
+            .map_err(|_| anyhow::anyhow!("invalid gateway credential export"))?
+    } else {
+        ensure!(
+            !state.clients.values().any(|c| c.name == name),
+            "gateway client exists; restore its original private export"
+        );
+        ensure!(
+            state.clients.len() < MAX_CLIENTS,
+            "gateway client capacity reached"
+        );
+        let id = Uuid::new_v4().to_string();
+        Export {
+            version: 1,
+            registry: registry.id.clone(),
+            cluster: registry.cluster.clone(),
+            node: registry.node.clone(),
+            client: id.clone(),
+            name: name.into(),
+            conversation_key: key.into(),
+            token: format!("gent_g1.{id}.{}", config::secret()),
+            created_at: now,
+            expires_at: now + hours * 3600,
+        }
+    };
+    ensure!(
+        value.version == 1
+            && value.registry == registry.id
+            && value.cluster == registry.cluster
+            && value.node == registry.node
+            && value.name == name
+            && value.conversation_key == key
+            && token_id(&value.token)? == value.client
+            && value.created_at <= now
+            && value.expires_at.checked_sub(value.created_at) == Some(hours * 3600),
+        "gateway credential export does not match this node or original options"
+    );
+    let hash = digest(&value.token);
+    if let Some(client) = state.clients.get(&value.client) {
+        ensure!(
+            client.name == name
+                && client.conversation_key == key
+                && client.token_hash == hash
+                && client.export == out
+                && client.created_at == value.created_at
+                && client.expires_at == value.expires_at,
+            "gateway client options changed"
+        );
+        ensure!(
+            !client.revoked,
+            "revoked gateway credentials cannot be reactivated"
+        );
+    } else {
+        ensure!(
+            state.clients.len() < MAX_CLIENTS && !state.clients.values().any(|c| c.name == name),
+            "gateway client name or capacity conflict"
+        );
+        ensure!(
+            now < value.expires_at,
+            "gateway credential export expired before registration"
+        );
+        // Export first, registry second. A retry after either write reuses the
+        // same secret. No bearer or signing key is printed by the command.
+        exported.write(&(serde_json::to_string(&value)? + "\n"))?;
+        state.clients.insert(
+            value.client.clone(),
+            Client {
+                name: name.into(),
+                conversation_key: key.into(),
+                token_hash: hash,
+                created_at: value.created_at,
+                expires_at: value.expires_at,
+                export: out.clone(),
+                revoked: false,
+                bindings: BTreeMap::new(),
+            },
+        );
+        state.clock = now;
+        registry.save(&state)?;
+    }
+    Ok(
+        json!({"client":value.client,"name":name,"credential_file":out,"expires_at":value.expires_at,
+        "conversation_key":key,"security_mode":"user_controlled_gateway",
+        "scope":"trusted host namespace; required conversation metadata selects each agent"}),
+    )
+}

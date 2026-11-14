@@ -2,6 +2,7 @@ mod auth;
 mod cluster;
 mod contexts;
 mod files;
+mod gateway;
 mod hooks;
 mod integration;
 mod invitations;
@@ -65,6 +66,11 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    /// Serve authenticated remote MCP directly on a user-controlled node.
+    Gateway {
+        #[command(subcommand)]
+        command: Option<gateway::Command>,
     },
     /// Configure a host's MCP connection and conversation binding.
     Integration {
@@ -418,6 +424,9 @@ async fn execute(cli: Cli) -> Result<()> {
                 Command::Daemon {
                     command: Some(DaemonCommand::Run)
                 } | Command::Mcp { .. }
+                    | Command::Gateway {
+                        command: Some(gateway::Command::Run(_))
+                    }
                     | Command::Integration {
                         command: integration::Command::Hook { .. }
                     }
@@ -557,6 +566,18 @@ async fn execute(cli: Cli) -> Result<()> {
         }) => {
             mcp::run(home, binding, host, explicit_context).await?;
             return Ok(());
+        }
+        Some(Command::Gateway { command }) => {
+            let Some(value) = gateway::execute(
+                &home,
+                command.unwrap_or(gateway::Command::Status),
+                explicit_context,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            value
         }
         Some(Command::Integration { command }) => integration::execute(&home, command)?,
         Some(Command::Integrations) => integration::execute(

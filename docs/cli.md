@@ -106,6 +106,12 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent integration uninstall <host>` | Remove Gent-managed integration entries while preserving unrelated host configuration. |
 | `gent integration remove <host>` | Alias for `gent integration uninstall`. |
 | `gent mcp serve` | Serve the shared MCP interface over stdio, connecting the host's registered agents to the local daemon. |
+| `gent gateway` / `gent gateway status` | Inspect local remote-MCP grants and limits without probing a listener. |
+| `gent gateway clients add NAME --conversation-key KEY --out FILE` | Export a private credential for a trusted host's conversation namespace. |
+| `gent gateway clients list` / `gent gateway clients revoke ID` | Inspect or revoke remote host grants. |
+| `gent gateway run` | Serve Streamable HTTP in the foreground with explicit `--home` or `--cluster`; non-loopback listeners require direct TLS. |
+
+The [user-controlled gateway](gateway.md) uses authenticated host credentials and required per-call conversation metadata. Hosted provider support, OAuth and native hosted attachment handles remain unverified.
 
 The auth commands are implemented as a prototype. `gent auth login --headless` uses GitHub device authorization; SSH sessions select it automatically. `--no-browser` instead prints a browser authorization URL and waits on a local loopback callback. `--service ORIGIN` selects an account service. The default `https://api.gent.link` is not deployed. Both paths pass local fixture proofs on Linux and macOS; real GitHub consent remains unverified. See [account login](local-proof.md#account-login) before trying the commands.
 
