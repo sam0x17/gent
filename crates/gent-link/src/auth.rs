@@ -1,5 +1,6 @@
 //! Native account login. Service credentials never grant cluster key authority.
 pub mod renewal;
+pub(crate) mod source;
 use crate::managed_file::{self, Snapshot};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -204,11 +205,13 @@ impl Service {
         home: &Path,
         pin: Option<&gent_daemon::config::ServiceConfig>,
     ) -> Result<Self> {
-        let directory = managed_file::normalize(&home.join("auth"))?;
-        managed_file::directory(&directory)?;
+        let location = source::Location::open(home)?;
+        let directory = &location.directory;
+        managed_file::directory(directory)?;
         let lock = managed_file::lock(&directory.join("session.lock"))?;
         let saved =
             read(&directory.join("session.json"))?.context("sign in first with gent auth login")?;
+        location.check_saved(&saved)?;
         ensure!(
             saved.phase == Phase::Active,
             "finish gent auth login or gent auth logout before configuring a service cluster"
@@ -227,6 +230,7 @@ impl Service {
         let session = service_session(&client, &saved)
             .await?
             .context("session is no longer active; run gent auth login")?;
+        location.check_session(&session)?;
         ensure!(
             saved
                 .session
@@ -465,18 +469,26 @@ pub async fn execute(home: &Path, command: Command) -> Result<Value> {
     if matches!(command, Command::Renew) {
         return renewal::renew(home, None).await;
     }
-    let directory = managed_file::normalize(&home.join("auth"))?;
+    let location = source::Location::open(home)?;
+    let result = execute_at(&location, command).await?;
+    Ok(location.describe(result))
+}
+
+async fn execute_at(location: &source::Location, command: Command) -> Result<Value> {
+    let directory = &location.directory;
     let path = directory.join("session.json");
     let client = client()?;
     if matches!(command, Command::Status) {
         let Some(saved) = read(&path)? else {
             return Ok(json!({"status":"signed_out"}));
         };
+        location.check_saved(&saved)?;
         if saved.phase == Phase::Revoking {
             return Ok(json!({"status":"revocation_pending","service":saved.service}));
         }
         return match service_session(&client, &saved).await {
             Ok(Some(session)) => {
+                location.check_session(&session)?;
                 Ok(json!({"status":"active","service":saved.service,"account":session}))
             }
             Ok(None) => Ok(json!({"status":"signed_out","service":saved.service})),
@@ -485,9 +497,12 @@ pub async fn execute(home: &Path, command: Command) -> Result<Value> {
             ),
         };
     }
-    managed_file::directory(&directory)?;
+    managed_file::directory(directory)?;
     let _lock = managed_file::lock(&directory.join("session.lock"))?;
     let mut saved = read(&path)?;
+    if let Some(saved) = &saved {
+        location.check_saved(saved)?;
+    }
     if matches!(command, Command::Logout) {
         let Some(saved) = &mut saved else {
             return Ok(json!({"status":"signed_out"}));
@@ -521,8 +536,10 @@ pub async fn execute(home: &Path, command: Command) -> Result<Value> {
         service
             .as_deref()
             .or_else(|| saved.as_ref().map(|s| s.service.as_str()))
+            .or_else(|| location.source.as_ref().map(|s| s.service.origin.as_str()))
             .unwrap_or(DEFAULT_SERVICE),
     )?;
+    location.check_service(base.as_str())?;
     if let Some(previous) = &mut saved {
         ensure!(
             origin(&previous.service)? == base,
@@ -533,6 +550,7 @@ pub async fn execute(home: &Path, command: Command) -> Result<Value> {
             "session revocation is pending; retry gent auth logout first"
         );
         if let Some(session) = service_session(&client, previous).await? {
+            location.check_session(&session)?;
             previous.phase = Phase::Active;
             previous.session = Some(session.clone());
             save(&path, Some(previous))?;
@@ -618,6 +636,7 @@ pub async fn execute(home: &Path, command: Command) -> Result<Value> {
         session: Some(session),
         ..pending
     };
+    location.check_session(active.session.as_ref().expect("session checked"))?;
     save(&path, Some(&active))?;
     Ok(json!({"status":"active","service":base.as_str(),"account":active.session}))
 }
@@ -845,6 +864,12 @@ fn callback_code(target: &str, expected: &Url, state: &str) -> Option<Result<Str
 }
 
 pub fn print(value: &Value) {
+    if let Some(home) = value["shared_account"]["home"].as_str() {
+        println!(
+            "Shared account store: {}. Login, renewal and logout apply to all profiles using it.",
+            home.escape_debug()
+        );
+    }
     if value["status"] == "active" && value.get("renewed").is_some() {
         println!(
             "{}",

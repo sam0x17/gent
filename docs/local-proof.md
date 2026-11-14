@@ -57,7 +57,7 @@ gent cluster
 gent config path
 ```
 
-`--local` is required to create a development cluster. This build supports one local cluster per state directory. For foreground use, run `gent cluster new demo --local` followed by `gent daemon run`; stop it with Ctrl-C or SIGTERM. A restart preserves identities, permissions, and queued messages. For an account service, `gent daemon install` guides login and owner/invitation enrollment; see [service setup](service-setup.md) for explicit choices and noninteractive use. Multi-cluster selection remains future work.
+`--local` is required to create a development cluster. This build supports one local cluster per state directory. For foreground use, run `gent cluster new demo --local` followed by `gent daemon run`; stop it with Ctrl-C or SIGTERM. A restart preserves identities, permissions, and queued messages. For an account service, `gent daemon install` guides login and owner/invitation enrollment; see [service setup](service-setup.md) for explicit choices and noninteractive use. Use the local cluster profiles below to create, join and select additional clusters.
 
 ## Account login
 
@@ -375,12 +375,10 @@ The bundled [agent guidance](../crates/gent-link/skills/gent/SKILL.md) is advert
 
 ## Local cluster profiles
 
-`gent clusters` (also `gent cluster list`) lists local profiles without contacting a daemon or account service. Register an already initialized directory with `gent cluster add PATH`. This records its cluster ID, node ID and absolute directory; it neither joins a remote cluster nor copies state. For a separate local development cluster:
+`gent clusters` (also `gent cluster list`) lists local profiles without contacting a daemon or account service. Register an already initialized directory with `gent cluster add PATH`. This records its cluster ID, node ID and absolute directory; it neither joins a remote cluster nor copies state. From an initialized primary directory, create and select another local development profile with:
 
 ```sh
-gent --home ~/.gent/clusters/scratch cluster new scratch --local
-gent --home ~/.gent/clusters/scratch daemon install
-gent cluster add ~/.gent/clusters/scratch
+gent daemon install --local scratch
 gent clusters
 gent cluster switch scratch
 gent --cluster CLUSTER_UUID agents
@@ -388,13 +386,26 @@ gent --cluster CLUSTER_UUID agents
 
 The primary directory must already be initialized. `gent cluster switch ID_OR_UNIQUE_NAME` changes the default for subsequent CLI commands. Without an argument it offers a numbered terminal picker; JSON and non-terminal invocations require the argument. `--cluster` selects one profile for a command without changing the default. Names follow each profile's current display label; ambiguous names require an ID. Missing, replaced, linked or mismatched selected state produces an error, without falling back to another cluster. Listing reports unavailable profiles so the user can select a remaining valid one.
 
-Registration upgrades the primary `~/.gent/config.toml` to version 2 and stores the local registry under `[contexts]`. It retains the original cluster's `[node]`, `[cluster]` and policy at that path, with its original keys and database. Additional profiles keep their own config, keys, queues, account sessions and daemon service in their recorded directories. `gent config path` returns the selected profile's configuration path. The registry allows 128 profiles, including the original, and never enters encrypted cluster configuration sync. Configuration writes share `config.lock`; daemon projections preserve the latest selection even if they loaded an older file before a switch.
+Registration upgrades the primary `~/.gent/config.toml` to version 2 and stores the local registry under `[contexts]`. It retains the original cluster's `[node]`, `[cluster]` and policy at that path, with its original keys and database. Additional profiles keep their own config, keys, queues and daemon service in their recorded directories. Imported profiles retain their own account stores; managed service profiles share the account store used during setup. `gent config path` returns the selected profile's configuration path. The registry allows 128 profiles, including the original, and never enters encrypted cluster configuration sync. Configuration writes share `config.lock`; daemon projections preserve the latest selection even if they loaded an older file before a switch.
 
 Switching leaves existing daemons, agents, inboxes, relay attachments and installed host entries in their original cluster. Each profile currently runs its own service. Installed service/MCP/hook commands pass an explicit physical `--home`; those runtime entry points keep interpreting it as that fixed directory. Ordinary CLI commands use that directory's selected context. Use `--cluster CLUSTER_UUID` to override selection explicitly, including for runtime commands. An unpinned new ephemeral MCP connection selects the default once at launch. Existing fixed bindings reject a reconnect into another cluster; installed Codex and Claude entries remain pinned across reconnects and daemon restarts.
 
-Guided creation and enrollment of additional profiles from the primary directory remain unfinished. For now, initialize or enroll a separate `--home` directory with the existing setup commands, then register it with `cluster add`. Registration does not move credentials or share logins between profiles. A single daemon supervising several profiles and profile removal remain future work.
+`gent cluster new NAME [--local]`, `gent cluster join ...`, and explicit creation/join flags on `gent daemon install` reserve additional profiles under `~/.gent/clusters/SETUP_UUID` once the primary directory is initialized. Successful setup registers and selects the profile. Bare `gent daemon install` operates on the current selection. For service setup:
 
-Run `python3 scripts/prove_contexts.py target/debug/gent` for the opt-in native-service proof. It creates two isolated systemd/launchd services, installs MCP entries in temporary host directories, switches contexts with a PNG queued, reconnects both synthetic host clients, checks binding isolation, restarts both services, and exercises the terminal picker. Cleanup removes its services and host entries. It makes no model calls and uses no account service or network relay.
+```sh
+gent auth login
+gent daemon install --new work --no-input
+# Or join another cluster using a privately transferred invitation:
+gent daemon install --invite-file /private/laptop.gent-invite --name laptop --no-input
+```
+
+Repeat the original command after an interruption. `gent clusters` lists pending setup directories. The journal retains the original creation name or joining cluster, node name and route, so retries preserve the reserved directory and identities even if the last response was lost. Completed creation retries reuse their original name after renaming. Changed join options are refused; invitation replacement still requires `--continue` and the same trust anchor. Keep `profile-setup.json` with the primary configuration in backups. Missing established records require restoration. Setup records and registered profiles each have a 128-entry limit; completed records remain for retries. Creating multiple profiles with the same original name requires separate primary directories.
+
+Managed service profiles use one account store and lock, without copying account bearer files. `gent auth login`, `renew`, and `logout` through a linked profile operate on that shared store; human and JSON output identify it. Logout affects every profile using that store. Node signing keys, transport credentials and message queues remain separate. The source directory, node/cluster identity, account and service are pinned in private metadata. Preserve the source directory when backing up or moving profiles. A missing reference, changed account or changed service fails instead of silently creating a different login. Use an explicit original `--cluster` when recovering a source account whose identity no longer matches. First setup and explicit `--headless`/`--no-browser` installation retain guided login.
+
+Configuration version 3 records the required local fields in `local_features`; losing a registry, account reference or setup-journal pin then fails validation. Ordinary configuration projections retain these local fields. They are not cluster policy and do not sync to another machine. `cluster add` still imports existing directories without changing their authentication. Use a short primary directory, such as the default `~/.gent`, so child daemon socket paths fit the operating system's Unix socket limit. A single daemon supervising several profiles and profile removal remain future work.
+
+Run `python3 scripts/prove_contexts.py target/debug/gent` for the opt-in native-service proof. It creates a second profile through the primary CLI, repeats creation and installation without restarting its daemon, runs two isolated systemd/launchd services, installs MCP entries in temporary host directories, switches contexts with a PNG queued, reconnects both synthetic host clients, checks binding isolation, restarts both services, and exercises the terminal picker. Cleanup removes its services and host entries. It makes no model calls and uses no account service or network relay.
 
 ## Configuration administration
 

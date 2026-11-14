@@ -56,6 +56,41 @@ pub struct ContextProfile {
     pub node_id: String,
 }
 
+/// Local account-session reference. It grants no cluster signing authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountSource {
+    pub version: u32,
+    pub home: PathBuf,
+    pub cluster_id: String,
+    pub node_id: String,
+    pub service: ServiceConfig,
+}
+impl AccountSource {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.version == 1 && self.home.is_absolute(),
+            "invalid account-session source"
+        );
+        ensure!(
+            !self
+                .home
+                .to_str()
+                .context("account source path must be UTF-8")?
+                .chars()
+                .any(char::is_control),
+            "invalid account source path"
+        );
+        for id in [&self.cluster_id, &self.node_id] {
+            ensure!(
+                uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == *id),
+                "invalid account source identity"
+            );
+        }
+        self.service.validate()
+    }
+}
+
 impl Contexts {
     pub const LIMIT: usize = 128;
     pub fn validate(&self) -> Result<()> {
@@ -265,6 +300,20 @@ pub fn save(home: &Path, config: &Config) -> Result<()> {
             );
             next.set_contexts(contexts)?;
         }
+        if let Some(source) = previous.account_source()? {
+            ensure!(
+                previous.cluster.id == next.cluster.id && previous.node.id == next.node.id,
+                "cannot replace the identity of a managed account profile"
+            );
+            next.set_account_source(source)?;
+        }
+        if let Some(id) = previous.profile_setup()? {
+            ensure!(
+                previous.cluster.id == next.cluster.id && previous.node.id == next.node.id,
+                "cannot replace the identity of a profile setup registry"
+            );
+            next.set_profile_setup(id)?;
+        }
     }
     next.validate()?;
     write_private(&path(home), toml::to_string_pretty(&next)?.as_bytes())
@@ -305,6 +354,60 @@ fn configuration_lock(home: &Path) -> Result<fs::File> {
     }
 }
 impl Config {
+    pub fn profile_setup(&self) -> Result<Option<String>> {
+        self.extra
+            .get("profile_setup")
+            .map(|value| {
+                let id = value
+                    .as_str()
+                    .context("invalid profile setup registry pin")?;
+                ensure!(
+                    uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == id),
+                    "invalid profile setup registry pin"
+                );
+                Ok(id.to_string())
+            })
+            .transpose()
+    }
+    pub fn set_profile_setup(&mut self, id: String) -> Result<()> {
+        ensure!(
+            self.profile_setup()?.is_none_or(|previous| previous == id),
+            "profile setup registry changed"
+        );
+        self.extra
+            .insert("profile_setup".into(), toml::Value::String(id));
+        self.update_local_version()?;
+        self.profile_setup()?;
+        Ok(())
+    }
+    pub fn account_source(&self) -> Result<Option<AccountSource>> {
+        self.extra
+            .get("account_source")
+            .cloned()
+            .map(|value| -> Result<AccountSource> {
+                let source: AccountSource =
+                    value.try_into().context("invalid account-session source")?;
+                source.validate()?;
+                if let Some(pin) = &self.service {
+                    ensure!(
+                        pin.account_id == source.service.account_id
+                            && reqwest::Url::parse(&pin.origin)?
+                                == reqwest::Url::parse(&source.service.origin)?,
+                        "account source does not match this profile's service"
+                    );
+                }
+                Ok(source)
+            })
+            .transpose()
+    }
+    pub fn set_account_source(&mut self, source: AccountSource) -> Result<()> {
+        source.validate()?;
+        self.extra
+            .insert("account_source".into(), toml::Value::try_from(source)?);
+        self.update_local_version()?;
+        self.account_source()?;
+        Ok(())
+    }
     pub fn contexts(&self) -> Result<Option<Contexts>> {
         self.extra
             .get("contexts")
@@ -330,8 +433,33 @@ impl Config {
         contexts.validate()?;
         self.extra
             .insert("contexts".into(), toml::Value::try_from(contexts)?);
-        self.version = 2;
+        self.update_local_version()?;
         self.contexts()?;
+        Ok(())
+    }
+    fn local_features(&self) -> Result<Vec<String>> {
+        let mut features = Vec::new();
+        if self.account_source()?.is_some() {
+            features.push("account_source".into());
+        }
+        if self.contexts()?.is_some() {
+            features.push("contexts".into());
+        }
+        if self.profile_setup()?.is_some() {
+            features.push("profile_setup".into());
+        }
+        Ok(features)
+    }
+    fn update_local_version(&mut self) -> Result<()> {
+        let features = self.local_features()?;
+        if self.account_source()?.is_some() || self.profile_setup()?.is_some() {
+            self.version = 3;
+            self.extra
+                .insert("local_features".into(), toml::Value::try_from(features)?);
+        } else {
+            self.version = if self.contexts()?.is_some() { 2 } else { 1 };
+            self.extra.remove("local_features");
+        }
         Ok(())
     }
     pub fn validate(&self) -> Result<()> {
@@ -345,12 +473,28 @@ impl Config {
     /// edit. Live policy authority comes from the verified daemon database.
     pub fn validate_local(&self) -> Result<()> {
         ensure!(
-            matches!(self.version, 1 | 2),
+            matches!(self.version, 1..=3),
             "unsupported configuration version"
         );
+        let features = self.local_features()?;
+        let required: Option<Vec<String>> = self
+            .extra
+            .get("local_features")
+            .cloned()
+            .map(|value| {
+                value
+                    .try_into()
+                    .context("invalid local metadata requirements")
+            })
+            .transpose()?;
         ensure!(
-            self.contexts()?.is_some() == (self.version == 2),
-            "configuration version does not match its profile registry"
+            match self.version {
+                1 => features.is_empty() && required.is_none(),
+                2 => features == ["contexts"] && required.is_none(),
+                3 => required.as_ref() == Some(&features) && !features.is_empty(),
+                _ => false,
+            },
+            "configuration version or required local metadata does not match its fields"
         );
         ensure!(
             self.cluster.local_only || self.relay.is_some(),

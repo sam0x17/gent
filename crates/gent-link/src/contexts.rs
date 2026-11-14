@@ -8,8 +8,9 @@ use std::{
     io::{self, BufRead, IsTerminal, Read, Write},
     path::{Path, PathBuf},
 };
+pub(crate) mod provision;
 
-fn inspect(home: &Path) -> Result<Config> {
+pub(crate) fn inspect(home: &Path) -> Result<Config> {
     // Read-only checks: status and selection never create a missing directory.
     let metadata =
         std::fs::symlink_metadata(home).context("cluster profile directory is unavailable")?;
@@ -132,7 +133,8 @@ pub fn list(root: &Path) -> Result<Value> {
         })
         .collect();
     Ok(
-        json!({"active_cluster":registry.active_cluster,"profiles":profiles,"config":config::path(&root)}),
+        json!({"active_cluster":registry.active_cluster,"profiles":profiles,
+        "pending":provision::pending(&root,&cfg)?,"config":config::path(&root)}),
     )
 }
 
@@ -258,6 +260,19 @@ pub fn print(value: &Value) {
                     " (restore this profile's state)"
                 }
             );
+        }
+        if let Some(pending) = value["pending"].as_array() {
+            for job in pending {
+                println!(
+                    "Pending {}: {} ({}). Rerun the original setup command.",
+                    job["intent"]["kind"].as_str().unwrap_or("setup"),
+                    job["intent"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .escape_debug(),
+                    job["home"].as_str().unwrap_or_default().escape_debug()
+                );
+            }
         }
     } else if value["added"] == true {
         println!(

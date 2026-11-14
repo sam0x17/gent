@@ -455,7 +455,7 @@ async fn execute(cli: Cli) -> Result<()> {
         return Ok(());
     }
     let home = if pinned_runtime && cli.context.is_none() {
-        root
+        root.clone()
     } else {
         contexts::resolve(&root, cli.context.as_deref())?
     };
@@ -481,7 +481,7 @@ async fn execute(cli: Cli) -> Result<()> {
         let status_only = matches!(command, None | Some(DaemonCommand::Status));
         let output = match command.unwrap_or(DaemonCommand::Status) {
             DaemonCommand::Install { local, setup } => {
-                setup::install(&home, local, setup, !cli.json).await?
+                contexts::provision::install(&root, &home, local, setup, !cli.json).await?
             }
             action => service::execute(&home, action).await?,
         };
@@ -526,13 +526,7 @@ async fn execute(cli: Cli) -> Result<()> {
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::New { name, local }),
-        }) => {
-            if local {
-                json!(cluster::local(&home, &name)?)
-            } else {
-                cluster::connect(&home, Some(&name)).await?
-            }
-        }
+        }) => contexts::provision::create(&root, &home, name, local).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Connect),
         }) => cluster::connect(&home, None).await?,
@@ -541,7 +535,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }) => configure(&home, &request_id, ConfigurationEdit::Renew).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Join(args)),
-        }) => pairing::join(&home, args).await?,
+        }) => contexts::provision::join(&root, &home, args).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Invite(args)),
         }) => invitations::create(&home, args).await?,

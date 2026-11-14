@@ -21,7 +21,7 @@ from smoke_mcp import Client, PNG
 def main():
     binary = str(Path(sys.argv[1] if len(sys.argv) > 1 else 'target/debug/gent').resolve())
     folder = Path(tempfile.mkdtemp(prefix='gent-contexts-', dir='/tmp')).resolve()
-    root, peer = folder / 'primary', folder / 'secondary'
+    root = folder / 'primary'
     clients, installed, hosts = [], [], []
     ids = {}
 
@@ -45,12 +45,25 @@ def main():
         return client
 
     try:
-        for home, name in [(root, 'alpha'), (peer, 'beta')]:
-            cli(home, 'cluster', 'new', name, '--local')
-            ids[home] = cli(home, 'config')['cluster']['id']
-            installed.append(home)
-            assert cli(home, 'daemon', 'install')['daemon']['managed']
-        original_pids = {home: cli(home, 'daemon', 'status')['daemon']['pid'] for home in installed}
+        cli(root, 'cluster', 'new', 'alpha', '--local')
+        ids[root] = cli(root, 'config')['cluster']['id']
+        installed.append(root)
+        assert primary('daemon', 'install')['daemon']['managed']
+        original_pid = primary('daemon', 'status')['daemon']['pid']
+        created = cli(root, 'cluster', 'new', 'beta', '--local')
+        peer = Path(created['profile']['home'])
+        ids[peer] = created['profile']['cluster_id']
+        installed.append(peer)
+        assert peer.parent == root / 'clusters'
+        assert cli(root, 'daemon', 'install')['daemon']['managed']
+        original_pids = {home: cli(home, '--cluster', ids[home], 'daemon', 'status')['daemon']['pid'] for home in installed}
+        assert original_pids[root] == original_pid
+        for args in [('cluster', 'new', 'beta', '--local'), ('daemon', 'install', '--local', 'beta', '--no-input')]:
+            retry = cli(root, *args)
+            assert retry['profile'] == created['profile']
+            assert cli(root, 'daemon', 'status')['daemon']['pid'] == original_pids[peer]
+        assert cli(root, 'clusters')['pending'] == []
+        cli(root, 'cluster', 'switch', 'alpha')
         identities = {home: (home / 'identity.key').read_bytes() for home in installed}
         owner_keys = {home: (home / 'owner.key').read_bytes() for home in installed}
         files, specs = {}, {}
@@ -165,6 +178,7 @@ def main():
         assert cli(root, 'cluster')['cluster']['id'] == ids[root]
         report = {'result': 'passed', 'scope': 'two native services, synthetic MCP host calls, one physical host',
             'checks': ['read-only per-command selection', 'unchanged service PIDs on switch',
+                'primary CLI creates and selects managed profile; creation/install retries preserve PID and identity',
                 'installed Codex and Claude reconnect and per-call hook pinning', 'queued PNG retained in original cluster',
                 'generic binding rejects wrong-cluster reconnect', 'independent daemon restarts',
                 'configuration projection preserves selection', 'noninteractive refusal and real PTY selection',

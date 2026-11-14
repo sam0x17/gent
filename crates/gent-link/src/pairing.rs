@@ -49,6 +49,85 @@ pub struct JoinArgs {
     relay_endpoint: Option<String>,
 }
 
+impl JoinArgs {
+    pub(crate) fn invitation_intent(
+        file: &Path,
+        name: &str,
+        cluster: Option<&str>,
+    ) -> Result<crate::contexts::provision::Intent> {
+        let invitation = crate::invitations::decode_file(file)?;
+        let offer = &invitation.offer().offer;
+        ensure!(
+            cluster.is_none_or(|id| id == offer.anchor.cluster_id),
+            "invitation belongs to another cluster"
+        );
+        Ok(crate::contexts::provision::Intent::Join {
+            cluster: offer.anchor.cluster_id.clone(),
+            name: name.into(),
+            route: serde_json::json!({"kind":"invitation","anchor":offer.anchor,"service":offer.service}),
+        })
+    }
+    pub(crate) fn intent(&self) -> Result<crate::contexts::provision::Intent> {
+        if let Some(file) = &self.invite_file {
+            ensure!(
+                self.remote_home.is_none()
+                    && self.relay_endpoint.is_none()
+                    && self.remote_gent == "gent",
+                "invitation joins do not accept SSH paths or relay overrides"
+            );
+            return Self::invitation_intent(file, &self.name, self.cluster.as_deref());
+        }
+        remote_command(self)?;
+        Ok(crate::contexts::provision::Intent::Join {
+            cluster: self
+                .cluster
+                .clone()
+                .context("SSH joining requires a cluster ID")?,
+            name: self.name.clone(),
+            route: serde_json::json!({"kind":"ssh","via":self.via,"remote_home":self.remote_home,
+                "remote_gent":self.remote_gent,"relay_endpoint":self.relay_endpoint}),
+        })
+    }
+    pub(crate) fn existing(&self, home: &Path) -> Result<Option<Value>> {
+        if crate::managed_file::Snapshot::read(&gent_daemon::config::path(home))?
+            .text
+            .is_none()
+        {
+            return Ok(None);
+        }
+        if gent_daemon::config::pending_join(home)?.exists() {
+            return Ok(None);
+        }
+        let cfg = crate::contexts::inspect(home)?;
+        if let Some(file) = &self.invite_file {
+            let saved = crate::invitations::installation(home)?
+                .context("invitation setup record is missing")?;
+            if !saved.complete {
+                return Ok(None);
+            }
+            let invitation = crate::invitations::decode_file(file)?;
+            ensure!(
+                saved.offer == *invitation.offer()
+                    && saved.name == self.name
+                    && saved.offer.offer.anchor.cluster_id == cfg.cluster.id
+                    && saved.node.is_some_and(|node| node.id == cfg.node.id),
+                "installed node does not match this invitation"
+            );
+        } else {
+            ensure!(
+                self.cluster.as_deref() == Some(&cfg.cluster.id) && self.name == cfg.node.name,
+                "installed node does not match the requested join"
+            );
+        }
+        if crate::cluster::installation(home)?.is_some_and(|s| s.pending) {
+            return Ok(None);
+        }
+        Ok(Some(
+            serde_json::json!({"joined":true,"already_configured":true,"cluster":cfg.cluster,"node":cfg.node}),
+        ))
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireRequest {

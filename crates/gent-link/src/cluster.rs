@@ -271,6 +271,7 @@ pub async fn connect(home: &Path, name: Option<&str>) -> Result<Value> {
                 origin: service.origin()?.into(),
                 account_id: service.session.account_id.clone(),
             });
+            auth::source::apply(&home, &mut initial)?;
             let setup = Setup {
                 version: 1,
                 role: SetupRole::Owner,
@@ -336,6 +337,7 @@ pub async fn connect(home: &Path, name: Option<&str>) -> Result<Value> {
     credential_snapshot.write(&setup.credential.as_ref().expect("candidate saved").token)?;
     config.cluster.local_only = false;
     config.service = Some(setup.account());
+    auth::source::apply(&home, &mut config)?;
     config_snapshot.write(&toml_edit::ser::to_string_pretty(&config)?)?;
     Ok(json!({"status":"configured", "service":setup.service,
         "cluster":config.cluster,"node":config.node,"relay_endpoint":setup.relay_endpoint,
@@ -464,6 +466,7 @@ pub(crate) async fn provision_joined(
     config.cluster.local_only = false;
     config.relay = Some(settings);
     config.service = Some(setup.account());
+    auth::source::apply(home, &mut config)?;
     config_snapshot.write(&toml_edit::ser::to_string_pretty(&config)?)?;
     Ok(())
 }
