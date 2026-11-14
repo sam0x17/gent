@@ -34,12 +34,12 @@ pub(super) struct Listener {
 }
 impl Drop for Listener {
     fn drop(&mut self) {
+        self.connected.store(false, Ordering::SeqCst);
         self.task.abort();
     }
 }
 impl Listener {
-    pub(super) fn start(relay: Relay, wakeup: Arc<Notify>) -> Self {
-        let connected = Arc::new(AtomicBool::new(false));
+    pub(super) fn start(relay: Relay, wakeup: Arc<Notify>, connected: Arc<AtomicBool>) -> Self {
         let flag = connected.clone();
         let task = tokio::spawn(async move {
             let mut delay = Duration::from_secs(1);

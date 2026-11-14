@@ -46,6 +46,12 @@ def main():
         assert result.returncode in (0, 3), result.stderr
         return json.loads(result.stdout)
 
+    def doctor(expected=0):
+        value = call('doctor', '--codex-config-dir', str(folder / 'codex'),
+                     '--claude-config-dir', str(folder / 'claude'),
+                     '--shell', 'zsh', '--rc-file', str(folder / 'zshrc'), expected=expected)
+        return {check['id']: check for check in value['checks']}
+
     try:
         before = call('daemon', 'status', expected=3)
         assert not before['service']['installed'] and not home.exists()
@@ -53,6 +59,9 @@ def main():
         assert not home.exists()
         installed = call('daemon', 'install', '--local', 'service-proof')
         assert installed['daemon']['managed'] and installed['service']['enabled']
+        diagnosed = doctor()
+        assert diagnosed['daemon']['status'] == diagnosed['service']['status'] == 'pass'
+        assert diagnosed['service']['evidence']['pid'] == installed['daemon']['pid']
         service_file = Path(installed['service']['file'])
         service_bytes = service_file.read_bytes()
         unrelated = service_file.with_name(service_file.name + '.proof-unrelated')
@@ -77,6 +86,8 @@ def main():
         assert not call('daemon', 'stop')['daemon']['running']
         assert not (home / 'daemon.sock').exists()
         call('daemon', 'status', expected=3)
+        diagnosed = doctor(expected=3)
+        assert diagnosed['daemon']['status'] == 'fail' and diagnosed['service']['status'] == 'warn'
         assert not call('daemon', 'stop')['daemon']['running']
         started = call('daemon', 'start')
         assert started['daemon']['managed'] and started['daemon']['pid'] != pid
@@ -96,6 +107,8 @@ def main():
             service_file.write_bytes(service_bytes + b'\n')
             call('daemon', 'install', expected=1)
             call('daemon', 'uninstall', expected=1)
+            assert service_file.read_bytes() == service_bytes + b'\n'
+            assert doctor(expected=3)['service']['status'] == 'warn'
             assert service_file.read_bytes() == service_bytes + b'\n'
         finally:
             service_file.write_bytes(service_bytes)
@@ -119,6 +132,7 @@ def main():
             foreground = subprocess.Popen(command + ['daemon', 'run'], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
         wait(lambda: status()['daemon']['running'])
         assert not status()['daemon']['managed']
+        assert doctor()['service']['status'] == 'skip'
         call('daemon', 'install', expected=1)
         assert not service_file.exists()
         foreground.send_signal(signal.SIGTERM)
@@ -132,7 +146,7 @@ def main():
         current = call('config')
         assert current['node']['id'] == config['node']['id'] and current['cluster']['id'] == config['cluster']['id']
         call('daemon', 'uninstall')
-        print(f"PASS: {installed['service']['backend']} install/reinstall/start/stop/restart/uninstall, crash recovery, literal paths, file protection, foreground ownership, and durable MCP image")
+        print(f"PASS: {installed['service']['backend']} install/reinstall/start/stop/restart/uninstall, crash recovery, literal paths, file protection, foreground ownership, doctor status, and durable MCP image")
     finally:
         for client in clients:
             client.close()

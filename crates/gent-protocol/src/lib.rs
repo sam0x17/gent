@@ -399,6 +399,8 @@ pub enum OwnerOp {
         revision: u64,
     },
     Status,
+    /// Read-only local-owner diagnostics; never advances clocks or projects files.
+    Diagnose,
     Nodes,
     Agents,
     Providers,

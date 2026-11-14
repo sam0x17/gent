@@ -322,6 +322,11 @@ impl State {
 }
 
 impl Registry {
+    // Caller must be read-only; ordinary opening also allocates the lock file.
+    fn inspect_existing(home: &Path) -> Result<Self> {
+        directory_check(&home.join("gateway"))?;
+        Self::open_locked(home)
+    }
     pub(crate) fn open(home: &Path) -> Result<Self> {
         let home = managed_file::normalize(home)?;
         directory_check(&home.join("gateway"))?;
@@ -535,6 +540,23 @@ impl Registry {
             .filter_map(|c| c.mtls)
             .collect())
     }
+}
+
+pub(super) fn diagnose(home: &Path) -> Result<Value> {
+    let cfg = contexts::inspect(home)?;
+    if cfg.gateway_registry()?.is_none() {
+        ensure!(
+            !home.join("gateway/state.json").try_exists()?,
+            "gateway state has no pin"
+        );
+        return Ok(json!({"configured":false}));
+    }
+    let registry = Registry::inspect_existing(home)?;
+    let state = registry.read()?;
+    let now = auth::now()?;
+    Ok(json!({"configured":true, "clock_ahead":now < state.clock,
+        "active_clients":state.clients.values().filter(|c| !c.revoked && now < c.expires_at).count(),
+        "running":"not_probed"}))
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 mod auth;
 mod cluster;
 mod contexts;
+mod doctor;
 mod files;
 mod gateway;
 mod hooks;
@@ -45,6 +46,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Diagnose local setup without repairing state or running a model.
+    Doctor(doctor::Options),
     /// Sign in to Gent's service, inspect the account session, or sign out.
     Auth {
         #[command(subcommand)]
@@ -440,6 +443,18 @@ async fn execute(cli: Cli) -> Result<()> {
         .or_else(|| std::env::var_os("GENT_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".gent")))
         .context("cannot locate home; pass --home")?;
+    if let Some(Command::Doctor(options)) = cli.command {
+        let report = doctor::run(&root, cli.context.as_deref(), options).await;
+        if cli.json {
+            println!("{}", serde_json::to_string(&report)?);
+        } else {
+            report.print();
+        }
+        if report.exit_code() != 0 {
+            std::process::exit(report.exit_code());
+        }
+        return Ok(());
+    }
     let context_output = match &cli.command {
         Some(
             Command::Clusters
@@ -532,6 +547,7 @@ async fn execute(cli: Cli) -> Result<()> {
         })
     );
     let output = match cli.command {
+        Some(Command::Doctor(_)) => unreachable!(),
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::New { name, local }),

@@ -199,6 +199,20 @@ pub async fn preflight(home: &Path) -> Result<()> {
     service.no_foreground(&state).await
 }
 
+/// Inspect only the manager and registration. Doctor uses its own read-only
+/// daemon operation instead of the ordinary status/projection path.
+pub(crate) async fn diagnose(home: &Path) -> Result<Value> {
+    let service = Service::new(home).await?;
+    let installed = service.installed()?;
+    let state = service.manager.inspect().await;
+    Ok(
+        json!({"installed":installed.is_some(),"available":state.available,
+        "binary_available":installed.as_ref().is_some_and(|s| s.binary.is_file()),
+        "loaded":state.loaded,"running":state.running,"enabled":state.enabled,
+        "pid":state.pid,"last_exit":state.last_exit}),
+    )
+}
+
 pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
     let service = Service::new(home).await?;
     match action {

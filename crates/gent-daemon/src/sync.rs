@@ -14,6 +14,7 @@ use std::{
 };
 use tokio::{sync::Notify, task::JoinHandle, time::Instant};
 mod files;
+pub(crate) mod health;
 mod notifications;
 
 const MAX_FRAME: usize = 1024 * 1024;
@@ -309,7 +310,13 @@ pub fn start(store: SharedStore) -> Result<Option<JoinHandle<()>>> {
 }
 
 async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>, files: files::Scheduler) {
-    let push = notifications::Listener::start(relay.clone(), wakeup.clone());
+    let health = store
+        .lock()
+        .expect("store lock poisoned")
+        .sync_health
+        .clone();
+    let push =
+        notifications::Listener::start(relay.clone(), wakeup.clone(), health.connected.clone());
     let _files = files.start(store.clone());
     let mut retries = BTreeMap::<Vec<u8>, Retry>::new();
     let mut transferred = BTreeMap::<Vec<u8>, u64>::new();
@@ -324,11 +331,13 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>, files: files
         let mut progressed = false;
         let mut mesh_pending = false;
         let mut error = None;
+        let (mut successes, mut failures, mut local_error) = (0, 0, false);
         match result {
             Ok((streams, pending)) => {
                 match pending {
                     Ok(pending) => mesh_pending = pending,
                     Err(e) => {
+                        local_error = true;
                         // Peer setup cannot prevent configuration recovery or
                         // delivery over already established streams.
                         mesh_pending = true;
@@ -356,6 +365,7 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>, files: files
                 while let Some((group, result)) = work.next().await {
                     match result {
                         Ok(position) => {
+                            successes += 1;
                             if let Some(position) = position {
                                 progressed |=
                                     transferred.insert(group.clone(), position) != Some(position);
@@ -363,6 +373,7 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>, files: files
                             retries.remove(&group);
                         }
                         Err(e) => {
+                            failures += 1;
                             let delay = retries.get(&group).map_or(Duration::from_secs(1), |r| {
                                 (r.delay * 2).min(Duration::from_secs(30))
                             });
@@ -382,9 +393,17 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>, files: files
                 progressed |= cursor != 0;
             }
             Err(e) => {
+                local_error = true;
                 error = Some(e.to_string());
             }
         }
+        health.observe(
+            crate::store::now(),
+            successes,
+            failures,
+            retries.len(),
+            local_error,
+        );
         if let Some(error) = &error {
             if previous_error.as_ref() != Some(error) {
                 eprintln!("Gent encrypted sync waiting: {error}");

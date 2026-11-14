@@ -278,3 +278,8 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
         } => Ok(Some(Registry::open(&home)?.revoke(&client)?)),
     }
 }
+
+/// Inspect existing pins/state without creating a registry lock or listener.
+pub(crate) fn diagnose(home: &Path) -> Result<Value> {
+    registry::diagnose(home)
+}

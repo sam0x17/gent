@@ -171,7 +171,7 @@ Additional command families should follow the same grammar as their functionalit
 | `gent config apply` | Submit local cluster/node names and policy to the active owner; the newest accepted revision replaces earlier shared settings. |
 | `gent config requests` | List the latest 100 configuration requests submitted on this node. |
 | `gent config request REQUEST_UUID` | Inspect a request's queued, applied, or rejected status and its revision or rejection reason. |
-| `gent doctor` | Diagnose configuration, auth, daemon, hooks, MCP registration, and connectivity; provide concrete repair commands without starting inference. |
+| `gent doctor [--online]` | Inspect local configuration, auth, daemon, relay observations, hooks and MCP installation without changing state or starting inference. `--online` also checks the saved account session. See [diagnostics](diagnostics.md). |
 
 Messages carry an explicit authenticated user or agent identity. Do not infer sender authority from the shell's active cluster or an agent ID passed as an argument. Relay and permission-management commands must expose their acting identity and target scope when added.
 

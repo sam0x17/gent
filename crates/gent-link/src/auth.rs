@@ -474,6 +474,65 @@ pub async fn execute(home: &Path, command: Command) -> Result<Value> {
     Ok(location.describe(result))
 }
 
+/// Diagnostics never lock, renew, sign in, persist or print account credentials.
+pub(crate) async fn diagnose(
+    home: &Path,
+    pin: Option<&gent_daemon::config::ServiceConfig>,
+    online: bool,
+) -> Result<Value> {
+    let location = source::Location::open(home)?;
+    let Some(saved) = read(&location.directory.join("session.json"))? else {
+        return Ok(json!({"status":"signed_out","source":"local"}));
+    };
+    location.check_saved(&saved)?;
+    let check = |session: &ServiceSession| -> Result<()> {
+        location.check_session(session)?;
+        if let Some(pin) = pin {
+            ensure!(
+                origin(&saved.service)? == origin(&pin.origin)?
+                    && session.account_id == pin.account_id,
+                "account state does not match this cluster"
+            );
+        }
+        Ok(())
+    };
+    if let Some(pin) = pin {
+        ensure!(
+            origin(&saved.service)? == origin(&pin.origin)?,
+            "service pin mismatch"
+        );
+    }
+    if let Some(session) = &saved.session {
+        check(session)?;
+    }
+    match saved.phase {
+        Phase::Pending => return Ok(json!({"status":"login_pending","source":"local"})),
+        Phase::Revoking => return Ok(json!({"status":"revocation_pending","source":"local"})),
+        Phase::Active => {}
+    }
+    let cached = saved
+        .session
+        .as_ref()
+        .context("active session cache missing")?;
+    if !online {
+        return Ok(
+            json!({"status":if cached.expires_at > now()? {"cached"} else {"expired"},
+            "source":"local","expires_at":cached.expires_at,"shared":location.source.is_some()}),
+        );
+    }
+    match timeout(Duration::from_secs(5), service_session(&client()?, &saved)).await {
+        Ok(Ok(Some(session))) => {
+            check(&session)?;
+            Ok(
+                json!({"status":if session.expires_at > now()? {"active"} else {"expired"},
+                "source":"service","expires_at":session.expires_at,"shared":location.source.is_some()}),
+            )
+        }
+        Ok(Ok(None)) => Ok(json!({"status":"signed_out","source":"service"})),
+        _ => Ok(json!({"status":"unavailable","source":"service"})),
+    }
+}
+
 async fn execute_at(location: &source::Location, command: Command) -> Result<Value> {
     let directory = &location.directory;
     let path = directory.join("session.json");
@@ -904,6 +963,101 @@ pub fn print(value: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn diagnostic_account_checks_are_optional_pinned_and_do_not_mutate_credentials() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+        };
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        gent_daemon::config::initialize(directory.path(), "diagnostic").unwrap();
+        let auth_dir = directory.path().join("auth");
+        managed_file::directory(&auth_dir).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let session = ServiceSession {
+            account_id: uuid::Uuid::new_v4().to_string(),
+            github_subject: "PRIVATE-SUBJECT".into(),
+            github_login: "PRIVATE-LOGIN".into(),
+            created_at: now().unwrap(),
+            expires_at: now().unwrap() + 3600,
+        };
+        let pin = gent_daemon::config::ServiceConfig {
+            origin: origin.clone(),
+            account_id: session.account_id.clone(),
+        };
+        let saved = Saved {
+            version: 1,
+            service: origin,
+            token: candidate().unwrap(),
+            phase: Phase::Active,
+            session: Some(session.clone()),
+        };
+        let path = auth_dir.join("session.json");
+        save(&path, Some(&saved)).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mode = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (m, r) = (mode.clone(), requests.clone());
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(socket.read_u8().await.unwrap());
+                }
+                assert!(head.starts_with(b"GET /v1/auth/session HTTP/1.1\r\n"));
+                r.fetch_add(1, Ordering::SeqCst);
+                let mode = m.load(Ordering::SeqCst);
+                let mut response = session.clone();
+                if mode == 2 {
+                    response.account_id = uuid::Uuid::new_v4().to_string();
+                }
+                let (status, body) = if mode == 1 {
+                    (401, "{}".into())
+                } else {
+                    (200, serde_json::to_string(&response).unwrap())
+                };
+                socket.write_all(format!("HTTP/1.1 {status} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        assert_eq!(
+            diagnose(directory.path(), Some(&pin), false).await.unwrap()["status"],
+            "cached"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        let value = diagnose(directory.path(), Some(&pin), true).await.unwrap();
+        assert_eq!(value["status"], "active");
+        let text = value.to_string();
+        for secret in [
+            &saved.token,
+            &saved.session.as_ref().unwrap().github_login,
+            &pin.account_id,
+        ] {
+            assert!(!text.contains(secret));
+        }
+        mode.store(1, Ordering::SeqCst);
+        assert_eq!(
+            diagnose(directory.path(), Some(&pin), true).await.unwrap()["status"],
+            "signed_out"
+        );
+        mode.store(2, Ordering::SeqCst);
+        assert!(diagnose(directory.path(), Some(&pin), true).await.is_err());
+        let bad = gent_daemon::config::ServiceConfig {
+            origin: "https://example.invalid".into(),
+            ..pin
+        };
+        let count = requests.load(Ordering::SeqCst);
+        assert!(diagnose(directory.path(), Some(&bad), true).await.is_err());
+        assert_eq!(requests.load(Ordering::SeqCst), count);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!auth_dir.join("session.lock").exists());
+        task.abort();
+    }
     #[test]
     fn malformed_saved_authentication_never_echoes_values() {
         use std::os::unix::fs::PermissionsExt;

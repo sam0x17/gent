@@ -8,6 +8,8 @@ The source CLI also has [recoverable service setup](service-setup.md), tested ag
 
 ## Build and verify
 
+Use [`gent doctor`](diagnostics.md) to diagnose the selected profile without changing setup. It inspects local credentials, the live daemon's signed authority and relay observations, service registration, gateway pins, and user-scope host/shell integrations. `--online` also checks a saved Gent account session. The report gives suggested commands; it does not repair state or establish hosted-provider compatibility.
+
 Use Rust 1.98 or newer and Python 3 for the process-level test. Run from this repository's root:
 
 ```sh

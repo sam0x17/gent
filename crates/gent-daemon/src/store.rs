@@ -18,6 +18,7 @@ use std::{
 };
 use tokio::sync::Notify;
 mod configuration;
+mod diagnostics;
 mod files;
 mod history;
 pub mod invitations;
@@ -50,6 +51,7 @@ pub struct Store {
     identity: Identity,
     owner_hash: String,
     pub(crate) sync_wakeup: Arc<Notify>,
+    pub(crate) sync_health: Arc<crate::sync::health::Health>,
 }
 impl Store {
     /// Called by offline owner provisioning while holding daemon.lock. Service
@@ -150,6 +152,7 @@ impl Store {
             owner_hash,
             identity,
             sync_wakeup: Arc::new(Notify::new()),
+            sync_health: Arc::default(),
         };
         // Projection failure must never replace committed authority with TOML.
         let _ = store.project_config();
@@ -197,6 +200,15 @@ impl Store {
     fn execute_step(&mut self, request: Request, export_step: files::ExportStep) -> Result<Value> {
         if let Request::Owner { credential, .. } = &request {
             ensure!(hash(credential) == self.owner_hash, "unauthorized");
+        }
+        if matches!(
+            &request,
+            Request::Owner {
+                action: OwnerOp::Diagnose,
+                ..
+            }
+        ) {
+            return self.diagnose();
         }
         if let Request::Owner {
             action: OwnerOp::Pair { cluster_id, action },
@@ -493,7 +505,7 @@ impl StoreSession<'_> {
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
-            OwnerOp::Pair { .. } | OwnerOp::Invitation { .. } => {
+            OwnerOp::Pair { .. } | OwnerOp::Invitation { .. } | OwnerOp::Diagnose => {
                 anyhow::bail!("pairing must use its owner-authenticated entry point")
             }
             OwnerOp::Status => Ok(

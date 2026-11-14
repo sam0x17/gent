@@ -23,6 +23,36 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 struct Task(JoinHandle<()>);
+
+#[tokio::test]
+async fn diagnostics_distinguish_relay_contact_failed_streams_and_recovery() {
+    use std::sync::atomic::Ordering;
+    let relay = relay::RelayServer::start().await;
+    let pair = Pair::new(&relay).await;
+    pair.wait(|| {
+        pair.owner(0, OwnerOp::Diagnose)["relay"]["health"]["last_success_at"].is_number()
+    })
+    .await;
+    relay.mode.store(1, Ordering::SeqCst);
+    let _ = relay.notices.send(relay::Notice::Close);
+    pair.wait(|| {
+        pair.owner(0, OwnerOp::Diagnose)["relay"]["health"]["retrying_streams"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    })
+    .await;
+    let failed = pair.owner(0, OwnerOp::Diagnose);
+    assert!(failed["relay"]["health"]["last_failure_at"].is_number());
+    assert!(!failed.to_string().contains(&relay.token));
+    relay.mode.store(0, Ordering::SeqCst);
+    pair.wait(|| {
+        let h = &pair.owner(0, OwnerOp::Diagnose)["relay"]["health"];
+        h["retrying_streams"] == 0 && h["notifications_connected"] == true
+    })
+    .await;
+    assert!(pair.owner(0, OwnerOp::Diagnose)["relay"]["health"]["last_success_at"].is_number());
+}
 impl Drop for Task {
     fn drop(&mut self) {
         self.0.abort();
