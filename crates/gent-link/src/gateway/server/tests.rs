@@ -9,6 +9,7 @@ use tokio::{
     net::TcpStream,
     task::JoinHandle,
 };
+mod oauth;
 
 struct Fixture {
     _temp: tempfile::TempDir,

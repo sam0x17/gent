@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 const MAX_CONNECTIONS: usize = 64;
 const REQUEST_TIME: Duration = Duration::from_secs(30);
 const CONNECTION_TIME: Duration = Duration::from_secs(60);
+mod oauth;
 
 #[cfg(test)]
 mod tests;
@@ -55,8 +56,8 @@ fn one<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 impl Boundary {
     fn validate(&self, request: &Request<Body>) -> Result<()> {
         ensure!(
-            request.uri().path() == "/mcp"
-                && request.uri().query().is_none()
+            (request.uri().query().is_none()
+                || matches!(request.uri().path(), "/oauth/authorize" | "/oauth/continue"))
                 && request.uri().scheme().is_none()
                 && request.uri().authority().is_none(),
             "invalid request target"
@@ -89,6 +90,9 @@ async fn guard(
         if boundary.validate(&request).is_err() {
             return StatusCode::FORBIDDEN.into_response();
         }
+        if request.uri().path() != "/mcp" {
+            return oauth::handle(&boundary, request).await;
+        }
         let token = one(request.headers(), "authorization")
             .and_then(|s| s.strip_prefix("Bearer "))
             .filter(|s| s.len() <= 128)
@@ -96,11 +100,16 @@ async fn guard(
         // The SDK sees the authorization decision, never the raw bearer.
         request.headers_mut().remove(header::AUTHORIZATION);
         let Some(token) = token else {
-            return StatusCode::UNAUTHORIZED.into_response();
+            return oauth::challenge(&boundary.origin);
         };
-        let permit = boundary.registry.authenticate_remote(token).await;
-        let Ok(permit) = permit else {
-            return StatusCode::UNAUTHORIZED.into_response();
+        let permit = boundary
+            .registry
+            .authenticate_remote(token, format!("{}/mcp", boundary.origin))
+            .await;
+        let permit = match permit {
+            Ok(permit) => permit,
+            Err(error) if error.is::<super::registry::Busy>() => return oauth::busy(),
+            Err(_) => return oauth::challenge(&boundary.origin),
         };
         request.extensions_mut().insert(permit);
         next.run(request).await
@@ -111,6 +120,18 @@ async fn guard(
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("referrer-policy", "no-referrer".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("x-content-type-options", "nosniff".parse().unwrap());
+    response.headers_mut().insert(
+        "content-security-policy",
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            .parse()
+            .unwrap(),
+    );
     response
 }
 

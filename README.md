@@ -14,7 +14,7 @@ Web agents may use a Gent-hosted bridge with an explicit warning that Gent and t
 
 An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQLite inbox, permission evaluator, and stdio MCP server. Independent MCP clients can register, exchange text and image bytes, reply, and recover queued work after a restart. Follow the [local proof guide](docs/local-proof.md) to build and try it.
 
-The [remote MCP gateway](docs/gateway.md) now serves the same agent tools on a user-controlled node, with direct TLS, expiring host credentials and persistent per-conversation bindings. It supports inline files/images and relay turns. Tests use synthetic trusted hosts; actual ChatGPT/Claude hosted connectors, OAuth and mobile operation still need verification.
+The [remote MCP gateway](docs/gateway.md) now serves the same agent tools on a user-controlled node, with direct TLS, expiring host credentials and persistent per-conversation bindings. It supports inline files/images, relay turns and [owner-approved OAuth](docs/gateway-oauth.md) with PKCE and rotating refresh tokens. Tests use synthetic trusted hosts; actual ChatGPT/Claude hosted connectors and mobile operation still need verification.
 
 The [account-login prototype](docs/local-proof.md#account-login) adds GitHub browser/device login, service-session status and logout. Native tests pass on both OSes against a local provider fixture, including interrupted login and offline logout. Real GitHub consent remains unverified, the default `https://api.gent.link` service is not deployed, and hosted enrollment remains unfinished.
 

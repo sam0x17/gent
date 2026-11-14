@@ -1,6 +1,6 @@
 //! User-controlled remote MCP. The HTTP credential authenticates a trusted host
 //! namespace; every agent call also needs that host's conversation metadata.
-mod registry;
+pub(crate) mod registry;
 mod server;
 use crate::{contexts, managed_file};
 use anyhow::{Result, ensure};
@@ -23,6 +23,23 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ClientCommand>,
     },
+    /// Inspect and authorize OAuth connection requests on this node.
+    Oauth {
+        #[command(subcommand)]
+        command: Option<OAuthCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OAuthCommand {
+    Requests,
+    /// Approve the exact request shown in your browser after checking its client and callback.
+    Approve {
+        request: String,
+    },
+    Deny {
+        request: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -40,6 +57,12 @@ pub enum ClientCommand {
         out: PathBuf,
         #[arg(long, default_value_t=720, value_parser=clap::value_parser!(u64).range(1..=8760))]
         ttl_hours: u64,
+        /// Pin this OAuth client's exact MCP resource URL. The export token becomes its client secret.
+        #[arg(long, requires = "redirect_uri")]
+        oauth_resource: Option<String>,
+        /// Exact OAuth callback URL; repeat for additional callbacks. No wildcards.
+        #[arg(long, requires = "oauth_resource")]
+        redirect_uri: Vec<String>,
     },
     /// Reject future requests from this host, retaining agent identities and messages.
     Revoke {
@@ -65,6 +88,14 @@ pub struct Run {
 pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Option<Value>> {
     let home = managed_file::normalize(home)?;
     match command {
+        Command::Oauth { command } => {
+            let registry = Registry::open(&home)?;
+            Ok(Some(match command.unwrap_or(OAuthCommand::Requests) {
+                OAuthCommand::Requests => registry.oauth_requests()?,
+                OAuthCommand::Approve { request } => registry.oauth_decide(&request, true)?,
+                OAuthCommand::Deny { request } => registry.oauth_decide(&request, false)?,
+            }))
+        }
         Command::Run(options) => {
             ensure!(
                 explicit,
@@ -92,13 +123,19 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
                     conversation_key,
                     out,
                     ttl_hours,
+                    oauth_resource,
+                    redirect_uri,
                 }),
-        } => Ok(Some(registry::add(
+        } => Ok(Some(registry::add_client(
             &home,
             &name,
             &conversation_key,
             &out,
             ttl_hours,
+            oauth_resource.map(|resource| registry::oauth::Registration {
+                resource,
+                redirect_uris: redirect_uri,
+            }),
         )?)),
         Command::Clients {
             command: Some(ClientCommand::Revoke { client }),

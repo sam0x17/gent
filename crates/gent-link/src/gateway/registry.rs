@@ -22,6 +22,16 @@ const MAX_CLIENT_BINDINGS: usize = 256;
 const MAX_LIFETIME: u64 = 8760 * 3600;
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WORKERS: usize = 16;
+pub(crate) mod oauth;
+
+#[derive(Debug)]
+pub(crate) struct Busy;
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("gateway is busy")
+    }
+}
+impl std::error::Error for Busy {}
 
 #[cfg(test)]
 mod tests;
@@ -38,6 +48,7 @@ pub(crate) struct Registry {
 pub(crate) struct Permit {
     client: String,
     hash: String,
+    oauth: Option<(String, String)>,
 }
 
 // These records contain private agent credentials and never implement Debug.
@@ -50,6 +61,8 @@ struct State {
     node: String,
     clock: u64,
     clients: BTreeMap<String, Client>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oauth: Option<oauth::Records>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +75,8 @@ struct Client {
     export: PathBuf,
     revoked: bool,
     bindings: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oauth: Option<oauth::Registration>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,6 +91,8 @@ struct Export {
     token: String,
     created_at: u64,
     expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oauth: Option<oauth::Registration>,
 }
 
 fn uuid(value: &str) -> bool {
@@ -144,8 +161,9 @@ fn directory_check(path: &Path) -> Result<()> {
 
 impl State {
     fn validate(&self) -> Result<()> {
+        let oauth = self.oauth.is_some() || self.clients.values().any(|c| c.oauth.is_some());
         ensure!(
-            self.version == 1
+            self.version == if oauth { 2 } else { 1 }
                 && uuid(&self.id)
                 && uuid(&self.cluster)
                 && uuid(&self.node)
@@ -157,6 +175,9 @@ impl State {
         for (id, client) in &self.clients {
             config::label(&client.name)?;
             metadata_key(&client.conversation_key)?;
+            if let Some(registration) = &client.oauth {
+                registration.validate()?;
+            }
             ensure!(
                 uuid(id)
                     && names.insert(&client.name)
@@ -178,12 +199,21 @@ impl State {
             count += client.bindings.len();
         }
         ensure!(count <= MAX_BINDINGS, "gateway binding capacity exceeded");
+        if let Some(records) = &self.oauth {
+            records.validate(self)?;
+        }
         Ok(())
     }
 }
 
 impl Registry {
     pub(crate) fn open(home: &Path) -> Result<Self> {
+        let home = managed_file::normalize(home)?;
+        directory_check(&home.join("gateway"))?;
+        let _lock = managed_file::lock(&home.join("gateway/state.lock"))?;
+        Self::open_locked(&home)
+    }
+    fn open_locked(home: &Path) -> Result<Self> {
         let home = managed_file::normalize(home)?;
         let cfg = contexts::inspect(&home)?;
         let id = cfg
@@ -205,11 +235,7 @@ impl Registry {
         &self,
         operation: impl FnOnce(Self) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let slot = self
-            .workers
-            .clone()
-            .try_acquire_owned()
-            .context("gateway is busy")?;
+        let slot = self.workers.clone().try_acquire_owned().map_err(|_| Busy)?;
         let registry = self.clone();
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
@@ -218,8 +244,12 @@ impl Registry {
         .await
         .context("gateway worker unavailable")?
     }
-    pub(crate) async fn authenticate_remote(&self, token: String) -> Result<Permit> {
-        self.blocking(move |registry| registry.authenticate(&token))
+    pub(crate) async fn authenticate_remote(
+        &self,
+        token: String,
+        resource: String,
+    ) -> Result<Permit> {
+        self.blocking(move |registry| registry.authenticate_at(&token, Some(&resource)))
             .await
     }
     pub(crate) async fn credential_remote(&self, permit: Permit, meta: Value) -> Result<String> {
@@ -264,16 +294,29 @@ impl Registry {
         ensure!(bytes.len() <= MAX_BYTES, "gateway registry is too large");
         snapshot(&self.directory().join("state.json"))?.write(&bytes)
     }
+    #[cfg(test)]
     pub(crate) fn authenticate(&self, token: &str) -> Result<Permit> {
-        let id = token_id(token)?;
+        self.authenticate_at(token, None)
+    }
+    fn authenticate_at(&self, token: &str, resource: Option<&str>) -> Result<Permit> {
         directory_check(&self.directory())?;
         let _lock = managed_file::lock(&self.directory().join("state.lock"))?;
         let mut state = self.read()?;
-        let permit = Permit {
-            client: id.into(),
-            hash: digest(token),
-        };
         let now = auth::now()?;
+        let permit = if token.starts_with("gent_a1.") {
+            oauth::access_permit(
+                &state,
+                token,
+                resource.context("OAuth requires a resource audience")?,
+                now,
+            )?
+        } else {
+            Permit {
+                client: token_id(token)?.into(),
+                hash: digest(token),
+                oauth: None,
+            }
+        };
         Self::client(&state, &permit, now)?;
         if state.clock != now {
             state.clock = now;
@@ -287,10 +330,14 @@ impl Registry {
             .clients
             .get(&permit.client)
             .context("invalid gateway credential")?;
+        let valid = if permit.oauth.is_some() {
+            oauth::check_access(state, permit, now).is_ok()
+        } else {
+            client.oauth.is_none()
+                && bool::from(client.token_hash.as_bytes().ct_eq(permit.hash.as_bytes()))
+        };
         ensure!(
-            !client.revoked
-                && now < client.expires_at
-                && bool::from(client.token_hash.as_bytes().ct_eq(permit.hash.as_bytes())),
+            !client.revoked && now < client.expires_at && valid,
             "inactive gateway credential"
         );
         Ok(client)
@@ -342,7 +389,7 @@ impl Registry {
             .map(|(id, c)| {
                 json!({"id":id,"name":c.name,
             "conversation_key":c.conversation_key,"expires_at":c.expires_at,"revoked":c.revoked,
-            "active":!c.revoked && now<c.expires_at,"conversations":c.bindings.len()})
+            "active":!c.revoked && now<c.expires_at,"conversations":c.bindings.len(),"oauth":c.oauth})
             })
             .collect();
         Ok(
@@ -367,7 +414,22 @@ impl Registry {
     }
 }
 
+#[cfg(test)]
 pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) -> Result<Value> {
+    add_client(home, name, key, out, hours, None)
+}
+
+pub(super) fn add_client(
+    home: &Path,
+    name: &str,
+    key: &str,
+    out: &Path,
+    hours: u64,
+    oauth: Option<oauth::Registration>,
+) -> Result<Value> {
+    if let Some(registration) = &oauth {
+        registration.validate()?;
+    }
     config::label(name)?;
     metadata_key(key)?;
     ensure!(
@@ -376,7 +438,11 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
     );
     let home = managed_file::normalize(home)?;
     let home = home.as_path();
-    contexts::inspect(home)?;
+    directory_check(home)?;
+    ensure!(
+        config::path(home).is_file(),
+        "initialize this node before adding a gateway client"
+    );
     let directory = home.join("gateway");
     config::private_dir(&directory)?;
     directory_check(&directory)?;
@@ -403,6 +469,7 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
                 node: cfg.node.id,
                 clock: auth::now()?,
                 clients: BTreeMap::new(),
+                oauth: None,
             }
         };
         file.write(&(serde_json::to_string(&state)? + "\n"))?;
@@ -414,7 +481,7 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
             cfg.set_gateway_registry(state.id.clone())
         })?;
     }
-    let registry = Registry::open(home)?;
+    let registry = Registry::open_locked(home)?;
     let mut state = registry.read()?;
     let out = managed_file::normalize(out)?;
     let exported = snapshot(&out)?;
@@ -444,6 +511,7 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
             token: format!("gent_g1.{id}.{}", config::secret()),
             created_at: now,
             expires_at: now + hours * 3600,
+            oauth: oauth.clone(),
         }
     };
     ensure!(
@@ -453,6 +521,7 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
             && value.node == registry.node
             && value.name == name
             && value.conversation_key == key
+            && value.oauth == oauth
             && token_id(&value.token)? == value.client
             && value.created_at <= now
             && value.expires_at.checked_sub(value.created_at) == Some(hours * 3600),
@@ -470,6 +539,10 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
             "gateway client options changed"
         );
         ensure!(
+            client.oauth == oauth,
+            "gateway client authorization mode changed"
+        );
+        ensure!(
             !client.revoked,
             "revoked gateway credentials cannot be reactivated"
         );
@@ -485,6 +558,9 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
         // Export first, registry second. A retry after either write reuses the
         // same secret. No bearer or signing key is printed by the command.
         exported.write(&(serde_json::to_string(&value)? + "\n"))?;
+        if oauth.is_some() {
+            state.version = 2;
+        }
         state.clients.insert(
             value.client.clone(),
             Client {
@@ -496,6 +572,7 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
                 export: out.clone(),
                 revoked: false,
                 bindings: BTreeMap::new(),
+                oauth,
             },
         );
         state.clock = now;
@@ -503,7 +580,7 @@ pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) ->
     }
     Ok(
         json!({"client":value.client,"name":name,"credential_file":out,"expires_at":value.expires_at,
-        "conversation_key":key,"security_mode":"user_controlled_gateway",
+        "conversation_key":key,"security_mode":"user_controlled_gateway","oauth":value.oauth,
         "scope":"trusted host namespace; required conversation metadata selects each agent"}),
     )
 }

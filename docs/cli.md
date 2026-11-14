@@ -110,8 +110,10 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent gateway clients add NAME --conversation-key KEY --out FILE` | Export a private credential for a trusted host's conversation namespace. |
 | `gent gateway clients list` / `gent gateway clients revoke ID` | Inspect or revoke remote host grants. |
 | `gent gateway run` | Serve Streamable HTTP in the foreground with explicit `--home` or `--cluster`; non-loopback listeners require direct TLS. |
+| `gent gateway oauth requests` | Inspect pending OAuth client requests, callback URLs and decisions without displaying codes or tokens. |
+| `gent gateway oauth approve ID` / `gent gateway oauth deny ID` | Decide a specific connection request as the local node owner. |
 
-The [user-controlled gateway](gateway.md) uses authenticated host credentials and required per-call conversation metadata. Hosted provider support, OAuth and native hosted attachment handles remain unverified.
+The [user-controlled gateway](gateway.md) uses authenticated host credentials and required per-call conversation metadata. `clients add --oauth-resource URL --redirect-uri URL` configures an [OAuth client](gateway-oauth.md) with PKCE and refresh support. Hosted provider support and native hosted attachment handles remain unverified.
 
 The auth commands are implemented as a prototype. `gent auth login --headless` uses GitHub device authorization; SSH sessions select it automatically. `--no-browser` instead prints a browser authorization URL and waits on a local loopback callback. `--service ORIGIN` selects an account service. The default `https://api.gent.link` is not deployed. Both paths pass local fixture proofs on Linux and macOS; real GitHub consent remains unverified. See [account login](local-proof.md#account-login) before trying the commands.
 

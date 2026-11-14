@@ -258,9 +258,14 @@ impl ServerHandler for GentMcp {
                 let meta = serde_json::to_value(&context.meta).expect("MCP metadata serializes");
                 match registry.credential_remote(permit, meta).await {
                     Ok(credential) => credential,
-                    _ => return Ok(CallToolResult::error(vec![ContentBlock::text(
-                        "gateway authorization or conversation binding unavailable; check host metadata and credential status"
-                    )]).into()),
+                    Err(failure) => {
+                        let message = if failure.is::<crate::gateway::registry::Busy>() {
+                            "gateway is busy; retry identical arguments with the original request ID"
+                        } else {
+                            "gateway authorization or conversation binding unavailable; check host metadata and credential status"
+                        };
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(message)]).into());
+                    }
                 }
             }
             Credentials::Host(bindings) => {

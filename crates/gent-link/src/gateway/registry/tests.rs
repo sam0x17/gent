@@ -295,12 +295,15 @@ async fn disconnected_call_keeps_worker_slot_until_filesystem_work_finishes() {
     task.abort();
     let _ = task.await;
     assert_eq!(f.registry.workers.available_permits(), 0);
-    assert!(
-        f.registry
-            .authenticate_remote(f.token.clone())
-            .await
-            .is_err()
-    );
+    let failure = match f
+        .registry
+        .authenticate_remote(f.token.clone(), "http://127.0.0.1:8787/mcp".into())
+        .await
+    {
+        Err(failure) => failure,
+        Ok(_) => panic!("exhausted worker pool accepted authentication"),
+    };
+    assert!(failure.is::<Busy>());
     release.send(()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while f.registry.workers.available_permits() == 0 {
@@ -310,7 +313,7 @@ async fn disconnected_call_keeps_worker_slot_until_filesystem_work_finishes() {
     .await
     .unwrap();
     f.registry
-        .authenticate_remote(f.token.clone())
+        .authenticate_remote(f.token.clone(), "http://127.0.0.1:8787/mcp".into())
         .await
         .unwrap();
     drop(reserved);
