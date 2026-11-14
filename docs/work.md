@@ -59,4 +59,14 @@ cargo build -p gent-link
 python3 scripts/prove_work.py --gent target/debug/gent
 ```
 
-The proof drops a begin response, kills and restarts the daemon, performs explicit owner reconciliation, writes one disposable host output, crashes again, checks that a repeated begin cannot start it again, and records completion before sending a separate reply. It uses isolated state and synthetic MCP clients, with no model calls. Real-model adherence to the workflow and interruption of arbitrary external tools remain unverified.
+The proof drops a begin response, kills and restarts the daemon, performs explicit owner reconciliation, writes one disposable host output, crashes again, checks that a repeated begin cannot start it again, and records completion before sending a separate reply. It uses isolated state and synthetic MCP clients, with no model calls.
+
+## Real-host acceptance
+
+Separate opt-in tests using real Codex and Claude Code conversations pass on Linux and macOS. Each host receives an authorized request to append one line to a disposable file. A test proxy first withholds a committed begin response, then the controller stops the host, its MCP children and the daemon. On resumption, the agent reads the saved start and waits for owner review without changing the file.
+
+After the owner checks the absent output and approves one retry, the agent records a second start and performs one append. The proxy then stops the completion call before it reaches Gent. After another restart, the same conversation inspects the actual file, records the checked outcome and replies to the original message without another append. Agent identity and the original message remain unchanged.
+
+Verification compares the native database, MCP traffic, host command transcripts and file contents. It checks that the successful begin response preceded the action, that recovery included a fresh inspection before completion, and that the reply followed recorded completion. Eleven verification controls using altered evidence or forbidden commands are rejected. The tested hosts were Codex 0.167.2 on Linux and 0.167.0 on Mac, and Claude Code 2.1.323 on Linux and 2.1.311 on Mac.
+
+This establishes one bounded workflow involving a shell command using normal Gent guidance and explicit test authorization. Turns and crashes were scheduled by the controller. Arbitrary external operations, crashes during a partially applied action, longer conversations, GUI/mobile hosts and automatic host wake-up remain separate acceptance work. A journal still cannot guarantee exactly-once external execution.
