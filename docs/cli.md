@@ -214,4 +214,6 @@ All support `--json` and use local owner authority. Authenticated receiver check
 
 ## Backup and recovery
 
-Backup commands and restored-node activation remain unimplemented. The CLI refuses state marked `recovery-required.json` before selecting a cluster profile or contacting a daemon. A copied profile registry cannot redirect commands to a live external node. Removing the marker does not make old encryption state safe to resume. See [recovery requirements and the offline boundary](recovery.md).
+`gent backup keygen --output KEY` creates a private recovery identity. `gent backup create ARCHIVE --identity KEY` captures a stopped node. `verify` checks the complete archive; `inspect [--files]` verifies before returning its metadata. `gent backup extract ARCHIVE --identity KEY --output DIRECTORY` publishes a verified, guarded offline copy at a new path. Keys, archives and extraction outputs are never overwritten. Only `create` uses cluster selection. See [backup scope, limits and examples](recovery.md).
+
+Restored-node activation remains unimplemented. The CLI refuses state marked `recovery-required.json` before selecting a cluster profile or contacting a daemon. A copied profile registry cannot redirect commands to a live external node. Removing the marker does not make old encryption state safe to resume.

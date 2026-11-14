@@ -26,7 +26,7 @@ This version assumes one active configuration writer holding the cluster's owner
 
 Signed states contain private node names, membership, and policy; signatures alone do not conceal them. The configuration dispatcher encrypts these records in established MLS streams before upload. Initial grants and key packages travel through the invitation's authenticated Noise channel or trusted SSH pairing and are never published to the relay in plaintext. A future hosted bridge must receive only its agent's scoped credentials and grants, never this full configuration or the owner key.
 
-The [recovery boundary](recovery.md) refuses operational access to directories marked `recovery-required.json`, including nested profiles and aliases. It runs before profile selection, daemon startup, configuration mutation, database opening and local RPC. Archive creation, verified extraction and safe node/owner replacement remain unfinished. A copied database must not be started as the old node.
+The [recovery boundary](recovery.md) refuses operational access to directories marked `recovery-required.json`, including nested profiles and aliases. It runs before profile selection, daemon startup, configuration mutation, database opening and local RPC. Encrypted offline backups now include manifest origin authentication, full verification and guarded extraction. They preserve historical secrets; they cannot establish current authority or replace a node or owner. Safe node/owner replacement remains unfinished. A copied database must not be started as the old node.
 
 ## Account sessions
 

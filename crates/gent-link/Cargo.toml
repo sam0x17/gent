@@ -19,6 +19,10 @@ gent-protocol = { path = "../gent-protocol" }
 gent-daemon = { path = "../gent-daemon" }
 gent-crypto = { path = "../gent-crypto", features = ["invitation"] }
 anyhow.workspace = true
+# 0.12's unused ML-KEM backend conflicts with the MLS stack's stable kem API.
+# The standard age X25519 stream format used for backups is unchanged.
+age = { version = "0.11.5", default-features = false }
+rusqlite.workspace = true
 clap.workspace = true
 clap_complete = "4.6"
 fs2.workspace = true

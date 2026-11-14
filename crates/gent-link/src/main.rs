@@ -1,4 +1,5 @@
 mod auth;
+mod backup;
 mod cluster;
 mod contexts;
 mod doctor;
@@ -48,6 +49,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Create, verify or extract encrypted offline node backups.
+    Backup {
+        #[command(subcommand)]
+        command: backup::Command,
+    },
     /// Manage permission groups and separately delegated membership editing.
     #[command(alias = "groups")]
     Group {
@@ -407,6 +413,18 @@ async fn main() {
 }
 
 async fn execute(cli: Cli) -> Result<()> {
+    if let Some(Command::Backup { command }) = cli.command {
+        let value = backup::execute(command, cli.home.as_deref(), cli.context.as_deref())?;
+        println!(
+            "{}",
+            if cli.json {
+                serde_json::to_string(&value)?
+            } else {
+                serde_json::to_string_pretty(&value)?
+            }
+        );
+        return Ok(());
+    }
     if let Some(Command::Completions { shell }) = cli.command {
         let mut script = Vec::new();
         clap_complete::generate(shell.generator(), &mut Cli::command(), "gent", &mut script);
@@ -565,7 +583,7 @@ async fn execute(cli: Cli) -> Result<()> {
         })
     );
     let output = match cli.command {
-        Some(Command::Doctor(_)) => unreachable!(),
+        Some(Command::Doctor(_) | Command::Backup { .. }) => unreachable!(),
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::New { name, local }),
