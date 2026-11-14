@@ -19,6 +19,8 @@ mod administration;
 mod group_administration;
 #[path = "runtime/permissions.rs"]
 mod permissions;
+#[path = "runtime/recovery.rs"]
+mod recovery;
 #[path = "runtime/rule_administration.rs"]
 mod rule_administration;
 

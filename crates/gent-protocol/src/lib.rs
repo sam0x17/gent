@@ -547,6 +547,11 @@ pub enum OwnerOp {
     Providers,
     FilesStatus,
     HistoryStatus,
+    /// Private recovery evidence. These operations grant no replacement authority.
+    RecoveryChallenge,
+    RecoveryObserve {
+        challenge: String,
+    },
     WorkList {
         after_message_id: Option<String>,
     },

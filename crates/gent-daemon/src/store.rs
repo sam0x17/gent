@@ -625,6 +625,18 @@ impl StoreSession<'_> {
             OwnerOp::FilesStatus => self.files_status(),
             OwnerOp::FilesClean { dry_run } => self.files_clean(dry_run),
             OwnerOp::HistoryStatus => self.history_status(),
+            OwnerOp::RecoveryChallenge => Ok(serde_json::to_value(
+                gent_crypto::recovery::RecoveryBaseline::new(&self.state, self.timestamp as u64)?,
+            )?),
+            OwnerOp::RecoveryObserve { challenge } => {
+                let challenge =
+                    gent_crypto::recovery::RecoveryChallenge::decode(challenge.as_bytes())?;
+                Ok(serde_json::to_value(self.identity.node.observe_recovery(
+                    &self.state,
+                    &challenge,
+                    self.timestamp as u64,
+                )?)?)
+            }
             OwnerOp::WorkList { after_message_id } => self.work_list(after_message_id.as_deref()),
             OwnerOp::WorkShow { message_id } => self.work_show(&message_id),
             OwnerOp::WorkReconcile {

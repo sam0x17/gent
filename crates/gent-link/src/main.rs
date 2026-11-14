@@ -13,6 +13,7 @@ mod invitations;
 mod managed_file;
 mod mcp;
 mod node;
+mod owner_recovery;
 mod pairing;
 mod permission_admin;
 mod service;
@@ -51,6 +52,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Collect and inspect private recovery evidence; does not replace an owner.
+    Recovery {
+        #[command(subcommand)]
+        command: owner_recovery::Command,
+    },
     /// Inspect local work reports and reconcile interrupted attempts.
     Work {
         #[command(subcommand)]
@@ -469,6 +475,29 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         return Ok(());
     }
+    if let Some(Command::Recovery {
+        command:
+            owner_recovery::Command::Inspect {
+                ref challenge,
+                ref reports,
+            },
+    }) = cli.command
+    {
+        ensure!(
+            cli.context.is_none(),
+            "offline recovery inspection does not select a live cluster"
+        );
+        let value = owner_recovery::inspect(challenge, reports)?;
+        println!(
+            "{}",
+            if cli.json {
+                serde_json::to_string(&value)?
+            } else {
+                serde_json::to_string_pretty(&value)?
+            }
+        );
+        return Ok(());
+    }
     if let Some(Command::Hooks { command }) = cli.command {
         let value = hooks::execute(command.unwrap_or_default())?;
         println!(
@@ -617,6 +646,7 @@ async fn execute(cli: Cli) -> Result<()> {
         })
     );
     let output = match cli.command {
+        Some(Command::Recovery { command }) => owner_recovery::execute(&home, command).await?,
         Some(Command::Work { command }) => work::execute(&home, command).await?,
         Some(Command::Doctor(_) | Command::Backup { .. }) => unreachable!(),
         None => owner(&home, OwnerOp::Status).await?,

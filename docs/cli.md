@@ -216,6 +216,8 @@ All support `--json` and use local owner authority. Authenticated receiver check
 
 ## Backup and recovery
 
+`gent recovery challenge --out FILE` pins the selected node's accepted configuration in a private challenge. `gent recovery witness CHALLENGE --out FILE` records its node-signed observation. `gent recovery inspect CHALLENGE [REPORTS...]` compares reports offline, showing missing nodes and differing or conflicting checkpoints without changing authority. Challenge and witness require local owner RPC access; inspection needs no daemon and rejects `--cluster`. Files must be private, outputs must be new, and collection must finish within 15 minutes. See [owner recovery evidence and its limits](owner-recovery.md). Owner replacement remains unfinished.
+
 `gent backup keygen --output KEY` creates a private recovery identity. `gent backup create ARCHIVE --identity KEY` captures a stopped node. `verify` checks the complete archive; `inspect [--files]` verifies before returning its metadata. `gent backup extract ARCHIVE --identity KEY --output DIRECTORY` publishes a verified, guarded offline copy at a new path. Keys, archives and extraction outputs are never overwritten. Only `create` uses cluster selection. See [backup scope, limits and examples](recovery.md).
 
 `gent history import ARCHIVE --identity KEY --from-agent OLD_UUID --agent CURRENT_UUID` assigns retained historical messages/files to an existing local agent. Use `--from-import IMPORT_UUID` instead to select an assignment saved in a later backup. `gent history imports` lists assignments; removal and restoration require their current access revision.

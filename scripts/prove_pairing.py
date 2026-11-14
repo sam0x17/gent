@@ -146,6 +146,7 @@ def main():
     parser.add_argument('--event-storage', action='store_true', help='Finally advance disposable request clocks to prove node event retry cleanup')
     parser.add_argument('--edit-storage', action='store_true', help='Also prove compact configuration edits and migration while the owner is offline')
     parser.add_argument('--agent-administration', action='store_true', help='Also prove delegated agent edits, private status, owner audit, revocation and restart across both machines')
+    parser.add_argument('--recovery-evidence', action='store_true', help='Exchange signed recovery observations through trusted SSH and inspect them on both machines')
     parser.add_argument('--node-replacement', action='store_true', help='Finally replace the joined node through SSH with fresh keys and prove MCP image/file delivery')
     parser.add_argument('--remote-relay-port', type=int, default=18789)
     args = parser.parse_args()
@@ -346,6 +347,10 @@ def main():
 
             exercise_turns(a, b, attached['attachment']['id'], files, wait_for, restart_relay_nodes)
             print('PASS: two-machine ordered relay turns, PNG forwarding, restart recovery, cancellation, final outcomes, and exact retries')
+            if args.recovery_evidence:
+                from recovery_checks import exercise
+                exercise(cli, lambda *cmd: json.loads(remote(owner + list(cmd)).stdout),
+                         remote, Path(folder), owner_home, restart_relay_nodes, wait_for)
             if args.agent_administration:
                 def admin_owner(*command, error=False):
                     result = remote(owner + list(command), check=not error)

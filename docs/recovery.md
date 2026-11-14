@@ -4,6 +4,8 @@ Gent can create encrypted backups of a stopped node, verify every payload, extra
 
 For interrupted work on an intact node, the [local work journal](work.md) records a recipient's start and checked outcome. `gent work` lists reports and `gent work reconcile` records an owner-reviewed outcome or permits a subsequent attempt. These records survive message cleanup but are not assigned through historical recovery. They do not establish exactly-once external execution or make an old database safe to resume.
 
+For a lost cluster owner, [signed recovery evidence](owner-recovery.md) compares surviving nodes' accepted configuration checkpoints through `gent recovery challenge`, `witness` and offline `inspect`. Reports identify missing, stale or conflicting observations. They do not authorize owner replacement or activate old state.
+
 ## Commands
 
 Keep the recovery key outside node state and separately from the archives. Its private file contains one age X25519 secret string, optionally surrounded by whitespace; Gent never prints the secret. Losing it makes these archives unreadable. Anyone holding it can decrypt archives and create authenticated archives with the same key.
