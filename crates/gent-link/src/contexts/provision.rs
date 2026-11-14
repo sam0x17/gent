@@ -557,14 +557,20 @@ pub(crate) async fn join(
     match prepare(root, account_home, args.intent()?)? {
         Selection::Direct => crate::pairing::join(root, args).await,
         Selection::Existing(home) => {
-            let result = match args.existing(&home)? {
+            let result = match args.existing(&home, None)? {
                 Some(value) => value,
                 None => crate::pairing::join(&home, args).await?,
             };
             select_existing(root, &home, result)
         }
         Selection::Managed(mut ticket) => {
-            let result = match args.existing(&ticket.home)? {
+            // Original routing/name options were matched by prepare. The
+            // completed node pin remains authoritative after a display rename.
+            let pin = ticket.journal.jobs[ticket.index]
+                .complete
+                .as_ref()
+                .map(|pin| pin.node.as_str());
+            let result = match args.existing(&ticket.home, pin)? {
                 Some(value) => value,
                 None => {
                     ensure!(

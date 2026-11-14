@@ -203,3 +203,48 @@ async fn primary_creation_retry_selects_existing_profiles_after_rename() {
     assert_eq!(result["profile"], retry["profile"]);
     assert_eq!(resolve(&root, None).unwrap(), home);
 }
+
+#[tokio::test]
+async fn completed_ssh_join_retry_uses_pinned_identity_after_node_rename() {
+    use clap::Parser;
+    let (_directory, root) = fixture();
+    let cluster = Uuid::new_v4().to_string();
+    let arguments = |name: &str| {
+        let cli = crate::Cli::try_parse_from([
+            "gent", "cluster", "join", &cluster, "--via", "owner", "--name", name,
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            crate::Command::Cluster {
+                command: Some(crate::ClusterCommand::Join(args)),
+            } => args,
+            _ => panic!("expected join arguments"),
+        }
+    };
+    let mut job = ticket(&root, arguments("original-node").intent().unwrap());
+    let home = job.home.clone();
+    let mut cfg = config::initialize(&home, "fixture").unwrap();
+    cfg.cluster.id = cluster.clone();
+    cfg.node.name = "original-node".into();
+    config::save(&home, &cfg).unwrap();
+    job.finish(json!({})).unwrap();
+    drop(job);
+    config::edit_local(&home, |cfg| {
+        cfg.node.name = "renamed-node".into();
+        Ok(())
+    })
+    .unwrap();
+    let daemon = config::state_lock(&home, "daemon.lock").unwrap();
+    let result = join(&root, &root, arguments("original-node"))
+        .await
+        .unwrap();
+    assert_eq!(result["node"]["id"], cfg.node.id);
+    assert_eq!(result["node"]["name"], "renamed-node");
+    assert_eq!(result["already_configured"], true);
+    assert!(
+        join(&root, &root, arguments("changed-request"))
+            .await
+            .is_err()
+    );
+    drop(daemon);
+}

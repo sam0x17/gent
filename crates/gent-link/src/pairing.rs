@@ -88,7 +88,7 @@ impl JoinArgs {
                 "remote_gent":self.remote_gent,"relay_endpoint":self.relay_endpoint}),
         })
     }
-    pub(crate) fn existing(&self, home: &Path) -> Result<Option<Value>> {
+    pub(crate) fn existing(&self, home: &Path, pinned_node: Option<&str>) -> Result<Option<Value>> {
         if crate::managed_file::Snapshot::read(&gent_daemon::config::path(home))?
             .text
             .is_none()
@@ -115,7 +115,8 @@ impl JoinArgs {
             );
         } else {
             ensure!(
-                self.cluster.as_deref() == Some(&cfg.cluster.id) && self.name == cfg.node.name,
+                self.cluster.as_deref() == Some(&cfg.cluster.id)
+                    && pinned_node.map_or(self.name == cfg.node.name, |node| node == cfg.node.id),
                 "installed node does not match the requested join"
             );
         }
