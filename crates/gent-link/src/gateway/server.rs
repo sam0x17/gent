@@ -1,5 +1,6 @@
 //! Direct TLS termination on the owner's node. No forwarded-header trust and
 //! no request logging: even metadata and tool arguments can be private.
+use super::mtls::{self, Peer};
 use super::{Registry, Run};
 use crate::{managed_file, mcp::GentMcp};
 use anyhow::{Context, Result, ensure};
@@ -104,7 +105,15 @@ async fn guard(
         };
         let permit = boundary
             .registry
-            .authenticate_remote(token, format!("{}/mcp", boundary.origin))
+            .authenticate_remote(
+                token,
+                format!("{}/mcp", boundary.origin),
+                request
+                    .extensions()
+                    .get::<Peer>()
+                    .cloned()
+                    .unwrap_or_default(),
+            )
             .await;
         let permit = match permit {
             Ok(permit) => permit,
@@ -171,7 +180,7 @@ fn origin(options: &Run, bound: SocketAddr) -> Result<(String, String)> {
     }
 }
 
-fn tls(options: &Run) -> Result<Option<TlsAcceptor>> {
+fn tls(options: &Run, policies: &[mtls::Policy]) -> Result<Option<TlsAcceptor>> {
     let (Some(cert), Some(key)) = (&options.tls_cert, &options.tls_key) else {
         return Ok(None);
     };
@@ -191,12 +200,14 @@ fn tls(options: &Run) -> Result<Option<TlsAcceptor>> {
         rustls_pemfile::certs(&mut cert_text.as_bytes()).collect::<std::io::Result<Vec<_>>>()?;
     let key_der = rustls_pemfile::private_key(&mut key_text.as_bytes())?
         .context("missing TLS private key")?;
-    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()?
-    .with_no_client_auth()
-    .with_single_cert(certs, key_der)?;
+    let builder = rustls::ServerConfig::builder_with_provider(mtls::provider())
+        .with_safe_default_protocol_versions()?;
+    let builder = if policies.is_empty() {
+        builder.with_no_client_auth()
+    } else {
+        builder.with_client_cert_verifier(mtls::verifier(policies)?)
+    };
+    let mut config = builder.with_single_cert(certs, key_der)?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     cert.verify()?;
     key.verify()?;
@@ -270,8 +281,9 @@ async fn serve(
                 tasks.spawn(async move {
                     let _=tokio::time::timeout(CONNECTION_TIME,async move {
                         if let Some(tls)=tls {
-                            if let Ok(Ok(stream))=tokio::time::timeout(Duration::from_secs(10),tls.accept(socket)).await {
-                                connection(stream,app).await;
+                            if let Ok(Ok(stream))=tokio::time::timeout(Duration::from_secs(10),tls.accept(socket)).await
+                                && let Ok(peer)=Peer::from_tls(stream.get_ref().1.peer_certificates()) {
+                                connection(stream,app.layer(axum::Extension(peer))).await;
                             }
                         } else {connection(socket,app).await;}
                     }).await;
@@ -289,7 +301,7 @@ pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
     let _lock = managed_file::lock(&home.join("gateway/runtime.lock"))?;
     // Validate exposure before binding any non-loopback socket.
     origin(&options, options.listen)?;
-    let tls = tls(&options)?;
+    let tls = tls(&options, &registry.tls_policies()?)?;
     let listener = TcpListener::bind(options.listen).await?;
     let address = listener.local_addr()?;
     let (host, origin) = origin(&options, address)?;

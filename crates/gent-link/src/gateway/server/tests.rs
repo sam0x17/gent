@@ -9,6 +9,7 @@ use tokio::{
     net::TcpStream,
     task::JoinHandle,
 };
+mod mtls;
 mod oauth;
 
 struct Fixture {
@@ -560,7 +561,14 @@ async fn direct_tls_requires_valid_server_trust_and_plaintext_cannot_bind_public
         tls_key: Some(key.clone()),
     };
     let (host, origin_text) = origin(&options, address).unwrap();
-    let server = Running::start(&f.home, listener, origin_text, host, tls(&options).unwrap()).await;
+    let server = Running::start(
+        &f.home,
+        listener,
+        origin_text,
+        host,
+        tls(&options, &[]).unwrap(),
+    )
+    .await;
     let trusted = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(5))
@@ -590,7 +598,7 @@ async fn direct_tls_requires_valid_server_trust_and_plaintext_cannot_bind_public
     );
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(tls(&options).is_err());
+    assert!(tls(&options, &[]).is_err());
     options.tls_cert = None;
     options.tls_key = None;
     options.origin = None;

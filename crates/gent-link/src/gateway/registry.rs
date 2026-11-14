@@ -1,3 +1,4 @@
+use super::mtls::{Peer, Policy as TlsPolicy};
 use crate::{
     auth, contexts,
     managed_file::{self, Snapshot},
@@ -49,6 +50,7 @@ pub(crate) struct Permit {
     client: String,
     hash: String,
     oauth: Option<(String, String)>,
+    peer: Peer,
 }
 
 // These records contain private agent credentials and never implement Debug.
@@ -77,6 +79,12 @@ struct Client {
     bindings: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     oauth: Option<oauth::Registration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mtls: Option<TlsPolicy>,
+    // The separate requirement marker rejects partial records that lose a
+    // certificate policy while other mTLS clients keep the registry at v3.
+    #[serde(default, skip_serializing_if = "is_false")]
+    mtls_required: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,10 +101,15 @@ struct Export {
     expires_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     oauth: Option<oauth::Registration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mtls: Option<TlsPolicy>,
 }
 
 fn uuid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|v| !v.is_nil() && v.to_string() == value)
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 fn digest(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
@@ -174,8 +187,16 @@ fn directory_check(path: &Path) -> Result<()> {
 impl State {
     fn validate(&self) -> Result<()> {
         let oauth = self.oauth.is_some() || self.clients.values().any(|c| c.oauth.is_some());
+        let mtls = self.clients.values().any(|c| c.mtls.is_some());
         ensure!(
-            self.version == if oauth { 2 } else { 1 }
+            self.version
+                == if mtls {
+                    3
+                } else if oauth {
+                    2
+                } else {
+                    1
+                }
                 && uuid(&self.id)
                 && uuid(&self.cluster)
                 && uuid(&self.node)
@@ -190,6 +211,13 @@ impl State {
             if let Some(registration) = &client.oauth {
                 registration.validate()?;
             }
+            if let Some(policy) = &client.mtls {
+                policy.validate()?;
+            }
+            ensure!(
+                client.mtls_required == client.mtls.is_some(),
+                "gateway client certificate policy is missing or inconsistent"
+            );
             ensure!(
                 uuid(id)
                     && names.insert(&client.name)
@@ -260,8 +288,9 @@ impl Registry {
         &self,
         token: String,
         resource: String,
+        peer: Peer,
     ) -> Result<Permit> {
-        self.blocking(move |registry| registry.authenticate_at(&token, Some(&resource)))
+        self.blocking(move |registry| registry.authenticate_peer(&token, Some(&resource), peer))
             .await
     }
     pub(crate) async fn credential_remote(&self, permit: Permit, meta: Value) -> Result<String> {
@@ -310,12 +339,16 @@ impl Registry {
     pub(crate) fn authenticate(&self, token: &str) -> Result<Permit> {
         self.authenticate_at(token, None)
     }
+    #[cfg(test)]
     fn authenticate_at(&self, token: &str, resource: Option<&str>) -> Result<Permit> {
+        self.authenticate_peer(token, resource, Peer::default())
+    }
+    fn authenticate_peer(&self, token: &str, resource: Option<&str>, peer: Peer) -> Result<Permit> {
         directory_check(&self.directory())?;
         let _lock = managed_file::lock(&self.directory().join("state.lock"))?;
         let mut state = self.read()?;
         let now = auth::now()?;
-        let permit = if token.starts_with("gent_a1.") {
+        let mut permit = if token.starts_with("gent_a1.") {
             oauth::access_permit(
                 &state,
                 token,
@@ -327,8 +360,10 @@ impl Registry {
                 client: token_id(token)?.into(),
                 hash: digest(token),
                 oauth: None,
+                peer: Peer::default(),
             }
         };
+        permit.peer = peer;
         Self::client(&state, &permit, now)?;
         if state.clock != now {
             state.clock = now;
@@ -352,6 +387,9 @@ impl Registry {
             !client.revoked && now < client.expires_at && valid,
             "inactive gateway credential"
         );
+        if let Some(policy) = &client.mtls {
+            policy.verify(&permit.peer, now)?;
+        }
         Ok(client)
     }
     pub(crate) fn credential(&self, permit: &Permit, meta: &Value) -> Result<String> {
@@ -402,7 +440,8 @@ impl Registry {
             .map(|(id, c)| {
                 json!({"id":id,"name":c.name,
             "conversation_key":c.conversation_key,"expires_at":c.expires_at,"revoked":c.revoked,
-            "active":!c.revoked && now<c.expires_at,"conversations":c.bindings.len(),"oauth":c.oauth})
+            "active":!c.revoked && now<c.expires_at,"conversations":c.bindings.len(),"oauth":c.oauth,
+            "mtls":c.mtls.as_ref().map(TlsPolicy::summary)})
             })
             .collect();
         Ok(
@@ -425,11 +464,22 @@ impl Registry {
             json!({"client":id,"revoked":true,"scope":"future host requests; already accepted work and agent data are retained"}),
         )
     }
+    pub(super) fn tls_policies(&self) -> Result<Vec<TlsPolicy>> {
+        let state = self.read()?;
+        let now = auth::now()?;
+        ensure!(now >= state.clock, "gateway clock moved backward");
+        Ok(state
+            .clients
+            .into_values()
+            .filter(|c| !c.revoked && now < c.expires_at)
+            .filter_map(|c| c.mtls)
+            .collect())
+    }
 }
 
 #[cfg(test)]
 pub(super) fn add(home: &Path, name: &str, key: &str, out: &Path, hours: u64) -> Result<Value> {
-    add_client(home, name, key, out, hours, None)
+    add_client(home, name, key, out, hours, None, None)
 }
 
 pub(super) fn add_client(
@@ -439,9 +489,13 @@ pub(super) fn add_client(
     out: &Path,
     hours: u64,
     oauth: Option<oauth::Registration>,
+    mtls: Option<TlsPolicy>,
 ) -> Result<Value> {
     if let Some(registration) = &oauth {
         registration.validate()?;
+    }
+    if let Some(policy) = &mtls {
+        policy.validate()?;
     }
     config::label(name)?;
     conversation_key(key)?;
@@ -514,7 +568,7 @@ pub(super) fn add_client(
         );
         let id = Uuid::new_v4().to_string();
         Export {
-            version: 1,
+            version: if mtls.is_some() { 2 } else { 1 },
             registry: registry.id.clone(),
             cluster: registry.cluster.clone(),
             node: registry.node.clone(),
@@ -525,16 +579,18 @@ pub(super) fn add_client(
             created_at: now,
             expires_at: now + hours * 3600,
             oauth: oauth.clone(),
+            mtls: mtls.clone(),
         }
     };
     ensure!(
-        value.version == 1
+        value.version == if mtls.is_some() { 2 } else { 1 }
             && value.registry == registry.id
             && value.cluster == registry.cluster
             && value.node == registry.node
             && value.name == name
             && value.conversation_key == key
             && value.oauth == oauth
+            && value.mtls == mtls
             && token_id(&value.token)? == value.client
             && value.created_at <= now
             && value.expires_at.checked_sub(value.created_at) == Some(hours * 3600),
@@ -552,7 +608,7 @@ pub(super) fn add_client(
             "gateway client options changed"
         );
         ensure!(
-            client.oauth == oauth,
+            client.oauth == oauth && client.mtls == mtls,
             "gateway client authorization mode changed"
         );
         ensure!(
@@ -571,9 +627,13 @@ pub(super) fn add_client(
         // Export first, registry second. A retry after either write reuses the
         // same secret. No bearer or signing key is printed by the command.
         exported.write(&(serde_json::to_string(&value)? + "\n"))?;
-        if oauth.is_some() {
-            state.version = 2;
-        }
+        state.version = state.version.max(if mtls.is_some() {
+            3
+        } else if oauth.is_some() {
+            2
+        } else {
+            1
+        });
         state.clients.insert(
             value.client.clone(),
             Client {
@@ -586,6 +646,8 @@ pub(super) fn add_client(
                 revoked: false,
                 bindings: BTreeMap::new(),
                 oauth,
+                mtls_required: mtls.is_some(),
+                mtls,
             },
         );
         state.clock = now;
@@ -594,6 +656,7 @@ pub(super) fn add_client(
     Ok(
         json!({"client":value.client,"name":name,"credential_file":out,"expires_at":value.expires_at,
         "conversation_key":key,"security_mode":"user_controlled_gateway","oauth":value.oauth,
+        "mtls":value.mtls.as_ref().map(TlsPolicy::summary),
         "scope":"trusted host namespace; required conversation metadata selects each agent"}),
     )
 }

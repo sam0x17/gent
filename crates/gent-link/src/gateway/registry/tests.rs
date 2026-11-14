@@ -360,7 +360,11 @@ async fn disconnected_call_keeps_worker_slot_until_filesystem_work_finishes() {
     assert_eq!(f.registry.workers.available_permits(), 0);
     let failure = match f
         .registry
-        .authenticate_remote(f.token.clone(), "http://127.0.0.1:8787/mcp".into())
+        .authenticate_remote(
+            f.token.clone(),
+            "http://127.0.0.1:8787/mcp".into(),
+            Peer::default(),
+        )
         .await
     {
         Err(failure) => failure,
@@ -376,7 +380,11 @@ async fn disconnected_call_keeps_worker_slot_until_filesystem_work_finishes() {
     .await
     .unwrap();
     f.registry
-        .authenticate_remote(f.token.clone(), "http://127.0.0.1:8787/mcp".into())
+        .authenticate_remote(
+            f.token.clone(),
+            "http://127.0.0.1:8787/mcp".into(),
+            Peer::default(),
+        )
         .await
         .unwrap();
     drop(reserved);

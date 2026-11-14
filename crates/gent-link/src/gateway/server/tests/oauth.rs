@@ -22,6 +22,7 @@ async fn oauth_discovery_consent_pkce_refresh_and_revocation_work_through_real_h
             resource: resource.clone(),
             redirect_uris: vec![redirect.into()],
         }),
+        None,
     )
     .unwrap();
     let value: Value = serde_json::from_slice(&fs::read(export).unwrap()).unwrap();

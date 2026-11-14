@@ -65,6 +65,28 @@ Connect directly or through a transport that preserves the TLS connection to thi
 
 Plaintext tool calls are visible to the model provider and the user's node. Traffic from that node through Gent's central relay uses the existing encrypted daemon transport. This does not provide encryption against the model provider or prove a mobile connector's security. MCP instructions and registration, identity and relay-selection results disclose the user-controlled gateway route. No Gent-hosted plaintext bridge is implemented here.
 
+### Require a client certificate
+
+A host grant can require a TLS client certificate in addition to its bearer or OAuth credentials. Pin one CA certificate and an exact lowercase DNS SAN when creating the grant:
+
+```sh
+gent --home /private/path/gent-node gateway clients add certificate-host \
+  --conversation-key test/conversation \
+  --tls-client-ca /private/path/client-ca.pem \
+  --tls-client-name client.example \
+  --out /private/path/gent-node/certificate-host.json
+```
+
+The CA file must contain one CA certificate, at most 16 KiB of PEM and 8 KiB of DER. Gent copies it into the private registry and export; changing or deleting the original file cannot change trust. `clients list` shows the CA's SHA-256 fingerprint and required DNS name. An identical setup retry retains the grant; omitting or changing either pin fails. Registries containing these grants use version 3, and their exports use version 2. A separate stored requirement marker prevents a missing policy field from silently disabling certificate checks.
+
+Start the normal direct TLS listener after adding the grant. It loads the registered client CAs at startup, so adding another authority requires a gateway restart. Rustls checks the certificate chain and handshake proof of possession. Each authenticated HTTP request and agent tool call checks its own grant's CA, exact DNS SAN, explicit client-authentication usage and certificate validity, including the pinned CA's validity. A sibling intermediate under the same root cannot satisfy another grant. Wildcards, Common Names, HTTP headers and model arguments cannot substitute for the required identity.
+
+Discovery and browser authorization/continuation remain accessible without a certificate. Certificate-bound grants require the certificate for OAuth code exchange, refresh and MCP access. Bearer grants without a certificate policy keep their existing behavior. Even if the listener is later started as loopback HTTP, a certificate-bound grant cannot authenticate. Revocation applies immediately to new requests and per-call checks on existing connections; already accepted work remains.
+
+Leaf certificates may rotate under the pinned CA and DNS name without changing the agent namespace. CA/name changes currently require a new grant, which creates a new namespace; migration between grants is not implemented. There is no automatic CA download, CRL/OCSP checking, or live trust reload. The local owner selects the trust anchor and is responsible for its replacement or grant revocation. Gent logs no peer certificates or request content.
+
+OpenAI's [mTLS guide](https://developers.openai.com/plugins/build/auth#mutual-tls-mtls) publishes a [Connectors intermediate CA](https://developers.openai.com/plugins/mtls/openai-connectors-mtls-ca.pem) and the DNS identity `mtls.prod.connectors.openai.com`. The published intermediate parses and registers with this implementation. This is a candidate ChatGPT configuration; actual provider certificate presentation at the MCP and token endpoints, hosted OAuth onboarding, and conversation stability still need acceptance tests. No provider CA is embedded in Gent. Claude's [remote connector requirements](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp) require publicly reachable HTTPS on port 443; the local CLI proofs on other ports do not establish that hosted route.
+
 ## Files and relay mode
 
 Agents use the existing messaging, receipt and relay tools. Inline files accept actual base64 bytes, up to 1 MiB each and four files per message. Received supported images also appear as MCP image blocks. The host still needs to expose real bytes to its tools; native hosted attachment handles are not supported.
@@ -96,6 +118,7 @@ cargo test -p gent-link gateway
 cargo test -p gent-daemon --test config
 cargo build -p gent-link
 python3 scripts/prove_gateway.py --gent target/debug/gent
+python3 scripts/prove_gateway_mtls.py --gent target/debug/gent
 ```
 
 Tests cover separate conversations and host namespaces, absent and forged identity inputs, duplicate headers, wrong hosts/origins, proxy headers, credential expiry/revocation, registry recovery, concurrent allocation, bounded filesystem work and direct TLS trust. The HTTP/daemon test exchanges a PNG, reply and receipt, recovers a relay turn across both process layers restarting, and checks agent revocation. The CLI proof checks physical-node pinning across profile switches and restarts, live host revocation and clean foreground shutdown. All host calls in these tests are synthetic.

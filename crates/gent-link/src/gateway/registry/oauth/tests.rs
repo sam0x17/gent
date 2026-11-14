@@ -27,6 +27,7 @@ impl Fixture {
             &out,
             720,
             Some(registration.clone()),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -36,7 +37,8 @@ impl Fixture {
                 "test/conversation",
                 &out,
                 720,
-                Some(registration)
+                Some(registration),
+                None,
             )
             .unwrap(),
             result

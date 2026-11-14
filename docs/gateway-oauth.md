@@ -43,6 +43,8 @@ Approve only a connection you started, after matching its request ID and callbac
 
 Approval is limited to the named host namespace. Each agent call still requires host-owned conversation metadata, and daemon permissions still control discovery, sending, receiving and relay selection. OAuth neither proves that metadata's provenance nor grants permission to select an arbitrary existing agent. Choosing a provider label cannot authorize a request. The model provider and user-controlled node see tool plaintext, while Gent's central relay carries encrypted daemon traffic.
 
+An optional [client certificate policy](gateway.md#require-a-client-certificate) binds token exchange, refresh and MCP access to a pinned CA and exact client DNS identity. Browser consent pages and discovery remain accessible without that certificate. The certificate supplements OAuth and does not grant user consent or identify a conversation by itself.
+
 Pending requests expire after ten minutes. An approved code lasts at most five minutes and cannot outlive its request. A decision cannot be reversed; revoke the host grant if an approved request must be disabled. Both an approval retry and a page reload preserve the original code until it expires or is redeemed.
 
 ## Refresh, reconnect and revoke
@@ -59,7 +61,7 @@ Host revocation rejects all its codes, refreshes, new authorization requests and
 
 ## Stored state and limits
 
-OAuth state shares `gateway/state.json` and its mutation lock with host revocation and agent bindings. Registry version 2 prevents older gateway builds from accepting these records. Existing static clients retain their original credentials and bindings. Store a consistent private backup; missing or corrupt established state causes access to fail. Rolling back a backup can also roll back revocations and token generations, so live-state rollback is not a supported recovery procedure.
+OAuth state shares `gateway/state.json` and its mutation lock with host revocation and agent bindings. OAuth registries use version 2, or version 3 when they contain client certificate policies; older gateway readers reject unsupported records. Existing static clients retain their original credentials and bindings. Store a consistent private backup; missing or corrupt established state causes access to fail. Rolling back a backup can also roll back revocations and token generations, so live-state rollback is not a supported recovery procedure.
 
 The registry stores access-token and client-secret digests, pending code secrets until redemption or pruning of expired requests, and private refresh-family keys. Refresh tokens use HMAC-SHA256 over a domain, random family ID and generation; replay detection needs no unbounded list of spent tokens. These private keys remain on the user's node. Registry summaries exclude codes, tokens, PKCE values and browser state. HTTP responses disable caching, referrers and framing, and Gent logs no request content.
 

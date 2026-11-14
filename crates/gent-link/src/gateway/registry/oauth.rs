@@ -230,6 +230,7 @@ pub(super) fn access_permit(
         client: grant.client.clone(),
         hash: digest(token),
         oauth: Some((id.into(), resource.into())),
+        peer: Peer::default(),
     };
     check_access(state, &permit, now)?;
     Ok(permit)
@@ -454,11 +455,16 @@ impl Registry {
         &self,
         fields: Parameters,
         resource: String,
+        peer: Peer,
     ) -> Result<Value> {
-        self.blocking(move |registry| registry.exchange(&fields, &resource))
+        self.blocking(move |registry| registry.exchange_peer(&fields, &resource, &peer))
             .await
     }
+    #[cfg(test)]
     fn exchange(&self, p: &Parameters, resource: &str) -> Result<Value> {
+        self.exchange_peer(p, resource, &Peer::default())
+    }
+    fn exchange_peer(&self, p: &Parameters, resource: &str, peer: &Peer) -> Result<Value> {
         ensure!(
             required(p, "resource")? == resource,
             Failure("invalid_target")
@@ -478,6 +484,11 @@ impl Registry {
                 equal(&client.token_hash, &digest(client_secret)),
                 Failure("invalid_client")
             );
+            if let Some(policy) = &client.mtls {
+                policy
+                    .verify(peer, now)
+                    .map_err(|_| Failure("invalid_client"))?;
+            }
             let client_expiry = client.expires_at;
             match kind {
                 "authorization_code" => {

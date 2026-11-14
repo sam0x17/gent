@@ -101,6 +101,11 @@ pub(super) async fn handle(boundary: &Boundary, request: Request<Body>) -> Respo
         {
             return error("invalid_request");
         }
+        let peer = request
+            .extensions()
+            .get::<Peer>()
+            .cloned()
+            .unwrap_or_default();
         let Ok(bytes) = axum::body::to_bytes(request.into_body(), 8192).await else {
             return error("invalid_request");
         };
@@ -110,7 +115,11 @@ pub(super) async fn handle(boundary: &Boundary, request: Request<Body>) -> Respo
         let Ok(fields) = parameters(text) else {
             return error("invalid_request");
         };
-        return match boundary.registry.oauth_exchange(fields, resource).await {
+        return match boundary
+            .registry
+            .oauth_exchange(fields, resource, peer)
+            .await
+        {
             Ok(value) => Json(value).into_response(),
             Err(failure) if failure.is::<crate::gateway::registry::Busy>() => busy(),
             Err(failure) => error(

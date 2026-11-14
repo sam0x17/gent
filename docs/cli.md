@@ -108,6 +108,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent mcp serve` | Serve the shared MCP interface over stdio, connecting the host's registered agents to the local daemon. |
 | `gent gateway` / `gent gateway status` | Inspect local remote-MCP grants and limits without probing a listener. |
 | `gent gateway clients add NAME --conversation-key KEY --out FILE` | Export a private credential for a trusted host's conversation namespace. |
+| `gent gateway clients add NAME ... --tls-client-ca FILE --tls-client-name DNS` | Additionally require a certificate chaining to the pinned CA with that exact DNS SAN. Applies to MCP access and OAuth token requests. |
 | `gent gateway clients list` / `gent gateway clients revoke ID` | Inspect or revoke remote host grants. |
 | `gent gateway run` | Serve Streamable HTTP in the foreground with explicit `--home` or `--cluster`; non-loopback listeners require direct TLS. |
 | `gent gateway oauth requests` | Inspect pending OAuth client requests, callback URLs and decisions without displaying codes or tokens. |

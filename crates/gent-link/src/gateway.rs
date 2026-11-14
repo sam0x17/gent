@@ -1,5 +1,6 @@
 //! User-controlled remote MCP. The HTTP credential authenticates a trusted host
 //! namespace; every agent call also needs that host's conversation metadata.
+mod mtls;
 pub(crate) mod registry;
 mod server;
 use crate::{contexts, managed_file};
@@ -63,6 +64,12 @@ pub enum ClientCommand {
         /// Exact OAuth callback URL; repeat for additional callbacks. No wildcards.
         #[arg(long, requires = "oauth_resource")]
         redirect_uri: Vec<String>,
+        /// Pin one client CA certificate. The peer must also have the exact --tls-client-name DNS SAN.
+        #[arg(long, requires = "tls_client_name")]
+        tls_client_ca: Option<PathBuf>,
+        /// Exact lowercase DNS SAN in the client certificate; no wildcards or CN fallback.
+        #[arg(long, requires = "tls_client_ca")]
+        tls_client_name: Option<String>,
     },
     /// Reject future requests from this host, retaining agent identities and messages.
     Revoke {
@@ -125,6 +132,8 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
                     ttl_hours,
                     oauth_resource,
                     redirect_uri,
+                    tls_client_ca,
+                    tls_client_name,
                 }),
         } => Ok(Some(registry::add_client(
             &home,
@@ -136,6 +145,16 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
                 resource,
                 redirect_uris: redirect_uri,
             }),
+            tls_client_ca
+                .map(|path| {
+                    mtls::Policy::load(
+                        &path,
+                        tls_client_name
+                            .as_deref()
+                            .expect("clap requires client name"),
+                    )
+                })
+                .transpose()?,
         )?)),
         Command::Clients {
             command: Some(ClientCommand::Revoke { client }),
