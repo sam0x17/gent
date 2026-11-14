@@ -27,6 +27,7 @@ mod bindings;
 mod downloads;
 pub(crate) use downloads::{Download, DownloadTarget};
 mod keys;
+mod recovery;
 pub(crate) use bindings::BindingKeys;
 pub(crate) mod oauth;
 
@@ -93,7 +94,7 @@ struct Client {
     expires_at: u64,
     export: PathBuf,
     revoked: bool,
-    bindings: BTreeMap<String, String>,
+    bindings: BTreeMap<String, recovery::Binding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     oauth: Option<oauth::Registration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,9 +224,16 @@ impl State {
             .any(|c| c.oauth.as_ref().is_some_and(|r| r.assertion.is_some()));
         let updates = self.clients.values().any(|c| c.key_update.is_some());
         let subjects = self.clients.values().any(|c| c.subject_key.is_some());
+        let recovered = self.clients.values().any(|c| {
+            c.bindings
+                .values()
+                .any(|b| matches!(b, recovery::Binding::Recovery(_)))
+        });
         ensure!(
             self.version
-                == if subjects {
+                == if recovered {
+                    7
+                } else if subjects {
                     6
                 } else if updates {
                     5
@@ -304,7 +312,7 @@ impl State {
                 client
                     .bindings
                     .iter()
-                    .all(|(key, credential)| hash(key) && hash(credential)),
+                    .all(|(key, binding)| hash(key) && binding.valid()),
                 "invalid gateway binding record"
             );
             count += client.bindings.len();

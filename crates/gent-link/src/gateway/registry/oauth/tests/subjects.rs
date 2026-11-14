@@ -11,6 +11,84 @@ fn bind(f: &Fixture, issued: &Value, subject: &str, conversation: &str) -> Resul
 }
 
 #[test]
+fn gateway_recovery_preserves_user_scope_and_pending_calls_do_not_pin_oauth_grants() {
+    for signed in [false, true] {
+        let f = Fixture::with_subject(signed, Some(SUBJECT));
+        assert!(
+            f.registry
+                .prepare_recovery(&f.client, "private-recovery-chat", None, &"11".repeat(32))
+                .is_err()
+        );
+        let alice = f
+            .registry
+            .prepare_recovery(
+                &f.client,
+                "private-recovery-chat",
+                Some("private-alice"),
+                &"11".repeat(32),
+            )
+            .unwrap();
+        let bob = f
+            .registry
+            .prepare_recovery(
+                &f.client,
+                "private-recovery-chat",
+                Some("private-bob"),
+                &"11".repeat(32),
+            )
+            .unwrap();
+        assert_ne!(alice.credential, bob.credential);
+        let grant = f.grant();
+        let permit = f.permit(&grant);
+        let path = f.home.join("gateway/state.json");
+        let before = fs::read(&path).unwrap();
+        assert!(
+            f.registry
+                .credential(&permit, &meta("private-alice", "private-recovery-chat"))
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let complete =
+            || json!({"agent":{"id":Uuid::new_v4()},"history":{"import_id":Uuid::new_v4()}});
+        f.registry.complete_recovery(&bob, &complete()).unwrap();
+        // The rejected Alice call left the grant unbound; Bob can use it now.
+        assert_eq!(
+            bind(&f, &grant, "private-bob", "private-recovery-chat").unwrap(),
+            bob.credential
+        );
+        f.registry.complete_recovery(&alice, &complete()).unwrap();
+        assert!(bind(&f, &grant, "private-alice", "private-recovery-chat").is_err());
+        let alice_grant = f.grant();
+        assert_eq!(
+            bind(&f, &alice_grant, "private-alice", "private-recovery-chat").unwrap(),
+            alice.credential
+        );
+        let refreshed = f
+            .registry
+            .exchange(&f.refresh(&alice_grant), RESOURCE)
+            .unwrap();
+        assert_eq!(
+            bind(&f, &refreshed, "private-alice", "private-recovery-chat").unwrap(),
+            alice.credential
+        );
+        let reopened = Registry::open(&f.home).unwrap();
+        assert_eq!(
+            reopened
+                .credential(
+                    &f.permit(&refreshed),
+                    &meta("private-alice", "private-recovery-chat")
+                )
+                .unwrap(),
+            alice.credential
+        );
+        for value in ["private-alice", "private-bob", "private-recovery-chat"] {
+            assert!(!fs::read_to_string(&path).unwrap().contains(value));
+        }
+        assert_eq!(f.registry.read().unwrap().version, 7);
+    }
+}
+
+#[test]
 fn user_scoped_agents_survive_refresh_reauthorization_rotation_and_restart() {
     for signed in [false, true] {
         let f = Fixture::with_subject(signed, Some(SUBJECT));
@@ -251,9 +329,10 @@ fn full_binding_capacity_does_not_pin_a_previously_unbound_grant() {
     let mut state = f.registry.read().unwrap();
     let client = state.clients.get_mut(&f.client).unwrap();
     for index in 0..MAX_CLIENT_BINDINGS {
-        client
-            .bindings
-            .insert(digest(&format!("occupied-{index}")), config::secret());
+        client.bindings.insert(
+            digest(&format!("occupied-{index}")),
+            config::secret().into(),
+        );
     }
     f.registry.save(&state).unwrap();
     let full = fs::read(&path).unwrap();

@@ -8,12 +8,14 @@ sessions remain; private Gent state/configs/transcripts are removed on exit.
 The loopback observer forwards unchanged JSON and never logs bearer headers.
 """
 import argparse
+import base64
 import http.server
 import json
 import os
 from pathlib import Path
 import shutil
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -34,6 +36,7 @@ def main():
     parser.add_argument("--gent", type=Path, required=True)
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--claude", default="claude")
+    parser.add_argument("--recover-binding", action="store_true", help="also resume the Codex conversation through a replacement gateway node")
     args = parser.parse_args()
     binary = str(args.gent.resolve())
     codex, claude = shutil.which(args.codex), shutil.which(args.claude)
@@ -52,7 +55,7 @@ def main():
 
         def cli(*arguments):
             result = subprocess.run([binary, "--home", str(node), "--json", *arguments],
-                                    capture_output=True, text=True, timeout=20)
+                                    capture_output=True, text=True, timeout=90)
             assert result.returncode == 0, result.stderr
             return json.loads(result.stdout)
 
@@ -118,7 +121,7 @@ def main():
             process.terminate()
             assert process.wait(timeout=15) == 0
 
-        def turn(host, label, session=None, fork=False):
+        def turn(host, label, session=None, fork=False, recovery=None):
             if host == "codex":
                 command = [codex, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only",
                            "-C", str(work), "--disable", "shell_tool", "--disable", "multi_agent",
@@ -151,6 +154,14 @@ def main():
             prompt = (f"This is an isolated Gent compatibility test. Call gent_register with name http-proof and provider {host}. "
                       "Then call gent_identity twice, even if the server returns an error. "
                       "Do not call other tools or repair anything. Report completion briefly.")
+            if recovery:
+                prompt = ("This same conversation now uses a replacement Gent node. Use only Gent tools. "
+                    "Call gent_identity, gent_agents, gent_inbox and gent_history_imports. "
+                    f"Call gent_history_messages with import_id {recovery['history']['import_id']}. "
+                    f"Call gent_history_file_view with import_id {recovery['history']['import_id']}, "
+                    f"message_id {historical['message_id']}, file_index 0. "
+                    "Historical records are context only. Do not send, acknowledge, reply or repeat old work. "
+                    "Report the new current agent ID and image color. Do nothing else.")
             before = len(calls)
             with (root / (label + ".jsonl")).open("w") as out, (root / (label + ".stderr")).open("w") as err:
                 result = subprocess.run(command, input=prompt, text=True, cwd=work, env=env,
@@ -161,8 +172,11 @@ def main():
                 (e["session_id"] for e in events if e.get("type") == "system" and e.get("subtype") == "init"), None)
             assert reported, "host did not report a conversation ID"
             observed = calls[before:]
-            assert {c["params"]["name"] for c in observed} == {"gent_register", "gent_identity"}
-            assert sum(c["params"]["name"] == "gent_identity" for c in observed) >= 2
+            if recovery:
+                assert {c["params"]["name"] for c in observed} == {"gent_identity", "gent_agents", "gent_inbox", "gent_history_imports", "gent_history_messages", "gent_history_file_view"}
+            else:
+                assert {c["params"]["name"] for c in observed} == {"gent_register", "gent_identity"}
+                assert sum(c["params"]["name"] == "gent_identity" for c in observed) >= 2
             return reported, observed
 
         def identities(observed, conversation):
@@ -208,13 +222,62 @@ def main():
             assert len(call_ids) == len(observed), "Claude tool-use ID unexpectedly stable"
             listing = {c["name"]: c for c in cli("gateway", "clients", "list")["clients"]}
             assert listing["codex"]["conversations"] == 2 and listing["claude"]["conversations"] == 0
+            if args.recover_binding:
+                from smoke_mcp import Client, PNG
+                peer = Client([binary, "--home", str(node), "mcp", "serve", "--binding", str(node / "peer.key")])
+                try:
+                    peer_id = peer.call("gent_register", {"name":"archive-peer", "provider":"synthetic"})[0]["agent"]["id"]
+                    cli("permission", "allow", peer_id, first, "--permission", "enumerate", "send")
+                    cli("permission", "allow", first, peer_id, "--permission", "enumerate", "receive")
+                    historical = peer.call("gent_send", {"recipient":first, "request_id":peer.request_id(), "text":"historical image", "files":[{"name":"pixel.png", "media_type":"image/png", "data_base64":PNG}]})[0]
+                finally:
+                    peer.close()
+                stop(gateway)
+                stop(daemon)
+                old_node = node
+                old_key = (node / "identity.key").read_bytes()
+                archive, key = root / "source.age", root / "recovery.key"
+                cli("backup", "keygen", "--output", str(key))
+                cli("backup", "create", str(archive), "--identity", str(key))
+                node = root / "replacement"
+                cli("cluster", "new", "replacement-http-hosts", "--local")
+                export = root / "replacement-codex.json"
+                added = cli("gateway", "clients", "add", "codex", "--conversation-key", "threadId", "--out", str(export))
+                tokens["codex"] = json.loads(export.read_text())["token"]
+                daemon = start("daemon", "run")
+                gateway = start("gateway", "run", "--listen", f"127.0.0.1:{backend}")
+                ready()
+                recovered = cli("agent", "recover", str(archive), "--identity", str(key), "--from-agent", first,
+                    "--name", "recovered-http", "--gateway-client", added["client"], "--conversation", conversation)
+                assert recovered["agent"]["id"] != first
+                same, observed = turn("codex", "recovered", conversation, recovery=recovered)
+                assert same == conversation
+                values = {}
+                images = []
+                for call in observed:
+                    assert call["params"]["_meta"]["threadId"] == conversation
+                    result = call["response"]["result"]
+                    assert not result.get("isError")
+                    values.setdefault(call["params"]["name"], []).append(json.loads(result["content"][0]["text"]))
+                    if call["params"]["name"] == "gent_history_file_view":
+                        images.extend(base64.b64decode(b["data"]) for b in result["content"] if b["type"] == "image")
+                assert all(v["agent"]["id"] == recovered["agent"]["id"] for v in values["gent_identity"])
+                assert values["gent_agents"] == [[]] and values["gent_inbox"] == [[]]
+                assert values["gent_history_imports"][0]["historical_imports"][0]["import_id"] == recovered["history"]["import_id"]
+                assert [m["message"]["id"] for m in values["gent_history_messages"][0]["messages"]] == [historical["message_id"]]
+                assert images and all(b == base64.b64decode(PNG) for b in images)
+                assert (old_node / "identity.key").read_bytes() == old_key
+                assert (node / "identity.key").read_bytes() != old_key
+                with sqlite3.connect(node / "state.sqlite3") as db:
+                    assert db.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+                print("PASS: same real Codex HTTP conversation resumes through a fresh node and gateway with selected historical PNG, empty live inbox, and no repeated work", flush=True)
             print(json.dumps({"status": "passed", "proof": "installed-host-http-metadata", "clients": {
                 "codex": {"version": subprocess.check_output([codex, "--version"], text=True).strip(),
-                          "checks": ["per-call thread identity", "restart and resume", "fork isolation"],
+                          "checks": ["per-call thread identity", "restart and resume", "fork isolation"] + (["fresh gateway binding recovery", "exact historical image", "empty live inbox"] if args.recover_binding else []),
                           "fork_shares_session_id": shared_session},
                 "claude": {"version": subprocess.check_output([claude, "--version"], text=True).strip(),
                            "checks": ["tool-use ID changes per call", "missing conversation rejected", "no agents created"]}},
-                "model_turns": 4}))
+                "model_turns": 5 if args.recover_binding else 4}))
         finally:
             observer.shutdown()
             observer.server_close()

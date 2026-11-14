@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import secrets
 import socket
@@ -25,7 +26,9 @@ def main():
     parser.add_argument("--gent", type=Path, required=True)
     parser.add_argument("--private-key-jwt", action="store_true")
     parser.add_argument("--subject-binding", action="store_true")
+    parser.add_argument("--recover-binding", action="store_true", help="recover archived history into an unused gateway conversation")
     args = parser.parse_args()
+    os.umask(0o077)
     binary = args.gent.resolve()
     with tempfile.TemporaryDirectory(prefix="gent-go-", dir="/tmp") as temporary:
         home = Path(temporary).resolve() / "node"
@@ -60,7 +63,7 @@ def main():
 
         def cli(*arguments):
             completed = subprocess.run([str(binary), "--home", str(home), "--json", *arguments],
-                                       capture_output=True, text=True, timeout=20)
+                                       capture_output=True, text=True, timeout=90)
             assert completed.returncode == 0, completed.stderr
             return json.loads(completed.stdout)
 
@@ -212,6 +215,77 @@ def main():
                 assert second["agent"]["id"] != first["agent"]["id"]
                 call(token["access_token"], "gent_identity", {}, subject="synthetic-user-b", error=True)
                 call(second_token["access_token"], "gent_identity", {}, error=True)
+            recovered = None
+            recovery_meta = {"test/conversation": "private-recovered-chat"}
+            if args.subject_binding:
+                recovery_meta["test/subject"] = "synthetic-user-a"
+
+            def check_recovered(access):
+                if recovered is None:
+                    return
+                assert call(access, "gent_identity", {}, metadata=recovery_meta)["agent"]["id"] == recovered["agent"]["id"]
+                assert call(access, "gent_inbox", {}, metadata=recovery_meta) == []
+                assert call(access, "gent_agents", {}, metadata=recovery_meta) == []
+                imports = call(access, "gent_history_imports", {}, metadata=recovery_meta)["historical_imports"]
+                assert len(imports) == 1 and imports[0]["import_id"] == recovered["history"]["import_id"]
+                _, body = http("/mcp", bearer=access, rpc={"jsonrpc":"2.0", "id":1, "method":"tools/call", "params": {
+                    "name":"gent_history_file_view", "arguments":{"import_id":imports[0]["import_id"], "message_id":historical["message_id"], "file_index":0}, "_meta":recovery_meta}})
+                result = json.loads(body)["result"]
+                assert not result.get("isError")
+                assert [base64.b64decode(b["data"]) for b in result["content"] if b["type"] == "image"] == [base64.b64decode(PNG)]
+
+            if args.recover_binding:
+                from smoke_mcp import Client, PNG
+                peer = Client([str(binary), "--home", str(home), "mcp", "serve", "--binding", str(home / "peer.key")])
+                try:
+                    peer_id = peer.call("gent_register", {"name":"archive-peer", "provider":"synthetic"})[0]["agent"]["id"]
+                    source = first["agent"]["id"]
+                    cli("permission", "allow", peer_id, source, "--permission", "enumerate", "send")
+                    cli("permission", "allow", source, peer_id, "--permission", "enumerate", "receive")
+                    historical = peer.call("gent_send", {"recipient":source, "request_id":peer.request_id(), "text":"archived image", "files":[{"name":"pixel.png", "media_type":"image/png", "data_base64":PNG}]})[0]
+                finally:
+                    peer.close()
+                stop(gateway)
+                stop(daemon)
+                archive, key = home.parent / "archive.age", home.parent / "recovery.key"
+                cli("backup", "keygen", "--output", str(key))
+                cli("backup", "create", str(archive), "--identity", str(key))
+                recovery_command = ["agent", "recover", str(archive), "--identity", str(key), "--from-agent", source,
+                    "--name", "recovered-gateway", "--gateway-client", local_client_id, "--conversation", "private-recovered-chat"]
+                if args.subject_binding:
+                    recovery_command += ["--subject", "synthetic-user-a"]
+                pending = subprocess.run([str(binary), "--home", str(home), *recovery_command], capture_output=True, timeout=90)
+                assert pending.returncode != 0  # daemon offline; the registry reservation remains
+                state_path = home / "gateway/state.json"
+                pending_state = json.loads(state_path.read_text())
+                entries = [(k,v) for k,v in pending_state["clients"][local_client_id]["bindings"].items() if isinstance(v, dict)]
+                assert len(entries) == 1
+                binding_key, pending_record = entries[0]
+                assert pending_record["completed"] is None
+                gateway = start("gateway", "run", "--listen", address)
+                for _ in range(200):
+                    try:
+                        http("/.well-known/oauth-authorization-server")
+                        break
+                    except urllib.error.URLError:
+                        time.sleep(.025)
+                call(token["access_token"], "gent_register", {"name":"premature", "provider":"synthetic"}, metadata=recovery_meta, error=True)
+                daemon = start("daemon", "run")
+                for _ in range(200):
+                    if (home / "daemon.sock").exists():
+                        break
+                    time.sleep(.025)
+                recovered = cli(*recovery_command)
+                assert recovered["agent"]["id"] != source
+                # Simulate a committed daemon response lost before local publication.
+                saved = json.loads(state_path.read_text())
+                saved["clients"][local_client_id]["bindings"][binding_key] = pending_record
+                state_path.write_text(json.dumps(saved))
+                call(token["access_token"], "gent_identity", {}, metadata=recovery_meta, error=True)
+                retried = cli(*recovery_command)
+                assert retried["agent"]["id"] == recovered["agent"]["id"] and retried["history"]["duplicate"]
+                check_recovered(token["access_token"])
+                assert "private-recovered-chat" not in state_path.read_text()
             stop(gateway)
             gateway = start("gateway", "run", "--listen", address)
             for _ in range(200):
@@ -227,6 +301,7 @@ def main():
             rotated = json.loads(body)
             private_values.extend([rotated["access_token"], rotated["refresh_token"]])
             assert call(rotated["access_token"], "gent_identity", {})["agent"]["id"] == first["agent"]["id"]
+            check_recovered(rotated["access_token"])
             if args.subject_binding:
                 call(rotated["access_token"], "gent_identity", {}, subject="synthetic-user-b", error=True)
                 assert call(second_token["access_token"], "gent_identity", {}, subject="synthetic-user-b")["agent"]["id"] == second["agent"]["id"]
@@ -251,6 +326,7 @@ def main():
             http("/mcp", bearer=rotated["access_token"], status=401)
             fresh = authorize()
             assert call(fresh["access_token"], "gent_identity", {})["agent"]["id"] == first["agent"]["id"]
+            check_recovered(fresh["access_token"])
             if args.private_key_jwt:
                 def renew(current, auth):
                     _, body = http("/oauth/token", form={"grant_type": "refresh_token", "client_id": client_id,
@@ -304,8 +380,17 @@ def main():
                 call(fresh["access_token"], "gent_identity", {}, subject="synthetic-user-b", error=True)
                 saved = (home / "gateway/state.json").read_text()
                 assert "synthetic-user-a" not in saved and "synthetic-user-b" not in saved
-                assert json.loads(saved)["version"] == 6
+                assert json.loads(saved)["version"] == (7 if args.recover_binding else 6)
                 assert json.loads(export.read_text())["subject_key"] == "test/subject"
+            check_recovered(fresh["access_token"])
+            if recovered:
+                cli("history", "remove", recovered["history"]["import_id"], "--expect-revision", "1")
+                call(fresh["access_token"], "gent_history_messages", {"import_id":recovered["history"]["import_id"]}, metadata=recovery_meta, error=True)
+                for revoke in [False, True]:
+                    if revoke:
+                        cli("agent", "revoke", recovered["agent"]["id"])
+                    refused = subprocess.run([str(binary), "--home", str(home), *recovery_command], capture_output=True, timeout=90)
+                    assert refused.returncode != 0
             cli("gateway", "clients", "revoke", local_client_id)
             http("/mcp", bearer=fresh["access_token"], status=401)
             stop(gateway)
@@ -319,7 +404,9 @@ def main():
                 "pinned JWKS", "no shared secret", "persistent assertion replay rejection", "key overlap and retirement",
                 "key-update retry", "stale update rejection", "grant and agent continuity after key update"] if args.private_key_jwt else []) + ([
                 "user-scoped conversation isolation", "grant user pin", "missing and argument-supplied user rejection",
-                "user continuity through refresh restart and reauthorization", "hashed user persistence"] if args.subject_binding else [])}))
+                "user continuity through refresh restart and reauthorization", "hashed user persistence"] if args.subject_binding else []) + ([
+                "pending recovery refusal", "lost-reply retry", "fresh agent with exact historical PNG", "empty live inbox and directory",
+                "recovery survives refresh restart and reauthorization", "removed history and agent revocation refuse retries"] if args.recover_binding else [])}))
         finally:
             for process in processes:
                 if process.poll() is None:

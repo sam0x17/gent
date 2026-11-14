@@ -28,17 +28,28 @@ pub struct Args {
     #[arg(long)]
     pub name: String,
     /// New private binding path for a host using explicit bindings.
-    #[arg(long, required_unless_present = "host", conflicts_with = "host")]
+    #[arg(long, required_unless_present_any = ["host", "gateway_client"], conflicts_with_all = ["host", "gateway_client", "conversation"])]
     pub binding: Option<PathBuf>,
     /// Prepare the binding selected by this local host's conversation metadata.
-    #[arg(long, value_enum, requires = "conversation")]
+    #[arg(
+        long,
+        value_enum,
+        requires = "conversation",
+        conflicts_with = "gateway_client"
+    )]
     pub host: Option<Host>,
-    #[arg(long, requires = "host")]
+    /// Prepare a conversation in this existing remote gateway host namespace.
+    #[arg(long, requires = "conversation")]
+    pub gateway_client: Option<String>,
+    #[arg(long)]
     pub conversation: Option<String>,
+    /// Exact host-reported user identifier, required for a user-scoped gateway host.
+    #[arg(long, requires = "gateway_client")]
+    pub subject: Option<String>,
     /// Claude's optional child-agent identifier within the conversation.
     #[arg(long, requires = "host")]
     pub subagent: Option<String>,
-    /// Descriptive provider label for an explicit binding; defaults to generic.
+    /// Descriptive provider label for an explicit or gateway binding; defaults to generic.
     #[arg(long, conflicts_with = "host")]
     pub provider: Option<String>,
 }
@@ -244,6 +255,43 @@ pub async fn execute(home: &Path, args: Args) -> Result<Value> {
         .map(|h| h.name().to_string())
         .unwrap_or_else(|| args.provider.unwrap_or_else(|| "generic".into()));
     config::label(&provider)?;
+    if let Some(client) = args.gateway_client {
+        ensure!(
+            args.binding.is_none() && args.host.is_none(),
+            "select one recovery destination"
+        );
+        let registry = crate::gateway::Registry::open(home)?;
+        let prepared = backup::prepare_history(&args.archive, &args.identity, args.source)?;
+        let request = hash(
+            &json!([
+                prepared.manifest_sha256,
+                prepared.source_agent,
+                args.name,
+                provider
+            ])
+            .to_string(),
+        );
+        let ticket = registry.prepare_recovery(
+            &client,
+            args.conversation
+                .as_deref()
+                .context("gateway recovery requires --conversation")?,
+            args.subject.as_deref(),
+            &request,
+        )?;
+        let mut result = register(
+            home,
+            &prepared,
+            ticket.credential.clone(),
+            args.name,
+            provider,
+        )
+        .await?;
+        registry.complete_recovery(&ticket, &result)?;
+        result["gateway_client"] = json!(client);
+        result["state"] = json!("recovered");
+        return Ok(result);
+    }
     let path = match (args.binding, args.host) {
         (Some(path), None) => path,
         (None, Some(host)) => integration::recovery_binding(
@@ -273,7 +321,33 @@ pub async fn execute(home: &Path, args: Args) -> Result<Value> {
         .to_string(),
     );
     let (mut record, _credential) = prepare(&path, &cfg, &fingerprint)?;
-    let result = crate::owner(
+    let result = register(
+        home,
+        &prepared,
+        record
+            .pending_credential
+            .as_ref()
+            .context("missing recovery credential")?
+            .clone(),
+        args.name,
+        provider,
+    )
+    .await?;
+    complete(&path, &cfg, &mut record, &result)?;
+    let mut output = result;
+    output["binding"] = json!(path);
+    output["state"] = json!("recovered");
+    Ok(output)
+}
+
+async fn register(
+    home: &Path,
+    prepared: &backup::PreparedHistory,
+    credential: String,
+    name: String,
+    provider: String,
+) -> Result<Value> {
+    crate::owner(
         home,
         OwnerOp::AgentRecover {
             directory: prepared
@@ -283,21 +357,12 @@ pub async fn execute(home: &Path, args: Args) -> Result<Value> {
                 .into(),
             manifest_sha256: prepared.manifest_sha256.clone(),
             source_agent: prepared.source_agent.clone(),
-            agent_credential: record
-                .pending_credential
-                .as_ref()
-                .context("missing recovery credential")?
-                .clone(),
-            name: args.name,
+            agent_credential: credential,
+            name,
             provider,
         },
     )
-    .await?;
-    complete(&path, &cfg, &mut record, &result)?;
-    let mut output = result;
-    output["binding"] = json!(path);
-    output["state"] = json!("recovered");
-    Ok(output)
+    .await
 }
 
 #[cfg(test)]

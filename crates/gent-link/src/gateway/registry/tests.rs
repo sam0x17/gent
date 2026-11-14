@@ -1,5 +1,6 @@
 use super::*;
 mod downloads;
+mod recovery;
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
@@ -208,11 +209,11 @@ fn expiry_clock_rollback_and_capacity_fail_closed_without_rebinding() {
     for i in 0..MAX_CLIENT_BINDINGS {
         client
             .bindings
-            .insert(digest(&i.to_string()), config::secret());
+            .insert(digest(&i.to_string()), config::secret().into());
     }
     let original = client.bindings[&digest("0")].clone();
     f.registry.save(&state).unwrap();
-    assert_eq!(original, f.bind("0"));
+    assert_eq!(original.credential().unwrap(), f.bind("0"));
     assert!(
         f.registry
             .credential(&permit, &json!({"test/conversation":"new"}))

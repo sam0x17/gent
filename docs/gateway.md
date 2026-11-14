@@ -47,6 +47,8 @@ Claude Code HTTP calls supply `claudecode/toolUseId`, which changes for every ca
 
 A host credential authorizes a namespace containing several agents. Its holder can select any conversation in that namespace, so the host must supply conversation metadata outside model control. The gateway cannot prove that an arbitrary metadata string came from ChatGPT or Claude. Verify provenance and stability on each actual host before granting access. Separate host credentials isolate equal conversation identifiers from each other. Existing daemon permissions still determine discovery, messages, replies and relay grants; registration grants no communication permissions.
 
+An owner can [recover a conversation on a replacement gateway](recovery.md#recover-a-gateway-conversation) with `gent agent recover --gateway-client CLIENT_UUID --conversation HOST_ID`. Recovery requires an unused binding, creates a fresh agent with selected archived history, and preserves host authentication and optional user scope. It cannot supply missing conversation metadata or restore provider-owned transcripts. Recovery records use registry version 7; existing host exports and ordinary bindings keep their formats.
+
 ### Scope conversations to a host user
 
 For an OAuth host that provides stable user metadata on every call, select that field when creating its namespace:

@@ -95,7 +95,7 @@ impl Registry {
         let binding = client
             .bindings
             .iter()
-            .find(|(_, v)| **v == credential)
+            .find(|(_, v)| v.credential().ok() == Some(credential.as_str()))
             .map(|(k, _)| k.clone())
             .context("download binding unavailable")?;
         ensure!(
@@ -191,7 +191,8 @@ impl Registry {
         let credential = client
             .bindings
             .get(&claims.binding)
-            .context("download binding unavailable")?;
+            .context("download binding unavailable")?
+            .credential()?;
         mac(credential, &bytes)
             .verify_slice(&tag)
             .context("invalid download signature")?;
@@ -209,7 +210,7 @@ impl Registry {
             (None, None) => {}
             _ => anyhow::bail!("download grant mismatch"),
         }
-        let credential = credential.clone();
+        let credential = credential.to_string();
         if state.clock != now {
             state.clock = now;
             self.save(&state)?;

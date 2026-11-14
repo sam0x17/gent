@@ -171,7 +171,26 @@ The destination must be unused. An ordinary existing binding is never overwritte
 
 Reconnect the conversation with Gent configured to use the replacement node's explicit `--home` or `--cluster`. For an explicit binding, also select the returned binding path. Host mode derives the normal conversation path automatically. Recovery does not edit host settings or move provider transcripts. Close the old connection before changing configuration; for installed entries, use the existing integration uninstall/install workflow to select the replacement home. Check `gent_identity` after reconnecting, then read `gent_history_imports`. Historical messages remain outside the live inbox and must not trigger old actions automatically.
 
-A private `.recovery.json` sidecar records publication. While pending, it holds the newly generated credential and blocks MCP use of that binding. If the daemon is unavailable, a reply is lost or the command is interrupted, rerun the exact same command with the same archive, destination and labels. The retry reuses the credential, agent and assignment. Completion removes the credential from the sidecar; keep the receipt, binding key and `.scope.json` together. Changed arguments, conflicting files, busy bindings or a different node cause refusal. A missing pending key can be recreated from its own record; a missing completed key is never silently regenerated. Removal of the assignment or revocation of the new agent prevents recovery retries from restoring access.
+For local bindings, a private `.recovery.json` sidecar records publication. While pending, it holds the newly generated credential and blocks MCP use of that binding. If the daemon is unavailable, a reply is lost or the command is interrupted, rerun the exact same command with the same archive, destination and labels. The retry reuses the credential, agent and assignment. Completion removes the credential from the sidecar; keep the receipt, binding key and `.scope.json` together. Changed arguments, conflicting files, busy bindings or a different node cause refusal. A missing pending key can be recreated from its own record; a missing completed key is never silently regenerated. Removal of the assignment or revocation of the new agent prevents recovery retries from restoring access.
+
+### Recover a gateway conversation
+
+For a remote MCP conversation, create its host namespace on the replacement node through `gent gateway clients add`, with the verified conversation metadata policy and any required OAuth/user/certificate policy. Existing unused conversations in a current namespace also work. Obtain the namespace UUID from `gent gateway clients list`, then prepare the binding before reconnecting the host:
+
+```sh
+gent --home ~/.gent-replacement agent recover ~/gent-backups/node.age \
+  --identity ~/gent-recovery.key --from-agent OLD_AGENT_UUID \
+  --name recovered-remote --gateway-client CLIENT_UUID \
+  --conversation HOST_CONVERSATION_ID
+```
+
+Use `--subject HOST_USER_ID` exactly when that namespace has a `--subject-key` policy. These values must match the host-owned metadata on its future calls. Prompts, tool arguments, display names and local agent IDs cannot substitute for them. The owner selects the historical read grant; normal host authentication and OAuth user pins still apply on every call. The recovery command neither issues OAuth consent nor pins an unbound grant. A call refused because recovery is pending leaves that grant's user pin unchanged. Raw conversation/user identifiers are hashed before storage; as with ordinary bindings, hashes do not conceal guessable identifiers from someone with registry access.
+
+Select `--gateway-client` instead of `--binding` or `--host`. Both archive selectors remain available, and `--provider` is a descriptive label defaulting to `generic`. Gent refuses an already allocated ordinary gateway binding, even if it has not registered with the daemon. Use `gent history import --agent CURRENT_UUID` for an existing agent. Concurrent host calls and recovery commands share the registry lock: whichever first allocates the binding establishes its destination, and the other operation cannot overwrite it.
+
+Gateway recovery stores a pending/completed record and its credential in private `gateway/state.json`, using registry version 7. Existing ordinary bindings retain their encoding and credentials, and host export formats stay unchanged. Upgrade the gateway executable before recovery; older readers reject version 7. Pending records block tool access and file-download authorization for that binding. The daemon commits fresh registration and history atomically; registry completion is a separate local write. An interrupted or lost reply leaves a reservation for the same credential, so rerunning the exact command finishes publication without another agent. Pending/completed entries count toward existing conversation and registry limits.
+
+Reconnect using the replacement gateway's host credentials or a newly approved OAuth grant. The selected host must actually provide stable conversation metadata; recovery cannot supply missing provider metadata. It does not transfer old access/refresh tokens, host grants, certificates or provider transcripts. A revoked/expired host, removed import or revoked recovered agent prevents retries from restoring access. If host access is permanently revoked after daemon assignment but before publication, the binding stays unusable; the owner can inspect `gent history imports` and remove the assignment or revoke its recipient through the normal CLI. Previously assigned data and network announcements are not rolled back automatically.
 
 ## Replace a lost joined node
 
@@ -214,7 +233,7 @@ Gent enrollment uses the invitation's encrypted Noise mailbox; SSH is unnecessar
 
 ## Remaining recovery work
 
-Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, a new cluster can receive selected archived history through the assignment commands above, without recovering the old cluster's authority. Migration of old agent identities and peer permissions, gateway conversation recovery and pending-work reconciliation remain unfinished. Multi-user recovery authority remains future work.
+Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, a new cluster can receive selected archived history through the assignment commands above, without recovering the old cluster's authority. Migration of old agent identities and peer permissions, actual hosted-provider recovery acceptance and pending-work reconciliation remain unfinished. Multi-user recovery authority remains future work.
 
 ## Validation
 
@@ -247,6 +266,16 @@ python3 scripts/prove_host.py --host claude-code --recover-binding
 ```
 
 The real-host proofs use the installed host's authenticated model access and retain private proof directories and synthetic provider sessions. Add `--use-host-config` for Codex when its configured provider is required; the proof disables unrelated MCP servers and plugins for that run. Neither proof changes saved host configuration.
+
+Gateway recovery adds registry tests for concurrent allocation, pending capacity, strict persistence, OAuth user pins and download authorization. Its native OAuth proof exercises real HTTP and CLI calls, daemon-offline reservation, lost completion, exact archived PNG bytes, refresh, reauthorization, restart and refusal after removal/revocation. Signed-client mode also checks key overlap and retirement. The real HTTP host proof resumes a Codex conversation through a fresh gateway node, while retaining Claude Code's missing-metadata rejection:
+
+```sh
+python3 scripts/prove_gateway_oauth.py --gent target/debug/gent --subject-binding --recover-binding
+python3 scripts/prove_gateway_oauth.py --gent target/debug/gent --subject-binding --recover-binding --private-key-jwt
+python3 scripts/prove_gateway_hosts.py --gent target/debug/gent --recover-binding
+```
+
+The last command uses both installed hosts' authenticated model access. It compares actual tool results and image bytes, then removes its private disposable state; provider-managed synthetic conversations remain. These proofs do not establish hosted ChatGPT/Claude or mobile acceptance.
 
 Replacement tests cover lost replies at every pairing step, owner/competing-target refusal, atomic rollback, durable key pins, interrupted publication, schema migration, invitation scope and retries after later revocation. The optional physical-machine proof adds a replacement to the existing SSH workflow:
 

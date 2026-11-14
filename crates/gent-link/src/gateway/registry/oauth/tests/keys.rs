@@ -55,7 +55,7 @@ fn key_rotation_preserves_grants_agents_and_pending_codes_and_rejects_removed_ke
     );
     let before = &original.clients[&f.client];
     let after = &updated.clients[&f.client];
-    assert_eq!(before.bindings, after.bindings);
+    assert!(before.bindings == after.bindings);
     assert_eq!(before.expires_at, after.expires_at);
     assert!(before.mtls == after.mtls); // no policy changes beyond the public keys
     let saved: Export = serde_json::from_slice(&fs::read(&after.export).unwrap()).unwrap();

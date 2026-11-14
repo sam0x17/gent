@@ -31,10 +31,32 @@ pub(super) fn subject_key(key: &str, conversation: &str) -> Result<()> {
 }
 
 fn identity<'a>(meta: &'a Value, key: &str) -> Result<&'a str> {
-    meta.get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty() && s.len() <= 512 && !s.chars().any(char::is_control))
-        .context("required host identity metadata is missing or invalid")
+    identity_value(
+        meta.get(key)
+            .and_then(Value::as_str)
+            .context("required host identity metadata is missing or invalid")?,
+    )
+}
+
+pub(super) fn identity_value(value: &str) -> Result<&str> {
+    ensure!(
+        !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control),
+        "required host identity metadata is missing or invalid"
+    );
+    Ok(value)
+}
+
+pub(super) fn subject_hash(client: &str, value: &str) -> String {
+    digest(&format!("gent-gateway-subject-v1\0{client}\0{value}"))
+}
+
+pub(super) fn binding_key(conversation: &str, subject: Option<&str>) -> String {
+    match subject {
+        Some(subject) => digest(&format!(
+            "gent-gateway-binding-v2\0{subject}\0{conversation}"
+        )),
+        None => digest(conversation), // preserve all existing unscoped identities
+    }
 }
 
 impl Registry {
@@ -53,10 +75,7 @@ impl Registry {
                 let value = identity(meta, key)?;
                 // Client UUIDs and hashes have fixed encodings; NUL is forbidden
                 // in metadata, so these domain-separated tuples are unambiguous.
-                Ok(digest(&format!(
-                    "gent-gateway-subject-v1\0{}\0{value}",
-                    permit.client
-                )))
+                Ok(subject_hash(&permit.client, value))
             })
             .transpose()?;
         let pin = if let Some(subject) = &subject {
@@ -72,14 +91,9 @@ impl Registry {
         } else {
             false
         };
-        let key = match &subject {
-            Some(subject) => digest(&format!(
-                "gent-gateway-binding-v2\0{subject}\0{conversation}"
-            )),
-            None => digest(conversation), // preserve all existing unscoped identities
-        };
+        let key = binding_key(conversation, subject.as_deref());
         let credential = if let Some(value) = client.bindings.get(&key) {
-            value.clone()
+            value.credential()?.to_string()
         } else {
             ensure!(
                 client.bindings.len() < MAX_CLIENT_BINDINGS
@@ -107,7 +121,8 @@ impl Registry {
                 .get_mut(&permit.client)
                 .expect("client checked")
                 .bindings
-                .insert(key, credential.clone());
+                .entry(key)
+                .or_insert_with(|| credential.clone().into());
             // First-use subject pin and credential allocation commit together.
             self.save(&state)?;
         }
