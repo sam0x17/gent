@@ -7,6 +7,7 @@ use gent_protocol::file_objects::Manifest;
 use zeroize::Zeroizing;
 mod exports;
 mod host;
+mod receive;
 mod retention;
 
 #[derive(Clone, Copy)]

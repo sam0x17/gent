@@ -88,7 +88,7 @@ fn public_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn destinations(addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>> {
+pub(super) fn destinations(addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>> {
     ensure!(
         !addresses.is_empty()
             && addresses.len() <= 32
@@ -104,7 +104,7 @@ fn destinations(addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>> {
         .collect())
 }
 
-fn client(url: &Url, addresses: &[SocketAddr]) -> reqwest::ClientBuilder {
+pub(super) fn client(url: &Url, addresses: &[SocketAddr]) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .https_only(true)
         .no_proxy()

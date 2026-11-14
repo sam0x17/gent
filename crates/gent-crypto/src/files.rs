@@ -83,13 +83,30 @@ fn validate(manifest: &FileDescriptor) -> Result<()> {
             && id.to_string() == manifest.id,
         "invalid file object ID"
     );
+    validate_metadata(&manifest.name, &manifest.media_type)?;
     ensure!(
-        (1..=128).contains(&manifest.name.len())
-            && !manifest.name.trim().is_empty()
-            && !manifest.name.chars().any(char::is_control)
-            && !manifest.name.contains(['/', '\\'])
-            && manifest.name != "."
-            && manifest.name != "..",
+        manifest.byte_length <= MAX_FILE_BYTES as u64,
+        "file exceeds 32 MiB"
+    );
+    ensure!(
+        manifest.sha256.len() == 64
+            && manifest
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "invalid file digest"
+    );
+    Ok(())
+}
+
+pub fn validate_metadata(name: &str, media_type: &str) -> Result<()> {
+    ensure!(
+        (1..=128).contains(&name.len())
+            && !name.trim().is_empty()
+            && !name.chars().any(char::is_control)
+            && !name.contains(['/', '\\'])
+            && name != "."
+            && name != "..",
         "invalid file basename"
     );
     // A bare media type, without parameters, paths, or header delimiters.
@@ -104,24 +121,11 @@ fn validate(manifest: &FileDescriptor) -> Result<()> {
             })
     };
     ensure!(
-        manifest.media_type.len() <= 128
-            && manifest
-                .media_type
+        media_type.len() <= 128
+            && media_type
                 .split_once('/')
                 .is_some_and(|(kind, subtype)| token(kind) && token(subtype)),
         "invalid file media type"
-    );
-    ensure!(
-        manifest.byte_length <= MAX_FILE_BYTES as u64,
-        "file exceeds 32 MiB"
-    );
-    ensure!(
-        manifest.sha256.len() == 64
-            && manifest
-                .sha256
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-        "invalid file digest"
     );
     Ok(())
 }

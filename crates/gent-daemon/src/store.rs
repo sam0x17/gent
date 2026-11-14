@@ -655,6 +655,33 @@ impl StoreSession<'_> {
                 media_type,
             } => self.file_import(&who, &request_id, &name, &media_type),
             AgentOp::FileStatus { file_id } => self.file_status(&who, &file_id),
+            AgentOp::FileReceiveStatus { file } => self.file_receive_status(&who, &file),
+            AgentOp::FileReceive {
+                file,
+                byte_length,
+                sha256,
+            } => {
+                ensure!(
+                    byte_length <= gent_protocol::file_objects::MAX_FILE_BYTES as u64,
+                    "file exceeds 32 MiB"
+                );
+                ensure!(
+                    sha256.len() == 64
+                        && sha256
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                    "invalid file digest"
+                );
+                let status = self.file_receive_status(&who, &file)?;
+                ensure!(
+                    status["state"] != "ready"
+                        || (status["file"]["byte_length"] == byte_length
+                            && status["file"]["sha256"] == sha256),
+                    "request_id already used with different content"
+                );
+                Ok(status)
+            }
+            AgentOp::FileReceiveData { file, bytes } => self.file_receive(&who, &file, &bytes),
             AgentOp::FileRead {
                 file_id,
                 chunk_index,

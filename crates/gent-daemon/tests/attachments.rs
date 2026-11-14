@@ -14,6 +14,8 @@ mod content;
 mod handoff_limits;
 #[path = "attachments/history.rs"]
 mod history;
+#[path = "attachments/receive.rs"]
+mod receive;
 #[path = "attachments/retention.rs"]
 mod retention;
 

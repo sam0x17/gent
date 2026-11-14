@@ -47,6 +47,7 @@ pub(crate) struct Registry {
     cluster: String,
     node: String,
     workers: Arc<tokio::sync::Semaphore>,
+    pub(crate) files: Arc<super::files::Runtime>,
 }
 #[derive(Clone)]
 pub(crate) struct Permit {
@@ -54,6 +55,11 @@ pub(crate) struct Permit {
     hash: String,
     oauth: Option<(String, String)>,
     peer: Peer,
+}
+impl Permit {
+    pub(crate) fn client_id(&self) -> &str {
+        &self.client
+    }
 }
 
 // These records contain private agent credentials and never implement Debug.
@@ -331,6 +337,7 @@ impl Registry {
             cluster: cfg.cluster.id,
             node: cfg.node.id,
             workers: Arc::new(tokio::sync::Semaphore::new(MAX_WORKERS)),
+            files: Arc::new(super::files::Runtime::default()),
         };
         value.read()?;
         Ok(value)
@@ -362,6 +369,22 @@ impl Registry {
     pub(crate) async fn credential_remote(&self, permit: Permit, meta: Value) -> Result<String> {
         self.blocking(move |registry| registry.credential(&permit, &meta))
             .await
+    }
+    pub(crate) fn with_file_origins(mut self, entries: &[String]) -> Result<Self> {
+        let state = self.read()?;
+        let now = auth::now()?;
+        self.files = Arc::new(super::files::Runtime::new(entries, |id| {
+            let client = state
+                .clients
+                .get(id)
+                .context("unknown file-import client")?;
+            ensure!(
+                !client.revoked && client.expires_at > now,
+                "file-import client is inactive"
+            );
+            Ok(())
+        })?);
+        Ok(self)
     }
     fn directory(&self) -> PathBuf {
         self.home.join("gateway")

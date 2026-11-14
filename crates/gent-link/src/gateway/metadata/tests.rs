@@ -241,7 +241,7 @@ impl Server {
             task,
         }
     }
-    fn client(&self, url: &Url) -> reqwest::Client {
+    pub(crate) fn client(&self, url: &Url) -> reqwest::Client {
         // Only tests inject a loopback destination and fixture root. Production
         // fetch validates every DNS answer and uses the normal TLS trust store.
         client(url, &[self.address])
@@ -253,6 +253,9 @@ impl Server {
     pub(crate) fn reply(&self, path: &str, body: &[u8]) {
         let mut response=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).into_bytes();
         response.extend_from_slice(body);
+        self.replies.lock().unwrap().insert(path.into(), response);
+    }
+    pub(crate) fn raw_reply(&self, path: &str, response: Vec<u8>) {
         self.replies.lock().unwrap().insert(path.into(), response);
     }
     async fn import(&self) -> Result<Policy> {

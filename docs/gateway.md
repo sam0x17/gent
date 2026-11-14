@@ -109,7 +109,7 @@ OpenAI's [mTLS guide](https://developers.openai.com/plugins/build/auth#mutual-tl
 
 ## Files and relay mode
 
-Agents use the existing messaging, receipt and relay tools. Inline files accept actual base64 bytes, up to 1 MiB combined and four files per message across both attachment forms. Received supported inline images also appear as MCP image blocks. The host still needs to expose real bytes to its tools; native hosted attachment handles and download URLs are not supported.
+Agents use the existing messaging, receipt and relay tools. Inline files accept actual base64 bytes, up to 1 MiB combined and four files per message across both attachment forms. Received supported inline images also appear as MCP image blocks. The host still needs to expose actual file inputs; the optional import path below accepts a host file ID and download URL.
 
 Remote tool discovery excludes `gent_file_paths`, `gent_file_import` and `gent_file_export`, and calling those names directly fails. A remote chat cannot use Gent to browse the node's filesystem. Received `attachments` contain opaque file IDs. Check `gent_file_status` until ready, then retrieve their contents through the shared MCP tools:
 
@@ -117,6 +117,25 @@ Remote tool discovery excludes `gent_file_paths`, `gent_file_import` and `gent_f
 - `gent_file_view {file_id}` verifies a complete PNG, JPEG, WebP or GIF of at most 4 MiB, then returns descriptor text and an MCP image block with the original bytes. It does not resize or decode the image. The media type is supplied by the source. Host support determines whether the model can inspect the image; base64 text alone does not establish visual inspection. Use a local export or request a smaller preview when needed.
 
 Reads require host-owned conversation metadata on every call and recheck current agent, message, relay and expiry rules. They create no filesystem exports or public download links and expose no file keys. `file_ids` can forward an authorized attachment directly in ordinary or relay messages. Bytes returned to a remote model cross the same provider/user-node trust boundary as text. Actual hosted rendering and native file upload/download acceptance remain unverified.
+
+### Import host-provided files
+
+Enable file inputs for an existing client by selecting each exact download origin when starting the gateway. Use origins from the host's actual documented file service; no provider origin is trusted by default:
+
+```sh
+gent --home /absolute/node/profile gateway run \
+  --file-origin CLIENT_UUID=https://files.example
+```
+
+Repeat `--file-origin` for additional origins. The runtime accepts at most 64 entries and eight origins per client, with no wildcards, paths, queries, IP literals or custom ports. Restart with the same flags to retain this capability. Existing host authentication and conversation/user binding remain required. Tool discovery exposes `gent_file_import_remote` when any origin is selected, but a call from an unselected host is refused before fetching.
+
+The tool takes `request_id` from `gent_request_ids` and a `file` object with required `download_url` and `file_id` strings, plus optional `file_name` and `mime_type` strings. Its descriptor includes `openai/fileParams` according to [ChatGPT's published file-input schema](https://developers.openai.com/plugins/reference#file-apis). Any trusted MCP host able to provide that shape can use it. Actual ChatGPT/Claude attachment acceptance, URL origins and metadata provenance still need host tests.
+
+The gateway fetches at most 32 MiB over canonical public HTTPS on port 443. It validates every DNS answer and pins those addresses for TLS. Redirects, proxies, compressed HTTP bodies, partial responses, private/reserved addresses and missing TLS trust are rejected. The fetch carries no Gent credentials, cookies or referrer. DNS and body retrieval share a ten-second deadline. There are two concurrent imports globally, one per host, and at most one new attempt per second per host. Cancellation releases the fetch; quota or network errors require retrying the same request ID.
+
+Bytes stay in bounded memory until the daemon seals and commits the complete file, its agent binding and retry record together. A separate local binary exchange preserves the existing JSON frame limit and permits two bodies at a time. Disconnects, wrong lengths/hashes and revocation before commit create no partial file. No plaintext handoff file is written. Downloads recheck gateway authorization before transfer; the daemon checks current agent authority at commit. URLs and host file IDs are not stored in daemon state; it stores a hash of the host file ID/name/type and the content digest. Network failures omit URLs from their errors.
+
+Keep the same request ID, host file ID, name and type on retries. A refreshed URL is allowed within approved origins. Completed imports return the original Gent descriptor without fetching again, even when the old URL is expired; they retain the original bytes if the external source later changes. Omitted metadata defaults to `attachment` and `application/octet-stream`. These defaults are part of the retry identity. Pending failures can be retried until the request's first-use window expires. Successful imports retain normal file expiry and object/retry quotas. Pass the returned Gent file ID in `file_ids` to send or relay it. This does not create outgoing provider file references or download links.
 
 The owner grants ordinary permissions and time-limited relay selection through the existing CLI. Target selection, pending turns, replies and receipts stay in the daemon database across gateway restarts. A timeout does not prove that a send failed: keep its original request ID for an identical retry, or inspect its status.
 
@@ -143,9 +162,12 @@ cargo test -p gent-link gateway
 cargo test -p gent-daemon --test config
 cargo build -p gent-link
 python3 scripts/prove_gateway.py --gent target/debug/gent --files
+python3 scripts/prove_gateway.py --gent target/debug/gent --host-files
 python3 scripts/prove_gateway_mtls.py --gent target/debug/gent
 ```
 
 Tests cover separate conversations and host namespaces, absent and forged identity inputs, duplicate headers, wrong hosts/origins, proxy headers, credential expiry/revocation, registry recovery, concurrent allocation, bounded filesystem work and direct TLS trust. The HTTP/daemon test exchanges a PNG, reply and receipt, recovers a relay turn across both process layers restarting, and checks agent revocation. The CLI proof checks physical-node pinning across profile switches and restarts, live host revocation and clean foreground shutdown. All host calls in these tests are synthetic.
 
 With `--files`, the native proof additionally imports a 32 MiB file, an empty file and a generated PNG larger than 1 MiB through local stdio MCP, then retrieves them through HTTP after daemon/gateway restart. It verifies exact reassembly and image blocks, forwarding, missing or changed conversation metadata, malformed arguments, hidden local tools, message permission changes and agent revocation. Daemon tests cover image-view size limits, incomplete objects, tampered chunks, expiry and unauthorized IDs. This proves the MCP representation without a hosted provider or model rendering step.
+
+With `--host-files`, the native proof fetches a public PNG from GitHub through the real HTTPS path, verifies its image bytes, and retries after restart using an intentionally unavailable URL. It also checks local binary ingress for a 32 MiB file, interrupted/oversized bodies, digest mismatches, ingress capacity, unchanged handoff usage and restart retries. Gateway tests exercise host isolation, failures and revocation during download; TLS fixtures check the download body limits and response policy. The public PNG is a synthetic host input, not a ChatGPT or Claude attachment.

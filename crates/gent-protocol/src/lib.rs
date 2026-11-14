@@ -248,6 +248,22 @@ pub enum AgentOp {
     FileStatus {
         file_id: String,
     },
+    /// Private local RPC preflight; absent from the MCP tool surface.
+    FileReceiveStatus {
+        file: file_objects::IncomingFile,
+    },
+    /// Header for a bounded binary body after the daemon's ready response.
+    FileReceive {
+        file: file_objects::IncomingFile,
+        byte_length: u64,
+        sha256: String,
+    },
+    /// Constructed only by the local transport after receiving the whole body.
+    #[serde(skip)]
+    FileReceiveData {
+        file: file_objects::IncomingFile,
+        bytes: zeroize::Zeroizing<Vec<u8>>,
+    },
     FileRead {
         file_id: String,
         chunk_index: u32,

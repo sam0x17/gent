@@ -90,6 +90,7 @@ impl Endpoint {
         config::write_private(&key, generated.signing_key.serialize_pem().as_bytes()).unwrap();
         Self {
             options: Run {
+                file_origin: vec![],
                 client_metadata: vec![],
                 listen: "127.0.0.1:0".parse().unwrap(),
                 origin: None,

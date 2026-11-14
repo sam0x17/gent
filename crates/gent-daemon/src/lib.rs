@@ -6,9 +6,11 @@ pub mod file_transport;
 pub mod invitation_transport;
 pub mod messages;
 pub mod pairing;
+mod receive;
 pub mod replica;
 mod runtime;
 mod storage;
+pub use receive::receive_file;
 pub mod store;
 pub mod sync;
 
@@ -65,6 +67,7 @@ pub async fn run(home: &Path) -> Result<()> {
     let listener = UnixListener::bind(&socket)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     let permits = Arc::new(Semaphore::new(32));
+    let uploads = Arc::new(Semaphore::new(2));
     let mut maintenance = tokio::time::interval(Duration::from_secs(15 * 60));
     let sync_task = sync::start(store.clone())?;
     let invitation_task = invitation_transport::owner::start(store.clone());
@@ -89,9 +92,10 @@ pub async fn run(home: &Path) -> Result<()> {
                 let (stream,_)=connection?;
                 let Ok(permit)=permits.clone().try_acquire_owned() else { continue; };
                 let store=store.clone();
+                let uploads=uploads.clone();
                 tokio::spawn(async move {
                     let _permit=permit;
-                    let _=tokio::time::timeout(Duration::from_secs(10),serve(stream,store)).await;
+                    let _=tokio::time::timeout(Duration::from_secs(10),serve(stream,store,uploads)).await;
                 });
             }
         }
@@ -105,9 +109,15 @@ pub async fn run(home: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn serve(mut stream: UnixStream, store: Arc<Mutex<store::Store>>) -> Result<()> {
+async fn serve(
+    stream: UnixStream,
+    store: Arc<Mutex<store::Store>>,
+    uploads: Arc<Semaphore>,
+) -> Result<()> {
+    let mut stream = BufReader::new(stream);
     let mut frame = Vec::new();
-    BufReader::new((&mut stream).take(MAX_FRAME_BYTES as u64 + 1))
+    (&mut stream)
+        .take(MAX_FRAME_BYTES as u64 + 1)
         .read_until(b'\n', &mut frame)
         .await?;
     ensure!(
@@ -116,6 +126,15 @@ async fn serve(mut stream: UnixStream, store: Arc<Mutex<store::Store>>) -> Resul
     );
     let response = match serde_json::from_slice::<Request>(&frame) {
         Ok(request) => {
+            if matches!(
+                &request,
+                Request::Agent {
+                    action: gent_protocol::AgentOp::FileReceive { .. },
+                    ..
+                }
+            ) {
+                return receive::serve(stream, store, uploads, request).await;
+            }
             tokio::task::spawn_blocking(move || {
                 store.lock().expect("store lock poisoned").handle(request)
             })
@@ -126,6 +145,6 @@ async fn serve(mut stream: UnixStream, store: Arc<Mutex<store::Store>>) -> Resul
     let mut response = serde_json::to_vec(&response)?;
     response.push(b'\n');
     ensure!(response.len() <= MAX_FRAME_BYTES, "response too large");
-    stream.write_all(&response).await?;
+    stream.get_mut().write_all(&response).await?;
     Ok(())
 }

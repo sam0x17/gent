@@ -42,6 +42,11 @@ impl GentMcp {
                 )
             });
         }
+        if let Credentials::Remote(registry) = &self.credentials
+            && registry.files.enabled()
+        {
+            tools.push(crate::gateway::files::tool());
+        }
         tools
     }
 }
@@ -207,7 +212,7 @@ impl ServerHandler for GentMcp {
             .1;
         let instructions = if matches!(self.credentials, Credentials::Remote(_)) {
             format!(
-                "{instructions}\n\nRemote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: send inline attachments (up to 1 MiB combined, four per message), forward authorized file_ids, read separate objects with gent_file_read, or inspect images up to 4 MiB with gent_file_view. Native hosted file handles are not supported.\n"
+                "{instructions}\n\nRemote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: send inline attachments (up to 1 MiB combined, four per message), forward authorized file_ids, read separate objects with gent_file_read, or inspect images up to 4 MiB with gent_file_view. If gent_file_import_remote is available and enabled for this host, use an actual host-provided file object from an owner-approved HTTPS origin. Provider download links for outgoing Gent files are not implemented.\n"
             )
         } else {
             instructions.to_string()
@@ -306,6 +311,42 @@ impl ServerHandler for GentMcp {
                 }
             }
         };
+        if operation == "file_import_remote" {
+            let Credentials::Remote(registry) = &self.credentials else {
+                unreachable!()
+            };
+            let permit = context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .and_then(|parts| parts.extensions.get::<crate::gateway::Permit>())
+                .cloned()
+                .ok_or_else(|| {
+                    ErrorData::invalid_request("gateway authentication required", None)
+                })?;
+            let result = async {
+                let input = serde_json::from_value::<crate::gateway::files::Input>(Value::Object(
+                    call.arguments.unwrap_or_default(),
+                ))
+                .map_err(|_| anyhow::anyhow!("invalid file import arguments"))?;
+                registry
+                    .files
+                    .import(
+                        registry,
+                        permit,
+                        serde_json::to_value(&context.meta)?,
+                        &self.home,
+                        credential,
+                        input,
+                    )
+                    .await
+            }
+            .await;
+            return Ok(match result {
+                Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
+                Err(error) => CallToolResult::error(vec![ContentBlock::text(error.to_string())]),
+            }
+            .into());
+        }
         let mut arguments = call.arguments.unwrap_or_default();
         arguments.insert("op".into(), Value::String(operation.into()));
         let action = match serde_json::from_value::<AgentOp>(Value::Object(arguments)) {
@@ -328,7 +369,7 @@ impl ServerHandler for GentMcp {
                         "mode":"user_controlled_gateway",
                         "plaintext_endpoints":["model_provider","user_node"],
                         "gent_relay":"encrypted_node_traffic_only",
-                        "file_access":"inline attachments, authorized file chunks and image views; no local filesystem or native hosted file handles"
+                        "file_access":"inline attachments, authorized file chunks and image views, optional host file import; no local filesystem or outgoing hosted download links"
                     }));
                 }
                 // Image data belongs in the image block, not a second large copy

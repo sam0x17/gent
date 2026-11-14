@@ -12,6 +12,17 @@ pub const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 pub const UPLOAD_TTL_SECONDS: u64 = 60 * 60;
 pub const MAX_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 
+/// Local byte-import identity. source_id hashes the host file ID and metadata;
+/// temporary URLs and their credentials never enter daemon state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncomingFile {
+    pub request_id: String,
+    pub source_id: String,
+    pub name: String,
+    pub media_type: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Chunk {

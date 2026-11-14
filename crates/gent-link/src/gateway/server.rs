@@ -300,7 +300,7 @@ async fn serve(
 }
 
 pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
-    let registry = Registry::open(&home)?;
+    let registry = Registry::open(&home)?.with_file_origins(&options.file_origin)?;
     let _lock = managed_file::lock(&home.join("gateway/runtime.lock"))?;
     // Validate exposure before binding any non-loopback socket.
     origin(&options, options.listen)?;

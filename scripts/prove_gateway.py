@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gent", type=Path, required=True)
     parser.add_argument("--files", action="store_true", help="also prove 32 MiB chunk reads and image views")
+    parser.add_argument("--host-files", action="store_true", help="prove host file inputs using a public PNG and local binary framing")
     args = parser.parse_args()
     binary = args.gent.resolve()
     with tempfile.TemporaryDirectory(prefix="gent-gw-", dir="/tmp") as temporary:
@@ -118,7 +119,11 @@ def main():
                 port = free.getsockname()[1]
             address = f"127.0.0.1:{port}"
             url = f"http://{address}/mcp"
-            gateway = start("gateway", "run", "--listen", address)
+            file_options = []
+            if args.host_files:
+                from gateway_input_checks import InputChecks, ORIGIN
+                file_options = ["--file-origin", added["client"] + "=" + ORIGIN]
+            gateway = start("gateway", "run", "--listen", address, *file_options)
             ready(gateway)
             first = call("gent_register", {"name": "one", "provider": "synthetic"})
             second = call("gent_register", {"name": "two", "provider": "synthetic"}, "two")
@@ -129,6 +134,7 @@ def main():
             if args.files:
                 from gateway_file_checks import FileChecks
                 files = FileChecks(binary, home, cli, rpc, token, first, second)
+            inputs = InputChecks(binary, home, cli, rpc, token) if args.host_files else None
             # The primary CLI now selects another managed profile. Both running
             # and restarted --home runtimes must remain on the physical node.
             cli("cluster", "new", "selected-elsewhere", "--local")
@@ -141,11 +147,13 @@ def main():
                 if (home / "daemon.sock").exists():
                     break
                 time.sleep(0.025)
-            gateway = start("gateway", "run", "--listen", address)
+            gateway = start("gateway", "run", "--listen", address, *file_options)
             ready(gateway)
             assert call("gent_identity", {})["agent"]["id"] == first["agent"]["id"]
             if files:
                 files.after_restart()
+            if inputs:
+                inputs.after_restart()
             cli("--cluster", original, "gateway", "clients", "revoke", added["client"])
             rpc("tools/list", {}, token, expected=401)
             cli("--cluster", original, "gateway", "clients", "add", "synthetic-host",
@@ -158,6 +166,7 @@ def main():
                 assert "test/conversation" not in text
             print(json.dumps({"status": "passed", "proof": "foreground-gateway",
                               "file_reads": bool(files),
+                              "host_file_inputs": bool(inputs),
                               "platform": os.uname().sysname,
                               "checks": ["private host export", "separate conversations", "profile switch isolation",
                                          "daemon and gateway restart", "live host revocation", "clean shutdown",

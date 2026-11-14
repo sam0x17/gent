@@ -1,6 +1,7 @@
 //! User-controlled remote MCP. The HTTP credential authenticates a trusted host
 //! namespace; every agent call also needs that host's conversation metadata.
 mod assertion;
+pub(crate) mod files;
 mod metadata;
 mod mtls;
 pub(crate) mod registry;
@@ -138,6 +139,9 @@ pub struct Run {
     /// Enable CIMD and bounded metadata/key refresh for this existing signed client UUID. Repeat for more hosts.
     #[arg(long)]
     client_metadata: Vec<String>,
+    /// Allow file imports for CLIENT_UUID=https://exact-download-host. Repeat for additional origins; no wildcards.
+    #[arg(long)]
+    file_origin: Vec<String>,
 }
 
 pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Option<Value>> {

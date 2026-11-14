@@ -10,6 +10,7 @@ use tokio::{
     task::JoinHandle,
 };
 mod cimd;
+mod files;
 mod mtls;
 mod oauth;
 
@@ -581,6 +582,7 @@ async fn direct_tls_requires_valid_server_trust_and_plaintext_cannot_bind_public
     config::write_private(&cert, generated.cert.pem().as_bytes()).unwrap();
     config::write_private(&key, generated.signing_key.serialize_pem().as_bytes()).unwrap();
     let mut options = Run {
+        file_origin: vec![],
         client_metadata: vec![],
         listen: address,
         origin: Some(origin_text.clone()),
