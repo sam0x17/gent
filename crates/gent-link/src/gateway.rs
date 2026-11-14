@@ -47,6 +47,11 @@ pub enum OAuthCommand {
 #[derive(Subcommand)]
 pub enum ClientCommand {
     List,
+    /// Inspect or replace an existing signed client's pinned public keys.
+    Keys {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
     /// Register a trusted host and write its private connection configuration.
     Add {
         name: String,
@@ -81,6 +86,22 @@ pub enum ClientCommand {
     /// Reject future requests from this host, retaining agent identities and messages.
     Revoke {
         client: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum KeyCommand {
+    Show {
+        client: String,
+    },
+    /// Replace the complete key set while preserving the client and its agents.
+    Set {
+        client: String,
+        #[arg(long)]
+        jwks: PathBuf,
+        /// Revision from keys show; prevents a stale update from replacing newer keys.
+        #[arg(long)]
+        expect_revision: u64,
     },
 }
 
@@ -177,6 +198,19 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
                 })
                 .transpose()?,
         )?)),
+        Command::Clients {
+            command: Some(ClientCommand::Keys { command }),
+        } => {
+            let registry = Registry::open(&home)?;
+            Ok(Some(match command {
+                KeyCommand::Show { client } => registry.signing_keys(&client)?,
+                KeyCommand::Set {
+                    client,
+                    jwks,
+                    expect_revision,
+                } => registry.set_signing_keys(&client, &jwks, expect_revision)?,
+            }))
+        }
         Command::Clients {
             command: Some(ClientCommand::Revoke { client }),
         } => Ok(Some(Registry::open(&home)?.revoke(&client)?)),

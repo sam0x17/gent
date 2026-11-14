@@ -84,6 +84,14 @@ fn decode(value: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl Policy {
+    pub(crate) fn equivalent(&self, other: &Self) -> bool {
+        self.client_id == other.client_id
+            && self.keys.len() == other.keys.len()
+            && self.keys.iter().all(|key| other.keys.contains(key))
+    }
+    pub(crate) fn key_ids(&self) -> Vec<&str> {
+        self.keys.iter().map(|key| key.kid.as_str()).collect()
+    }
     pub(crate) fn load(path: &Path, client_id: &str) -> Result<Self> {
         let mut bytes = Vec::new();
         std::fs::File::open(path)?

@@ -493,7 +493,7 @@ async fn oauth_peer(signed: bool) {
     } else {
         &id
     };
-    let authenticate = |fields: &mut std::collections::BTreeMap<String, String>| {
+    let authenticate = |fields: &mut std::collections::BTreeMap<String, String>, second: bool| {
         if signed {
             let mut claims = crate::gateway::assertion::tests::claims();
             claims["aud"] = json!(format!("{origin}/oauth/token"));
@@ -503,7 +503,11 @@ async fn oauth_peer(signed: bool) {
             );
             fields.insert(
                 "client_assertion".into(),
-                crate::gateway::assertion::tests::token(claims),
+                crate::gateway::assertion::tests::sign(
+                    json!({"alg":"RS256","kid":if second { "fixture-b" } else { "fixture-a" }}),
+                    claims,
+                    second,
+                ),
             );
         } else {
             fields.insert("client_secret".into(), secret.clone());
@@ -574,7 +578,7 @@ async fn oauth_peer(signed: bool) {
     .into_iter()
     .map(|(k, v)| (k.into(), v.into()))
     .collect();
-    authenticate(&mut form);
+    authenticate(&mut form, false);
     let token_url = format!("{origin}/oauth/token");
     let denied: Value = browser
         .post(&token_url)
@@ -639,7 +643,7 @@ async fn oauth_peer(signed: bool) {
     .into_iter()
     .map(|(k, v)| (k.into(), v.into()))
     .collect();
-    authenticate(&mut refresh);
+    authenticate(&mut refresh, false);
     let denied: Value = browser
         .post(&token_url)
         .form(&refresh)
@@ -650,7 +654,7 @@ async fn oauth_peer(signed: bool) {
         .await
         .unwrap();
     assert_eq!(denied["error"], "invalid_client");
-    let rotated: Value = host
+    let mut rotated: Value = host
         .post(&token_url)
         .form(&refresh)
         .send()
@@ -679,6 +683,75 @@ async fn oauth_peer(signed: bool) {
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    if signed {
+        let mut policy = serde_json::to_value(crate::gateway::assertion::tests::policy()).unwrap();
+        policy["keys"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|key| key["kid"] == "fixture-b");
+        let path = f.home.join("replacement.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({"keys":policy["keys"]})).unwrap(),
+        )
+        .unwrap();
+        registry.set_signing_keys(&id, &path, 0).unwrap();
+        refresh.insert(
+            "refresh_token".into(),
+            rotated["refresh_token"].as_str().unwrap().into(),
+        );
+        authenticate(&mut refresh, false);
+        let rejected: Value = host
+            .post(&token_url)
+            .form(&refresh)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rejected["error"], "invalid_client");
+        authenticate(&mut refresh, true);
+        let rejected: Value = browser
+            .post(&token_url)
+            .form(&refresh)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rejected["error"], "invalid_client");
+        rotated = host
+            .post(&token_url)
+            .form(&refresh)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let restored = server
+            .call(
+                &host,
+                rotated["access_token"].as_str().unwrap(),
+                "chat",
+                "gent_identity",
+                json!({}),
+            )
+            .await;
+        assert_eq!(first["agent"]["id"], restored["agent"]["id"]);
+        assert_eq!(
+            server
+                .post(&browser, rotated["access_token"].as_str().unwrap())
+                .json(&rpc)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
     registry.revoke(&id).unwrap();
     assert_eq!(
         server

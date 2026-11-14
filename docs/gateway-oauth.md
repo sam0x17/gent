@@ -42,7 +42,7 @@ gent --home /private/path/gent-node gateway clients add signed-host \
   --out /private/path/gent-node/signed-host.json
 ```
 
-The HTTPS ID is an exact identifier; this command does not fetch its URL. Gent stores the public keys in the registry and private export. Changing or removing the source file does not change trust. The export has no shared secret or bearer token. Its local `client` UUID remains the identifier for inspection and revocation; `oauth.assertion.client_id` is the ID the host sends to OAuth. Repeating setup must preserve the original key set and options. A second namespace cannot reuse the same OAuth client ID on this node. Key-set updates are not implemented; a host may rotate among the keys already pinned.
+The HTTPS ID is an exact identifier; this command does not fetch its URL. Gent stores the public keys in the registry and private export. Changing or removing the source file does not change trust. The export has no shared secret or bearer token. Its local `client` UUID remains the identifier for inspection and revocation; `oauth.assertion.client_id` is the ID the host sends to OAuth. Repeating setup must match the current export and registration. A second namespace cannot reuse the same OAuth client ID on this node. Use the key update command below when the host changes its signing keys.
 
 JWKS input is limited to 64 KiB and 1-8 public RSA keys, with unique `kid` values, 2048-4096 bit moduli and exponent 65537. If supplied, `alg`, `use` and `key_ops` must specify RS256 signature verification. Private key fields and unsupported fields are rejected. Gent verifies signatures with `ring`; it never follows JWT key URLs or trusts embedded keys. Only RS256 and an optional `typ` of `JWT` are accepted in assertion headers.
 
@@ -51,6 +51,24 @@ Token requests send `client_id`, `client_assertion_type=urn:ietf:params:oauth:cl
 The registry consumes each valid assertion ID atomically with token processing, including grant errors after client authentication. A retry needs a new assertion. Reusing an assertion rejects authentication without revoking an otherwise valid token family. Replaying a redeemed code or spent refresh token with a fresh valid assertion retains the existing family-revocation rule. Replay digests persist across restart until assertion expiry, with a limit of 1,024 active records. Capacity exhaustion returns `503` and `Retry-After`. An optional client-certificate policy remains an additional requirement for exchange, refresh and MCP.
 
 This implements the signed token-authentication method described in [RFC 7523](https://www.rfc-editor.org/rfc/rfc7523.html). OpenAI's [authentication guide](https://developers.openai.com/plugins/build/auth#client-registration) documents RS256 keys published through ChatGPT's metadata/JWKS route. Manual key pinning does not complete CIMD onboarding, automatic key refresh, hosted consent or conversation-provenance acceptance. Gent does not advertise `client_id_metadata_document_supported` yet.
+
+### Update signing keys
+
+Inspect the local client UUID, then replace its complete key set using a JWKS obtained through a trusted channel:
+
+```sh
+gent --home /private/path/gent-node gateway clients keys show CLIENT_UUID
+gent --home /private/path/gent-node gateway clients keys set CLIENT_UUID \
+  --jwks /private/path/verified-new-jwks.json --expect-revision 0
+```
+
+Use the `key_revision` returned by `keys show` as `--expect-revision`. Initial registrations have revision 0; each changed key set increments it. Concurrent conflicting updates and stale retries fail. Repeating the last successful command preserves its revision and keys. Reordering the same keys does not create a revision. The command requires an existing signed client and cannot change its OAuth ID, callbacks, resource, certificate policy, expiry or agent bindings.
+
+For planned rotation, first supply a set containing both old and new keys, then supply only the retained keys once the host has switched. The current set is checked on each code exchange and refresh; no gateway restart is needed. Removing a key rejects subsequent assertions signed by it. Existing access tokens, refresh families, pending owner-approved codes and agents remain valid under their existing rules. Use host revocation to terminate that client's access after a compromise; a key update alone does not revoke previously issued grants.
+
+Gent commits the keys and revision to the registry before updating the private export. An interruption after that commit can leave `export_pending: true` in `keys show` (`key_export_pending` in `clients list`). The committed keys are already in effect. Retry the same command and original expected revision to finish the export. Gent accepts the recorded previous export or the completed new export; it preserves changed files and requires missing files to be restored before retry. Finish a pending export before starting a different key update. An exact retry can finish this local export after host expiry or revocation without reactivating the host. An expired or revoked host cannot receive a new key set.
+
+Updated registries use version 5 and exports use version 4. A per-client marker rejects missing revision records even when other clients retain newer schema versions. An updated export cannot recreate a missing registry client. Keep registry backups consistent; key-update retries are not a mechanism for rolling back registry state. Automatic JWKS fetching and scheduled key refresh remain future work.
 
 ## Approve a connection
 
@@ -85,7 +103,7 @@ Host revocation rejects all its codes, refreshes, new authorization requests and
 
 ## Stored state and limits
 
-OAuth state shares `gateway/state.json` and its mutation lock with host revocation and agent bindings. OAuth registries use version 2, version 3 with client certificate policies, or version 4 with signed-client policies and replay state; older gateway readers reject unsupported records. Signed-client exports use version 3 and contain no secret. Missing assertion policy or replay state fails validation; it cannot enable a secret fallback. Existing static clients retain their original credentials and bindings. Store a consistent private backup; missing or corrupt established state causes access to fail. Rolling back a backup can also roll back revocations and token generations, so live-state rollback is not a supported recovery procedure.
+OAuth state shares `gateway/state.json` and its mutation lock with host revocation and agent bindings. OAuth registries use version 2, version 3 with client certificate policies, version 4 with signed-client policies and replay state, or version 5 after a signing-key update; older gateway readers reject unsupported records. Signed-client exports use version 3 initially and version 4 after an update, and contain no secret. Missing assertion policy or replay state fails validation; it cannot enable a secret fallback. Existing static clients retain their original credentials and bindings. Store a consistent private backup; missing or corrupt established state causes access to fail. Rolling back a backup can also roll back revocations and token generations, so live-state rollback is not a supported recovery procedure.
 
 The registry stores access-token and client-secret digests, pending code secrets until redemption or pruning of expired requests, and private refresh-family keys. Refresh tokens use HMAC-SHA256 over a domain, random family ID and generation; replay detection needs no unbounded list of spent tokens. These private keys remain on the user's node. Registry summaries exclude codes, tokens, PKCE values and browser state. HTTP responses disable caching, referrers and framing, and Gent logs no request content.
 
@@ -110,7 +128,7 @@ python3 scripts/prove_gateway_hosts.py --gent target/debug/gent
 
 The tests cover approval/denial, PKCE, exact callback/client/audience checks, expiry, replay and concurrent redemption, stable bindings through refresh/reconnect, host revocation, bounded malformed inputs and real HTTP discovery. The CLI proof runs separate native gateway and daemon processes and checks approval, callback issuer/state, restart, refresh, replay revocation, reconnect identity and private logs.
 
-Signed-client tests also cover signature/key/algorithm substitution, exact claims, duplicate fields, replay capacity, concurrent assertion reuse, corrupted persistence, and combined mTLS/assertion requirements. The synthetic native proof generates a disposable RSA key with OpenSSL, imports the public JWKS, deletes its source file and exercises signed code exchange, refresh, restart, replay and revocation. All 30 gateway tests, strict Clippy, normal builds and both native OAuth modes pass on Linux and macOS. Installed-client login and native mTLS regressions pass on both. These checks make no signed hosted-provider acceptance claim.
+Signed-client tests also cover signature/key/algorithm substitution, exact claims, duplicate fields, replay capacity, concurrent assertion reuse, corrupted persistence, and combined mTLS/assertion requirements. Key-update tests cover concurrent conflicts, stale retries, simulated interruption at both export-write boundaries, modified/missing exports, retired-key rejection and preserved grants/agents. The TLS test verifies that key replacement retains the certificate requirement. The native proof generates disposable OpenSSL keys, exercises overlap and retirement while the gateway runs, deletes the JWKS sources and verifies identity after restart. All 35 gateway tests, strict Clippy, normal builds, both native OAuth modes and installed-client login pass on Linux and macOS. These checks make no signed hosted-provider acceptance claim.
 
 The installed-client proof, including both OAuth model lifecycle options, and the static-bearer model proof pass on Linux with Codex 0.167.2 / Claude Code 2.1.323 and on macOS with Codex 0.167.0 / Claude Code 2.1.311. These are tested versions, not minimum supported versions.
 

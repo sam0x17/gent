@@ -33,20 +33,29 @@ def main():
         private_values = []
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
-        def authentication():
+        def authentication(key=None, kid=None):
             if not args.private_key_jwt:
                 return {"client_secret": client_secret}
             now = int(time.time())
-            header = {"alg": "RS256", "kid": "synthetic", "typ": "JWT"}
+            header = {"alg": "RS256", "kid": kid or signing_kid, "typ": "JWT"}
             claims = {"iss": client_id, "sub": client_id, "aud": origin + "/oauth/token",
                       "iat": now, "exp": now + 120, "jti": secrets.token_hex(16)}
             encoded = [base64.urlsafe_b64encode(json.dumps(v).encode()).decode().rstrip("=") for v in (header, claims)]
             signing = ".".join(encoded).encode()
-            signature = subprocess.check_output(["openssl", "dgst", "-sha256", "-sign", str(signing_key)], input=signing)
+            signature = subprocess.check_output(["openssl", "dgst", "-sha256", "-sign", str(key or signing_key)], input=signing)
             assertion = signing.decode() + "." + base64.urlsafe_b64encode(signature).decode().rstrip("=")
             private_values.append(assertion)
             return {"client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
                     "client_assertion": assertion}
+
+        def signing_fixture(kid):
+            key = home / (kid + ".pem")
+            subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+                            "-out", str(key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            modulus = subprocess.check_output(["openssl", "rsa", "-in", str(key), "-noout", "-modulus"],
+                                              stderr=subprocess.DEVNULL).decode().strip().split("=", 1)[1]
+            return key, {"kty": "RSA", "alg": "RS256", "use": "sig", "kid": kid,
+                         "n": base64.urlsafe_b64encode(bytes.fromhex(modulus)).decode().rstrip("="), "e": "AQAB"}
 
         def cli(*arguments):
             completed = subprocess.run([str(binary), "--home", str(home), "--json", *arguments],
@@ -135,14 +144,10 @@ def main():
             export = home / "oauth.json"
             extra = []
             if args.private_key_jwt:
-                signing_key = home / "synthetic.pem"
-                subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
-                                "-out", str(signing_key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                modulus = subprocess.check_output(["openssl", "rsa", "-in", str(signing_key), "-noout", "-modulus"],
-                                                  stderr=subprocess.DEVNULL).decode().strip().split("=", 1)[1]
+                signing_kid = "synthetic"
+                signing_key, original_jwk = signing_fixture(signing_kid)
                 jwks = home / "jwks.json"
-                jwks.write_text(json.dumps({"keys": [{"kty": "RSA", "alg": "RS256", "use": "sig", "kid": "synthetic",
-                    "n": base64.urlsafe_b64encode(bytes.fromhex(modulus)).decode().rstrip("="), "e": "AQAB"}]}))
+                jwks.write_text(json.dumps({"keys": [original_jwk]}))
                 extra = ["--oauth-client-id", "https://synthetic.invalid/client.json", "--oauth-jwks", str(jwks)]
             added = cli("gateway", "clients", "add", "synthetic-oauth", "--conversation-key", "test/conversation",
                         "--out", str(export), "--oauth-resource", resource, "--redirect-uri", callback, *extra)
@@ -219,6 +224,55 @@ def main():
             http("/mcp", bearer=rotated["access_token"], status=401)
             fresh = authorize()
             assert call(fresh["access_token"], "gent_identity", {})["agent"]["id"] == first["agent"]["id"]
+            if args.private_key_jwt:
+                def renew(current, auth):
+                    _, body = http("/oauth/token", form={"grant_type": "refresh_token", "client_id": client_id,
+                        **auth, "resource": resource, "refresh_token": current["refresh_token"]})
+                    renewed = json.loads(body)
+                    assert renewed["refresh_token"].split(".")[1] == current["refresh_token"].split(".")[1]
+                    private_values.extend([renewed["access_token"], renewed["refresh_token"]])
+                    assert call(renewed["access_token"], "gent_identity", {})["agent"]["id"] == first["agent"]["id"]
+                    return renewed
+
+                next_key, next_jwk = signing_fixture("rotated")
+                assert cli("gateway", "clients", "keys", "show", local_client_id)["key_revision"] == 0
+                overlap = home / "overlap.json"
+                overlap.write_text(json.dumps({"keys": [original_jwk, next_jwk]}))
+                update = cli("gateway", "clients", "keys", "set", local_client_id,
+                             "--jwks", str(overlap), "--expect-revision", "0")
+                assert update["key_revision"] == 1 and not update["export_pending"]
+                assert cli("gateway", "clients", "keys", "set", local_client_id,
+                           "--jwks", str(overlap), "--expect-revision", "0") == update
+                fresh = renew(fresh, authentication())
+                fresh = renew(fresh, authentication(next_key, "rotated"))
+                replacement = home / "replacement.json"
+                replacement.write_text(json.dumps({"keys": [next_jwk]}))
+                update = cli("gateway", "clients", "keys", "set", local_client_id,
+                             "--jwks", str(replacement), "--expect-revision", "1")
+                assert update["key_revision"] == 2 and update["key_ids"] == ["rotated"]
+                stale = subprocess.run([str(binary), "--home", str(home), "--json", "gateway", "clients", "keys", "set",
+                    local_client_id, "--jwks", str(overlap), "--expect-revision", "0"], capture_output=True, timeout=20)
+                assert stale.returncode != 0
+                _, rejected = http("/oauth/token", form={"grant_type": "refresh_token", "client_id": client_id,
+                    **authentication(), "resource": resource, "refresh_token": fresh["refresh_token"]}, status=400)
+                assert json.loads(rejected)["error"] == "invalid_client"
+                signing_key, signing_kid = next_key, "rotated"
+                fresh = renew(fresh, authentication())
+                replacement.unlink()
+                overlap.unlink()
+                exported = json.loads(export.read_text())
+                assert exported["client"] == local_client_id and exported["version"] == 4 and exported["key_revision"] == 2
+                assert "token" not in exported and len(exported["oauth"]["assertion"]["keys"]) == 1
+                stop(gateway)
+                gateway = start("gateway", "run", "--listen", address)
+                for _ in range(200):
+                    assert gateway.poll() is None
+                    try:
+                        http("/.well-known/oauth-authorization-server")
+                        break
+                    except urllib.error.URLError:
+                        time.sleep(0.025)
+                fresh = renew(fresh, authentication())
             cli("gateway", "clients", "revoke", local_client_id)
             http("/mcp", bearer=fresh["access_token"], status=401)
             stop(gateway)
@@ -229,7 +283,8 @@ def main():
                 "authentication": "private_key_jwt" if args.private_key_jwt else "client_secret_post", "checks": [
                 "discovery", "local owner consent", "PKCE", "issuer and state callback", "restart",
                 "refresh", "replay revocation", "reconnect identity", "host revocation", "private logs"] + ([
-                "pinned JWKS", "no shared secret", "persistent assertion replay rejection"] if args.private_key_jwt else [])}))
+                "pinned JWKS", "no shared secret", "persistent assertion replay rejection", "key overlap and retirement",
+                "key-update retry", "stale update rejection", "grant and agent continuity after key update"] if args.private_key_jwt else [])}))
         finally:
             for process in processes:
                 if process.poll() is None:

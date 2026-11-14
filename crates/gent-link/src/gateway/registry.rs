@@ -23,6 +23,7 @@ const MAX_CLIENT_BINDINGS: usize = 256;
 const MAX_LIFETIME: u64 = 8760 * 3600;
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WORKERS: usize = 16;
+mod keys;
 pub(crate) mod oauth;
 
 #[derive(Debug)]
@@ -86,8 +87,12 @@ struct Client {
     // certificate policy while other mTLS clients keep the registry at v3.
     #[serde(default, skip_serializing_if = "is_false")]
     mtls_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_update: Option<keys::Update>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    keys_updated: bool,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Export {
     version: u32,
@@ -105,6 +110,8 @@ struct Export {
     oauth: Option<oauth::Registration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mtls: Option<TlsPolicy>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    key_revision: u64,
 }
 
 fn uuid(value: &str) -> bool {
@@ -112,6 +119,9 @@ fn uuid(value: &str) -> bool {
 }
 fn is_false(value: &bool) -> bool {
     !*value
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 fn digest(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
@@ -194,9 +204,12 @@ impl State {
             .clients
             .values()
             .any(|c| c.oauth.as_ref().is_some_and(|r| r.assertion.is_some()));
+        let updates = self.clients.values().any(|c| c.key_update.is_some());
         ensure!(
             self.version
-                == if assertions {
+                == if updates {
+                    5
+                } else if assertions {
                     4
                 } else if mtls {
                     3
@@ -225,6 +238,18 @@ impl State {
                 );
             }
             let signed = client.oauth.as_ref().is_some_and(|r| r.assertion.is_some());
+            ensure!(
+                client.keys_updated == client.key_update.is_some(),
+                "signing key revision state is missing"
+            );
+            if let Some(update) = &client.key_update {
+                ensure!(
+                    signed
+                        && update.revision > 0
+                        && update.pending_export.as_deref().is_none_or(hash),
+                    "invalid signing key update record"
+                );
+            }
             if let Some(policy) = &client.mtls {
                 policy.validate()?;
             }
@@ -466,6 +491,8 @@ impl Registry {
                 json!({"id":id,"name":c.name,
             "conversation_key":c.conversation_key,"expires_at":c.expires_at,"revoked":c.revoked,
             "active":!c.revoked && now<c.expires_at,"conversations":c.bindings.len(),"oauth":c.oauth,
+            "key_revision":c.key_update.as_ref().map_or(0, |u| u.revision),
+            "key_export_pending":c.key_update.as_ref().is_some_and(|u| u.pending_export.is_some()),
             "mtls":c.mtls.as_ref().map(TlsPolicy::summary)})
             })
             .collect();
@@ -616,11 +643,14 @@ pub(super) fn add_client(
             expires_at: now + hours * 3600,
             oauth: oauth.clone(),
             mtls: mtls.clone(),
+            key_revision: 0,
         }
     };
     ensure!(
         value.version
-            == if signed {
+            == if signed && value.key_revision > 0 {
+                4
+            } else if signed {
                 3
             } else if mtls.is_some() {
                 2
@@ -635,6 +665,7 @@ pub(super) fn add_client(
             && value.conversation_key == key
             && value.oauth == oauth
             && value.mtls == mtls
+            && (signed || value.key_revision == 0)
             && if signed {
                 value.token.is_none()
             } else {
@@ -659,6 +690,14 @@ pub(super) fn add_client(
             "gateway client options changed"
         );
         ensure!(
+            client.key_update.as_ref().map_or(0, |u| u.revision) == value.key_revision
+                && client
+                    .key_update
+                    .as_ref()
+                    .is_none_or(|u| u.pending_export.is_none()),
+            "signing key update/export is incomplete; retry keys set with its original arguments"
+        );
+        ensure!(
             client.oauth == oauth && client.mtls == mtls,
             "gateway client authorization mode changed"
         );
@@ -667,6 +706,10 @@ pub(super) fn add_client(
             "revoked gateway credentials cannot be reactivated"
         );
     } else {
+        ensure!(
+            value.key_revision == 0,
+            "rotated export cannot recreate a missing client; restore the registry"
+        );
         if let Some(registration) = &oauth {
             ensure!(
                 !state.clients.iter().any(|(id, c)| c
@@ -716,6 +759,8 @@ pub(super) fn add_client(
                 oauth,
                 mtls_required: mtls.is_some(),
                 mtls,
+                key_update: None,
+                keys_updated: false,
             },
         );
         state.clock = now;
