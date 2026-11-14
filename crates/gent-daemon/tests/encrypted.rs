@@ -23,6 +23,61 @@ struct Fixture {
     now: u64,
 }
 
+#[test]
+fn runtime_refuses_owner_succession_before_activation_without_partial_persistence() {
+    let f = Fixture::new();
+    let history_before = f
+        .db(0)
+        .query_row("SELECT COUNT(*) FROM authority_history", [], |r| {
+            r.get::<_, u64>(0)
+        })
+        .unwrap();
+    let successor = OwnerKey::generate().unwrap();
+    let handoff = f.state.transfer_owner(&f.owner, &successor, f.now).unwrap();
+    let error = f
+        .endpoint(0)
+        .apply_authority(std::slice::from_ref(&handoff))
+        .unwrap_err();
+    assert!(error.to_string().contains("coordinated daemon activation"));
+    assert_eq!(
+        f.endpoint(0).authority_state().unwrap().checkpoint(),
+        f.state.checkpoint()
+    );
+    assert_eq!(
+        f.db(0)
+            .query_row("SELECT COUNT(*) FROM authority_history", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        history_before
+    );
+    let mut successor_state = f.state.clone();
+    successor_state.apply_chain(&[handoff], f.now).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    fs::set_permissions(other.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut fresh = EncryptedEndpoint::open(other.path(), &f.nodes[0]).unwrap();
+    assert!(fresh.initialize(&successor_state, f.now).is_err());
+    assert!(fresh.authority_state().is_err());
+    // Even a structurally valid epoch written outside the runtime cannot
+    // bypass the activation guard through restart/loading.
+    f.db(0)
+        .execute(
+            "UPDATE authority SET state=?1,checkpoint=?2",
+            rusqlite::params![
+                successor_state.signed().encode().unwrap(),
+                serde_json::to_vec(successor_state.checkpoint()).unwrap()
+            ],
+        )
+        .unwrap();
+    assert!(
+        f.endpoint(0)
+            .authority_state()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("coordinated daemon activation")
+    );
+}
+
 impl Fixture {
     fn new() -> Self {
         let now = SystemTime::now()

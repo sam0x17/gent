@@ -11,6 +11,8 @@ pub use agents::*;
 #[cfg(feature = "invitation")]
 pub mod invitation;
 pub mod recovery;
+pub mod succession;
+use succession::{MAX_OWNER_CHAIN_BYTES, SignedOwnerTransition, verify_lineage};
 
 pub type Digest = [u8; 32];
 pub type PublicKey = [u8; 32];
@@ -24,7 +26,7 @@ const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const STATE_DOMAIN: &[u8] = b"gent/cluster-state/v1\0";
 const REQUEST_DOMAIN: &[u8] = b"gent/enrollment-request/v1\0";
 const CONFIGURATION_DOMAIN: &[u8] = b"gent/configuration-grant/v1\0";
-const MAX_CONFIGURATION_GRANT_BYTES: usize = 8192;
+const MAX_CONFIGURATION_GRANT_BYTES: usize = MAX_OWNER_CHAIN_BYTES + 8192;
 
 /// Owner signing authority, distinct from the local owner RPC credential and node keys.
 /// Deliberately has no Debug or Serialize implementation.
@@ -67,6 +69,8 @@ pub struct ClusterState {
     pub cluster_id: String,
     pub name: String,
     pub owner_key: PublicKey,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_transitions: Vec<SignedOwnerTransition>,
     pub revision: u64,
     pub previous: Option<Digest>,
     pub issued_at: u64,
@@ -142,6 +146,8 @@ pub struct SignedEnrollment {
 pub struct ConfigurationGrant {
     pub version: u32,
     pub anchor: TrustAnchor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_transitions: Vec<SignedOwnerTransition>,
     pub base: Checkpoint,
     pub group: Vec<u8>,
     pub origin: Digest,
@@ -170,6 +176,7 @@ impl SignedConfigurationGrant {
     /// receiver must also enforce the grant's saved stream and node-key bindings.
     pub fn verify(&self, anchor: &TrustAnchor) -> Result<()> {
         let grant = &self.grant;
+        let owner = verify_lineage(anchor, &grant.owner_transitions)?;
         ensure!(
             grant.version == 1 && &grant.anchor == anchor,
             "wrong configuration grant authority"
@@ -182,7 +189,9 @@ impl SignedConfigurationGrant {
             grant.writer != grant.reader
                 && grant.writer_key != grant.reader_key
                 && grant.writer_key != anchor.owner_key
-                && grant.reader_key != anchor.owner_key,
+                && grant.reader_key != anchor.owner_key
+                && grant.writer_key != owner
+                && grant.reader_key != owner,
             "configuration grant requires two distinct node identities"
         );
         ensure!(
@@ -192,8 +201,15 @@ impl SignedConfigurationGrant {
                 && grant.base.revision <= MAX_SAFE_INTEGER,
             "invalid configuration stream binding"
         );
+        ensure!(
+            grant
+                .owner_transitions
+                .last()
+                .is_none_or(|t| t.transition.base.revision < grant.base.revision),
+            "configuration grant precedes owner activation"
+        );
         verify(
-            &anchor.owner_key,
+            &owner,
             CONFIGURATION_DOMAIN,
             grant,
             &self.signature,
@@ -204,6 +220,10 @@ impl SignedConfigurationGrant {
     /// Enrollment of this exception requires the exact fresh approved checkpoint.
     pub fn verify_initial(&self, state: &VerifiedState, now: u64) -> Result<()> {
         self.verify(state.anchor())?;
+        ensure!(
+            self.grant.owner_transitions == state.state().owner_transitions,
+            "configuration grant is from another owner epoch"
+        );
         ensure!(
             &self.grant.base == state.checkpoint(),
             "configuration grant has a stale base"
@@ -405,7 +425,11 @@ pub fn validate_policy(policy: &Policy) -> Result<()> {
 
 impl ClusterState {
     fn validate(&self) -> Result<()> {
-        ensure!(self.version == 1, "unsupported state version");
+        ensure!(
+            (self.version == 1 && self.owner_transitions.is_empty())
+                || (self.version == 2 && !self.owner_transitions.is_empty()),
+            "unsupported state version"
+        );
         id(&self.cluster_id)?;
         label(&self.name)?;
         public_key(&self.owner_key)?;
@@ -426,12 +450,17 @@ impl ClusterState {
             "retirement history exceeds limits"
         );
         let mut keys = BTreeSet::new();
+        let owner_keys = succession::owner_keys(&self.owner_transitions, self.owner_key);
+        ensure!(
+            owner_keys.is_disjoint(&self.retired_keys),
+            "retired node keys cannot be owner signing keys"
+        );
         for (node_id, member) in &self.nodes {
             id(node_id)?;
             label(&member.name)?;
             public_key(&member.signing_key)?;
             ensure!(
-                member.signing_key != self.owner_key && keys.insert(member.signing_key),
+                !owner_keys.contains(&member.signing_key) && keys.insert(member.signing_key),
                 "node keys must be distinct from each other and owner authority"
             );
             ensure!(
@@ -493,7 +522,7 @@ impl OwnerKey {
         now: u64,
     ) -> Result<SignedConfigurationGrant> {
         ensure!(
-            self.public_key() == state.anchor().owner_key,
+            self.public_key() == state.state().owner_key,
             "wrong owner authority"
         );
         state.require_fresh(now)?;
@@ -501,6 +530,7 @@ impl OwnerKey {
         let grant = ConfigurationGrant {
             version: 1,
             anchor: state.anchor().clone(),
+            owner_transitions: state.state().owner_transitions.clone(),
             base: state.checkpoint().clone(),
             group: group.into(),
             origin,
@@ -582,6 +612,7 @@ impl OwnerKey {
             cluster_id: cluster.0.into(),
             name: cluster.1.into(),
             owner_key: self.public_key(),
+            owner_transitions: Vec::new(),
             revision: 0,
             previous: None,
             issued_at: now,
@@ -820,12 +851,27 @@ impl SignedState {
 
     fn verify(&self, anchor: &TrustAnchor) -> Result<Checkpoint> {
         self.state.validate()?;
+        let owner = verify_lineage(anchor, &self.state.owner_transitions)?;
         ensure!(
-            self.state.cluster_id == anchor.cluster_id && self.state.owner_key == anchor.owner_key,
+            self.state.cluster_id == anchor.cluster_id && self.state.owner_key == owner,
             "state does not match pinned authority"
         );
+        if let Some(last) = self.state.owner_transitions.last() {
+            let transition = &last.transition;
+            ensure!(
+                transition.base.revision < self.state.revision
+                    && transition.issued_at <= self.state.issued_at,
+                "state precedes owner activation"
+            );
+            if self.state.revision == transition.base.revision + 1 {
+                ensure!(
+                    self.state.previous == Some(transition.base.state_hash),
+                    "owner activation checkpoint mismatch"
+                );
+            }
+        }
         verify(
-            &anchor.owner_key,
+            &owner,
             STATE_DOMAIN,
             &self.state,
             &self.signature,
@@ -941,6 +987,7 @@ impl VerifiedState {
             );
             let checkpoint = update.verify(&self.anchor)?;
             let previous = next.state();
+            succession::verify_step(&next, update)?;
             ensure!(
                 checkpoint.revision == next.checkpoint.revision + 1
                     && update.state.previous == Some(next.checkpoint.state_hash),
@@ -1022,7 +1069,7 @@ impl VerifiedState {
         edit: impl FnOnce(&mut ClusterState) -> Result<()>,
     ) -> Result<SignedState> {
         ensure!(
-            owner.public_key() == self.anchor.owner_key,
+            owner.public_key() == self.state().owner_key,
             "wrong owner authority"
         );
         ensure!(

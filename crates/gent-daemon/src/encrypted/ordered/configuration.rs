@@ -78,7 +78,7 @@ impl OrderedEndpoint<'_> {
     ) -> Result<ConfigurationInvitation> {
         self.inner.transact(now, |session| {
             ensure!(
-                owner.public_key() == session.state.anchor().owner_key,
+                owner.public_key() == session.state.state().owner_key,
                 "wrong owner authority"
             );
             let raw_exists: bool = session.db.query_row(

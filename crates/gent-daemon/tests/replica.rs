@@ -14,6 +14,64 @@ fn private_tempdir() -> tempfile::TempDir {
 }
 
 #[test]
+fn owner_epochs_commit_with_history_and_survive_restart_without_admitting_stale_writers() {
+    let home = private_tempdir();
+    let root = OwnerKey::generate().unwrap();
+    let successor = OwnerKey::generate().unwrap();
+    let node = NodeIdentity::generate().unwrap();
+    let original = root
+        .create_cluster("succession", &node, "first", NOW)
+        .unwrap();
+    let handoff = original.transfer_owner(&root, &successor, NOW + 1).unwrap();
+    let mut first = Replica::open(home.path()).unwrap();
+    first.initialize(&original).unwrap();
+    let mut stale = Replica::open(home.path()).unwrap();
+    let db = rusqlite::Connection::open(home.path().join("authority.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_handoff BEFORE UPDATE ON cluster_state BEGIN SELECT RAISE(ABORT,'injected handoff failure'); END;").unwrap();
+    assert!(
+        first
+            .apply(
+                original.checkpoint(),
+                std::slice::from_ref(&handoff),
+                NOW + 1
+            )
+            .is_err()
+    );
+    assert_eq!(first.load().unwrap().checkpoint(), original.checkpoint());
+    assert!(first.history(0, 10).unwrap().is_empty());
+    db.execute_batch("DROP TRIGGER fail_handoff").unwrap();
+    let accepted = first
+        .apply(original.checkpoint(), &[handoff], NOW + 1)
+        .unwrap();
+    assert!(
+        stale
+            .apply(
+                original.checkpoint(),
+                &[original.renew(&root, NOW + 1).unwrap()],
+                NOW + 1
+            )
+            .is_err()
+    );
+    drop(first);
+    drop(stale);
+    let mut reopened = Replica::open(home.path()).unwrap();
+    let state = reopened.load().unwrap();
+    assert_eq!(state.checkpoint(), accepted.checkpoint());
+    assert_eq!(state.owner_epoch(), 1);
+    assert_eq!(state.anchor(), original.anchor());
+    assert!(state.renew(&root, NOW + 2).is_err());
+    let renewed = state.renew(&successor, NOW + 2).unwrap();
+    let final_state = reopened
+        .apply(state.checkpoint(), &[renewed], NOW + 2)
+        .unwrap();
+    let mut catching_up = original;
+    catching_up
+        .apply_chain(&reopened.history(0, 10).unwrap(), NOW + 2)
+        .unwrap();
+    assert_eq!(catching_up.checkpoint(), final_state.checkpoint());
+}
+
+#[test]
 fn restart_preserves_anchor_checkpoint_and_complete_history() {
     let home = private_tempdir();
     let owner = OwnerKey::generate().unwrap();

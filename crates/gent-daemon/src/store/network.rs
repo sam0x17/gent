@@ -97,7 +97,7 @@ impl StoreSession<'_> {
                 "legacy agent already belongs to another node"
             );
             let certificate: SignedLegacyAgentBinding = serde_json::from_slice(&certificate)?;
-            certificate.verify(self.state.anchor(), id, node)?;
+            certificate.verify_current(&self.state, id, node)?;
             return Ok(certificate);
         }
         let existing: Option<String> = self
@@ -660,7 +660,7 @@ impl Store {
         }
         for certificate in legacy {
             let id = &certificate.binding.agent;
-            certificate.verify(state.anchor(), id, self.identity.node.id())?;
+            certificate.verify_current(&state, id, self.identity.node.id())?;
             let node: String =
                 tx.query_row("SELECT node_id FROM agents WHERE id=?1", [id], |r| r.get(0))?;
             ensure!(

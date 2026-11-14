@@ -366,7 +366,7 @@ impl Store {
     fn invitation_authority(&self, record: &Record, timestamp: u64) -> Result<VerifiedState> {
         self.identity.signing_owner()?;
         let state = self.identity.state(&self.db)?;
-        record.offer.verify(state.anchor(), timestamp)?;
+        record.offer.verify_current(&state, timestamp)?;
         ensure!(
             record.offer.offer.issuer_id == self.identity.node.id()
                 && record.offer.offer.issuer_key == self.identity.node.public_key()

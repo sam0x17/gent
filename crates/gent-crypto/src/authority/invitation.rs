@@ -11,10 +11,10 @@ use zeroize::Zeroize;
 pub mod channel;
 
 pub const OFFER_LIFETIME: u64 = gent_protocol::service::invitations::LIFETIME_SECONDS;
-pub const MAX_INVITATION_BYTES: usize = 16 * 1024;
+pub const MAX_INVITATION_BYTES: usize = MAX_OWNER_CHAIN_BYTES + 16 * 1024;
 const OFFER_DOMAIN: &[u8] = b"gent/invitation-offer/v1\0";
 const CLAIM_DOMAIN: &[u8] = b"gent/invitation-claim/v1\0";
-const MAX_OFFER_BYTES: usize = 8192;
+const MAX_OFFER_BYTES: usize = MAX_OWNER_CHAIN_BYTES + 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +72,13 @@ impl ClaimedNode {
                 && self.key != offer.anchor.owner_key,
             "invitation requires a separate joining identity"
         );
+        ensure!(
+            offer
+                .owner_transitions
+                .iter()
+                .all(|t| t.transition.owner_key != self.key),
+            "joining node cannot reuse an owner signing key"
+        );
         if let Some(target) = &offer.replaces {
             ensure!(
                 self.id != target.id && self.key != target.signing_key,
@@ -102,6 +109,8 @@ pub struct Offer {
     pub version: u8,
     pub id: String,
     pub anchor: TrustAnchor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_transitions: Vec<SignedOwnerTransition>,
     pub issuer_id: String,
     pub issuer_key: PublicKey,
     pub service: ServiceBinding,
@@ -144,8 +153,18 @@ impl SignedOffer {
         id(&offer.issuer_id)?;
         public_key(&offer.anchor.owner_key)?;
         public_key(&offer.issuer_key)?;
+        let owner = verify_lineage(&offer.anchor, &offer.owner_transitions)?;
+        ensure!(
+            offer
+                .owner_transitions
+                .last()
+                .is_none_or(|t| t.transition.issued_at <= offer.issued_at),
+            "invitation precedes owner activation"
+        );
         ensure!(
             offer.issuer_key != offer.anchor.owner_key
+                && !succession::owner_keys(&offer.owner_transitions, owner)
+                    .contains(&offer.issuer_key)
                 && offer.anchor.genesis_hash != [0; 32]
                 && offer.routing_digest != [0; 32]
                 && offer.issued_at > 0,
@@ -168,17 +187,29 @@ impl SignedOffer {
         }
         lifetime(offer.issued_at, offer.expires_at, OFFER_LIFETIME)?;
         verify(
-            &offer.anchor.owner_key,
+            &owner,
             OFFER_DOMAIN,
             offer,
             &self.signature,
             MAX_OFFER_BYTES,
         )
     }
+    /// Authenticate the offer and its deadline. Admission must also compare the
+    /// current owner epoch through verify_current and check service revocation.
     pub fn verify(&self, anchor: &TrustAnchor, now: u64) -> Result<()> {
         ensure!(&self.offer.anchor == anchor, "invitation authority changed");
         self.verify_signature()?;
         fresh(self.offer.issued_at, self.offer.expires_at, now)
+    }
+
+    pub fn verify_current(&self, state: &VerifiedState, now: u64) -> Result<()> {
+        self.verify(state.anchor(), now)?;
+        ensure!(
+            self.offer.owner_transitions == state.state().owner_transitions,
+            "invitation is from another owner epoch"
+        );
+        state.authorize_node(&self.offer.issuer_id, &self.offer.issuer_key, now)?;
+        Ok(())
     }
 }
 
@@ -240,7 +271,7 @@ impl OwnerInvitation {
         now: u64,
     ) -> Result<Self> {
         ensure!(
-            owner.public_key() == state.anchor().owner_key,
+            owner.public_key() == state.state().owner_key,
             "wrong invitation owner"
         );
         state.authorize_node(issuer.id(), &issuer.public_key(), now)?;
@@ -281,6 +312,7 @@ impl OwnerInvitation {
             version: 1,
             id: Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, now, 0)).to_string(),
             anchor: state.anchor().clone(),
+            owner_transitions: state.state().owner_transitions.clone(),
             issuer_id: issuer.id().into(),
             issuer_key: issuer.public_key(),
             service: options.service,

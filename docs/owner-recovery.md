@@ -58,12 +58,12 @@ Files use strict canonical JCS JSON. Challenges are limited to 4 KiB; baselines 
 
 ## Required before owner replacement
 
-The existing cluster trust anchor pins one permanent owner public key. That key signs configuration, configuration grants, invitations and legacy agent certificates. Merely copying its secret from an archive would let both copies sign competing histories. Replacing the public key without authenticated succession would break the existing trust anchor.
+The cluster trust anchor pins the original owner public key. The [signer succession protocol](owner-succession.md) now verifies delegation to a fresh signer while retaining that root, including configuration grants, invitations and legacy agent certificates. Live clusters still use their original signer because coordinated activation remains unimplemented. Merely copying its secret from an archive would let both copies sign competing histories.
 
-The next protocol stage must define and verify:
+The remaining activation and lost-key recovery work must define and verify:
 
 - Recovery authority established before loss, independent of service login. Existing clusters with no such authority cannot infer a replacement signer from matching reports. A complete loss may instead require explicit creation of a fresh cluster and trusted re-enrollment.
-- A signer succession record bound to the old authority, a verified current checkpoint, a fresh owner key and a monotonically accepted authority epoch. Recovery evidence alone does not provide this authorization.
+- Installation and propagation of the implemented succession record, bound to the old authority, an exact current checkpoint, a fresh owner key and a monotonically accepted authority epoch. Recovery evidence alone does not provide this authorization.
 - Durable retirement of old authority on participating endpoints and service credentials. Offline peers must verify succession before accepting more traffic. The design must state what happens to peers that never receive it and to a still-running old writer.
 - History reconciliation and explicit handling of unavailable or conflicting peers. A majority of reports is not currently a quorum or a recovery policy.
 - Atomic persistence, restart behavior and rejection of replayed succession records. Recovering processes need fresh node identities and encrypted sending state where rollback cannot be excluded.

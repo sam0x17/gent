@@ -39,7 +39,7 @@ impl Registration {
                 agent_id(node, *nonce)? == self.id,
                 "agent ID does not belong to node"
             ),
-            (None, Some(binding)) => binding.verify(state.anchor(), &self.id, node)?,
+            (None, Some(binding)) => binding.verify_current(state, &self.id, node)?,
             _ => anyhow::bail!("ambiguous agent binding"),
         }
         Ok(())

@@ -2,6 +2,7 @@ use super::*;
 use uuid::Uuid;
 
 const LEGACY_DOMAIN: &[u8] = b"gent/legacy-agent-binding/v1\0";
+const MAX_LEGACY_BINDING_BYTES: usize = MAX_OWNER_CHAIN_BYTES + 4096;
 
 /// Public, node-bound IDs prevent an authenticated node from claiming another
 /// node's agent UUID before the receiver has seen its directory announcement.
@@ -34,6 +35,8 @@ pub fn scoped_id(domain: &[u8], parts: &[&[u8]]) -> Uuid {
 #[serde(deny_unknown_fields)]
 pub struct LegacyAgentBinding {
     pub anchor: TrustAnchor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_transitions: Vec<SignedOwnerTransition>,
     pub agent: String,
     pub node: String,
 }
@@ -44,6 +47,7 @@ pub struct SignedLegacyAgentBinding {
     pub signature: Vec<u8>,
 }
 impl SignedLegacyAgentBinding {
+    /// Verify historical provenance only. Use verify_current for a live registration.
     pub fn verify(&self, anchor: &TrustAnchor, agent: &str, node: &str) -> Result<()> {
         id(agent)?;
         id(node)?;
@@ -53,13 +57,28 @@ impl SignedLegacyAgentBinding {
                 && self.binding.node == node,
             "legacy agent binding mismatch"
         );
+        let owner = verify_lineage(anchor, &self.binding.owner_transitions)?;
         verify(
-            &anchor.owner_key,
+            &owner,
             LEGACY_DOMAIN,
             &self.binding,
             &self.signature,
-            4096,
+            MAX_LEGACY_BINDING_BYTES,
         )
+    }
+
+    /// Historical signatures alone cannot authorize a live registration.
+    pub fn verify_current(&self, state: &VerifiedState, agent: &str, node: &str) -> Result<()> {
+        self.verify(state.anchor(), agent, node)?;
+        ensure!(
+            self.binding.owner_transitions == state.state().owner_transitions,
+            "legacy binding is from another owner epoch"
+        );
+        ensure!(
+            state.state().nodes.contains_key(node),
+            "legacy binding node is unavailable"
+        );
+        Ok(())
     }
 }
 impl OwnerKey {
@@ -76,17 +95,22 @@ impl OwnerKey {
         id(node)?;
         state.require_fresh(now)?;
         ensure!(
-            self.public_key() == state.anchor().owner_key && state.state().nodes.contains_key(node),
+            self.public_key() == state.state().owner_key && state.state().nodes.contains_key(node),
             "legacy agent binding requires owner authority and enrolled node"
         );
         let binding = LegacyAgentBinding {
             anchor: state.anchor().clone(),
+            owner_transitions: state.state().owner_transitions.clone(),
             agent: agent.into(),
             node: node.into(),
         };
         let signature = self
             .0
-            .sign(&signing_input(LEGACY_DOMAIN, &binding, 4096)?)
+            .sign(&signing_input(
+                LEGACY_DOMAIN,
+                &binding,
+                MAX_LEGACY_BINDING_BYTES,
+            )?)
             .to_bytes()
             .to_vec();
         Ok(SignedLegacyAgentBinding { binding, signature })

@@ -347,7 +347,20 @@ pub(crate) fn authority(db: &Connection, signer: &NodeIdentity) -> Result<Verifi
     );
     let anchor: TrustAnchor = serde_json::from_slice(&anchor)?;
     let checkpoint: Checkpoint = serde_json::from_slice(&checkpoint)?;
-    VerifiedState::restore(anchor, checkpoint, SignedState::decode(&state)?)
+    let state = VerifiedState::restore(anchor, checkpoint, SignedState::decode(&state)?)?;
+    require_runtime_authority(&state)?;
+    Ok(state)
+}
+
+// Signer succession is verified by the protocol and standalone Replica. Live
+// activation additionally needs atomic runtime-key installation, peer stream
+// migration and service retirement. Do not persist a half-activated daemon.
+fn require_runtime_authority(state: &VerifiedState) -> Result<()> {
+    ensure!(
+        state.owner_epoch() == 0,
+        "owner succession requires coordinated daemon activation, which is not implemented yet"
+    );
+    Ok(())
 }
 
 fn credential(state: &VerifiedState, signer: &NodeIdentity) -> Result<CredentialWithKey> {
@@ -938,6 +951,7 @@ pub(crate) fn persist_authority(
     state: &VerifiedState,
     updates: &[SignedState],
 ) -> Result<()> {
+    require_runtime_authority(state)?;
     // All callers own a transaction. Cleanup may release records required only
     // by peers revoked in this update; a capacity or cleanup failure restores
     // the previous authority together with its history.
@@ -1139,6 +1153,7 @@ pub(crate) fn initialize_authority(
     identity: &NodeIdentity,
     state: &VerifiedState,
 ) -> Result<()> {
+    require_runtime_authority(state)?;
     db.execute(
         "INSERT INTO authority VALUES(1,?1,?2,?3,?4,?5)",
         params![
