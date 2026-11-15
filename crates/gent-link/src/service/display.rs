@@ -45,6 +45,22 @@ pub fn print(value: &Value) {
         "State directory: {}",
         service["home"].as_str().unwrap_or_default()
     );
+    let startup = &service["startup"];
+    println!(
+        "Startup: {}",
+        match startup["trigger"].as_str() {
+            Some("boot") => "at boot, including before login",
+            Some("login") => "with the user's login session",
+            Some("disabled") => "disabled",
+            _ => "unknown",
+        }
+    );
+    if startup["trigger"] == "login" && service["backend"] == "systemd" {
+        println!("For startup before login and after logout: gent daemon install --linger");
+    }
+    if let Some(error) = startup["error"].as_str() {
+        println!("Startup inspection: {error}");
+    }
     println!(
         "Service file: {}",
         service["file"].as_str().unwrap_or_default()

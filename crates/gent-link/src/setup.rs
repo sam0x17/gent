@@ -36,6 +36,10 @@ pub struct Options {
     /// Never prompt or start login. Use an existing login and explicit setup flags.
     #[arg(long)]
     no_input: bool,
+    /// Linux: keep user services running after logout and start them at boot.
+    /// Enables systemd linger for this OS user; may require administrator setup.
+    #[arg(long)]
+    linger: bool,
     /// Install shell PATH and completion setup after the daemon starts.
     #[arg(long)]
     hooks: bool,
@@ -343,6 +347,7 @@ pub async fn install(
     human: bool,
 ) -> Result<Value> {
     let home = managed_file::normalize(home)?;
+    service::validate_linger(options.linger)?;
     let interactive =
         human && !options.no_input && io::stdin().is_terminal() && io::stderr().is_terminal();
     if let Some(origin) = &options.service {
@@ -425,6 +430,12 @@ pub async fn install(
         },
     )
     .await?;
+    if options.linger {
+        service::enable_linger()
+            .await
+            .context("daemon is installed, but startup without login could not be enabled")?;
+        result = service::execute(&home, DaemonCommand::Status).await?;
+    }
     if let Some(enrollment) = enrollment {
         result["enrollment"] = enrollment;
     }

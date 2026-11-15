@@ -91,6 +91,7 @@ These two tests are transport component proofs: service node labels are fixture 
 
 ```sh
 gent daemon install
+gent daemon install --linger # Linux: stay available without a login session
 gent daemon status
 gent daemon stop
 gent daemon start
@@ -103,7 +104,11 @@ These are independent lifecycle examples. Install registers and starts a systemd
 
 Service names derive from the canonical state directory, so different `--home` directories have independent registrations. `gent daemon status --json` reports the service file, backend, manager state, PID, startup enablement, and authenticated daemon readiness. An established service registration does not prove the daemon is responding. Status exits 0 when the daemon responds and 3 when stopped or unavailable; command failures exit 1. Successful stop and uninstall exit 0. When reachable, existing node, cluster, and authority fields remain available in status output.
 
-Linux definitions live under `$XDG_CONFIG_HOME/systemd/user` or `~/.config/systemd/user`. Startup follows the systemd user manager; remaining active after logout or starting without login depends on the host's linger configuration. Gent does not change linger or install a system-wide service. On macOS, definitions live under `~/Library/LaunchAgents`. Gent uses the current GUI domain when available and otherwise the user's background domain, including SSH sessions. It supports both Aqua and Background session types. Actual logout/reboot and transitions between GUI and headless sessions have not been tested. Systems without an available user service manager can use `gent daemon run`.
+Linux definitions live under `$XDG_CONFIG_HOME/systemd/user` or `~/.config/systemd/user`. By default startup follows the user's login session. `gent daemon install --linger` explicitly enables systemd linger for the current OS user, keeping the user manager available after logout and starting it at boot. This OS setting applies to all that user's services, including Gent gateways and other Gent profiles. It is not replicated cluster configuration. Gent never invokes `sudo`; if host policy denies the change, installation remains intact and the error gives the exact `sudo loginctl enable-linger UID` command for an administrator. Retry the same installation afterward. Uninstalling Gent preserves linger because other services may depend on it.
+
+Service status reports `service.startup.trigger` as `boot`, `login`, `disabled` or `unknown`, with the observed linger setting on Linux. Unit enablement alone does not establish startup before login. Missing or unrecognized OS metadata produces `unknown`, with an inspection error. Preserve the same `--home` or `--cluster` selection when retrying a scoped installation.
+
+A disposable Debian 13 VM verifies the login-only baseline, explicit linger enablement, logout, startup before login after reboot, abrupt VM power loss, and stable identities with a queued PNG and a subsequent reply. This is local daemon/MCP evidence; it does not establish native provider recovery, hosted connectivity or physical power-loss durability. On macOS, definitions live under `~/Library/LaunchAgents`. Gent uses the current GUI domain when available and otherwise the user's background domain, including SSH sessions. It supports both Aqua and Background session types. `--linger` is refused on macOS before setup. Actual Mac logout/reboot and transitions between GUI and headless sessions remain unverified. Systems without an available user service manager can use `gent daemon run`.
 
 Definitions contain the executable and state paths, with no Gent credentials or encryption keys. Gent refuses to overwrite or remove edited, unrelated, shared, symlinked, or hard-linked service files. It also refuses to control a foreground daemon as though it were the installed service. Stop that foreground process before installing the service. Installation and removal preserve unrelated files in the service directory. A per-state lock prevents concurrent lifecycle mutations.
 

@@ -19,6 +19,8 @@ gent daemon install
 gent hooks install
 ```
 
+On Linux servers, use `gent daemon install --linger` to keep Gent running after logout and start it before login at boot. This explicitly changes the OS user's systemd linger setting for all their services. Host policy may require an administrator; Gent reports that requirement without running `sudo`. A denied linger change leaves the daemon installed. Rerun the same command after the administrator enables it. `gent daemon status` distinguishes startup at boot from startup with a login session. See [daemon services](local-proof.md#daemon-services) for scope and removal behavior.
+
 For explicit setup or a headless machine:
 
 ```sh

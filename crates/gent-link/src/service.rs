@@ -6,6 +6,7 @@ pub use command::GatewayCommand;
 use command::{Action, Install};
 pub use display::print;
 mod manager;
+mod startup;
 use crate::{DaemonCommand, managed_file, owner};
 use anyhow::{Context, Result, ensure};
 use files::{Kind, Platform, Spec};
@@ -113,6 +114,13 @@ impl Service {
         value["service"]["label"] = self.manager.label.clone().into();
         value["service"]["file"] = json!(self.path);
         value["service"]["home"] = json!(self.home);
+        let enabled = if matches!(&installed, Ok(None)) {
+            Some(false)
+        } else {
+            (installed.is_ok() && state.available).then_some(state.enabled)
+        };
+        value["service"]["startup"] =
+            json!(startup::inspect(self.manager.platform, self.manager.uid, enabled).await);
         if let Err(error) = installed {
             value["service"]["file_error"] = error.to_string().into();
         }
@@ -234,6 +242,19 @@ pub(crate) async fn diagnose(home: &Path) -> Result<Value> {
 
 pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
     control(home, Kind::Daemon, action.into()).await
+}
+
+pub(crate) fn validate_linger(requested: bool) -> Result<()> {
+    ensure!(
+        !requested || Platform::native()? == Platform::Systemd,
+        "--linger is only supported on Linux; macOS uses a login LaunchAgent"
+    );
+    Ok(())
+}
+
+pub(crate) async fn enable_linger() -> Result<()> {
+    validate_linger(true)?;
+    startup::enable(manager::uid().await?).await
 }
 
 pub(crate) async fn gateway(home: &Path, action: GatewayCommand) -> Result<Value> {

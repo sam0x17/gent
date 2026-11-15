@@ -31,6 +31,7 @@ gent auth login
 gent cluster join my-cluster-id
 gent node name set my-node
 gent daemon install
+gent daemon install --linger # Linux: start at boot and remain after logout
 gent hooks install
 gent cluster
 ```
