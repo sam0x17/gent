@@ -60,6 +60,12 @@ pub enum Command {
     /// Print MCP configuration and any required host hooks; does not edit settings.
     Config {
         host: Host,
+        /// Use Codex's default local app-server socket for queued delivery.
+        #[arg(long, conflicts_with = "wake_socket")]
+        wake: bool,
+        /// Codex config directory used to resolve --wake (defaults to CODEX_HOME).
+        #[arg(long, requires = "wake")]
+        config_dir: Option<PathBuf>,
         /// Opt into queued Codex wake through an existing local app-server socket.
         #[arg(long)]
         wake_socket: Option<PathBuf>,
@@ -74,7 +80,19 @@ pub fn execute(home: &Path, command: Command) -> Result<Value> {
         Command::Status { host, config_dir } => install::status(home, host, config_dir),
         Command::Install(args) => install::change(home, args, true),
         Command::Uninstall(args) => install::change(home, args, false),
-        Command::Config { host, wake_socket } => configuration(home, host, wake_socket.as_deref()),
+        Command::Config {
+            host,
+            wake,
+            config_dir,
+            wake_socket,
+        } => {
+            let socket = if wake {
+                Some(install::default_wake_socket(host, config_dir)?)
+            } else {
+                wake_socket
+            };
+            configuration(home, host, socket.as_deref())
+        }
         Command::Hook { host } => {
             ensure!(
                 host == Host::ClaudeCode,

@@ -17,6 +17,9 @@ pub struct Args {
     /// Host config directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
+    /// Use Codex's default local app-server socket for queued delivery.
+    #[arg(long, conflicts_with = "wake_socket")]
+    pub wake: bool,
     /// Opt into queued Codex wake through an existing local app-server socket.
     #[arg(long)]
     pub wake_socket: Option<PathBuf>,
@@ -57,7 +60,24 @@ struct Layout {
     server: PathBuf,
     settings: Option<PathBuf>,
 }
+
+pub(super) fn default_wake_socket(host: Host, config_dir: Option<PathBuf>) -> Result<PathBuf> {
+    Layout::resolve(host, config_dir)?.wake_socket()
+}
+
 impl Layout {
+    fn wake_socket(&self) -> Result<PathBuf> {
+        ensure!(
+            self.host == Host::Codex,
+            "queued wake is currently supported only for Codex"
+        );
+        // Codex resolves `--listen unix://` from this configuration directory.
+        // Pin the advertised name; the running host owns its rendezvous link.
+        Ok(self
+            .directory
+            .join("app-server-control/app-server-control.sock"))
+    }
+
     fn resolve(host: Host, explicit: Option<PathBuf>) -> Result<Self> {
         let user = std::env::var_os("HOME").map(PathBuf::from);
         let env_name = match host {
@@ -286,17 +306,22 @@ fn recover(layout: &Layout) -> Result<()> {
 
 pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     ensure!(
-        install || args.wake_socket.is_none(),
-        "--wake-socket applies only to installation"
+        install || (!args.wake && args.wake_socket.is_none()),
+        "--wake and --wake-socket apply only to installation"
     );
     let home = normalize(home)?;
     let layout = Layout::resolve(args.host, args.config_dir)?;
+    let wake_socket = if args.wake {
+        Some(layout.wake_socket()?)
+    } else {
+        args.wake_socket
+    };
     let desired = if install {
         config::load(&home).context("initialize this Gent node first")?;
         Some(Spec {
             home: home.clone(),
             binary: std::fs::canonicalize(std::env::current_exe()?)?,
-            wake_socket: args.wake_socket,
+            wake_socket,
         })
     } else {
         None
@@ -379,6 +404,7 @@ fn inspect(layout: &Layout, home: &Path) -> Result<Value> {
         result["gent_home"] = json!(spec.home);
         result["current_home"] = json!(spec.home == home);
         result["binary_available"] = json!(spec.binary.is_file());
+        result["wake_socket"] = json!(spec.wake_socket);
     }
     Ok(result)
 }

@@ -21,8 +21,8 @@ def main():
         home = root / "state ' $HOME"
         base = [binary, '--home', str(home)]
 
-        def cli(*command, check=True):
-            return subprocess.run(base + list(command), capture_output=True, text=True, timeout=20, check=check)
+        def cli(*command, check=True, env=None):
+            return subprocess.run(base + list(command), capture_output=True, text=True, timeout=20, check=check, env=env)
 
         cli('cluster', 'new', 'install-proof', '--local')
         for host, env_name, executable in [('codex', 'CODEX_HOME', args.codex), ('claude-code', 'CLAUDE_CONFIG_DIR', args.claude)]:
@@ -40,6 +40,35 @@ def main():
             status = subprocess.run(base + ['integration', 'status', host], env=env,
                                     capture_output=True, text=True, check=True, timeout=20)
             assert json.loads(status.stdout)['state'] == 'configured'
+            if host == 'codex':
+                endpoint = directory.resolve() / 'app-server-control/app-server-control.sock'
+                unrelated = root / 'unrelated-codex'
+                other_env = dict(env, CODEX_HOME=str(unrelated))
+                fragment = json.loads(cli('integration', 'config', host, '--wake', '--config-dir', str(directory), env=other_env).stdout)
+                assert fragment['mcp_servers']['gent']['args'][-2:] == ['--wake-socket', str(endpoint)]
+                inherited = json.loads(cli('integration', 'config', host, '--wake', env=env).stdout)
+                assert inherited == fragment
+                installed = json.loads(cli('integration', 'install', *suffix, '--wake', env=other_env).stdout)
+                assert installed['wake_socket'] == str(endpoint)
+                path = directory / 'config.toml'
+                original = path.read_bytes()
+                cli('integration', 'install', *suffix, '--wake', env=other_env)
+                assert path.read_bytes() == original
+                assert not endpoint.parent.exists() and not unrelated.exists()
+                for command in [
+                    ['install', *suffix, '--wake', '--wake-socket', str(root / 'other.sock')],
+                    ['uninstall', *suffix, '--wake'],
+                    ['config', host, '--config-dir', str(directory)],
+                    ['install', 'claude-code', '--config-dir', str(unrelated), '--wake'],
+                ]:
+                    assert cli('integration', *command, check=False).returncode != 0
+                    assert path.read_bytes() == original and not unrelated.exists()
+                custom = root / 'custom.sock'
+                assert json.loads(cli('integration', 'install', *suffix, '--wake-socket', str(custom)).stdout)['wake_socket'] == str(custom)
+                assert json.loads(cli('integration', 'install', *suffix).stdout)['wake_socket'] is None
+                cli('integration', 'install', *suffix, '--wake')
+                assert json.loads(cli('integration', 'status', *suffix).stdout)['wake_socket'] == str(endpoint)
+                print('PASS: Codex default socket selection, explicit directory precedence, pinned arguments, opt-out and invalid-option preservation', flush=True)
             command = [executable, 'mcp', 'get', 'gent']
             if host == 'codex':
                 command += ['--json']

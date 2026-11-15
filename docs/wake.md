@@ -6,15 +6,25 @@ The tested Codex queue creates a new entry when the same client message ID is su
 
 ## Enable Codex queued delivery
 
-Provide the absolute path of an existing Codex app-server Unix socket:
+Use Codex's default local app-server socket:
+
+```sh
+gent integration install codex --wake
+```
+
+Gent selects the Codex configuration directory from `--config-dir`, then `CODEX_HOME`, then `~/.codex`. It pins `<directory>/app-server-control/app-server-control.sock` in the MCP entry, so later environment changes cannot retarget that entry. Installation and `gent integration status codex` report the recorded `wake_socket` without probing the host. `gent integration config codex --wake [--config-dir PATH]` prints the equivalent fragment without editing settings.
+
+For a custom server, provide its absolute advertised socket path:
 
 ```sh
 gent integration install codex --wake-socket /absolute/path/to/codex.sock
 ```
 
-Restart the host's Gent MCP connection to load the setting. Use `--config-dir` when managing a separate Codex configuration directory. `gent integration config codex --wake-socket PATH` prints the equivalent fragment. Direct setups can use `gent --home PATH mcp serve --host codex --wake-socket PATH`.
+Use either `--wake` or `--wake-socket`, then restart the host's Gent MCP connection to load the setting. `gent integration config codex --wake-socket PATH` prints a custom fragment. Direct setups can use `gent --home PATH mcp serve --host codex --wake-socket PATH`.
 
 Gent does not start the Codex server. It resolves Codex's socket alias, requires a private socket and directory owned by the current OS user, and verifies the connected peer's user ID. The socket must serve the conversation that is using Gent. A standalone embedded host without that socket continues to use its inbox normally.
+
+For a manual default-server setup, run `codex app-server --listen unix://` in one terminal, then `codex --remote unix://` in another. Use the same Codex configuration directory for the server and CLI. The server must remain running and the conversation must stay loaded for automatic delivery. These commands create a new host connection; Gent does not move an existing embedded conversation to that server.
 
 After a conversation calls a Gent tool, its host-supplied thread ID selects the registration credential and saves an attachment for the configured socket. One watcher per node, cluster and socket checks loaded conversations against those attachments, visiting up to 128 thread IDs per sweep and waiting five seconds between sweeps. Before claiming a pending message, it reads that exact thread's metadata and requires a loaded idle or active thread that accepts direct input. It then uses `thread/queue/add`; it never calls turn start, steering, resume, queue start or interruption. Busy queues and explicit interruption holds remain controlled by Codex.
 
@@ -24,9 +34,9 @@ The adapter lives with the MCP process. A replacement or another opted-in MCP pr
 
 Unloaded threads, missing sockets, unsupported host APIs and unavailable registrations leave messages pending. A lost response after a claim leaves an uncertain journal record and never triggers a repeated submission. Other attached conversations remain eligible when one fails.
 
-To disable queued delivery, run `gent integration install codex` without `--wake-socket`, then reconnect the host's Gent MCP connections so the old watchers exit. This removes the managed socket option while preserving the ordinary MCP integration. Each conversation's next Gent call through a connection without that option also disables its saved attachment. Other still-running opted-in connections can continue watching saved attachments until they exit or those attachments are disabled. No Codex service or model setting is changed.
+To disable queued delivery, run `gent integration install codex` without either wake option, then reconnect the host's Gent MCP connections so the old watchers exit. This removes the managed socket option while preserving the ordinary MCP integration. Each conversation's next Gent call through a connection without that option also disables its saved attachment. Other still-running opted-in connections can continue watching saved attachments until they exit or those attachments are disabled. No Codex service or model setting is changed.
 
-Daemon identity still reports `delivery: polling` for its durable inbox. That field does not describe this optional adapter's live connection status; inspect `gent wake` for dispatch evidence. Richer connection diagnostics, automatic socket discovery, cold resume and GUI acceptance remain unfinished.
+Daemon identity still reports `delivery: polling` for its durable inbox. That field does not describe this optional adapter's live connection status; inspect `gent wake` for dispatch evidence. Live connection diagnostics, discovery of custom endpoints, automatic server startup, cold resume and GUI acceptance remain unfinished.
 
 ## Owner inspection
 
