@@ -3,6 +3,8 @@
 use super::*;
 use gent_protocol::wake::{WakeRecord, WakeState, WakeTarget};
 
+pub(super) mod retention;
+
 const MAX_RECORDS: u64 = 16_384;
 const RECORD_BYTES: usize = 2048;
 const AGENT_HOURLY_LIMIT: u64 = 12;
@@ -68,6 +70,42 @@ fn limits() -> Value {
         "minimum_agent_interval_seconds":MIN_INTERVAL})
 }
 
+fn record(db: &Connection, message_id: &str) -> Result<Option<WakeRecord>> {
+    id(message_id)?;
+    let row: Option<(String, String, i64, String)> = db
+        .query_row(
+            "SELECT agent,attempt_id,claimed_at,payload FROM wake_dispatches WHERE message_id=?1",
+            [message_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    row.map(|(agent, attempt, claimed, payload)| {
+        ensure!(payload.len() <= RECORD_BYTES, "oversized wake record");
+        let record: WakeRecord = serde_json::from_str(&payload)?;
+        id(&record.agent)?;
+        id(&record.attempt_id)?;
+        target(&record.target)?;
+        if let Some(submission) = &record.submission_id {
+            id(submission)?;
+        }
+        ensure!(
+            record.message_id == message_id
+                && record.agent == agent
+                && record.attempt_id == attempt
+                && record.claimed_at == claimed
+                && record.claimed_at >= 0
+                && record.updated_at >= record.claimed_at
+                && record
+                    .inbox_seen_at
+                    .is_none_or(|at| at >= claimed && at <= record.updated_at)
+                && (record.state == WakeState::Submitted) == record.submission_id.is_some(),
+            "inconsistent wake record; do not repeat uncertain dispatches"
+        );
+        Ok(record)
+    })
+    .transpose()
+}
+
 impl StoreSession<'_> {
     pub(super) fn wake_check(
         &self,
@@ -96,36 +134,7 @@ impl StoreSession<'_> {
     }
 
     fn wake_record(&self, message_id: &str) -> Result<Option<WakeRecord>> {
-        id(message_id)?;
-        let row: Option<(String,String,i64,String)> = self.db.query_row(
-            "SELECT agent,attempt_id,claimed_at,payload FROM wake_dispatches WHERE message_id=?1",
-            [message_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-        ).optional()?;
-        row.map(|(agent, attempt, claimed, payload)| {
-            ensure!(payload.len() <= RECORD_BYTES, "oversized wake record");
-            let record: WakeRecord = serde_json::from_str(&payload)?;
-            id(&record.agent)?;
-            id(&record.attempt_id)?;
-            target(&record.target)?;
-            if let Some(submission) = &record.submission_id {
-                id(submission)?;
-            }
-            ensure!(
-                record.message_id == message_id
-                    && record.agent == agent
-                    && record.attempt_id == attempt
-                    && record.claimed_at == claimed
-                    && record.claimed_at >= 0
-                    && record.updated_at >= record.claimed_at
-                    && record
-                        .inbox_seen_at
-                        .is_none_or(|at| at >= claimed && at <= record.updated_at)
-                    && (record.state == WakeState::Submitted) == record.submission_id.is_some(),
-                "inconsistent wake record; do not repeat uncertain dispatches"
-            );
-            Ok(record)
-        })
-        .transpose()
+        record(self.db, message_id)
     }
 
     fn wake_write(&self, record: &WakeRecord) -> Result<()> {
@@ -188,7 +197,7 @@ impl StoreSession<'_> {
             .query_row("SELECT COUNT(*) FROM wake_dispatches", [], |r| r.get(0))?;
         ensure!(
             count < MAX_RECORDS,
-            "wake journal is full; leave messages pending"
+            "wake journal is full; inspect gent wake status and gent wake clean; leave messages pending"
         );
         let (node_count, agent_count, last): (u64, u64, Option<i64>) = self.db.query_row(
             "SELECT COUNT(*),COALESCE(SUM(agent=?1),0),MAX(CASE WHEN agent=?1 THEN claimed_at END)

@@ -6,6 +6,9 @@ use std::sync::{Arc, Barrier};
 use std::{fs, os::unix::fs::PermissionsExt};
 use uuid::Uuid;
 
+#[path = "wake/retention.rs"]
+mod retention;
+
 fn ok(response: Response) -> Value {
     match response {
         Response::Ok(value) => value,

@@ -15,6 +15,99 @@ fn clean(pair: &mut Pair, node: usize, dry_run: bool) -> Result<Value> {
 }
 
 #[tokio::test]
+async fn retired_wake_claim_cannot_return_through_remote_replay_or_timestamp_rewriting() {
+    let mut pair = Pair::new().await;
+    let message = pair.send(vec![]).unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let body: Vec<u8> = pair.stores[0]
+        .db
+        .query_row(
+            "SELECT body FROM network_events WHERE subject=?1",
+            [&message],
+            |r| r.get(0),
+        )
+        .unwrap();
+    pair.pump();
+    let attempt = Uuid::new_v4().to_string();
+    let claim = AgentOp::WakeClaim {
+        message_id: message.clone(),
+        attempt_id: attempt.clone(),
+        target: gent_protocol::wake::WakeTarget::Codex {
+            thread_id: Uuid::new_v4().to_string(),
+        },
+    };
+    assert_eq!(pair.agent(1, claim.clone()).unwrap()["may_submit"], true);
+    pair.agent(1, AgentOp::Inbox).unwrap();
+    pair.agent(
+        1,
+        AgentOp::WakeSubmitted {
+            message_id: message,
+            attempt_id: attempt,
+            submission_id: Uuid::new_v4().to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(pair.retire_history(1)["messages_removed"], 1);
+    let credential = config::read_private(&pair.homes[1].path().join("owner.key")).unwrap();
+    assert_eq!(
+        pair.stores[1]
+            .execute(Request::Owner {
+                credential,
+                action: OwnerOp::WakeClean { dry_run: false },
+            })
+            .unwrap()["records_removed"],
+        1
+    );
+    let state = pair.stores[1].identity.state(&pair.stores[1].db).unwrap();
+    let renewal = state
+        .renew(
+            &pair.stores[0]
+                .identity
+                .signing_owner(&pair.stores[0].db)
+                .unwrap(),
+            (now() + 9 * 86400) as u64,
+        )
+        .unwrap();
+    pair.stores[1]
+        .identity
+        .apply(&pair.stores[1].db, renewal)
+        .unwrap();
+    pair.reopen(1);
+    let peer = pair.stores[0].identity.node.id().to_owned();
+    for rewrite in [false, true] {
+        let mut record: Record = serde_json::from_slice(&body).unwrap();
+        if rewrite {
+            let Event::Message { message, .. } = &mut record.event else {
+                panic!()
+            };
+            message.created_at = now() + 9 * 86400;
+            message.expires_at = message.created_at + EXCHANGE_TTL_SECONDS;
+        }
+        let store = &pair.stores[1];
+        let tx = store.db.unchecked_transaction().unwrap();
+        store
+            .network_session(&tx, store.identity.state(&tx).unwrap())
+            .import_event(&peer, record.event)
+            .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(count(&pair, 1, "messages"), 0);
+        assert_eq!(count(&pair, 1, "wake_dispatches"), 0);
+        assert!(
+            pair.agent(1, claim.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+        assert_eq!(
+            pair.agent(1, AgentOp::WakePending).unwrap()["pending"],
+            json!([])
+        );
+    }
+}
+
+#[tokio::test]
 async fn legacy_negative_receipts_outlive_the_complete_upgrade_admission_grace() {
     let mut pair = Pair::new().await;
     pair.send(vec![]).unwrap();

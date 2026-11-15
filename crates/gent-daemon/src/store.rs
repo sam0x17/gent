@@ -333,6 +333,7 @@ impl Store {
         self.clean_invitations()?;
         self.clean_files()?;
         self.clean_history()?;
+        self.clean_wake()?;
         {
             let tx = self
                 .db
@@ -678,6 +679,10 @@ impl StoreSession<'_> {
             }
             OwnerOp::WorkList { after_message_id } => self.work_list(after_message_id.as_deref()),
             OwnerOp::WakeList { after_message_id } => self.wake_list(after_message_id.as_deref()),
+            OwnerOp::WakeStatus => wake::retention::status(self.db, self.timestamp),
+            OwnerOp::WakeClean { dry_run } => {
+                wake::retention::clean(self.db, self.timestamp, dry_run)
+            }
             OwnerOp::WakeShow { message_id } => self.wake_show(&message_id),
             OwnerOp::WorkShow { message_id } => self.work_show(&message_id),
             OwnerOp::WorkReconcile {

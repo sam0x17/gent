@@ -8,6 +8,7 @@ import argparse
 import json
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -43,17 +44,26 @@ def main():
         process.wait(timeout=10)
         raise AssertionError('daemon startup timed out')
 
-    def rpc(credential, action, discard=False):
+    def rpc(credential, action, discard=False, role='agent', expect_error=False):
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(10)
             connection.connect(str(home / 'daemon.sock'))
-            connection.sendall((json.dumps({'role': 'agent', 'credential': credential,
+            connection.sendall((json.dumps({'role': role, 'credential': credential,
                                            'action': action}) + '\n').encode())
             if discard:
                 return None
             response = json.loads(connection.makefile('rb').readline())
+            if expect_error:
+                assert response['status'] == 'error', response
+                return response
             assert response['status'] == 'ok', response
             return response['data']
+
+    def advance(seconds):
+        # Only the disposable fixture's admission clock changes. No OS clock,
+        # real host queue or actual model submission is involved in this proof.
+        with sqlite3.connect(home / 'state.sqlite3') as database:
+            database.execute('UPDATE request_clock SET floor=floor+?', (seconds,))
 
     try:
         cli('cluster', 'new', 'wake-proof', '--local')
@@ -106,6 +116,43 @@ def main():
         assert cli('wake', 'show', message) == submitted
         report['inbox_receipt_and_work_remain_separate'] = True
         report['host_operations_not_exposed_as_mcp_tools'] = True
+        assert cli('wake', 'status')['submitted_and_observed'] == 1
+        assert cli('wake', 'clean', '--dry-run')['records_removed'] == 0
+        advance(5)
+        second = sender.call('gent_send', {'recipient': b, 'request_id': sender.request_id(),
+                                          'text': 'keep uncertain delivery'})[0]['message_id']
+        second_claim = dict(claim, message_id=second, attempt_id=str(uuid.uuid4()))
+        assert rpc(credential, second_claim)['may_submit'] is True
+        receiver.call('gent_inbox')
+        advance(9 * 86400)
+        assert cli('wake', 'status')['eligible'] == 0
+        assert cli('history', 'clean')['messages_removed'] == 2
+        before = cli('wake', 'status')
+        assert before['eligible'] == 1 and before['uncertain'] == 1
+        assert cli('wake', 'clean', '--dry-run')['records_removed'] == 1
+        assert cli('wake', 'status') == before
+        assert cli('wake', 'clean')['records_removed'] == 1
+        assert cli('wake', 'show', second)['state'] == 'uncertain'
+        # Renew synthetic authority so replay rejection is checked against the
+        # absent source/claim, rather than merely against an expired lease.
+        rpc((home / 'owner.key').read_text().strip(), {'op': 'renew'}, role='owner')
+        assert 'unavailable' in json.dumps(rpc(credential, claim, expect_error=True))
+        assert rpc(credential, second_claim)['may_submit'] is False
+        report['owner_preview_cleanup_and_replay_rejection'] = True
+        rpc(credential, {'op': 'wake_submitted', 'message_id': second,
+            'attempt_id': second_claim['attempt_id'], 'submission_id': str(uuid.uuid4())})
+        assert cli('wake', 'clean')['records_removed'] == 0
+        daemon.terminate()
+        assert daemon.wait(timeout=10) == 0
+        advance(7 * 86400)
+        daemon = start()
+        # Startup maintenance runs asynchronously; observe committed evidence.
+        for _ in range(200):
+            if cli('wake', 'status')['records'] == 0:
+                break
+            time.sleep(.02)
+        assert cli('wake', 'status')['records'] == 0
+        report['startup_cleanup_after_late_submission_retention'] = True
         report['passed'] = True
     except BaseException as error:
         report['error'] = f'{type(error).__name__}: {error}'

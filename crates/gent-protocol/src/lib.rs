@@ -582,6 +582,10 @@ pub enum OwnerOp {
     WakeList {
         after_message_id: Option<String>,
     },
+    WakeStatus,
+    WakeClean {
+        dry_run: bool,
+    },
     WakeShow {
         message_id: String,
     },

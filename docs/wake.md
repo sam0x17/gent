@@ -150,19 +150,34 @@ Dispatch records live in the selected node database's `wake_dispatches` table, w
 
 Each database admits 16,384 records of at most 2,048 payload bytes each. New claims are limited to 12 per agent per hour and 120 per database per hour, with at least five seconds between an agent's claims. These limits use the persisted request clock. Admission failure leaves the message pending; exact claim retries grant no additional submission. The limits do not bound a host's inference cost or external actions.
 
-Records survive message cleanup and revocation. They contain local agent, message, attempt and host-thread identifiers plus timestamps and submission evidence. They do not copy message content and are not replicated or sent to the centralized service by these operations. The existing trusted-OS-user boundary applies.
+Records contain local agent, message, attempt and host-thread identifiers plus timestamps and submission evidence. They do not copy message content and are not replicated or sent to the centralized service by these operations. The existing trusted-OS-user boundary applies.
 
-There is no pruning, reset, retry approval or automatic reconciliation. Preserve evidence at capacity. Deleting records, changing message IDs or rolling back a backup can forget earlier attempts and must not be used to repeat uncertain work. Offline backup guards remain required; see [recovery](recovery.md). Lost-node migration and verified host reconciliation remain unfinished.
+Inspect and clean the selected node's journal with owner commands:
+
+```sh
+gent wake status
+gent wake clean --dry-run
+gent wake clean
+```
+
+Cleanup removes at most 128 records per call, ordered by claim time and message ID. A record is eligible only when it reports a native submission, has an ordinary inbox observation, its source message has been removed by history retention, and at least seven days have passed since its last update. Legacy request admission must also have ended. A late submission report starts a fresh seven-day retention period. Submission and inbox evidence establish delivery, not completion of external work; the separate work journal is unchanged.
+
+The daemon runs the same cleanup after message-history maintenance at startup and every 15 minutes. `gent history clean` only retires message history; a subsequent `gent wake clean` can then retire eligible dispatches. Status reports capacity, uncertain records, unobserved submissions and cleanup eligibility. Preview validates the same records and changes no journal entries. Malformed evidence or a failed deletion aborts cleanup, rolling back all deletions in that batch.
+
+Uncertain attempts and submissions without an inbox observation survive cleanup and revocation. They can still exhaust the journal; cleanup does not guarantee space under sustained load. The retention delay exceeds the maximum request/message replay window, including both clock-skew allowances, and uses the persisted monotonic clock. A retired message cannot receive another claim, even after restart or timestamp rewriting. Old reports fail once their record has retired. Attempt identifiers are unique among retained records; adapters must continue generating fresh IDs for new messages.
+
+There is no reset, retry approval or automatic reconciliation. Preserve uncertain evidence at capacity. Manually deleting records, changing message IDs or rolling back a backup must not be used to repeat uncertain work. Offline backup guards remain required; see [recovery](recovery.md). Lost-node migration and verified host reconciliation remain unfinished.
 
 ## Verification
 
 ```sh
 cargo test -p gent-daemon --test wake --locked
+cargo test -p gent-daemon --lib retired_wake_claim --locked
 cargo build -p gent-link --locked
 python3 scripts/prove_wake_journal.py --gent target/debug/gent
 ```
 
-Ten journal tests cover restart, exact retries, conflicting attempts, concurrent claims, failed writes, permissions, expiry, revocation, storage and rate limits, and independent message/work state. They also cover read-only claim checks, Claude session IDs and cross-host target substitution. The journal process proof drops a committed claim response, restarts the daemon and verifies that the retry grants no new submission. It also checks MCP tool exclusion, inbox observation and synthetic submission reporting without invoking a host queue or model.
+Fifteen journal tests cover restart, exact retries, conflicting attempts, concurrent claims, failed writes, permissions, expiry, revocation, storage and rate limits, and independent message/work state. They also cover read-only claim checks, Claude session IDs, cross-host target substitution, retention boundaries, legacy admission, bounded cleanup, malformed evidence and transaction rollback. A separate network test retires a delivered claim and rejects both original and timestamp-rewritten remote replays after restart. The journal process proof drops a committed claim response, restarts the daemon and verifies that the retry grants no new submission. It also checks MCP tool exclusion, inbox observation, owner preview/cleanup, replay rejection and startup maintenance using synthetic submission reports and a disposable admission clock. It invokes no host queue or model.
 
 `cargo test -p gent-link wake --locked` additionally covers thread identity and capability gates, exact queue response binding, private socket requirements, refusal to answer host approval requests, installation upgrades/removal, saved attachment validation, watcher election, endpoint isolation, opt-out and bounded loaded-thread pages. Native installed-Codex proofs separately exercise actual metadata, queues, MCP calls, interrupted holds, lost queue responses and delivery after actual MCP process replacement. Real-model acceptance uses fresh synthetic conversations and normal host model access; its restart check covers the Gent daemon. Those proofs do not establish GUI support or exactly-once host execution across a Codex crash; Gent's journal controls its own submissions.
 
