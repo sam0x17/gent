@@ -38,7 +38,7 @@ async fn retained_guard_passes_human_input_without_state_but_rejects_broken_noti
     let mut event = json!({"hook_event_name":"UserPromptSubmit", "prompt":"Please continue."});
     assert_eq!(
         guard_event(&home, &directory, &event).await.unwrap(),
-        json!({})
+        json!({"continue":true})
     );
     event["prompt"] = format!("{PROMPT}\nGent dispatch: legacy-attempt").into();
     assert!(guard_event(&home, &directory, &event).await.is_err());
@@ -227,7 +227,7 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
         "prompt":dispatch["text"]});
     assert_eq!(
         guard_event(home.path(), &directory, &guard).await.unwrap(),
-        json!({})
+        json!({"continue":true})
     );
     for field in ["session_id", "installation_id", "message_id", "attempt_id"] {
         let mut changed = guard.clone();

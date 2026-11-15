@@ -56,9 +56,22 @@ fn retained_guard_upgrades_legacy_installs_preserves_other_hooks_and_fails_close
             .unwrap()
             .is_none()
     );
+    spec.claude_wake.as_mut().unwrap().version = 2;
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    let legacy = Document::parse(Some(&get(settings)), Host::ClaudeCode).unwrap();
+    assert!(legacy.wake_guard().unwrap().unwrap()["hooks"][0]["onFailure"].is_null());
+    assert!(
+        claude_wake(
+            &spec.home,
+            &layout.directory,
+            &spec.claude_wake.as_ref().unwrap().id
+        )
+        .is_err()
+    );
     mutate(&layout, &spec.home, Some(current.clone())).unwrap();
     let doc = Document::parse(Some(&get(settings)), Host::ClaudeCode).unwrap();
     let guard = doc.wake_guard().unwrap().unwrap();
+    assert_eq!(guard["hooks"][0]["onFailure"], "block");
     let command = guard["hooks"][0]["command"].as_str().unwrap();
     // Missing runtime must use Claude's blocking exit status, not its ordinary
     // hook-error path. The fixture's home contains a quote and a dollar sign.

@@ -98,9 +98,11 @@ impl Layout {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        Ok(Some(
-            json!({"hooks":[{"type":"command","command":command,"timeout":35}]}),
-        ))
+        let mut hook = json!({"type":"command","command":command,"timeout":35});
+        if spec.claude_wake.as_ref().is_some_and(|w| w.version >= 3) {
+            hook["onFailure"] = "block".into();
+        }
+        Ok(Some(json!({"hooks":[hook]})))
     }
 
     fn plugin_files(&self, spec: Option<&Spec>) -> Result<Vec<(PathBuf, Option<String>)>> {
@@ -435,7 +437,7 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
                 .filter(|w| {
                     w.cluster_id == cfg.cluster.id
                         && w.node_id == cfg.node.id
-                        && w.version == 2
+                        && w.version == 3
                         && w.module == claude_wake::MODULE
                 });
             desired.claude_wake =
@@ -575,8 +577,8 @@ pub(super) fn claude_wake(
         .context("Claude automatic delivery is disabled")?;
     ensure!(wake.id == id, "Claude wake installation changed");
     ensure!(
-        wake.version == 2,
-        "Claude wake needs the retained command guard; reinstall the integration and restart Claude"
+        wake.version == 3,
+        "Claude wake needs the failure-blocking command guard; reinstall the integration and restart Claude"
     );
     let edits = layout.edits(Some(spec), Some(spec), false, true)?;
     for edit in edits {

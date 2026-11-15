@@ -35,7 +35,7 @@ pub(super) struct Installation {
 impl Installation {
     pub(super) fn new(cfg: &config::Config) -> Self {
         Self {
-            version: 2,
+            version: 3,
             id: uuid::Uuid::new_v4().to_string(),
             cluster_id: cfg.cluster.id.clone(),
             node_id: cfg.node.id.clone(),
@@ -44,7 +44,7 @@ impl Installation {
     }
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(
-            matches!(self.version, 1 | 2)
+            matches!(self.version, 1..=3)
                 && wake::valid_thread(&self.id)
                 && wake::valid_thread(&self.cluster_id)
                 && wake::valid_thread(&self.node_id)
@@ -71,7 +71,7 @@ async fn guard_event(home: &Path, directory: &Path, event: &Value) -> Result<Val
     );
     let prompt = event["prompt"].as_str().context("missing prompt")?;
     if !prompt.starts_with("Gent has a pending message.") {
-        return Ok(json!({}));
+        return Ok(json!({"continue":true}));
     }
     let fields: Vec<_> = prompt.split('\n').collect();
     ensure!(
@@ -113,7 +113,8 @@ async fn guard_event(home: &Path, directory: &Path, event: &Value) -> Result<Val
         answer["eligible"] == true,
         "Gent dispatch is no longer eligible"
     );
-    Ok(json!({}))
+    // Make successful validation explicit; no model context is added.
+    Ok(json!({"continue":true}))
 }
 
 pub(crate) async fn guard_execute(home: &Path, directory: &Path) -> Value {
