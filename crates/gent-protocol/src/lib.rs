@@ -7,6 +7,7 @@ pub mod history;
 pub mod owner_transfer;
 pub mod permissions;
 pub mod service;
+pub mod wake;
 pub mod work;
 
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -352,6 +353,18 @@ pub enum AgentOp {
         file_ids: Vec<String>,
     },
     Inbox,
+    /// Local host adapter operations; not exposed as model-callable MCP tools.
+    WakePending,
+    WakeClaim {
+        message_id: String,
+        attempt_id: String,
+        target: wake::WakeTarget,
+    },
+    WakeSubmitted {
+        message_id: String,
+        attempt_id: String,
+        submission_id: String,
+    },
     WorkStatus {
         message_id: String,
     },
@@ -559,6 +572,12 @@ pub enum OwnerOp {
     },
     WorkList {
         after_message_id: Option<String>,
+    },
+    WakeList {
+        after_message_id: Option<String>,
+    },
+    WakeShow {
+        message_id: String,
     },
     WorkShow {
         message_id: String,

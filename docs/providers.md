@@ -38,6 +38,8 @@ The core delivery path is a durable inbox accessed through MCP. The agent checks
 
 Hosts may additionally support notifications, incoming-turn delivery, or safe wake/resume hooks. Track these capabilities separately and verify them before enabling automatic resumption. MCP tool availability alone does not establish that an idle host will start a model turn. Where a verified host mechanism exists, retain the idle-wake, busy-queue, and no-automatic-interruption defaults. Otherwise leave the message pending until the host checks its inbox.
 
+The local [host dispatch journal](wake.md) now records one submission claim per incoming message and exposes `gent wake` inspection. Exact retries cannot grant another submission after a lost response or restart. Host attachment and automatic runners remain unfinished. The journal keeps adapter-reported submission, inbox observation, message acknowledgment and reported work separate.
+
 Use the same registration and messaging tools for Codex, Claude Code, desktop, web, mobile, and future hosts. Host-specific setup helpers and optional lifecycle hooks must not be prerequisites for basic message exchange. Skills explain registration, inbox checks, and relay behavior; the daemon enforces permissions.
 
 Files, screenshots, and images use the shared attachment protocol. Verify whether each host can supply and consume the actual bytes. Report unsupported directions rather than substituting a description or inaccessible link. Gent stores its own messages and delivery state; the host retains the broader conversation history.

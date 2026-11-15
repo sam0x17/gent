@@ -4,6 +4,8 @@ Gent can preserve a recipient's local report of work on an incoming message. Rec
 
 The journal is opt-in, with one record per incoming message. It complements message delivery and relay outcomes. Acknowledgment, a recorded work outcome and a relay's final response remain separate operations.
 
+The separate [host dispatch journal](wake.md) records claims to submit input to a host. A dispatch claim or adapter-reported submission does not start or complete a work record, and work reconciliation does not authorize another host submission.
+
 ## Agent workflow
 
 1. Read `gent_work_status {message_id}` when resuming work. An absent record means unknown execution history, including work performed before journaling existed. Resolve any existing uncertainty with the user and actual host state.

@@ -36,6 +36,7 @@ pub(crate) mod removals;
 mod requests;
 #[cfg(test)]
 mod storage_tests;
+mod wake;
 mod work;
 
 pub fn now() -> i64 {
@@ -130,6 +131,7 @@ impl Store {
         history::schema(&db)?;
         recovered::schema(&db)?;
         work::schema(&db)?;
+        wake::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -675,6 +677,8 @@ impl StoreSession<'_> {
                 )?)?)
             }
             OwnerOp::WorkList { after_message_id } => self.work_list(after_message_id.as_deref()),
+            OwnerOp::WakeList { after_message_id } => self.wake_list(after_message_id.as_deref()),
+            OwnerOp::WakeShow { message_id } => self.wake_show(&message_id),
             OwnerOp::WorkShow { message_id } => self.work_show(&message_id),
             OwnerOp::WorkReconcile {
                 message_id,
@@ -800,10 +804,15 @@ impl StoreSession<'_> {
             who.node_id == self.identity.node.id(),
             "credential belongs to another node"
         );
-        self.db.execute(
-            "UPDATE agents SET last_seen=?1 WHERE id=?2",
-            params![self.timestamp, who.id],
-        )?;
+        if !matches!(
+            &action,
+            AgentOp::WakePending | AgentOp::WakeClaim { .. } | AgentOp::WakeSubmitted { .. }
+        ) {
+            self.db.execute(
+                "UPDATE agents SET last_seen=?1 WHERE id=?2",
+                params![self.timestamp, who.id],
+            )?;
+        }
         match action {
             AgentOp::Register { .. } | AgentOp::Identity => Ok(
                 json!({"agent":self.get_agent(&who.id)?,"cluster_id":self.config.cluster.id,"node_name":self.config.node.name,"delivery":"polling","remote_ready":self.remote_ready()?}),
@@ -857,6 +866,17 @@ impl StoreSession<'_> {
             } => self.permission_rule_apply(&who, &request_id, changes),
             AgentOp::RequestIds { count } => self.request_ids(count),
             AgentOp::WorkStatus { message_id } => self.work_status(&who, &message_id),
+            AgentOp::WakePending => self.wake_pending(&who),
+            AgentOp::WakeClaim {
+                message_id,
+                attempt_id,
+                target,
+            } => self.wake_claim(&who, &message_id, &attempt_id, target),
+            AgentOp::WakeSubmitted {
+                message_id,
+                attempt_id,
+                submission_id,
+            } => self.wake_submitted(&who, &message_id, &attempt_id, &submission_id),
             AgentOp::WorkBegin {
                 message_id,
                 expect_revision,
@@ -1001,6 +1021,7 @@ impl StoreSession<'_> {
                             break;
                         }
                         bytes += payload.len();
+                        self.wake_observe(&who, &message.id)?;
                         inbox.push(message);
                     }
                 }

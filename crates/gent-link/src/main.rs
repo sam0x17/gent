@@ -19,6 +19,7 @@ mod pairing;
 mod permission_admin;
 mod service;
 mod setup;
+mod wake;
 mod work;
 
 use anyhow::{Context, Result, ensure};
@@ -97,6 +98,11 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    /// Inspect host-input dispatch evidence; separate from message delivery and work.
+    Wake {
+        #[command(subcommand)]
+        command: Option<wake::Command>,
     },
     /// Serve authenticated remote MCP directly on a user-controlled node.
     Gateway {
@@ -660,6 +666,7 @@ async fn execute(cli: Cli) -> Result<()> {
     let output = match cli.command {
         Some(Command::Recovery { command }) => owner_recovery::execute(&home, command).await?,
         Some(Command::Work { command }) => work::execute(&home, command).await?,
+        Some(Command::Wake { command }) => wake::execute(&home, command).await?,
         Some(Command::Doctor(_) | Command::Backup { .. }) => unreachable!(),
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
