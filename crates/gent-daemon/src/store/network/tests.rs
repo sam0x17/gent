@@ -12,6 +12,8 @@ mod group_administration_tests;
 mod owner_handoff_tests;
 #[path = "presence_tests.rs"]
 mod presence_tests;
+#[path = "registration_tests.rs"]
+mod registration_tests;
 #[path = "retention_tests.rs"]
 mod retention_tests;
 #[path = "retries.rs"]

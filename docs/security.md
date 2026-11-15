@@ -4,6 +4,8 @@
 
 [Node connectivity](node-presence.md) uses encrypted challenge/reply events on those streams. Only a timely reply to the persisted outstanding challenge refreshes reachability. This owner diagnostic grants no authority, exposes no agent inventory, and never wakes a host. The central relay still observes traffic timing and size. Older pre-release readers stall on the new event until upgraded; authenticated buffered records remain available for recovery.
 
+[Agent renaming](providers.md#rename-an-agent) changes only the authenticated registration's label, or a local registration selected by its hosting node's owner. It requires current node authority, an active registration and the expected generation. Queueing the existing encrypted registration update shares the label/generation transaction. A stale retry cannot undo later changes. Renaming cannot grant permissions or replace the authenticated binding. The final valid registration generation is reserved for revocation.
+
 ## Trust boundary
 
 The optional [user-controlled remote MCP gateway](gateway.md) terminates hosted tool calls directly on a trusted node. Host credentials authorize conversation namespaces; per-call host metadata selects a persistent agent credential. This requires a trusted host that prevents model control of that metadata. Direct TLS, registry/node pins, revocation checks and [owner-approved OAuth](gateway-oauth.md) are implemented; installed CLI login and Codex per-call thread metadata are verified; hosted-provider provenance and integration remain unverified. Gent's central relay continues receiving encrypted daemon traffic. The model provider and gateway node see tool plaintext. The gateway has no Gent-hosted plaintext bridge.

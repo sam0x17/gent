@@ -18,6 +18,7 @@ use std::{
 };
 use tokio::sync::Notify;
 mod administration;
+mod agents;
 mod configuration;
 pub(crate) use configuration::pending::schema as pending_configuration_schema;
 pub(crate) use configuration::routing::schema as configuration_routing_schema;
@@ -649,6 +650,15 @@ impl StoreSession<'_> {
             } => self.permission_admin_history(administrator.as_deref(), before),
             OwnerOp::Nodes => self.nodes(),
             OwnerOp::Agents => Ok(serde_json::to_value(self.all_agents()?)?),
+            OwnerOp::Agent { agent_id } => self.agent_details(&agent_id),
+            OwnerOp::RenameAgent {
+                agent_id,
+                name,
+                expected_generation,
+            } => {
+                self.rename_agent(&agent_id, &name, expected_generation)?;
+                self.agent_details(&agent_id)
+            }
             OwnerOp::FilesStatus => self.files_status(),
             OwnerOp::FilesClean { dry_run } => self.files_clean(dry_run),
             OwnerOp::HistoryStatus => self.history_status(),
@@ -813,9 +823,14 @@ impl StoreSession<'_> {
             )?;
         }
         match action {
-            AgentOp::Register { .. } | AgentOp::Identity => Ok(
-                json!({"agent":self.get_agent(&who.id)?,"cluster_id":self.config.cluster.id,"node_name":self.config.node.name,"delivery":"polling","remote_ready":self.remote_ready()?}),
-            ),
+            AgentOp::Register { .. } | AgentOp::Identity => self.agent_identity(&who.id),
+            AgentOp::Rename {
+                name,
+                expected_generation,
+            } => {
+                self.rename_agent(&who.id, &name, expected_generation)?;
+                self.agent_identity(&who.id)
+            }
             AgentOp::Agents => Ok(json!(
                 self.all_agents()?
                     .into_iter()

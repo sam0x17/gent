@@ -16,6 +16,7 @@ pub const MAX_FRAME_BYTES: usize = 6 * 1024 * 1024;
 pub const MAX_EXCHANGE_MESSAGES: u32 = 32;
 pub const EXCHANGE_TTL_SECONDS: i64 = 24 * 60 * 60;
 pub const MAX_RELAY_GRANT_LIFETIME: u64 = 7 * 24 * 60 * 60;
+pub const MAX_REGISTRATION_GENERATION: u64 = (1 << 53) - 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Agent {
@@ -236,6 +237,11 @@ pub enum AgentOp {
         provider: String,
     },
     Identity,
+    /// Rename only this authenticated registration, preserving its identity.
+    Rename {
+        name: String,
+        expected_generation: u64,
+    },
     /// Current relationship with one visible peer; never exposes raw policy.
     PermissionCheck {
         peer: String,
@@ -564,6 +570,14 @@ pub enum OwnerOp {
     },
     Nodes,
     Agents,
+    Agent {
+        agent_id: String,
+    },
+    RenameAgent {
+        agent_id: String,
+        name: String,
+        expected_generation: u64,
+    },
     Providers,
     FilesStatus,
     HistoryStatus,

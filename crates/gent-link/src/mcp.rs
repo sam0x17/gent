@@ -182,15 +182,21 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_register",
-            "Announce this conversation. The connection determines identity and node; registration does not grant messaging permissions.",
+            "Announce this conversation. The connection determines identity and node; registration does not grant messaging permissions. Reconnecting preserves its current name; use gent_rename to change it.",
             json!({"name":{"type":"string","maxLength":128},"provider":{"type":"string","maxLength":128}}),
             vec!["name", "provider"],
         ),
         (
             "gent_identity",
-            "Get this connection's registered identity and location.",
+            "Get this connection's registered identity, location and registration_generation.",
             json!({}),
             vec![],
+        ),
+        (
+            "gent_rename",
+            "Rename this conversation's Gent display label without changing identity, provider, permissions or messages. Use registration_generation from gent_identity as expected_generation. Retry an uncertain result with the same name and generation; if another rename has intervened, inspect identity before deciding on a new change. This does not rename the host's conversation title.",
+            json!({"name":{"type":"string","maxLength":128},"expected_generation":{"type":"integer","minimum":1,"maximum":gent_protocol::MAX_REGISTRATION_GENERATION-1}}),
+            vec!["name", "expected_generation"],
         ),
         (
             "gent_agents",
@@ -606,7 +612,7 @@ impl ServerHandler for GentMcp {
         Ok(match result {
             Ok(mut value) => {
                 if matches!(self.credentials, Credentials::Remote(_))
-                    && matches!(operation, "register" | "identity" | "relay_attach" | "relay_status")
+                    && matches!(operation, "register" | "identity" | "rename" | "relay_attach" | "relay_status")
                     && let Some(object) = value.as_object_mut()
                 {
                     object.insert("access_route".into(), json!({

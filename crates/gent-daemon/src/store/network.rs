@@ -120,7 +120,7 @@ impl StoreSession<'_> {
         )?;
         Ok(certificate)
     }
-    fn registration(&self, id: &str) -> Result<Registration> {
+    pub(super) fn registration(&self, id: &str) -> Result<Registration> {
         self.ensure_local_origin(id)?;
         let agent = self.get_agent(id)?;
         let (nonce, legacy, generation): (Option<String>, Option<Vec<u8>>, u64) =

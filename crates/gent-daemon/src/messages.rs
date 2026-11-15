@@ -30,7 +30,7 @@ impl Registration {
             "registration belongs to another node"
         );
         ensure!(
-            (1..=(1 << 53) - 1).contains(&self.generation),
+            (1..=gent_protocol::MAX_REGISTRATION_GENERATION).contains(&self.generation),
             "invalid registration generation"
         );
         crate::config::label(&self.name)?;

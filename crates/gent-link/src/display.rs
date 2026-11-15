@@ -254,6 +254,11 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
                 writeln!(output)?;
                 agent(&mut output, value)?;
             }
+            if matches!(view, View::Agent)
+                && let Some(generation) = value["registration_generation"].as_u64()
+            {
+                writeln!(output, "  Registration generation: {generation}")?;
+            }
             if agents.is_empty() {
                 writeln!(
                     output,

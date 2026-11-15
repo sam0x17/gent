@@ -1,3 +1,4 @@
+mod agent;
 mod agent_recovery;
 mod auth;
 mod backup;
@@ -148,7 +149,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<TransportCommand>,
     },
-    /// Inspect or revoke a registration.
+    /// Inspect, rename, recover or revoke a registration.
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
@@ -332,6 +333,14 @@ enum AgentCommand {
     },
     Revoke {
         agent: String,
+    },
+    /// Rename an agent on this node without changing its identity or permissions.
+    Rename {
+        agent: String,
+        name: String,
+        /// Compare with a previously observed generation; do not overwrite a later rename.
+        #[arg(long)]
+        expect_generation: Option<u64>,
     },
     /// Create a fresh conversation binding and assign selected archived history.
     Recover(Box<agent_recovery::Args>),
@@ -699,7 +708,7 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Nodes) => Some(display::View::Nodes),
         Some(Command::Agents) => Some(display::View::Agents),
         Some(Command::Agent {
-            command: AgentCommand::Show { .. },
+            command: AgentCommand::Show { .. } | AgentCommand::Rename { .. },
         }) => Some(display::View::Agent),
         Some(Command::Providers { .. }) => Some(display::View::Providers),
         _ => None,
@@ -855,16 +864,15 @@ async fn execute(cli: Cli) -> Result<()> {
         }) => agent_recovery::execute(&home, *args).await?,
         Some(Command::Agent {
             command: AgentCommand::Show { agent },
-        }) => {
-            let agents = owner(&home, OwnerOp::Agents).await?;
-            agents
-                .as_array()
-                .context("invalid agent list")?
-                .iter()
-                .find(|a| a["id"] == agent)
-                .cloned()
-                .context("unknown agent ID")?
-        }
+        }) => agent::show(&home, agent).await?,
+        Some(Command::Agent {
+            command:
+                AgentCommand::Rename {
+                    agent,
+                    name,
+                    expect_generation,
+                },
+        }) => agent::rename(&home, agent, name, expect_generation).await?,
         Some(Command::Node {
             command:
                 Some(NodeCommand::Name {

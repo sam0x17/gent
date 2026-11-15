@@ -16,6 +16,24 @@ The registration flow is:
 
 The daemon determines the local node identity. Provider labels and model-supplied agent IDs are descriptive metadata, not authentication. Registering does not grant permission to discover or message other agents; normal cluster policy applies.
 
+## Rename an agent
+
+An agent can change its own Gent display name through `gent_rename`. First read `gent_identity`, then pass the new `name` and its returned `registration_generation` as `expected_generation`. The authenticated connection selects the agent; this tool accepts no target agent ID, node or provider override. Names remain nonempty labels of at most 128 UTF-8 bytes, without control characters.
+
+The local owner can inspect and rename an agent on its hosting node:
+
+```sh
+gent agent show AGENT_UUID
+gent agent rename AGENT_UUID 'Build coordinator'
+gent agent rename AGENT_UUID 'Release coordinator' --expect-generation 2
+```
+
+Without `--expect-generation`, the CLI reads the current generation and compares it when committing. A concurrent change causes an error rather than being overwritten. For an uncertain result, reuse the same name and expected generation. A retry succeeds without another update if the requested name is already at exactly the next generation; intervening changes require another inspection and decision. Setting the current name at its current generation neither increments it nor queues another announcement. Revoked agents and stale or removed nodes cannot rename, including through an old successful request.
+
+Renaming preserves the agent ID, credential, provider label, node binding, permissions, relay selections and queued messages/files. It changes the Gent label only; the host's conversation title is separate. Repeating `gent_register` after a reconnect preserves the current name. Names need not be unique, so continue routing by the IDs returned from discovery.
+
+Name and generation changes commit with encrypted registration publication. A queue or storage failure rolls back the rename. An invalid or obsolete legacy binding also refuses the edit; renaming cannot repair registration provenance. Connected peers receive the update through the existing registration stream; offline peers catch up later. Older embedded registrations cannot roll the name back. Owner inspection includes `registration_generation`, which can be cached for a remote node; rename on that node or through that agent's own MCP connection. This does not grant one agent permission to rename another or add a remote owner-administration route.
+
 A shared provider login or MCP connection may serve multiple conversations. The implementation must prove per-conversation isolation using host session metadata or explicit pairing with credentials scoped to the registration. Keep credentials and cryptographic keys outside model-visible tool results. If a host cannot distinguish conversations reliably, record the limitation rather than merging them or allowing one to impersonate another.
 
 ## Providers and setup
