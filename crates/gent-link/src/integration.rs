@@ -3,6 +3,7 @@
 pub(crate) mod claude_wake;
 pub(crate) mod codex_files;
 mod install;
+pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod vscode;
 pub(crate) mod wake;
@@ -61,6 +62,11 @@ pub enum Command {
     },
     /// Start or reuse Codex's background app server for an installed --wake integration.
     Start(runtime::Args),
+    /// Select node-local conversations for automatic startup and idle recovery.
+    Recovery {
+        #[command(subcommand)]
+        command: recovery::Command,
+    },
     /// Install the MCP connection and required conversation identity hook.
     Install(install::Args),
     /// Remove Gent-managed host entries, retaining conversations and Gent state.
@@ -105,6 +111,7 @@ pub fn execute(home: &Path, command: Command) -> Result<Value> {
         | Command::CodexIde(_)
         | Command::ClaudeWakeGuard { .. }
         | Command::Start(_)
+        | Command::Recovery { .. }
         | Command::Status { live: true, .. } => {
             anyhow::bail!("native bridge requires async dispatch")
         }

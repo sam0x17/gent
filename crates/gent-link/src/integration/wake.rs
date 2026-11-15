@@ -14,7 +14,7 @@ use std::{
 
 const MAX_BYTES: u64 = 4096;
 
-pub(super) fn valid_thread(thread: &str) -> bool {
+pub(crate) fn valid_thread(thread: &str) -> bool {
     uuid::Uuid::parse_str(thread).is_ok_and(|id| !id.is_nil() && id.to_string() == thread)
 }
 
@@ -143,6 +143,12 @@ pub(crate) struct Registry {
     pub(crate) endpoint: PathBuf,
 }
 impl Registry {
+    pub(crate) fn codex(home: &Path, socket: &Path) -> Result<Self> {
+        let cfg = config::load(home)?;
+        let folder = super::scope_path(home, &cfg, super::Host::Codex);
+        Self::new(home, folder, cfg, socket)
+    }
+
     pub(super) fn new(
         home: &Path,
         folder: PathBuf,

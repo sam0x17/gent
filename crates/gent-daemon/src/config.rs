@@ -9,6 +9,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod host_recovery;
+pub use host_recovery::{CodexRecovery, HostRecovery, MAX_RECOVERY_AGENTS};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub id: String,
@@ -323,6 +326,9 @@ pub fn save(home: &Path, config: &Config) -> Result<()> {
             );
             next.set_gateway_registry(id)?;
         }
+        if let Some(recovery) = previous.host_recovery()? {
+            next.set_host_recovery(recovery)?;
+        }
     }
     next.validate()?;
     write_private(&path(home), toml::to_string_pretty(&next)?.as_bytes())
@@ -484,6 +490,9 @@ impl Config {
         if self.profile_setup()?.is_some() {
             features.push("profile_setup".into());
         }
+        if self.host_recovery()?.is_some() {
+            features.push("host_recovery".into());
+        }
         Ok(features)
     }
     fn update_local_version(&mut self) -> Result<()> {
@@ -491,6 +500,7 @@ impl Config {
         if self.account_source()?.is_some()
             || self.profile_setup()?.is_some()
             || self.gateway_registry()?.is_some()
+            || self.host_recovery()?.is_some()
         {
             self.version = 3;
             self.extra

@@ -135,6 +135,7 @@ pub async fn run_daemon(home: &Path) -> Result<()> {
         result = gent_daemon::run(home) => result,
         _ = maintain(home) => unreachable!("maintenance continues until daemon shutdown"),
         _ = crate::node::maintain(home) => unreachable!("node removals continue until daemon shutdown"),
+        _ = crate::integration::recovery::maintain(home) => unreachable!("host recovery continues until daemon shutdown"),
     }
 }
 

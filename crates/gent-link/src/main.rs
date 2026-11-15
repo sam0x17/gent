@@ -780,6 +780,9 @@ async fn execute(cli: Cli) -> Result<()> {
             command: integration::Command::Start(args),
         }) => integration::runtime::start(&home, args).await?,
         Some(Command::Integration {
+            command: integration::Command::Recovery { command },
+        }) => integration::recovery::execute(&home, command).await?,
+        Some(Command::Integration {
             command:
                 integration::Command::Status {
                     host,
