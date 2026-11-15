@@ -196,13 +196,19 @@ async fn rpc(home: &Path, credential: &str, action: AgentOp) -> Result<Value> {
     .context("Gent bridge RPC timed out")?
 }
 
+async fn validate_installation(home: &Path, directory: &Path, id: &str) -> Result<Installation> {
+    // Claude may atomically rewrite unrelated settings during a native turn.
+    // Retry only installation reads; never repeat a credential or dispatch RPC.
+    crate::managed_file::retry_read(|| install::claude_wake(home, directory, id)).await
+}
+
 pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<Value> {
     ensure!(
         wake::valid_thread(&input.session_id),
         "invalid Claude session ID"
     );
     let cfg = config::load(home)?;
-    let installation = install::claude_wake(home, directory, &input.installation_id)?;
+    let installation = validate_installation(home, directory, &input.installation_id).await?;
     ensure!(
         installation.cluster_id == cfg.cluster.id && installation.node_id == cfg.node.id,
         "Claude wake node or cluster changed; reinstall the integration"
@@ -299,7 +305,7 @@ pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<V
     };
     // A concurrent uninstall/key replacement makes the response unusable. A
     // committed claim remains uncertain; no caller can replay its permission.
-    install::claude_wake(home, directory, &input.installation_id)?;
+    validate_installation(home, directory, &input.installation_id).await?;
     let current = config::load(home)?;
     ensure!(
         current.node.id == cfg.node.id && current.cluster.id == cfg.cluster.id,

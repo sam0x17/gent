@@ -5,154 +5,19 @@ Uses normal host model access with built-in tools disabled. A transparent stdio
 observer records only this proof's MCP traffic. Temporary state is retained.
 """
 import argparse
-import errno
-import fcntl
 import json
 import os
 from pathlib import Path
-import pty
 import re
-import select
-import signal
-import struct
 import subprocess
 import sys
 import tempfile
-import termios
-import threading
 import time
 import uuid
 
 
-def proxy():
-    trace = Path(sys.argv[2])
-    process = subprocess.Popen(sys.argv[3:], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-
-    def pump(source, destination, direction):
-        for line in iter(source.readline, b''):
-            value = json.loads(line)
-            event = {'pid': os.getpid(), 'direction': direction, 'frame': value}
-            with trace.open('a') as log:
-                fcntl.flock(log, fcntl.LOCK_EX)
-                log.write(json.dumps(event) + '\n')
-            destination.write(line)
-            destination.flush()
-        if direction == 'request':
-            destination.close()
-
-    outgoing = threading.Thread(target=pump, args=(process.stdout, sys.stdout.buffer, 'response'))
-    outgoing.start()
-    pump(sys.stdin.buffer, process.stdin, 'request')
-    outgoing.join()
-    raise SystemExit(process.wait())
-
-
-class Terminal:
-    def __init__(self, command, work, path):
-        self.pid, self.fd = pty.fork()
-        if self.pid == 0:
-            os.chdir(work)
-            os.execvpe(command[0], command, dict(os.environ, TERM='xterm-256color', DISABLE_AUTOUPDATER='1'))
-        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
-        self.log = path.open('ab')
-        self.text = ''
-        self.accepted_test_folder = False
-        self.trust_ready_at = None
-        self.trust_selected_at = None
-
-    def drain(self, seconds=.1):
-        if select.select([self.fd], [], [], seconds)[0]:
-            try:
-                data = os.read(self.fd, 65536)
-            except OSError as error:
-                if error.errno == errno.EIO:
-                    raise AssertionError('host terminal exited; inspect terminal.raw') from error
-                raise
-            assert data, 'host terminal exited'
-            self.log.write(data)
-            self.log.flush()
-            # Answer the terminal cursor query without inventing user input.
-            if b'\x1b[6n' in data:
-                os.write(self.fd, b'\x1b[1;1R')
-            self.text += re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', data.decode(errors='replace'))
-            if not self.accepted_test_folder and 'Yes,Itrustthisfolder' in re.sub(r'\s+', '', self.text):
-                self.accepted_test_folder = True
-                # Wait for startup rendering/terminal negotiation to settle.
-                self.trust_ready_at = time.monotonic() + 1
-        if self.trust_ready_at is not None and time.monotonic() >= self.trust_ready_at:
-            os.write(self.fd, b'\x1b[B')
-            self.trust_ready_at = None
-            self.trust_selected_at = time.monotonic() + 1
-        if self.trust_selected_at is not None and time.monotonic() >= self.trust_selected_at:
-            os.write(self.fd, b'\r')
-            self.trust_selected_at = None
-
-    def send(self, text):
-        os.write(self.fd, b'\x1b[200~' + text.encode() + b'\x1b[201~')
-        self.drain(.2)
-        os.write(self.fd, b'\r')
-
-    def settle(self):
-        # Slash-command rendering differs by host/version. Identity assertions
-        # below verify the transition, rather than interpreting UI copy.
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            self.drain()
-
-    def close(self):
-        def reaped(timeout):
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                if os.waitpid(self.pid, os.WNOHANG)[0]:
-                    return True
-                if select.select([self.fd], [], [], .05)[0]:
-                    try:
-                        data = os.read(self.fd, 65536)
-                        self.log.write(data)
-                        self.log.flush()
-                    except OSError as error:
-                        if error.errno != errno.EIO:
-                            raise
-            return False
-        try:
-            if reaped(.1):
-                return
-            # Let the host close its MCP children before terminating its group.
-            self.send('/exit')
-            if reaped(5):
-                return
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                try:
-                    os.killpg(self.pid, sig)
-                except ProcessLookupError:
-                    pass
-                if reaped(5):
-                    return
-            raise AssertionError(f'host process {self.pid} did not exit after SIGKILL')
-        finally:
-            os.close(self.fd)
-            self.log.close()
-
-
-def responses(trace):
-    calls, values = {}, []
-    if not trace.exists():
-        return values
-    for line in trace.read_text().splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        frame = event['frame']
-        key = (event['pid'], frame.get('id'))
-        if event['direction'] == 'request' and frame.get('method') == 'tools/call':
-            calls[key] = frame['params']
-        if event['direction'] == 'response' and key in calls:
-            result = frame.get('result', {})
-            assert not frame.get('error') and not result.get('isError'), frame
-            value = json.loads(result['content'][0]['text'])
-            values.append((calls[key], value))
-    return values
+from host_terminal import Terminal
+from mcp_trace import proxy, responses
 
 
 def main():
@@ -321,5 +186,5 @@ def main():
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'proxy':
-        proxy()
+        raise SystemExit(proxy(sys.argv[3:], Path(sys.argv[2])))
     main()

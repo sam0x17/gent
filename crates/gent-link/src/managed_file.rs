@@ -10,6 +10,8 @@ const LIMIT: u64 = 16 * 1024 * 1024;
 
 mod locking;
 pub use locking::lock;
+mod validation;
+pub use validation::{SnapshotChanged, retry_read};
 
 // Canonical parents coordinate installers using /tmp and /private/tmp aliases.
 // Refuse a linked final component even when its destination does not exist.
@@ -118,7 +120,7 @@ impl Snapshot {
         let file = File::open(path)?;
         ensure!(
             Stamp::from(&meta) == Stamp::from(&file.metadata()?),
-            "configuration changed while opening; retry"
+            SnapshotChanged(path.into())
         );
         let mut bytes = Vec::new();
         (&file).take(LIMIT + 1).read_to_end(&mut bytes)?;
@@ -129,7 +131,7 @@ impl Snapshot {
         );
         ensure!(
             Stamp::from(&meta) == Stamp::from(&file.metadata()?),
-            "configuration changed while reading; retry"
+            SnapshotChanged(path.into())
         );
         let text = String::from_utf8(bytes)
             .map_err(|_| anyhow::anyhow!("configuration is not UTF-8: {}", path.display()))?;
@@ -150,8 +152,7 @@ impl Snapshot {
     pub fn verify(&self) -> Result<()> {
         ensure!(
             *self == Self::read(&self.path)?,
-            "configuration changed during installation; retry: {}",
-            self.path.display()
+            SnapshotChanged(self.path.clone())
         );
         Ok(())
     }
