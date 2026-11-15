@@ -23,6 +23,7 @@ use uuid::Uuid;
 mod service;
 
 type Key = (String, String, String, u64);
+type ObservedRequest = (Instant, Vec<u8>);
 #[derive(Default)]
 struct State {
     messages: BTreeMap<Key, Vec<u8>>,
@@ -32,6 +33,8 @@ struct State {
     deny: bool,
     corrupt_once: Option<u64>,
     gets: usize,
+    throttle_once: BTreeMap<(String, String, u64), (u16, u64)>,
+    observed: BTreeMap<(String, Key), Vec<ObservedRequest>>,
 }
 struct Relay {
     origin: String,
@@ -109,6 +112,7 @@ async fn serve(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) -> R
     } else {
         "invalid"
     };
+    let mut retry_after = None;
     let response = {
         let mut state = state.lock().unwrap();
         if state.deny || role == "invalid" {
@@ -135,31 +139,47 @@ async fn serve(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) -> R
             let key = (fields[3].into(), fields[4].into(), fields[5].into(), index);
             if (first[0] == "PUT") != (role == fields[5]) {
                 Some((403, Vec::new()))
-            } else if first[0] == "PUT" {
-                let body = bytes[end..].to_vec();
-                *state.writes.entry(key.clone()).or_default() += 1;
-                if state.messages.get(&key).is_some_and(|old| *old != body) {
-                    Some((409, Vec::new()))
-                } else {
-                    state.messages.insert(key, body);
-                    if state.drop_once.remove(&(fields[5].into(), index)) {
-                        None
-                    } else {
-                        Some((204, Vec::new()))
-                    }
-                }
             } else {
-                state.gets += 1;
-                if fields[5] == "owner" && state.hide_owner == Some(index) {
-                    Some((404, Vec::new()))
-                } else if let Some(mut body) = state.messages.get(&key).cloned() {
-                    if fields[5] == "owner" && state.corrupt_once == Some(index) {
-                        state.corrupt_once = None;
-                        *body.last_mut().unwrap() ^= 1;
+                let throttle = state
+                    .throttle_once
+                    .remove(&(first[0].into(), role.into(), index));
+                let observed_key = (first[0].to_owned(), key.clone());
+                if throttle.is_some() || state.observed.contains_key(&observed_key) {
+                    state
+                        .observed
+                        .entry(observed_key)
+                        .or_default()
+                        .push((Instant::now(), bytes[end..].to_vec()));
+                }
+                if let Some((status, delay)) = throttle {
+                    retry_after = Some(delay);
+                    Some((status, Vec::new()))
+                } else if first[0] == "PUT" {
+                    let body = bytes[end..].to_vec();
+                    *state.writes.entry(key.clone()).or_default() += 1;
+                    if state.messages.get(&key).is_some_and(|old| *old != body) {
+                        Some((409, Vec::new()))
+                    } else {
+                        state.messages.insert(key, body);
+                        if state.drop_once.remove(&(fields[5].into(), index)) {
+                            None
+                        } else {
+                            Some((204, Vec::new()))
+                        }
                     }
-                    Some((200, body))
                 } else {
-                    Some((404, Vec::new()))
+                    state.gets += 1;
+                    if fields[5] == "owner" && state.hide_owner == Some(index) {
+                        Some((404, Vec::new()))
+                    } else if let Some(mut body) = state.messages.get(&key).cloned() {
+                        if fields[5] == "owner" && state.corrupt_once == Some(index) {
+                            state.corrupt_once = None;
+                            *body.last_mut().unwrap() ^= 1;
+                        }
+                        Some((200, body))
+                    } else {
+                        Some((404, Vec::new()))
+                    }
                 }
             }
         } else {
@@ -167,14 +187,83 @@ async fn serve(mut socket: tokio::net::TcpStream, state: Arc<Mutex<State>>) -> R
         }
     };
     if let Some((status, body)) = response {
+        let retry_header = retry_after.map_or(String::new(), |seconds| {
+            format!("Retry-After: {seconds}\r\n")
+        });
         let header = format!(
-            "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status} Test\r\n{retry_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         socket.write_all(header.as_bytes()).await?;
         socket.write_all(&body).await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn throttled_noise_exchange_keeps_one_attempt_and_exact_ciphertext_beyond_idle_timeout() {
+    let relay = Relay::new().await;
+    {
+        let mut state = relay.state.lock().unwrap();
+        state.throttle_once.extend([
+            (("PUT".into(), "join".into(), 0), (429, 4)),
+            (("PUT".into(), "owner".into(), 1), (503, 1)),
+            (("PUT".into(), "owner".into(), 2), (429, IDLE_SECONDS + 1)),
+            (("GET".into(), "join".into(), 2), (429, IDLE_SECONDS + 1)),
+        ]);
+        state.drop_once.insert(("join".into(), 2));
+    }
+    let Fixture {
+        _home,
+        store,
+        invitation,
+    } = Fixture::new(&relay.origin);
+    let shared = Arc::new(Mutex::new(store));
+    let worker = start(shared);
+    let node = NodeIdentity::generate().unwrap();
+    let mut client = client(&invitation, &node);
+    // Polling for an owner reply must cover the owner's advertised pause too.
+    // The initial PUT delay still exceeds the client's short 3-second wait.
+    let operation = request(PairingOp::Snapshot);
+    let result = tokio::time::timeout(Duration::from_secs(70), client.invoke(&operation))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result["anchor"]["cluster_id"],
+        invitation.offer().offer.anchor.cluster_id
+    );
+    {
+        let state = relay.state.lock().unwrap();
+        assert!(state.throttle_once.is_empty());
+        assert_eq!(
+            state
+                .messages
+                .keys()
+                .map(|(_, a, _, _)| a)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
+        assert_eq!(state.messages.len(), 6);
+        for ((method, key), requests) in &state.observed {
+            assert!(requests.len() >= 2);
+            if method == "PUT" {
+                assert!(requests.iter().all(|(_, bytes)| *bytes == requests[0].1));
+                let minimum = if key.2 == "join" {
+                    4
+                } else if key.3 == 1 {
+                    1
+                } else {
+                    IDLE_SECONDS + 1
+                };
+                assert!(
+                    requests[1].0.duration_since(requests[0].0) >= Duration::from_secs(minimum)
+                );
+            }
+        }
+    }
+    worker.stop().await;
 }
 
 fn request(action: PairingOp) -> Invocation {
@@ -563,9 +652,15 @@ async fn admission_has_global_and_per_invitation_limits_and_releases_expired_slo
     );
     let mut expired = Vec::new();
     for (id, owner) in &mut scheduler.owners {
-        for (attempt, live) in &mut owner.live {
+        for (index, (attempt, live)) in owner.live.iter_mut().enumerate() {
             expired.push((id.clone(), attempt.clone()));
-            live.last_input = Instant::now() - Duration::from_secs(IDLE_SECONDS + 1);
+            if index == 0 {
+                // A throttle grace period cannot extend the Noise session.
+                live.idle_deadline = Instant::now() + super::super::retry::MAX_DELAY;
+                live.started = Instant::now() - Duration::from_secs(SESSION_LIFETIME + 1);
+            } else {
+                live.idle_deadline = Instant::now() - Duration::from_secs(1);
+            }
         }
         owner.retry_at = Instant::now();
     }

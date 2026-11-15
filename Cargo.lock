@@ -1219,6 +1219,7 @@ dependencies = [
  "futures-util",
  "gent-crypto",
  "gent-protocol",
+ "httpdate",
  "openmls",
  "openmls_rust_crypto",
  "openmls_sqlite_storage",

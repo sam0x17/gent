@@ -130,7 +130,7 @@ impl Joining {
                 Some(live) => live,
                 None => match self.open().await {
                     Ok(live) => live,
-                    Err(e) if fatal(&e) => return Err(e),
+                    Err(e) if fatal(&e) || super::retry::until(&e).is_some() => return Err(e),
                     Err(e) => {
                         last_error = Some(e);
                         continue;
@@ -169,7 +169,7 @@ impl Joining {
                         ),
                     };
                 }
-                Err(e) if fatal(&e) => return Err(e),
+                Err(e) if fatal(&e) || super::retry::until(&e).is_some() => return Err(e),
                 Err(e) => last_error = Some(e),
             }
         }
@@ -184,44 +184,93 @@ async fn exchange(
     outgoing: &Envelope,
     wait: Duration,
 ) -> Result<Envelope> {
-    // timeout drops in-flight HTTP work. Callers discard the whole attempt on
-    // uncertainty; the owner journal recovers committed application effects.
-    tokio::time::timeout(wait, async {
-        let mut uploaded = false;
-        loop {
-            mailbox.check_time()?;
-            if !uploaded {
-                match mailbox.put(attempt, index, outgoing).await {
-                    Ok(()) => uploaded = true,
-                    Err(e) if fatal(&e) => return Err(e),
-                    Err(_) => {}
+    // A throttle pause retains the exact envelope and upload acknowledgment.
+    // Bound all extra waiting, and keep the original inactivity allowance.
+    // Cancellation still discards the attempt; durable operation IDs recover
+    // committed effects without restoring uncertain Noise counters.
+    let mut deadline = Instant::now() + wait;
+    let maximum = deadline + super::retry::MAX_DELAY;
+    let timed_out = "invitation response timed out; owner must be online";
+    let mut uploaded = false;
+    loop {
+        mailbox.check_time()?;
+        if !uploaded {
+            match tokio::time::timeout_at(deadline, mailbox.put(attempt, index, outgoing))
+                .await
+                .context(timed_out)?
+            {
+                Ok(()) => uploaded = true,
+                Err(e) if fatal(&e) => return Err(e),
+                Err(e) if super::retry::until(&e).is_some() => {
+                    pause(e, &mut deadline, maximum).await?;
+                    continue;
                 }
+                Err(_) => {}
             }
-            if uploaded {
-                let limit = if index == 0 {
-                    57
-                } else if index == 1 {
-                    4096
-                } else {
-                    super::protocol::MAX_WIRE_BYTES
-                };
-                match mailbox.get_limit(attempt, index, limit).await {
-                    Ok(Some(envelope)) => return Ok(envelope),
-                    Ok(None) => {}
-                    Err(e) if fatal(&e) || super::invalid_message(&e) => return Err(e),
-                    Err(_) => {}
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-    })
-    .await
-    .context("invitation response timed out; owner must be online")?
+        if uploaded {
+            let limit = if index == 0 {
+                57
+            } else if index == 1 {
+                4096
+            } else {
+                super::protocol::MAX_WIRE_BYTES
+            };
+            match tokio::time::timeout_at(deadline, mailbox.get_limit(attempt, index, limit))
+                .await
+                .context(timed_out)?
+            {
+                Ok(Some(envelope)) => return Ok(envelope),
+                Ok(None) => {}
+                Err(e) if fatal(&e) || super::invalid_message(&e) => return Err(e),
+                Err(e) if super::retry::until(&e).is_some() => {
+                    pause(e, &mut deadline, maximum).await?;
+                    continue;
+                }
+                Err(_) => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn pause(error: anyhow::Error, deadline: &mut Instant, maximum: Instant) -> Result<()> {
+    let until = super::retry::until(&error).expect("retry deadline checked");
+    *deadline = (*deadline + until.saturating_duration_since(Instant::now())).min(maximum);
+    if until >= *deadline {
+        return Err(error);
+    }
+    tokio::time::sleep_until(until).await;
+    Ok(())
 }
 
 #[cfg(test)]
 impl Joining {
     pub(super) fn short_wait(&mut self) {
         self.wait = Duration::from_secs(3);
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn throttle_hint_cannot_extend_the_total_wait_budget() {
+        let response = reqwest::Response::from(
+            tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(429)
+                .header("Retry-After", "120")
+                .body("")
+                .unwrap(),
+        );
+        let error = super::super::retry::Backoff::default()
+            .observe(super::super::retry::Lane::Data, &response)
+            .unwrap_err();
+        let mut deadline = Instant::now() + Duration::from_secs(1);
+        let maximum = deadline + Duration::from_secs(1);
+        let error = pause(error, &mut deadline, maximum).await.unwrap_err();
+        assert_eq!(deadline, maximum);
+        assert!(super::super::retry::until(&error).is_some());
     }
 }

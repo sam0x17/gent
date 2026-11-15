@@ -20,7 +20,9 @@ use zeroize::Zeroizing;
 
 pub mod joining;
 pub mod owner;
+mod retry;
 pub mod wire;
+use retry::{Backoff, Lane};
 use wire::Envelope;
 
 /// The claim has been durably accepted, before any pairing operation is sent.
@@ -54,7 +56,7 @@ fn status(actual: StatusCode, expected: StatusCode) -> Result<()> {
 fn fatal(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<Refusal>()
-        .is_some_and(|r| !r.0.is_server_error())
+        .is_some_and(|r| !r.0.is_server_error() && r.0 != StatusCode::TOO_MANY_REQUESTS)
 }
 
 #[derive(Deserialize)]
@@ -79,6 +81,7 @@ pub struct Mailbox {
     side: Side,
     deadline: u64,
     clock: Arc<AtomicU64>,
+    backoff: Backoff,
 }
 
 impl Mailbox {
@@ -113,6 +116,7 @@ impl Mailbox {
             side,
             deadline: offer.offer.expires_at,
             clock: Arc::new(AtomicU64::new(timestamp)),
+            backoff: Backoff::default(),
         })
     }
 
@@ -146,7 +150,13 @@ impl Mailbox {
         };
         self.route(&format!("{attempt}/{side}/{index}"))
     }
-    async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+        lane: Lane,
+    ) -> Result<reqwest::Response> {
+        self.check_time()?;
+        self.backoff.check(lane)?;
         // Never include HTTP bodies, response headers, bearer values or URLs in
         // errors. The relay is untrusted and can reflect arbitrary input.
         let response = request
@@ -155,6 +165,7 @@ impl Mailbox {
             .await
             .map_err(|_| anyhow::anyhow!("invitation relay request failed"))?;
         self.check_time()?;
+        self.backoff.observe(lane, &response)?;
         Ok(response)
     }
     pub async fn attempts(&self) -> Result<BTreeMap<String, Attempt>> {
@@ -162,7 +173,9 @@ impl Mailbox {
             self.side == Side::Owner,
             "only the owner may list invitation attempts"
         );
-        let response = self.send(self.client.get(self.route("attempts")?)).await?;
+        let response = self
+            .send(self.client.get(self.route("attempts")?), Lane::Control)
+            .await?;
         status(response.status(), StatusCode::OK)?;
         let bytes = bounded(response, 16 * 1024)
             .await
@@ -206,6 +219,7 @@ impl Mailbox {
                     .put(self.message_route(attempt, index, self.side)?)
                     .header(header::CONTENT_TYPE, "application/octet-stream")
                     .body(envelope.encode()?),
+                Lane::Data,
             )
             .await?;
         status(response.status(), StatusCode::NO_CONTENT)?;
@@ -223,7 +237,10 @@ impl Mailbox {
             Side::Join => Side::Owner,
         };
         let response = self
-            .send(self.client.get(self.message_route(attempt, index, peer)?))
+            .send(
+                self.client.get(self.message_route(attempt, index, peer)?),
+                Lane::Data,
+            )
             .await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);

@@ -189,6 +189,7 @@ fn envelope_rejects_truncation_trailing_bytes_versions_counts_and_sizes() {
 }
 
 struct Captured {
+    at: tokio::time::Instant,
     line: String,
     headers: String,
     body: Vec<u8>,
@@ -225,6 +226,7 @@ async fn responder(listener: TcpListener, responses: Vec<Option<Vec<u8>>>) -> Ve
             bytes.extend_from_slice(&part[..n]);
         }
         captured.push(Captured {
+            at: tokio::time::Instant::now(),
             line: headers.lines().next().unwrap().into(),
             headers,
             body: bytes[end..].to_vec(),
@@ -234,6 +236,56 @@ async fn responder(listener: TcpListener, responses: Vec<Option<Vec<u8>>>) -> Ve
         }
     }
     captured
+}
+
+#[tokio::test]
+async fn http_throttle_cooldown_is_shared_without_blocking_control_or_ignoring_expiry() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = Fixture::new(&format!("http://{}", listener.local_addr().unwrap()));
+    let listing = serde_json::to_vec(
+        &json!({"attempts":{},"expires_at":fixture.invitation.offer().offer.expires_at}),
+    )
+    .unwrap();
+    let task = tokio::spawn(responder(listener, vec![
+        Some(b"HTTP/1.1 429 Test\r\nRetry-After: 1\r\nContent-Length: 21\r\nConnection: close\r\n\r\nprivate server detail".to_vec()),
+        Some(response("200 OK", &listing)),
+        Some(response("204 No Content", b"")),
+    ]));
+    let owner = fixture.mailbox(Side::Owner);
+    let attempt = Uuid::new_v4().to_string();
+    let envelope = Envelope::Handshake([17; 48]);
+    let error = owner.put(&attempt, 0, &envelope).await.unwrap_err();
+    assert!(!fatal(&error));
+    assert!(!error.to_string().contains("private server detail"));
+    let until = retry::until(&error).unwrap();
+    let clone = owner.clone();
+    assert_eq!(
+        retry::until(&clone.put(&attempt, 0, &envelope).await.unwrap_err()),
+        Some(until)
+    );
+    assert_eq!(
+        retry::until(&clone.get(&attempt, 0).await.err().unwrap()),
+        Some(until)
+    );
+    let mut expired = owner.clone();
+    expired.deadline = now() as u64;
+    assert!(
+        expired
+            .get(&attempt, 0)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("expired")
+    );
+    assert!(owner.attempts().await.unwrap().is_empty());
+    tokio::time::sleep_until(until).await;
+    clone.put(&attempt, 0, &envelope).await.unwrap();
+    let captured = task.await.unwrap();
+    assert_eq!(captured.len(), 3);
+    assert_eq!(captured[0].line, captured[2].line);
+    assert_eq!(captured[0].body, captured[2].body);
+    assert!(captured[2].at.duration_since(captured[0].at) >= Duration::from_secs(1));
 }
 fn response(status: &str, body: &[u8]) -> Vec<u8> {
     [

@@ -50,7 +50,7 @@ struct Live {
     next: u64,
     outgoing: Option<Envelope>,
     started: Instant,
-    last_input: Instant,
+    idle_deadline: Instant,
     supersedes: bool,
     _permit: OwnedSemaphorePermit,
 }
@@ -110,7 +110,7 @@ impl Owner {
             live.phase = Some(phase);
             live.supersedes = accepting;
             live.outgoing = Some(Envelope::Frames(frames));
-            live.last_input = Instant::now();
+            live.idle_deadline = Instant::now() + Duration::from_secs(IDLE_SECONDS);
         }
         let offer = self.offer.clone();
         local(store, move |store| store.invitation_live(&offer)).await?;
@@ -123,6 +123,7 @@ impl Owner {
             .await?;
         live.outgoing = None;
         live.next += 1;
+        live.idle_deadline = Instant::now() + Duration::from_secs(IDLE_SECONDS);
         Ok(true)
     }
 
@@ -135,13 +136,20 @@ impl Owner {
                 continue;
             };
             if live.started.elapsed() >= Duration::from_secs(SESSION_LIFETIME)
-                || live.last_input.elapsed() >= Duration::from_secs(IDLE_SECONDS)
+                || Instant::now() >= live.idle_deadline
             {
                 continue;
             }
             match self.advance(store.clone(), &attempt, &mut live).await {
                 Ok(value) => progressed |= value,
                 Err(e) => {
+                    if let Some(until) = super::retry::until(&e) {
+                        // A delayed exchange keeps its cached response. This
+                        // never extends the signed offer or Noise lifetime.
+                        live.idle_deadline = live
+                            .idle_deadline
+                            .max(until + Duration::from_secs(IDLE_SECONDS));
+                    }
                     if super::fatal(&e) || super::invalid_message(&e) {
                         live.phase = None;
                     }
@@ -211,7 +219,7 @@ impl Owner {
                                         .map_err(|_| anyhow::anyhow!("invalid handshake reply"))?,
                                 )),
                                 started,
-                                last_input: started,
+                                idle_deadline: started + Duration::from_secs(IDLE_SECONDS),
                                 supersedes: false,
                                 _permit: permit,
                             },
@@ -356,11 +364,15 @@ impl Scheduler {
                         Duration::from_millis(250)
                     }
                 }
-                Err(_) => {
+                Err(error) => {
                     owner.retry_delay = (owner.retry_delay * 2)
                         .max(Duration::from_millis(500))
                         .min(Duration::from_secs(10));
-                    owner.retry_delay
+                    super::retry::until(&error).map_or(owner.retry_delay, |until| {
+                        owner
+                            .retry_delay
+                            .min(until.saturating_duration_since(Instant::now()))
+                    })
                 }
             };
             owner.retry_at = Instant::now() + pause;
