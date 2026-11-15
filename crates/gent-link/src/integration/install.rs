@@ -1,6 +1,8 @@
 //! User-scope host installation. Only generated Gent fragments enter the journal.
+mod claude_runtime;
 mod document;
 use crate::managed_file as files;
+pub(super) use claude_runtime::{ClaudeRuntime, claude_runtime_target};
 
 use super::{Host, claude_wake, render_configuration, vscode};
 use anyhow::{Context, Result, ensure};

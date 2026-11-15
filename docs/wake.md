@@ -30,7 +30,7 @@ These socket configurations also expose the [native pasted-image tools](provider
 
 Use the same `--config-dir PATH` for install, start and status when selecting a nondefault Codex home. Startup also accepts `--host-binary PATH`. Its result supplies the command and `CODEX_HOME` for attaching with `--remote unix://`. Codex manages its own package and background process, including any native updater policy. Gent neither registers another service nor changes that policy. Startup has a 60-second limit and bounds native output. A timeout can leave the native daemon running; inspect live status before retrying.
 
-`gent integration status codex --live` validates the managed installation and probes its default or recorded custom endpoint without starting a host or model turn. It returns `runtime.connected`, a loaded-thread count for one page of at most 128 entries, and `has_more`, or a diagnostic error. It does not expose thread IDs or prove that a particular agent is ready. Ordinary status and `gent doctor` retain their file-only integration checks. Claude live status and startup are currently unsupported.
+`gent integration status codex --live` validates the managed installation and probes its default or recorded custom endpoint without starting a host or model turn. It returns `runtime.connected`, a loaded-thread count for one page of at most 128 entries, and `has_more`, or a diagnostic error. It does not expose thread IDs or prove that a particular agent is ready. Ordinary status and `gent doctor` retain their file-only integration checks.
 
 For a foreground server, run `codex app-server --listen unix://` in one terminal, then `codex --remote unix://` in another. Use the same Codex configuration directory for the server and CLI. The socket must serve the conversation using Gent, and that conversation must stay loaded for automatic delivery. Resume it explicitly if needed, or select [automatic recovery](host-recovery.md) for a managed default-socket installation. Gent does not move an existing embedded conversation. A standalone embedded host without that socket continues to use its inbox normally.
 
@@ -83,6 +83,20 @@ Actual installer replacement with a different executable path creates a new inst
 Native stream observation also confirms that Escape during a partial text response aborts that exact turn. Both an already queued notification and a new arrival cause no further model request. Explicit human input rearms delivery, and a fresh notification runs without replaying either old attempt. These lifecycle proofs use isolated native hosts and a loopback model.
 
 Separate real-model checks on both OSes use one initial registration turn and three automatic reply/acknowledgment exchanges. They cover initial delivery, a Gent daemon restart, and an actual Claude restart into the same synthetic session. Agent identity and native submission receipts remain exact, and resumed delivery needs no registration or human model turn. Those checks do not establish arbitrary crash recovery, operating-system restart or GUI delivery.
+
+### Claude live status
+
+```sh
+gent integration status claude-code --live
+```
+
+Use the same `--config-dir PATH` as installation for a nondefault profile. `--host-binary PATH` selects the Claude executable; the default is `claude`. Gent validates the managed installation before and after running `claude agents --json --all` in that profile. Both ordinary MCP and wake installations are supported. A pending update, conflicting files, disabled hooks or changed node/cluster refuses inspection. The command has a 15-second limit, bounds each output stream to 1 MiB and accepts at most 1,024 sessions.
+
+The result includes `runtime.inspected`, `reported_running`, `session_count` and `sessions`. Each row preserves the native kind, working directory, reported PID, status/state and available session identifiers. Interactive sessions can lack the short `native_id`; Gent leaves it null. Titles and conversation content are omitted. An inspection failure returns `inspected: false` and an error without native stderr.
+
+Rows with a reported PID become `reported_idle`, `reported_busy` or `reported_running`. Rows without one become `inactive_complete` for native `done`, `inactive_incomplete` for native `working`, `blocked` or `waiting`, and `inactive_unknown` otherwise. Stopping a completed session can retain `done` or produce `stopped`. These are native observations: an incomplete record does not prove recovery is underway, and a completion marker does not establish successful external work.
+
+`gent_bindings_checked` is false: the inventory does not authenticate Gent agent bindings or prove an agent can receive messages. Gent does not register agents, edit configuration, or start/resume sessions during inspection. The native Claude CLI can maintain its own profile cache. Gent-managed Claude startup remains unsupported.
 
 ### Native Claude background sessions
 

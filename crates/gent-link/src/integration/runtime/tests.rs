@@ -19,7 +19,9 @@ async fn runtime_checks_refuse_absent_polling_foreign_and_conflicting_installs_w
     gent_daemon::config::initialize(&home, "runtime").unwrap();
     assert!(start(&home, args(&dir)).await.is_err());
     assert_eq!(
-        status(&home, Host::Codex, Some(dir.clone())).await.unwrap()["runtime"]["connected"],
+        status(&home, Host::Codex, Some(dir.clone()), None)
+            .await
+            .unwrap()["runtime"]["connected"],
         false
     );
     assert!(!dir.exists());
@@ -155,10 +157,7 @@ async fn launcher_uses_scoped_arguments_without_shell_expansion_and_bounds_outpu
     assert!(!directory.exists());
     fs::write(&binary, "#!/bin/sh\nhead -c 65537 /dev/zero\n").unwrap();
     assert!(
-        launch(&binary, &directory)
-            .await
-            .unwrap_err()
-            .to_string()
+        format!("{:#}", launch(&binary, &directory).await.unwrap_err())
             .contains("exceeded its limit")
     );
 }

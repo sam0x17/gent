@@ -111,6 +111,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent integrations` | Inspect Codex and Claude Code user-scope entries; effective host configuration is not yet verified. |
 | `gent integration status [host]` | Inspect recorded installation, conflicts, or pending recovery without editing files. |
 | `gent integration status codex --live` | Probe the installed endpoint and report connectivity and a bounded loaded-thread count without starting a host or model turn. |
+| `gent integration status claude-code --live` | Inspect native interactive/background session metadata without starting or resuming a conversation. Supports `--config-dir PATH` and `--host-binary PATH`; see [live status](wake.md#claude-live-status). |
 | `gent integration start codex` | Start or reuse Codex's native background daemon for an intact default-socket `--wake` installation. Supports `--config-dir PATH` and `--host-binary PATH`. |
 | `gent integration recovery enable codex THREAD_ID` | Select an existing loaded agent for node-local automatic startup and idle recovery. Supports `--config-dir PATH` and `--host-binary PATH`; see [recovery conditions](host-recovery.md). |
 | `gent integration recovery list` | Inspect selected agents and their persisted recovery budget without contacting a host. |

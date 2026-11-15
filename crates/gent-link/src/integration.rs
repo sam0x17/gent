@@ -56,9 +56,12 @@ pub enum Command {
         /// Host config directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
         #[arg(long, requires = "host")]
         config_dir: Option<PathBuf>,
-        /// Probe the installed Codex endpoint without starting a host or model turn.
+        /// Inspect native runtime state without starting or resuming a conversation.
         #[arg(long, requires = "host")]
         live: bool,
+        /// Claude executable for live session inspection (defaults to claude).
+        #[arg(long, requires = "live")]
+        host_binary: Option<PathBuf>,
     },
     /// Start or reuse Codex's background app server for an installed --wake integration.
     Start(runtime::Args),

@@ -1,5 +1,7 @@
-//! Owner-invoked Codex startup. Native Codex owns its daemon lifecycle/package;
-//! Gent checks its recorded endpoint and never restarts or stops an existing host.
+//! Native runtime observations and owner-invoked Codex startup. Hosts retain
+//! lifecycle ownership; inspecting Claude never starts or resumes a session.
+mod claude;
+mod process;
 use super::{Host, install};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -7,13 +9,9 @@ use serde_json::{Value, json};
 use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
-};
+use tokio::process::Command;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -32,10 +30,23 @@ async fn probe(socket: &Path) -> Result<Value> {
         .context("Codex did not respond to the live probe")?
 }
 
-pub(crate) async fn status(home: &Path, host: Host, directory: Option<PathBuf>) -> Result<Value> {
+pub(crate) async fn status(
+    home: &Path,
+    host: Host,
+    directory: Option<PathBuf>,
+    binary: Option<&Path>,
+) -> Result<Value> {
+    if host == Host::ClaudeCode {
+        return claude::status(
+            home,
+            directory,
+            binary.unwrap_or_else(|| Path::new("claude")),
+        )
+        .await;
+    }
     ensure!(
-        host == Host::Codex,
-        "live runtime checks currently support Codex"
+        binary.is_none(),
+        "--host-binary applies to live Claude inspection; Codex uses its installed socket"
     );
     let mut status = install::status(home, Some(host), directory.clone())?;
     let result = async {
@@ -56,59 +67,32 @@ struct NativeStart {
     app_server_version: Option<String>,
 }
 
-async fn bounded(mut reader: impl AsyncRead + Unpin, limit: u64) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    (&mut reader)
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .await?;
-    ensure!(
-        bytes.len() as u64 <= limit,
-        "Codex startup output exceeded its limit"
-    );
-    Ok(bytes)
-}
-
 async fn launch(binary: &Path, directory: &Path) -> Result<NativeStart> {
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(["app-server", "daemon", "start"])
-        .env("CODEX_HOME", directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("cannot start Codex; check --host-binary")?;
-    let stdout = child.stdout.take().context("Codex stdout unavailable")?;
-    let stderr = child.stderr.take().context("Codex stderr unavailable")?;
-    let result = async {
-        let (status, stdout, stderr) = tokio::try_join!(
-            async { child.wait().await.map_err(anyhow::Error::from) },
-            bounded(stdout, 64 * 1024),
-            bounded(stderr, 64 * 1024)
-        )?;
-        ensure!(
-            status.success(),
-            "Codex startup failed: {}",
-            String::from_utf8_lossy(&stderr)
-                .chars()
-                .take(4096)
-                .collect::<String>()
-                .trim()
-        );
-        let value: NativeStart =
-            serde_json::from_slice(&stdout).context("invalid Codex startup result")?;
-        ensure!(
-            matches!(value.status.as_str(), "started" | "alreadyRunning"),
-            "unexpected Codex startup state"
-        );
-        Ok(value)
-    };
-    tokio::time::timeout(Duration::from_secs(60), result)
+        .env("CODEX_HOME", directory);
+    let output = process::output(command, Duration::from_secs(60), 64 * 1024)
         .await
         .context(
-            "Codex startup timed out; inspect gent integration status codex --live before retrying",
-        )?
+            "Codex startup failed; inspect gent integration status codex --live before retrying",
+        )?;
+    ensure!(
+        output.status.success(),
+        "Codex startup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+            .chars()
+            .take(4096)
+            .collect::<String>()
+            .trim()
+    );
+    let value: NativeStart =
+        serde_json::from_slice(&output.stdout).context("invalid Codex startup result")?;
+    ensure!(
+        matches!(value.status.as_str(), "started" | "alreadyRunning"),
+        "unexpected Codex startup state"
+    );
+    Ok(value)
 }
 
 pub(crate) async fn start(home: &Path, args: Args) -> Result<Value> {

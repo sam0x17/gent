@@ -788,10 +788,16 @@ async fn execute(cli: Cli) -> Result<()> {
                     host,
                     config_dir,
                     live: true,
+                    host_binary,
                 },
         }) => {
-            integration::runtime::status(&home, host.context("--live requires a host")?, config_dir)
-                .await?
+            integration::runtime::status(
+                &home,
+                host.context("--live requires a host")?,
+                config_dir,
+                host_binary.as_deref(),
+            )
+            .await?
         }
         Some(Command::Integration { command }) => integration::execute(&home, command)?,
         Some(Command::Integrations) => integration::execute(
@@ -800,6 +806,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 host: None,
                 config_dir: None,
                 live: false,
+                host_binary: None,
             },
         )?,
         Some(Command::Providers { .. }) => owner(&home, OwnerOp::Providers).await?,

@@ -204,6 +204,7 @@ pub(crate) async fn run(root: &Path, selected: Option<&str>, options: Options) -
                     host: Some(host),
                     config_dir: directory.clone(),
                     live: false,
+                    host_binary: None,
                 },
             );
             inspect_integration(&mut report, id, result.ok());
