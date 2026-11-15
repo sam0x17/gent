@@ -51,6 +51,14 @@ impl GentMcp {
         {
             tools.push(crate::gateway::downloads::tool());
         }
+        if let Credentials::Host(bindings) = &self.credentials
+            && bindings
+                .lock()
+                .expect("host bindings lock poisoned")
+                .has_host_files()
+        {
+            tools.extend(crate::integration::codex_files::tools());
+        }
         tools
     }
 }
@@ -407,6 +415,7 @@ impl ServerHandler for GentMcp {
                 CallToolResult::error(vec![ContentBlock::text("unexpected tool argument")]).into(),
             );
         }
+        let mut host_files = None;
         let credential = match &self.credentials {
             Credentials::Fixed(credential) => credential.clone(),
             Credentials::Remote(registry) => {
@@ -442,11 +451,16 @@ impl ServerHandler for GentMcp {
                 let client = client.as_ref().map(|i| i.name.as_str()).unwrap_or_default();
                 let meta = serde_json::to_value(&context.meta).expect("MCP metadata serializes");
                 let arguments = Value::Object(call.arguments.clone().unwrap_or_default());
-                match bindings
-                    .lock()
-                    .expect("host bindings lock poisoned")
+                let mut bindings = bindings.lock().expect("host bindings lock poisoned");
+                let resolved = bindings
                     .credential(client, &meta, &call.name, &arguments)
-                {
+                    .and_then(|credential| {
+                        if matches!(operation, "host_attachments" | "file_import_host") {
+                            host_files = Some(bindings.host_files(&meta, &credential)?);
+                        }
+                        Ok(credential)
+                    });
+                match resolved {
                     Ok(credential) => credential,
                     Err(error) => {
                         return Ok(CallToolResult::error(vec![ContentBlock::text(
@@ -457,6 +471,42 @@ impl ServerHandler for GentMcp {
                 }
             }
         };
+        if let Some(source) = host_files {
+            let arguments = call.arguments.unwrap_or_default();
+            let result = async {
+                if operation == "host_attachments" {
+                    let cursor = arguments
+                        .get("cursor")
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("invalid attachment cursor"))
+                        })
+                        .transpose()?;
+                    source.list(&self.home, cursor).await
+                } else {
+                    let field = |name| {
+                        arguments
+                            .get(name)
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| anyhow::anyhow!("invalid native file import arguments"))
+                    };
+                    source
+                        .import(
+                            &self.home,
+                            field("request_id")?.into(),
+                            field("attachment_id")?,
+                        )
+                        .await
+                }
+            }
+            .await;
+            return Ok(match result {
+                Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
+                Err(error) => CallToolResult::error(vec![ContentBlock::text(error.to_string())]),
+            }
+            .into());
+        }
         if operation == "file_link" {
             let Credentials::Remote(registry) = &self.credentials else {
                 unreachable!()
@@ -665,6 +715,43 @@ pub async fn run(
 #[cfg(test)]
 mod instruction_tests {
     use super::*;
+
+    #[test]
+    fn native_attachment_tools_require_codex_socket_bindings() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        config::initialize(root.path(), "native-tools").unwrap();
+        let has = |credentials| {
+            let service = GentMcp {
+                home: root.path().into(),
+                credentials,
+            };
+            service
+                .available_tools()
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        t.name.as_ref(),
+                        "gent_host_attachments" | "gent_file_import_host"
+                    )
+                })
+                .count()
+        };
+        assert_eq!(has(Credentials::Fixed("test-key".into())), 0);
+        for host in [Host::Codex, Host::ClaudeCode] {
+            let bindings = Arc::new(Mutex::new(Bindings::new(root.path(), host).unwrap()));
+            assert_eq!(has(Credentials::Host(bindings.clone())), 0);
+            if host == Host::Codex {
+                bindings
+                    .lock()
+                    .unwrap()
+                    .enable_wake(root.path(), &root.path().join("native.sock"))
+                    .unwrap();
+                assert_eq!(has(Credentials::Host(bindings)), 2);
+            }
+        }
+    }
 
     #[test]
     fn core_and_remote_disclosure_survive_host_instruction_cutoff() {

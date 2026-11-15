@@ -1,6 +1,7 @@
 //! Host metadata selects credentials outside model-controlled tool arguments.
 //! The local host and OS user are trusted; this is not remote authentication.
 pub(crate) mod claude_wake;
+pub(crate) mod codex_files;
 mod install;
 pub(crate) mod runtime;
 pub(crate) mod vscode;
@@ -391,6 +392,29 @@ impl Bindings {
         let registry = wake::Registry::new(home, self.folder.clone(), self.cfg.clone(), endpoint)?;
         self.wake_endpoint = Some(registry.endpoint.clone());
         Ok(registry)
+    }
+
+    pub(crate) fn has_host_files(&self) -> bool {
+        self.host == Host::Codex && self.wake_endpoint.is_some()
+    }
+
+    /// Only called after credential() checked this request's host metadata.
+    /// Neither the endpoint nor the conversation can come from tool arguments.
+    pub(crate) fn host_files(&self, meta: &Value, credential: &str) -> Result<codex_files::Source> {
+        ensure!(self.has_host_files(), "native attachments are unavailable");
+        let thread = identifier(meta.get("threadId"))?;
+        ensure!(wake::valid_thread(thread), "invalid Codex thread");
+        ensure!(
+            self.active
+                .get(&session_key(thread, None))
+                .is_some_and(|b| b.credential == credential),
+            "native attachment binding changed"
+        );
+        Ok(codex_files::Source::new(
+            self.wake_endpoint.clone().expect("checked endpoint"),
+            thread.into(),
+            credential.into(),
+        ))
     }
 }
 

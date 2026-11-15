@@ -207,7 +207,7 @@ pub(crate) async fn connect_socket(
     Ok(socket)
 }
 
-struct Host {
+pub(crate) struct Host {
     socket: WebSocketStream<UnixStream>,
     sequence: u64,
 }
@@ -243,7 +243,11 @@ impl Host {
     }
 
     async fn connect(path: &Path) -> Result<Self> {
-        let socket = connect_socket(path, 1024 * 1024).await?;
+        Self::connect_with_limit(path, 1024 * 1024).await
+    }
+
+    pub(crate) async fn connect_with_limit(path: &Path, limit: usize) -> Result<Self> {
+        let socket = connect_socket(path, limit).await?;
         let mut host = Self {
             socket,
             sequence: 0,
@@ -264,7 +268,7 @@ impl Host {
         Ok(host)
     }
 
-    async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub(crate) async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
         self.sequence += 1;
         let id = self.sequence;
         tokio::time::timeout(RPC_TIMEOUT, async {
@@ -288,7 +292,7 @@ impl Host {
                     "Gent cannot handle Codex server requests"
                 );
                 if value.get("id") == Some(&json!(id)) {
-                    ensure!(value.get("error").is_none(), "Codex refused wake operation");
+                    ensure!(value.get("error").is_none(), "Codex refused operation");
                     return value
                         .get("result")
                         .cloned()

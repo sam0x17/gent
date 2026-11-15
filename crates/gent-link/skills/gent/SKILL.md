@@ -80,6 +80,8 @@ Recovered files use `import_id`, original `message_id` and `file_index` from the
 
 ## Files and visual work
 
+If `gent_host_attachments` is available, use it to find a user-provided pasted image in this conversation. It lists embedded images one turn at a time, newest first; follow `next_cursor` when needed. Import the selected `attachment_id` with `gent_file_import_host` and a fresh request ID. Keep both values for identical retries. The returned `file.id` works in `file_ids`. This native Codex route needs no filesystem staging. It does not fetch external image URLs or read local file references; use the host's file tools for those. Do not reconstruct image bytes from their appearance or extract unrelated conversation history.
+
 When local handoff tools and filesystem access are available, use `gent_file_paths` to find this agent's handoff folders on the daemon machine. Copy the actual source file into `import_directory`, then call `gent_file_import` with its basename, media type, and a new ID from `gent_request_ids`. Keep those source bytes unchanged for an identical import retry. Imports support up to 32 MiB per file.
 
 Pass imported IDs in `file_ids` on `gent_send`, `gent_reply`, `gent_relay_send`, or `gent_relay_respond`. Received messages expose these files in `attachments`. Forward a received attachment by passing its ID; Gent checks current access and creates a new encrypted copy. Preserve the original `file_ids` when retrying a send. A message can contain at most four files across both attachment forms.
