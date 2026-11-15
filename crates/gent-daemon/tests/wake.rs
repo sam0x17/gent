@@ -182,6 +182,160 @@ fn lost_claim_response_never_reissues_submission_permission() {
 }
 
 #[test]
+fn claude_claim_checks_never_create_retry_or_retarget_a_dispatch() {
+    let mut f = Fixture::new();
+    let message = f.send();
+    let attempt_id = Uuid::new_v4().to_string();
+    let session_id = Uuid::new_v4().to_string();
+    let target = WakeTarget::ClaudeCode {
+        session_id: session_id.clone(),
+    };
+    let check = AgentOp::WakeCheck {
+        message_id: message.clone(),
+        attempt_id: attempt_id.clone(),
+        target: target.clone(),
+    };
+    assert!(error(f.agent(1, check.clone())).contains("unavailable"));
+    assert_eq!(f.count(), 0);
+    let claim = AgentOp::WakeClaim {
+        message_id: message.clone(),
+        attempt_id: attempt_id.clone(),
+        target,
+    };
+    let first = ok(f.agent(1, claim.clone()));
+    assert_eq!(first["may_submit"], true);
+    f.store = Store::open(f.home.path()).unwrap();
+    f.db()
+        .execute("UPDATE agents SET last_seen=1 WHERE id=?1", [&f.agents[1]])
+        .unwrap();
+    for _ in 0..3 {
+        let value = ok(f.agent(1, check.clone()));
+        assert_eq!(value["eligible"], true);
+        assert_eq!(value["record"], first["record"]);
+        assert!(value.get("may_submit").is_none());
+        assert!(!value.to_string().contains("private request content"));
+    }
+    assert!(error(f.agent(2, check.clone())).contains("unavailable"));
+    for target in [
+        WakeTarget::Codex {
+            thread_id: session_id,
+        },
+        WakeTarget::ClaudeCode {
+            session_id: Uuid::new_v4().to_string(),
+        },
+    ] {
+        let wrong = AgentOp::WakeCheck {
+            message_id: message.clone(),
+            attempt_id: attempt_id.clone(),
+            target,
+        };
+        assert!(error(f.agent(1, wrong)).contains("does not match"));
+    }
+    let wrong = AgentOp::WakeCheck {
+        message_id: message.clone(),
+        attempt_id: Uuid::new_v4().to_string(),
+        target: WakeTarget::ClaudeCode {
+            session_id: first["record"]["target"]["session_id"]
+                .as_str()
+                .unwrap()
+                .into(),
+        },
+    };
+    assert!(error(f.agent(1, wrong)).contains("does not match"));
+    assert_eq!(ok(f.agent(1, claim))["may_submit"], false);
+    assert_eq!(f.count(), 1);
+    assert_eq!(f.show(&message), first["record"]);
+    let seen: i64 = f
+        .db()
+        .query_row(
+            "SELECT last_seen FROM agents WHERE id=?1",
+            [&f.agents[1]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(seen, 1);
+}
+
+#[test]
+fn queued_dispatch_checks_recheck_permissions_ack_expiry_and_submission() {
+    for condition in ["permissions", "ack", "expiry", "submitted", "revoked"] {
+        let mut f = Fixture::new();
+        let message = f.send();
+        let claim = Fixture::claim(&message);
+        let first = ok(f.agent(1, claim.clone()));
+        let AgentOp::WakeClaim {
+            attempt_id, target, ..
+        } = claim
+        else {
+            unreachable!()
+        };
+        let check = AgentOp::WakeCheck {
+            message_id: message.clone(),
+            attempt_id,
+            target,
+        };
+        assert_eq!(ok(f.agent(1, check.clone()))["eligible"], true);
+        match condition {
+            "permissions" => {
+                ok(f.owner(OwnerOp::SetPolicy {
+                    policy: Policy::default(),
+                }));
+            }
+            "ack" => {
+                ok(f.agent(
+                    1,
+                    AgentOp::Ack {
+                        message_id: message.clone(),
+                    },
+                ));
+            }
+            "expiry" => {
+                f.db().execute("UPDATE messages SET payload=json_set(payload,'$.expires_at',0) WHERE id=?1", [&message]).unwrap();
+            }
+            "submitted" => {
+                ok(f.agent(1, Fixture::submitted(&message, &first)));
+            }
+            "revoked" => {
+                ok(f.owner(OwnerOp::Revoke {
+                    agent_id: f.agents[1].clone(),
+                }));
+            }
+            _ => unreachable!(),
+        }
+        if condition == "revoked" {
+            assert!(error(f.agent(1, check)).contains("revoked"));
+        } else {
+            assert_eq!(ok(f.agent(1, check))["eligible"], false, "{condition}");
+        }
+        assert_eq!(f.count(), 1);
+    }
+}
+
+#[test]
+fn claude_targets_reject_invalid_session_ids_before_claiming() {
+    let mut f = Fixture::new();
+    let message = f.send();
+    for session_id in [
+        "../session".into(),
+        Uuid::nil().to_string(),
+        Uuid::new_v4().to_string().to_uppercase(),
+    ] {
+        assert!(
+            error(f.agent(
+                1,
+                AgentOp::WakeClaim {
+                    message_id: message.clone(),
+                    attempt_id: Uuid::new_v4().to_string(),
+                    target: WakeTarget::ClaudeCode { session_id }
+                }
+            ))
+            .contains("invalid wake identifier")
+        );
+    }
+    assert_eq!(f.count(), 0);
+}
+
+#[test]
 fn inbox_observation_and_host_ack_are_independent_of_message_receipts_and_work() {
     let mut f = Fixture::new();
     let message = f.send();

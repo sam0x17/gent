@@ -2,7 +2,7 @@
 
 Gent records a local host adapter's attempt to submit incoming-message input before that submission can begin. A lost daemon response or restart cannot grant a second submission for the same message. An optional Codex adapter now uses this journal to queue an inbox notification for a loaded conversation through its existing local app-server socket.
 
-The tested Codex queue creates a new entry when the same client message ID is submitted again. Gent therefore cannot treat a repeated queue call as harmless. Claude's tested channel mechanism can deliver during an active turn and is not enabled. Generic MCP inbox access remains available on both hosts.
+The tested Codex queue creates a new entry when the same client message ID is submitted again. Gent therefore cannot treat a repeated queue call as harmless. Claude's tested channel mechanism can deliver during an active turn. Its native plugin adapter also has an unresolved unload race, so automatic Claude delivery remains disabled in default builds. Generic MCP inbox access remains available on both hosts.
 
 ## Enable Codex queued delivery
 
@@ -38,6 +38,18 @@ To disable queued delivery, run `gent integration install codex` without either 
 
 Daemon identity still reports `delivery: polling` for its durable inbox. That field does not describe this optional adapter's live connection status; inspect `gent wake` for dispatch evidence. Live connection diagnostics, discovery of custom endpoints, automatic server startup, cold resume and GUI acceptance remain unfinished.
 
+## Claude native adapter investigation
+
+The `experimental-claude-wake` Cargo feature enables a development adapter for isolated native-host tests. It currently fails the plugin-unload acceptance check and is not ready for ordinary use. Default builds reject both installation with `gent integration install claude-code --wake` and the hidden runtime bridge, leaving existing MCP setup available.
+
+The candidate installer manages a native plugin under the host configuration directory's `skills/gent-wake`. It records the installed module bytes, an installation ID, node and cluster, and checks ownership before upgrading or removing files. Interrupted updates accept the recorded before/after versions; edited files are preserved. A pending update, disabled identity hook, old installation ID or changed binding prevents the Rust bridge from granting a usable response.
+
+The module polls every five seconds, using a bounded JSON subprocess interface with argument vectors. Rust reads the exact session's existing Gent credential and pinned scope without creating missing keys or taking live MCP credential locks. It claims before returning a fixed inbox notification. Credentials, message content and files never enter that subprocess response or notification. One notification remains outstanding per module.
+
+Native `prompt.submit` controls completed-turn queuing and interruption holds. A separate `classic.UserPromptSubmit` hook rechecks the target session and current claim eligibility at delivery. This hook does not infer turn completion from classic Stop events. The adapter correlates a guarded notification with a native `turn.start` UUID for its receipt; its generated attempt ID is not a host acceptance ID. Dropped or lost submissions remain uncertain and are never retried automatically.
+
+Linux and Mac native tests demonstrate idle delivery, busy boundaries, interruption/rearm, isolation when a claim response is delayed across `/clear`, restored binding after `/resume`, and no repeated submission after a lost claim response and daemon restart. They also expose the release blocker: Claude's file watcher can unload the validation hook after uninstall while retaining the plugin's queued input. That input can subsequently start a model turn without the guard. A shorter test initially passed because delivery reached the old guard before unload; the expanded test holds delivery until the watcher has actually unloaded the module. Session replacement, host restart, unload and real-model acceptance require further work before enabling this feature by default.
+
 ## Owner inspection
 
 Run these commands on the recipient's node, selecting its cluster profile if needed:
@@ -62,15 +74,16 @@ Inbox observation does not resolve an uncertain dispatch. A submission report ne
 
 ## Adapter contract
 
-Three local agent RPCs support adapters. They use the registration credential and are absent from the model-callable MCP tools:
+Four local agent RPCs support adapters. They use the registration credential and are absent from the model-callable MCP tools:
 
 1. `wake_pending` returns up to 50 currently accessible, unacknowledged, unexpired message IDs and expiry times with no existing claim. It includes no message text or files.
 2. `wake_claim` accepts a message ID, unique attempt ID and target. Only the first committed claim returns `may_submit: true`. An exact retry returns the saved record with `may_submit: false`, including after restart. Changing the attempt or target for a claimed message fails.
-3. `wake_submitted` records the host submission ID against the exact attempt. Repeating that report preserves the result; conflicting IDs fail. It can record an already attempted submission after peer permissions change, but still requires the authorized, unrevoked local registration and node.
+3. `wake_check` checks an existing claim against its agent, attempt and host conversation. Its `eligible` result also requires an uncertain claim and a currently accessible, unacknowledged, unexpired message visible in the relay queue. It creates no record, changes no evidence, and grants no submission permission. Only an adapter still holding the original successful claim response may use it before submitting; it cannot authorize recovery of an uncertain submission.
+4. `wake_submitted` records the host submission ID against the exact attempt. Repeating that report preserves the result; conflicting IDs fail. It can record an already attempted submission after peer permissions change, but still requires the authorized, unrevoked local registration and node.
 
 New claims recheck message permissions and relay queue visibility. All journal transitions use the existing immediate SQLite transaction. Adapter RPCs do not update agent `last_seen`, so background polling does not make the model appear active.
 
-The current target format supports a Codex thread UUID. The journal itself trusts the adapter's target report. The bundled adapter obtains that UUID from the same host metadata used to select the agent credential, then checks the connected server's thread identity and capability before claiming. Future adapters must preserve this binding and the host's busy queues and interruption holds. A process crash between claim and submission can leave an unused claim permanently uncertain. Never blindly retry an external submission after a lost response.
+Targets identify either a Codex thread UUID or a Claude Code session UUID. Host type is part of the target: identical UUID text under different hosts does not identify the same dispatch. The journal itself trusts the adapter's target report. The Codex adapter obtains its UUID from the same host metadata used to select the agent credential, then checks the connected server's thread identity and capability before claiming. The Claude bridge reads the existing session binding and its pinned scope. Adapters must preserve this binding and the host's busy queues and interruption holds. A process crash between claim and submission can leave an unused claim permanently uncertain. Never blindly retry an external submission after a lost response.
 
 ## Storage and recovery
 
@@ -94,6 +107,6 @@ cargo build -p gent-link --locked
 python3 scripts/prove_wake_journal.py --gent target/debug/gent
 ```
 
-Seven journal tests cover restart, exact retries, conflicting attempts, concurrent claims, failed writes, permissions, expiry, revocation, storage and rate limits, and independent message/work state. The journal process proof drops a committed claim response, restarts the daemon and verifies that the retry grants no new submission. It also checks MCP tool exclusion, inbox observation and synthetic submission reporting without invoking a host queue or model.
+Ten journal tests cover restart, exact retries, conflicting attempts, concurrent claims, failed writes, permissions, expiry, revocation, storage and rate limits, and independent message/work state. They also cover read-only claim checks, Claude session IDs and cross-host target substitution. The journal process proof drops a committed claim response, restarts the daemon and verifies that the retry grants no new submission. It also checks MCP tool exclusion, inbox observation and synthetic submission reporting without invoking a host queue or model.
 
 `cargo test -p gent-link wake --locked` additionally covers thread identity and capability gates, exact queue response binding, private socket requirements, refusal to answer host approval requests, installation upgrades/removal, saved attachment validation, watcher election, endpoint isolation, opt-out and bounded loaded-thread pages. Native installed-Codex proofs separately exercise actual metadata, queues, MCP calls, interrupted holds, lost queue responses and delivery after actual MCP process replacement. Real-model acceptance uses fresh synthetic conversations and normal host model access; its restart check covers the Gent daemon. Those proofs do not establish GUI support or exactly-once host execution across a Codex crash; Gent's journal controls its own submissions.

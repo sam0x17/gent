@@ -19,6 +19,7 @@ fn fixture(host: Host) -> (tempfile::TempDir, Layout, Spec) {
         home: root.join("gent ' $HOME"),
         binary: root.join("gent"),
         wake_socket: None,
+        claude_wake: None,
     };
     (temp, layout, spec)
 }
@@ -28,6 +29,140 @@ fn put(path: &Path, text: &str) {
 }
 fn get(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
+}
+
+fn enable_claude(spec: &mut Spec) {
+    let cfg = config::initialize(&spec.home, "claude-install").unwrap();
+    spec.claude_wake = Some(claude_wake::Installation::new(&cfg));
+}
+
+#[test]
+fn claude_plugin_installation_preserves_owned_versions_and_revokes_old_helpers() {
+    let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
+    enable_claude(&mut spec);
+    let id = spec.claude_wake.as_ref().unwrap().id.clone();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    assert_eq!(
+        claude_wake(&spec.home, &layout.directory, &id).unwrap().id,
+        id
+    );
+    let record = get(&layout.record());
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    assert_eq!(get(&layout.record()), record);
+    let module = layout.directory.join("skills/gent-wake/hooks/register.ts");
+    assert!(get(&module).contains("--config-dir"));
+    // A generated old version is checked against its recorded bytes when the
+    // template changes. It is never overwritten without checking ownership.
+    let previous = get(&module);
+    let mut next = spec.clone();
+    let wake = next.claude_wake.as_mut().unwrap();
+    wake.id = uuid::Uuid::new_v4().to_string();
+    wake.module.push_str("\n// fixture upgraded module\n");
+    mutate(&layout, &spec.home, Some(next.clone())).unwrap();
+    assert_ne!(get(&module), previous);
+    assert!(claude_wake(&spec.home, &layout.directory, &id).is_err());
+    let id = &next.claude_wake.as_ref().unwrap().id;
+    assert!(claude_wake(&spec.home, &layout.directory, id).is_ok());
+    let keep = module.with_file_name("user-notes.txt");
+    put(&keep, "user content");
+    next.claude_wake = None;
+    mutate(&layout, &spec.home, Some(next)).unwrap();
+    assert!(claude_wake(&spec.home, &layout.directory, &spec.claude_wake.unwrap().id).is_err());
+    assert!(!module.exists());
+    assert_eq!(get(&keep), "user content");
+    assert!(get(&layout.server).contains("gent"));
+}
+
+#[test]
+fn claude_wake_recovers_every_install_upgrade_and_removal_boundary() {
+    for operation in 0..3 {
+        for completed in 0..=5 {
+            let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
+            enable_claude(&mut spec);
+            if operation > 0 {
+                mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+            }
+            let mut desired = spec.clone();
+            desired.binary = desired.binary.with_file_name("updated-gent");
+            let desired = (operation != 2).then_some(desired);
+            let (snapshot, mut state) = layout.read().unwrap();
+            let edits = layout
+                .edits(state.installed.as_ref(), desired.as_ref(), false, true)
+                .unwrap();
+            assert_eq!(edits.len(), 5);
+            state.pending = Some(Transition {
+                after: desired.clone(),
+            });
+            save(&snapshot, &state).unwrap();
+            for edit in edits.into_iter().take(completed) {
+                edit.apply().unwrap();
+            }
+            assert!(
+                claude_wake(
+                    &spec.home,
+                    &layout.directory,
+                    &spec.claude_wake.as_ref().unwrap().id
+                )
+                .is_err()
+            );
+            mutate(&layout, &spec.home, desired.clone()).unwrap();
+            assert_eq!(layout.read().unwrap().1.installed, desired);
+            assert_eq!(
+                inspect(&layout, &spec.home).unwrap()["state"],
+                if operation == 2 {
+                    "absent"
+                } else {
+                    "configured"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn claude_wake_preserves_modified_plugin_files_and_refuses_disabled_identity_hook() {
+    let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
+    enable_claude(&mut spec);
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    let record = get(&layout.record());
+    let module = layout.directory.join("skills/gent-wake/hooks/register.ts");
+    let original = get(&module);
+    put(&module, "user edited module");
+    assert!(mutate(&layout, &spec.home, None).is_err());
+    assert_eq!(get(&module), "user edited module");
+    assert_eq!(get(&layout.record()), record);
+    let id = &spec.claude_wake.as_ref().unwrap().id;
+    assert!(claude_wake(&spec.home, &layout.directory, id).is_err());
+    put(&module, &original);
+    let settings = layout.settings.as_ref().unwrap();
+    let mut value: Value = serde_json::from_str(&get(settings)).unwrap();
+    value["disableAllHooks"] = true.into();
+    put(settings, &value.to_string());
+    assert!(claude_wake(&spec.home, &layout.directory, id).is_err());
+    // Uninstall still works when all hooks have been disabled.
+    mutate(&layout, &spec.home, None).unwrap();
+    assert!(!module.exists());
+}
+
+#[test]
+fn claude_bridge_uses_recorded_default_layout_without_creating_another_config() {
+    let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
+    fs::set_permissions(
+        layout.directory.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    enable_claude(&mut spec);
+    let layout = Layout::at(
+        Host::ClaudeCode,
+        layout.directory.clone(),
+        layout.directory.parent().unwrap().join(".claude.json"),
+    )
+    .unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    let id = &spec.claude_wake.as_ref().unwrap().id;
+    assert!(claude_wake(&spec.home, &layout.directory, id).is_ok());
+    assert!(!layout.directory.join(".claude.json").exists());
 }
 
 #[test]

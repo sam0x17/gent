@@ -2,7 +2,7 @@
 mod document;
 use crate::managed_file as files;
 
-use super::{Host, render_configuration};
+use super::{Host, claude_wake, render_configuration};
 use anyhow::{Context, Result, ensure};
 use document::Document;
 use files::{Snapshot, normalize};
@@ -17,7 +17,7 @@ pub struct Args {
     /// Host config directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
-    /// Use Codex's default local app-server socket for queued delivery.
+    /// Enable native queued delivery (Codex uses its default app-server socket).
     #[arg(long, conflicts_with = "wake_socket")]
     pub wake: bool,
     /// Opt into queued Codex wake through an existing local app-server socket.
@@ -32,9 +32,18 @@ struct Spec {
     binary: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wake_socket: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claude_wake: Option<claude_wake::Installation>,
 }
 impl Spec {
     fn fragments(&self, host: Host) -> Result<Value> {
+        if let Some(wake) = &self.claude_wake {
+            ensure!(
+                host == Host::ClaudeCode && self.wake_socket.is_none(),
+                "Claude wake installation belongs to another host"
+            );
+            wake.validate()?;
+        }
         for path in [&self.home, &self.binary] {
             ensure!(path.is_absolute(), "installation paths must be absolute");
             ensure!(
@@ -66,6 +75,34 @@ pub(super) fn default_wake_socket(host: Host, config_dir: Option<PathBuf>) -> Re
 }
 
 impl Layout {
+    fn plugin_files(&self, spec: Option<&Spec>) -> Result<Vec<(PathBuf, Option<String>)>> {
+        let root = self.directory.join("skills/gent-wake");
+        let wake = spec.and_then(|s| s.claude_wake.as_ref());
+        let content = if let (Some(spec), Some(wake)) = (spec, wake) {
+            let configuration = json!({"binary":spec.binary,"home":spec.home,
+                "directory":self.directory,"installation_id":wake.id});
+            Some([
+                json!({"name":"gent-wake","version":"0.0.1",
+                    "description":"Gent inbox delivery between completed turns"})
+                .to_string()
+                    + "\n",
+                "{\"modules\":[\"./register.ts\"]}\n".into(),
+                format!("const CONFIG = {configuration};\n{}", wake.module),
+            ])
+        } else {
+            None
+        };
+        Ok([
+            ".claude-plugin/plugin.json",
+            "hooks/hooks.json",
+            "hooks/register.ts",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, path)| (root.join(path), content.as_ref().map(|v| v[i].clone())))
+        .collect())
+    }
+
     fn wake_socket(&self) -> Result<PathBuf> {
         ensure!(
             self.host == Host::Codex,
@@ -168,6 +205,10 @@ impl Layout {
         recovery: bool,
         check_enabled: bool,
     ) -> Result<Vec<Edit>> {
+        let manage_plugin = before.is_some_and(|s| s.claude_wake.is_some())
+            || after.is_some_and(|s| s.claude_wake.is_some());
+        let plugin_before = self.plugin_files(before)?;
+        let plugin_after = self.plugin_files(after)?;
         let before = before.map(|s| s.fragments(self.host)).transpose()?;
         let after = after.map(|s| s.fragments(self.host)).transpose()?;
         let pointer = if self.host == Host::Codex {
@@ -187,7 +228,7 @@ impl Layout {
             &self.server,
         )?;
         let mut edits = vec![Edit {
-            text: doc.set_server(target)?,
+            text: Some(doc.set_server(target)?),
             snapshot,
         }];
         if let Some(path) = &self.settings {
@@ -209,9 +250,23 @@ impl Layout {
                 path,
             )?;
             edits.push(Edit {
-                text: doc.set_hook(target)?,
+                text: Some(doc.set_hook(target)?),
                 snapshot,
             });
+        }
+        if self.host == Host::ClaudeCode && manage_plugin {
+            for ((path, before), (_, after)) in plugin_before.into_iter().zip(plugin_after) {
+                let snapshot = Snapshot::read(&path)?;
+                ensure!(
+                    snapshot.text == before || (recovery && snapshot.text == after),
+                    "Gent plugin file is unowned, missing, or edited: {}; preserve your changes before retrying",
+                    path.display()
+                );
+                edits.push(Edit {
+                    snapshot,
+                    text: after,
+                });
+            }
         }
         Ok(edits)
     }
@@ -249,15 +304,18 @@ struct Transition {
 }
 struct Edit {
     snapshot: Snapshot,
-    text: String,
+    text: Option<String>,
 }
 impl Edit {
     fn apply(&self) -> Result<()> {
+        let Some(text) = &self.text else {
+            return self.snapshot.remove();
+        };
         // Uninstalling an absent integration must not create empty host files.
-        if self.snapshot.text.is_none() && matches!(self.text.trim(), "" | "{}") {
+        if self.snapshot.text.is_none() && matches!(text.trim(), "" | "{}") {
             self.snapshot.verify()
         } else {
-            self.snapshot.write(&self.text)
+            self.snapshot.write(text)
         }
     }
 }
@@ -305,24 +363,42 @@ fn recover(layout: &Layout) -> Result<()> {
 }
 
 pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
+    if install && args.host == Host::ClaudeCode && args.wake {
+        claude_wake::enabled()?;
+    }
     ensure!(
         install || (!args.wake && args.wake_socket.is_none()),
         "--wake and --wake-socket apply only to installation"
     );
     let home = normalize(home)?;
     let layout = Layout::resolve(args.host, args.config_dir)?;
-    let wake_socket = if args.wake {
+    let wake_socket = if args.wake && args.host == Host::Codex {
         Some(layout.wake_socket()?)
     } else {
         args.wake_socket
     };
     let desired = if install {
-        config::load(&home).context("initialize this Gent node first")?;
-        Some(Spec {
+        let cfg = config::load(&home).context("initialize this Gent node first")?;
+        let mut desired = Spec {
             home: home.clone(),
             binary: std::fs::canonicalize(std::env::current_exe()?)?,
             wake_socket,
-        })
+            claude_wake: None,
+        };
+        if args.wake && args.host == Host::ClaudeCode {
+            let previous = layout.read()?.1.installed;
+            let existing = previous
+                .filter(|s| s.home == desired.home && s.binary == desired.binary)
+                .and_then(|s| s.claude_wake)
+                .filter(|w| {
+                    w.cluster_id == cfg.cluster.id
+                        && w.node_id == cfg.node.id
+                        && w.module == claude_wake::MODULE
+                });
+            desired.claude_wake =
+                Some(existing.unwrap_or_else(|| claude_wake::Installation::new(&cfg)));
+        }
+        Some(desired)
     } else {
         None
     };
@@ -380,6 +456,15 @@ fn inspect(layout: &Layout, home: &Path) -> Result<Value> {
         "/mcpServers/gent"
     };
     let mut exact = doc.server()? == fragments.as_ref().and_then(|f| f.pointer(pointer));
+    if state
+        .installed
+        .as_ref()
+        .is_some_and(|s| s.claude_wake.is_some())
+    {
+        for (path, content) in layout.plugin_files(state.installed.as_ref())? {
+            exact &= Snapshot::read(&path)?.text == content;
+        }
+    }
     let mut disabled = false;
     if let Some(path) = &layout.settings {
         let snapshot = Snapshot::read(path)?;
@@ -405,8 +490,54 @@ fn inspect(layout: &Layout, home: &Path) -> Result<Value> {
         result["current_home"] = json!(spec.home == home);
         result["binary_available"] = json!(spec.binary.is_file());
         result["wake_socket"] = json!(spec.wake_socket);
+        result["claude_wake"] = json!(spec.claude_wake.as_ref().map(|w| &w.id));
     }
     Ok(result)
+}
+
+/// Every helper call must still belong to this exact completed installation.
+/// A pending uninstall/update fails closed before it touches a host setting.
+pub(super) fn claude_wake(
+    home: &Path,
+    directory: &Path,
+    id: &str,
+) -> Result<claude_wake::Installation> {
+    let home = normalize(home)?;
+    gent_daemon::recovery::ensure_active(&home)?;
+    // Default Claude settings keep .claude.json beside ~/.claude; an explicit
+    // CLAUDE_CONFIG_DIR keeps it inside. Recover the exact recorded layout.
+    let directory = normalize(directory)?;
+    let record = Snapshot::read(&directory.join(".gent-claude-code.json"))?;
+    record.private()?;
+    let saved: State = serde_json::from_str(
+        record
+            .text
+            .as_deref()
+            .context("Claude integration is not installed")?,
+    )?;
+    let layout = Layout::at(Host::ClaudeCode, directory, saved.server)?;
+    let (snapshot, state) = layout.read()?;
+    ensure!(
+        state.pending.is_none(),
+        "Claude integration update is pending"
+    );
+    state.owner(&home)?;
+    let spec = state
+        .installed
+        .as_ref()
+        .context("Claude integration is not installed")?;
+    let wake = spec
+        .claude_wake
+        .as_ref()
+        .context("Claude automatic delivery is disabled")?;
+    ensure!(wake.id == id, "Claude wake installation changed");
+    let edits = layout.edits(Some(spec), Some(spec), false, true)?;
+    for edit in edits {
+        edit.snapshot.verify()?;
+    }
+    snapshot.verify()?;
+    record.verify()?;
+    Ok(wake.clone())
 }
 
 pub fn status(home: &Path, host: Option<Host>, config_dir: Option<PathBuf>) -> Result<Value> {

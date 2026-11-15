@@ -12,6 +12,8 @@ path = "src/main.rs"
 [features]
 # Local auth proof only; rejects overrides unless both origins are loopback.
 test-auth-provider = []
+# Native lifecycle investigation only; queued input can survive plugin unload.
+experimental-claude-wake = []
 
 [dependencies]
 toml.workspace = true

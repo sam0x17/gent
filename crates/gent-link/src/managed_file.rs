@@ -201,4 +201,17 @@ impl Snapshot {
         File::open(parent)?.sync_all()?;
         Ok(())
     }
+    pub fn remove(&self) -> Result<()> {
+        self.verify()?;
+        if self.text.is_some() {
+            fs::remove_file(&self.path)?;
+            File::open(
+                self.path
+                    .parent()
+                    .context("missing configuration directory")?,
+            )?
+            .sync_all()?;
+        }
+        Ok(())
+    }
 }

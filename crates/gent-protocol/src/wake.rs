@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "host", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WakeTarget {
     Codex { thread_id: String },
+    ClaudeCode { session_id: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

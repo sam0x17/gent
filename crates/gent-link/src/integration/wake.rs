@@ -53,7 +53,7 @@ fn hash(credential: &str) -> String {
     format!("{:x}", Sha256::digest(credential.as_bytes()))
 }
 
-fn snapshot(path: &Path) -> Result<Snapshot> {
+pub(super) fn snapshot(path: &Path) -> Result<Snapshot> {
     if let Ok(meta) = fs::symlink_metadata(path) {
         ensure!(meta.len() <= MAX_BYTES, "wake attachment file is too large");
     }

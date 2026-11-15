@@ -543,6 +543,7 @@ async fn execute(cli: Cli) -> Result<()> {
                     }
                     | Command::Integration {
                         command: integration::Command::Hook { .. }
+                            | integration::Command::ClaudeWake { .. }
                     }
                     | Command::Cluster {
                         command: Some(ClusterCommand::PairingServe)
@@ -726,6 +727,9 @@ async fn execute(cli: Cli) -> Result<()> {
             };
             value
         }
+        Some(Command::Integration {
+            command: integration::Command::ClaudeWake { config_dir },
+        }) => integration::claude_wake::execute(&home, &config_dir).await?,
         Some(Command::Integration { command }) => integration::execute(&home, command)?,
         Some(Command::Integrations) => integration::execute(
             &home,

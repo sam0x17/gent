@@ -58,6 +58,7 @@ fn id(value: &str) -> Result<()> {
 fn target(value: &WakeTarget) -> Result<()> {
     match value {
         WakeTarget::Codex { thread_id } => id(thread_id),
+        WakeTarget::ClaudeCode { session_id } => id(session_id),
     }
 }
 
@@ -68,6 +69,32 @@ fn limits() -> Value {
 }
 
 impl StoreSession<'_> {
+    pub(super) fn wake_check(
+        &self,
+        who: &Agent,
+        message_id: &str,
+        attempt_id: &str,
+        target_id: &WakeTarget,
+    ) -> Result<Value> {
+        id(attempt_id)?;
+        target(target_id)?;
+        let record = self.wake_record(message_id)?.context(UNAVAILABLE)?;
+        ensure!(record.agent == who.id, UNAVAILABLE);
+        ensure!(
+            record.attempt_id == attempt_id && &record.target == target_id,
+            "wake dispatch does not match this attempt and host conversation"
+        );
+        let message = self.message(message_id)?;
+        let eligible = record.state == WakeState::Uncertain
+            && message.recipient == who.id
+            && !message.acknowledged
+            && self.deliverable(&message)?
+            && self.relay_inbox_visible(&message)?;
+        // This is a read-only check for the adapter still holding the original
+        // claim response. It never permits recovery/retry of a lost submission.
+        Ok(json!({"record":record,"eligible":eligible}))
+    }
+
     fn wake_record(&self, message_id: &str) -> Result<Option<WakeRecord>> {
         id(message_id)?;
         let row: Option<(String,String,i64,String)> = self.db.query_row(

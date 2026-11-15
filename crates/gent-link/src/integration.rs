@@ -1,5 +1,6 @@
 //! Host metadata selects credentials outside model-controlled tool arguments.
 //! The local host and OS user are trusted; this is not remote authentication.
+pub(crate) mod claude_wake;
 mod install;
 pub(crate) mod wake;
 use anyhow::{Context, Result, ensure};
@@ -73,10 +74,17 @@ pub enum Command {
     /// Receive a host's PreToolUse event on stdin. For host configuration only.
     #[command(hide = true)]
     Hook { host: Host },
+    /// Local native Claude plugin bridge. Input is bounded JSON on stdin.
+    #[command(hide = true)]
+    ClaudeWake {
+        #[arg(long)]
+        config_dir: PathBuf,
+    },
 }
 
 pub fn execute(home: &Path, command: Command) -> Result<Value> {
     match command {
+        Command::ClaudeWake { .. } => anyhow::bail!("native bridge requires async dispatch"),
         Command::Status { host, config_dir } => install::status(home, host, config_dir),
         Command::Install(args) => install::change(home, args, true),
         Command::Uninstall(args) => install::change(home, args, false),
@@ -195,13 +203,17 @@ fn session_key(session: &str, agent: Option<&str>) -> String {
 }
 fn scope(home: &Path, host: Host) -> Result<PathBuf> {
     let config = config::load(home)?;
-    let id = digest(&json!([config.cluster.id, config.node.id, host.name()]));
     let bindings = home.join("host-bindings");
     config::private_dir(home)?;
     config::private_dir(&bindings)?;
-    let folder = bindings.join(id);
+    let folder = scope_path(home, &config, host);
     config::private_dir(&folder)?;
     Ok(folder)
+}
+
+fn scope_path(home: &Path, cfg: &config::Config, host: Host) -> PathBuf {
+    home.join("host-bindings")
+        .join(digest(&json!([cfg.cluster.id, cfg.node.id, host.name()])))
 }
 
 pub(crate) fn recovery_binding(

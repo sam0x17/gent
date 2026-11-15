@@ -360,6 +360,12 @@ pub enum AgentOp {
         attempt_id: String,
         target: wake::WakeTarget,
     },
+    /// Recheck an existing claim without creating or renewing submission rights.
+    WakeCheck {
+        message_id: String,
+        attempt_id: String,
+        target: wake::WakeTarget,
+    },
     WakeSubmitted {
         message_id: String,
         attempt_id: String,

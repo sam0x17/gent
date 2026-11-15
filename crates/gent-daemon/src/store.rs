@@ -806,7 +806,10 @@ impl StoreSession<'_> {
         );
         if !matches!(
             &action,
-            AgentOp::WakePending | AgentOp::WakeClaim { .. } | AgentOp::WakeSubmitted { .. }
+            AgentOp::WakePending
+                | AgentOp::WakeClaim { .. }
+                | AgentOp::WakeCheck { .. }
+                | AgentOp::WakeSubmitted { .. }
         ) {
             self.db.execute(
                 "UPDATE agents SET last_seen=?1 WHERE id=?2",
@@ -872,6 +875,11 @@ impl StoreSession<'_> {
                 attempt_id,
                 target,
             } => self.wake_claim(&who, &message_id, &attempt_id, target),
+            AgentOp::WakeCheck {
+                message_id,
+                attempt_id,
+                target,
+            } => self.wake_check(&who, &message_id, &attempt_id, &target),
             AgentOp::WakeSubmitted {
                 message_id,
                 attempt_id,
