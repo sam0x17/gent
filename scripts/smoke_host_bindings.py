@@ -8,7 +8,8 @@ import tempfile
 import time
 import tomllib
 import uuid
-from smoke_mcp import Client, PNG
+from mcp_client import Client
+from mcp_fixtures import PNG
 
 
 def main():
