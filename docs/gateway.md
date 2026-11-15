@@ -20,7 +20,7 @@ In another terminal:
 gent --home /private/path/gent-node gateway run --listen 127.0.0.1:8787
 ```
 
-The endpoint is `http://127.0.0.1:8787/mcp`. Plain HTTP is restricted to loopback for local tests. `gateway run` requires explicit `--home` or `--cluster`; it runs in the foreground until interrupted. There is no gateway service installer yet.
+The endpoint is `http://127.0.0.1:8787/mcp`. Plain HTTP is restricted to loopback for local tests. `gateway run` requires explicit `--home` or `--cluster`; it runs in the foreground until interrupted. For a persistent listener, use the [gateway service](#persistent-listener).
 
 Transfer the private export's `token` to the trusted host's credential store outside prompts and tool arguments. Send it as `Authorization: Bearer TOKEN` on every request, including initialization and tool discovery. Credentials are never printed by Gent. They expire after 720 hours by default; `--ttl-hours` accepts 1 through 8760. An identical `clients add` retry with the same export preserves its token.
 
@@ -87,7 +87,30 @@ Connect directly or through a transport that preserves the TLS connection to thi
 
 Plaintext tool calls are visible to the model provider and the user's node. Traffic from that node through Gent's central relay uses the existing encrypted daemon transport. This does not provide encryption against the model provider or prove a mobile connector's security. MCP instructions and registration, identity and relay-selection results disclose the user-controlled gateway route. No Gent-hosted plaintext bridge is implemented here.
 
-### Require a client certificate
+## Persistent listener
+
+After creating the node and host registration, install the daemon and gateway as separate user services:
+
+```sh
+gent --home /private/path/gent-node daemon install
+gent --home /private/path/gent-node gateway service install \
+  --listen 0.0.0.0:8787 \
+  --origin https://agent.example.net:8787 \
+  --tls-cert /private/path/gent-node/server.pem \
+  --tls-key /private/path/gent-node/server.key
+gent --home /private/path/gent-node gateway service status
+gent --home /private/path/gent-node gateway service logs --lines 50
+```
+
+Linux uses a systemd user service; macOS uses a LaunchAgent. The same login/session requirements as the [daemon service](local-proof.md#daemon-services) apply. `gateway service install` requires explicit `--home` or `--cluster` and accepts the listener, TLS, metadata and file-capability options from `gateway run`. Use a fixed nonzero port. TLS paths are resolved to absolute paths; the private service file saves arguments and paths, never key or credential contents. The installed command stays on its physical node directory across cluster switches. Subsequent CLI service commands address the selected profile; use `--cluster ID` when controlling a different profile.
+
+`gateway service` defaults to `status`. Use `start`, `stop`, `restart`, `logs`, and `uninstall` (`remove` is an alias) to manage the listener. An identical install or start preserves its PID. Changed install arguments replace the saved configuration and restart a running listener. Supply the complete intended options on every install; omitted capability flags are removed. Installation and start/restart validate the TLS material and selected host capabilities before replacing or stopping a working listener. Binding conflicts and later runtime failures can still prevent startup; inspect status and logs to diagnose them.
+
+Status combines the service manager's PID with a private, same-user readiness socket at `gateway/control.sock`. `running` means the listener answered; `managed` means its PID matches the service manager. This does not establish daemon availability, public reachability, valid host credentials or provider compatibility. `--json` returns the same observations; status exits 3 when the listener is unavailable. The gateway uses its own service label and log, and stopping or uninstalling it leaves the daemon running. Uninstall preserves host grants, agent bindings, keys, messages and files. Stop/uninstall also work if a saved TLS file disappears. A ready foreground listener is refused by lifecycle mutations; its existing runtime lock prevents a second listener on the same node.
+
+Native systemd and launchd proofs cover lifecycle operations, SIGKILL recovery, literal paths, invalid replacement settings, edited/shared/symlink service files, foreground ownership, independent daemon operation and queued PNG delivery after restarts. Run the opt-in proof with `python3 scripts/prove_gateway_service.py --gent target/debug/gent`; it creates and removes disposable user services. Reboot, certificate renewal and reachable hosted connectors still need acceptance testing.
+
+## Require a client certificate
 
 A host grant can require a TLS client certificate in addition to its bearer or OAuth credentials. Pin one CA certificate and an exact lowercase DNS SAN when creating the grant:
 

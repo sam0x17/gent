@@ -336,14 +336,31 @@ pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
         &options.client_metadata,
     )
     .await?;
+    let control = super::control::Server::bind(&home)?;
     let app = router(home, registry, host, origin.clone(), stop.clone(), metadata);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     eprintln!("Gent gateway: {origin}/mcp (user-controlled endpoint, listening on {address})");
     let result = tokio::select! {
         result=serve(listener,app,tls,stop.clone())=>result,
+        result=control.serve(address,&origin)=>result,
         result=tokio::signal::ctrl_c()=>result.map_err(Into::into),
         _=terminate.recv()=>Ok(()),
     };
     stop.cancel();
     result
+}
+
+/// Check every saved capability before writing or restarting a service.
+pub(super) async fn validate(home: &std::path::Path, options: &Run) -> Result<()> {
+    let (_, origin) = origin(options, options.listen)?;
+    let registry = Registry::open(home)?.with_file_origins(&options.file_origin)?;
+    tls(options, &registry.tls_policies()?)?;
+    let registry = registry.with_file_downloads(&options.file_downloads, &origin)?;
+    super::metadata::runtime::Runtime::new(
+        registry,
+        format!("{origin}/mcp"),
+        &options.client_metadata,
+    )
+    .await?;
+    Ok(())
 }

@@ -6,13 +6,15 @@ Synthetic trusted host only; this does not test a provider connector or OAuth.
 import argparse
 import json
 import os
-from pathlib import Path
 import socket
 import subprocess
 import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+from http_mcp_client import rpc as http_rpc
 
 
 def main():
@@ -32,7 +34,7 @@ def main():
         def cli(*arguments, success=True):
             result = subprocess.run(
                 [str(binary), "--home", str(home), "--json", *arguments],
-                capture_output=True, text=True, timeout=20,
+                check=False, capture_output=True, text=True, timeout=20,
             )
             if success:
                 assert result.returncode == 0, result.stderr
@@ -63,20 +65,7 @@ def main():
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
         def rpc(method, params, token, expected=200):
-            body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
-            request = urllib.request.Request(url, data=body, headers={
-                "Authorization": "Bearer " + token,
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "MCP-Protocol-Version": "2025-11-25",
-            })
-            try:
-                with opener.open(request, timeout=5) as response:
-                    assert response.status == expected
-                    return json.load(response)
-            except urllib.error.HTTPError as error:
-                assert error.code == expected, f"unexpected HTTP status {error.code}"
-                return None
+            return http_rpc(opener, url, method, params, token, expected)
 
         def call(name, arguments, conversation="one"):
             result = rpc("tools/call", {
@@ -122,7 +111,7 @@ def main():
             url = f"http://{address}/mcp"
             file_options = []
             if args.host_files:
-                from gateway_input_checks import InputChecks, ORIGIN
+                from gateway_input_checks import ORIGIN, InputChecks
                 file_options = ["--file-origin", added["client"] + "=" + ORIGIN]
             if args.downloads:
                 file_options.extend(["--file-downloads", added["client"]])

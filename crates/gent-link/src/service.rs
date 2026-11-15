@@ -1,9 +1,14 @@
 //! Per-user service lifecycle. No account/model credentials enter service files.
+mod command;
+mod display;
 mod files;
+pub use command::GatewayCommand;
+use command::{Action, Install};
+pub use display::print;
 mod manager;
 use crate::{DaemonCommand, managed_file, owner};
 use anyhow::{Context, Result, ensure};
-use files::{Platform, Spec};
+use files::{Kind, Platform, Spec};
 use fs2::FileExt;
 use gent_daemon::config;
 use gent_protocol::OwnerOp;
@@ -21,9 +26,13 @@ struct Service {
     home: PathBuf,
     path: PathBuf,
     manager: Manager,
+    kind: Kind,
 }
 impl Service {
     async fn new(home: &Path) -> Result<Self> {
+        Self::with_kind(home, Kind::Daemon).await
+    }
+    async fn with_kind(home: &Path, kind: Kind) -> Result<Self> {
         let platform = Platform::native()?;
         let home = files::normalize(home)?;
         let user_home = PathBuf::from(
@@ -32,16 +41,17 @@ impl Service {
         let xdg = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
-        let path = files::location(platform, &home, &user_home, xdg.as_deref())?;
+        let path = files::location(platform, &home, &user_home, xdg.as_deref(), kind)?;
         let manager = Manager {
             platform,
             uid: manager::uid().await?,
-            label: files::label(platform, &home),
+            label: kind.label(platform, &home),
         };
         Ok(Self {
             home,
             path,
             manager,
+            kind,
         })
     }
     fn installed(&self) -> Result<Option<Spec>> {
@@ -50,6 +60,7 @@ impl Service {
             self.manager.platform,
             &self.home,
             self.manager.uid,
+            self.kind,
         )
     }
     fn lock(&self) -> Result<fs::File> {
@@ -58,7 +69,7 @@ impl Service {
             "Gent state directory is unavailable; restore it before changing its service"
         );
         config::private_dir(&self.home)?;
-        let path = self.home.join("service.lock");
+        let path = self.home.join(self.kind.lock());
         match fs::symlink_metadata(&path) {
             Ok(_) => files::owned_regular(&path, self.manager.uid)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -76,9 +87,14 @@ impl Service {
         Ok(lock)
     }
     async fn probe(&self) -> Result<Value> {
-        tokio::time::timeout(Duration::from_secs(1), owner(&self.home, OwnerOp::Status))
-            .await
-            .context("daemon did not respond")?
+        tokio::time::timeout(Duration::from_secs(1), async {
+            match self.kind {
+                Kind::Daemon => owner(&self.home, OwnerOp::Status).await,
+                Kind::Gateway => crate::gateway::control::probe(&self.home).await,
+            }
+        })
+        .await
+        .context("Gent process did not respond")?
     }
     async fn status(&self) -> Value {
         let installed = self.installed();
@@ -89,8 +105,9 @@ impl Service {
         let pid = probe.as_ref().ok().and_then(|v| v["process_id"].as_u64());
         let managed = running && pid == state.pid.map(u64::from);
         let mut value = probe.as_ref().ok().cloned().unwrap_or_else(|| json!({}));
-        value["daemon"] = json!({"running":running,"managed":managed,"pid":pid,"error":probe.err().map(|e|e.to_string())});
+        value[self.kind.name()] = json!({"running":running,"managed":managed,"pid":pid,"error":probe.err().map(|e|e.to_string())});
         value["service"] = serde_json::to_value(&state).expect("service status serializes");
+        value["service"]["kind"] = json!(self.kind.name());
         value["service"]["backend"] = json!(self.manager.platform);
         value["service"]["installed"] = json!(matches!(&installed, Ok(Some(_))));
         value["service"]["label"] = self.manager.label.clone().into();
@@ -105,7 +122,8 @@ impl Service {
         if let Ok(value) = self.probe().await {
             ensure!(
                 value["process_id"].as_u64() == state.pid.map(u64::from),
-                "a foreground or externally managed daemon is using this state directory; stop it before controlling the Gent service"
+                "a foreground or externally managed {} is using this state directory; stop it before controlling its service",
+                self.kind.name()
             );
         }
         Ok(())
@@ -128,14 +146,15 @@ impl Service {
             }
             ensure!(
                 tokio::time::Instant::now() < until,
-                "daemon did not reach the requested state; inspect gent daemon status and gent daemon logs"
+                "{} did not reach the requested state; inspect its service status and logs",
+                self.kind.name()
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
     fn prepare_log(&self) -> Result<()> {
         if self.manager.platform == Platform::Launchd {
-            let path = self.home.join("daemon.log");
+            let path = self.home.join(format!("{}.log", self.kind.name()));
             match fs::symlink_metadata(&path) {
                 Ok(_) => files::owned_regular(&path, self.manager.uid)?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -154,7 +173,7 @@ impl Service {
         let text = match self.manager.platform {
             Platform::Systemd => self.manager.journal(lines).await?,
             Platform::Launchd => {
-                let path = self.home.join("daemon.log");
+                let path = self.home.join(format!("{}.log", self.kind.name()));
                 if !path.exists() {
                     String::new()
                 } else {
@@ -214,11 +233,18 @@ pub(crate) async fn diagnose(home: &Path) -> Result<Value> {
 }
 
 pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
-    let service = Service::new(home).await?;
+    control(home, Kind::Daemon, action.into()).await
+}
+
+pub(crate) async fn gateway(home: &Path, action: GatewayCommand) -> Result<Value> {
+    control(home, Kind::Gateway, action.into()).await
+}
+
+async fn control(home: &Path, kind: Kind, mut action: Action) -> Result<Value> {
+    let service = Service::with_kind(home, kind).await?;
     match action {
-        DaemonCommand::Status => return Ok(service.status().await),
-        DaemonCommand::Logs { lines } => return service.logs(lines).await,
-        DaemonCommand::Run => unreachable!(),
+        Action::Status => return Ok(service.status().await),
+        Action::Logs { lines } => return service.logs(lines).await,
         _ => {}
     }
     let before = service.manager.inspect().await;
@@ -239,16 +265,19 @@ pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
         );
     }
     match &action {
-        DaemonCommand::Install { local, .. } => {
+        Action::Install(Install::Daemon { local }) => {
             if !config::path(&service.home).exists() {
                 local.as_deref().context("no Gent configuration; run gent auth login and gent cluster new NAME, or use gent daemon install --local NAME for a development cluster")?;
                 config::private_dir(&service.home)?;
             }
         }
-        DaemonCommand::Uninstall if previous.is_none() => return Ok(service.status().await),
+        Action::Uninstall if previous.is_none() => return Ok(service.status().await),
+        Action::Install(Install::Gateway(_)) => {
+            config::load(&service.home)?;
+        }
         _ => ensure!(
             previous.is_some(),
-            "service is not installed; run gent daemon install"
+            "service is not installed; install it first"
         ),
     }
     let _lock = service.lock()?;
@@ -264,7 +293,7 @@ pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
         "loaded service has no Gent-managed file; inspect {}",
         service.path.display()
     );
-    if let DaemonCommand::Install { local, .. } = &action {
+    if let Action::Install(Install::Daemon { local }) = &action {
         if !config::path(&service.home).exists() {
             let _daemon = managed_file::lock(&service.home.join("daemon.lock"))?;
             let name = local
@@ -283,11 +312,29 @@ pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
         config::read_private(&service.home.join("owner.key"))?;
     }
     service.no_foreground(&before).await?;
+    if let Action::Install(Install::Gateway(options)) = &mut action {
+        *options = options.for_service(&service.home).await?;
+    }
+    if matches!(action, Action::Start | Action::Restart)
+        && let Some(options) = previous.as_ref().and_then(|spec| spec.gateway.as_ref())
+    {
+        options.for_service(&service.home).await?;
+    }
     match action {
-        DaemonCommand::Install { .. } => {
+        Action::Install(installation) => {
             let binary = fs::canonicalize(std::env::current_exe()?)
                 .context("cannot locate the running Gent binary; reinstall it first")?;
-            let desired = Spec::new(service.manager.platform, service.home.clone(), binary)?;
+            let desired = match installation {
+                Install::Daemon { .. } => {
+                    Spec::new(service.manager.platform, service.home.clone(), binary)?
+                }
+                Install::Gateway(options) => Spec::gateway(
+                    service.manager.platform,
+                    service.home.clone(),
+                    binary,
+                    options,
+                )?,
+            };
             let changed =
                 previous.as_ref().map(|spec| spec.render()).transpose()? != Some(desired.render()?);
             service.prepare_log()?;
@@ -298,32 +345,26 @@ pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
                 .manager
                 .install(&service.path, changed, &before)
                 .await
-                .context(
-                    "service installation failed; inspect gent daemon status and gent daemon logs",
-                )?;
+                .context("service installation failed; inspect its service status and logs")?;
             service.wait(true).await?;
         }
-        DaemonCommand::Start | DaemonCommand::Restart => {
+        Action::Start | Action::Restart => {
             ensure!(
                 previous.is_some(),
-                "service was uninstalled; run gent daemon install"
+                "service was uninstalled; install it again"
             );
             service.prepare_log()?;
             service
                 .manager
-                .start(
-                    &service.path,
-                    &before,
-                    matches!(action, DaemonCommand::Restart),
-                )
+                .start(&service.path, &before, matches!(action, Action::Restart))
                 .await?;
             service.wait(true).await?;
         }
-        DaemonCommand::Stop => {
+        Action::Stop => {
             service.manager.stop(&before).await?;
             service.wait(false).await?;
         }
-        DaemonCommand::Uninstall => {
+        Action::Uninstall => {
             service.manager.uninstall(&before).await?;
             service.wait(false).await?;
             service
@@ -336,58 +377,4 @@ pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
         _ => unreachable!(),
     }
     Ok(service.status().await)
-}
-pub fn print(value: &Value) {
-    if let Some(lines) = value["lines"].as_array() {
-        for line in lines {
-            println!("{}", line.as_str().unwrap_or_default());
-        }
-        return;
-    }
-    let daemon = &value["daemon"];
-    let service = &value["service"];
-    println!(
-        "Daemon: {}",
-        if daemon["running"] == true {
-            if daemon["managed"] == true {
-                "running (managed service)"
-            } else {
-                "running (outside service)"
-            }
-        } else {
-            "stopped or unavailable"
-        }
-    );
-    println!(
-        "Service: {} ({}, {})",
-        if service["installed"] == true {
-            "installed"
-        } else {
-            "not installed"
-        },
-        service["backend"].as_str().unwrap_or("unknown"),
-        if service["enabled"] == true {
-            "startup enabled"
-        } else {
-            "startup disabled"
-        }
-    );
-    println!(
-        "State directory: {}",
-        service["home"].as_str().unwrap_or_default()
-    );
-    println!(
-        "Service file: {}",
-        service["file"].as_str().unwrap_or_default()
-    );
-    for key in ["error", "file_error"] {
-        if let Some(error) = service[key].as_str() {
-            println!("{error}");
-        }
-    }
-    if daemon["running"] != true
-        && let Some(error) = daemon["error"].as_str()
-    {
-        println!("{error}");
-    }
 }

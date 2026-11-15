@@ -666,6 +666,28 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         return Ok(());
     }
+    if let Some(Command::Gateway {
+        command: Some(gateway::Command::Service { command }),
+    }) = cli.command
+    {
+        let status_only = matches!(command, None | Some(service::GatewayCommand::Status));
+        let output = gateway::execute(
+            &home,
+            gateway::Command::Service { command },
+            explicit_context,
+        )
+        .await?
+        .context("missing gateway service result")?;
+        if cli.json {
+            println!("{}", serde_json::to_string(&output)?);
+        } else {
+            service::print(&output);
+        }
+        if status_only && output["gateway"]["running"] != true {
+            std::process::exit(3);
+        }
+        return Ok(());
+    }
     let files_output = matches!(&cli.command, Some(Command::Files { .. }));
     if let Some(Command::Node {
         command: Some(NodeCommand::Remove { node }),

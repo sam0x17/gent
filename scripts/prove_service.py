@@ -6,14 +6,16 @@ Retains its temporary directory if cleanup fails. Requires Python 3.9+.
 """
 import json
 import os
-from pathlib import Path
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
-from smoke_mcp import Client, PNG
+from pathlib import Path
+
+from mcp_client import Client
+from mcp_fixtures import PNG
 
 
 def wait(check):
@@ -36,13 +38,13 @@ def main():
     service_file = service_bytes = unrelated = foreground = None
 
     def call(*args, expected=0):
-        result = subprocess.run(command + list(args), capture_output=True, text=True, timeout=60)
+        result = subprocess.run(command + list(args), check=False, capture_output=True, text=True, timeout=60)
         if result.returncode != expected:
             raise AssertionError(f'{args}: exit {result.returncode}: {result.stderr}')
         return json.loads(result.stdout) if result.stdout else None
 
     def status():
-        result = subprocess.run(command + ['daemon', 'status'], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(command + ['daemon', 'status'], check=False, capture_output=True, text=True, timeout=30)
         assert result.returncode in (0, 3), result.stderr
         return json.loads(result.stdout)
 
@@ -153,7 +155,7 @@ def main():
         if foreground and foreground.poll() is None:
             foreground.send_signal(signal.SIGTERM)
             foreground.wait(timeout=10)
-        cleanup = subprocess.run(command + ['daemon', 'uninstall'], capture_output=True, text=True, timeout=60)
+        cleanup = subprocess.run(command + ['daemon', 'uninstall'], check=False, capture_output=True, text=True, timeout=60)
         if cleanup.returncode:
             raise RuntimeError(f'service cleanup failed; retained {folder}: {cleanup.stderr}')
         if unrelated:

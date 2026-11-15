@@ -1,12 +1,14 @@
 //! User-controlled remote MCP. The HTTP credential authenticates a trusted host
 //! namespace; every agent call also needs that host's conversation metadata.
 mod assertion;
+pub(crate) mod control;
 pub(crate) mod downloads;
 pub(crate) mod files;
 mod metadata;
 mod mtls;
 pub(crate) mod registry;
 mod server;
+mod service_options;
 use crate::{contexts, managed_file};
 use anyhow::{Result, ensure};
 use clap::{Args, Subcommand};
@@ -23,6 +25,11 @@ pub enum Command {
     Status,
     /// Run a user-controlled Streamable HTTP MCP endpoint in the foreground.
     Run(Run),
+    /// Manage this node's persistent gateway listener independently of its daemon.
+    Service {
+        #[command(subcommand)]
+        command: Option<crate::service::GatewayCommand>,
+    },
     /// Grant or revoke a trusted remote host's conversation namespace.
     Clients {
         #[command(subcommand)]
@@ -124,7 +131,8 @@ pub enum KeyCommand {
     },
 }
 
-#[derive(Args)]
+#[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Run {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
@@ -151,6 +159,14 @@ pub struct Run {
 pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Option<Value>> {
     let home = managed_file::normalize(home)?;
     match command {
+        Command::Service { command } => {
+            let command = command.unwrap_or(crate::service::GatewayCommand::Status);
+            ensure!(
+                explicit || !matches!(command, crate::service::GatewayCommand::Install(_)),
+                "gateway service install requires a pinned --home or --cluster"
+            );
+            Ok(Some(crate::service::gateway(&home, command).await?))
+        }
         Command::Oauth { command } => {
             let registry = Registry::open(&home)?;
             Ok(Some(match command.unwrap_or(OAuthCommand::Requests) {

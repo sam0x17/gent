@@ -7,18 +7,17 @@ Run: python3 scripts/smoke_mcp.py target/debug/gent
 import base64
 import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from pathlib import Path
+
 from mcp_client import Client
+from mcp_fixtures import PNG
 from relay_checks import exercise_turns
-
-
-PNG = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGP4z/AfK2IYWhIA0ad/gXfwoGMAAAAASUVORK5CYII="
 
 
 def main():
@@ -42,7 +41,7 @@ def main():
                 if process.poll() is not None:
                     raise AssertionError(process.stderr.read())
                 if (home / "daemon.sock").exists():
-                    probe = subprocess.run(base + ["daemon", "status"], capture_output=True, text=True)
+                    probe = subprocess.run(base + ["daemon", "status"], check=False, capture_output=True, text=True)
                     if probe.returncode == 0:
                         return process
                 time.sleep(0.02)
