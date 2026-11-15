@@ -321,7 +321,32 @@ gent permission deny AGENT_B_ID AGENT_A_ID --permission receive
 
 This blocks new messages and delivery of queued messages from A to B, as well as replies in the blocked relationship. Owner commands can inspect local and linked-node registrations; agent-facing discovery exposes only permitted peers. `last_seen` records local agent activity or receipt of a remote announcement and does not prove an active model turn or live connection.
 
-Selectors support an agent ID, `'*'`, `same-node`, `node:UUID`, or `group:NAME`. Quote `'*'` in the shell. Groups and rules are stored under `[policy]` in `config.toml`. Edit the TOML to remove a rule, then run `gent config validate` and `gent config apply`. The active owner signs and commits accepted edits, including requests from authorized joined nodes. The newest accepted revision replaces the previous shared configuration; editing the file without applying it does not change active permissions. `gent agent revoke AGENT_ID` invalidates a registration hosted on the current node and publishes its tombstone to linked peers. Revoking an agent hosted on another node through administrative forwarding remains pending.
+Selectors support an agent ID, `'*'`, `same-node`, `node:UUID`, or `group:NAME`. Quote `'*'` in the shell. Groups and rules are stored under `[policy]` in `config.toml`. Use `gent config edit` to remove a rule, then `gent config apply` to publish. The active owner signs and commits accepted edits, including requests from authorized joined nodes. The newest accepted revision replaces the previous shared configuration; editing the file without applying it does not change active permissions. `gent agent revoke AGENT_ID` invalidates a registration hosted on the current node and publishes its tombstone to linked peers. Revoking an agent hosted on another node through administrative forwarding remains pending.
+
+### Edit local configuration
+
+```sh
+gent config edit
+gent config apply
+```
+
+The editor command requires an initialized node with valid existing configuration and an interactive terminal. It chooses `--editor COMMAND`, nonempty `VISUAL`, nonempty `EDITOR`, then `vi`. Quoted paths and arguments are supported without shell expansion. Use a wait option for GUI editors. The command prints the private draft path before launching the editor; an interrupted session leaves that path available for inspection.
+
+Saving validates TOML and policy while retaining the edited text, comments and formatting. Gent refuses changes to generated identity, revision, service routing and managed local metadata; use the corresponding setup, cluster, gateway and integration commands for those fields. Names, policy and ordinary local preferences can be edited. An invalid starting configuration needs repair with a normal editor first. Validation errors avoid echoing TOML values.
+
+The draft has mode 0600 in a mode-0700 directory under the selected node. Gent releases its configuration lock while the editor runs, then checks the original file under the shared writer lock before saving atomically. A concurrent daemon projection or local configuration change wins: Gent refuses the stale save and retains the draft. An unchanged draft leaves the live file alone, even if it changed concurrently. Failed editor launches, unsuccessful exits, invalid edits and save errors retain the draft and report its path. Successful edits and unchanged drafts remove their temporary directory. Review and remove retained drafts when no longer needed.
+
+Saving does not contact the daemon or publish shared names or policy. Run `gent config apply` promptly: a later incoming signed revision can still replace unapplied shared edits. Machine-local settings keep their existing reload/restart requirements. `--request-id` applies to publication, not draft editing. For scripted edits, use `gent config path`, edit the file, and run `gent config validate` before applying.
+
+The native terminal check uses two disposable profiles and a real daemon, without provider calls:
+
+```sh
+python3 scripts/smoke_config_edit.py target/debug/gent
+```
+
+It checks editor selection, literal arguments, atomic editor saves, failed/invalid drafts, headless refusal, profile selection, concurrent signed changes and explicit publication.
+
+### Signed configuration storage
 
 Signed authority and message queues share `state.sqlite3`. First daemon startup preserves existing local identities and creates a private `identity.key` for node and owner signing keys, separate from the RPC credential in `owner.key`. Keep both keys and the database private. Existing databases must have mode 0600; Gent rejects shared or symlink files. Missing signing keys for an initialized database cause an error instead of silently creating a different identity.
 

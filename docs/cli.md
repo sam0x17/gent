@@ -198,13 +198,15 @@ Additional command families should follow the same grammar as their functionalit
 | `gent config` | Show a redacted effective configuration for the current node and selected cluster. |
 | `gent config path` | Print `~/.gent/config.toml` as an absolute path. |
 | `gent config validate` | Validate local TOML without publishing changes. |
-| `gent config edit` | Open the configured editor on the local TOML file. |
+| `gent config edit [--editor COMMAND]` | Open a private draft with `VISUAL`, `EDITOR`, or `vi`; validate and save locally without publishing. Requires an interactive terminal. |
 | `gent config apply` | Submit local cluster/node names and policy to the active owner; the newest accepted revision replaces earlier shared settings. |
 | `gent config requests` | List the latest 100 configuration requests submitted on this node. |
 | `gent config request REQUEST_UUID` | Inspect a request's queued, applied, or rejected status and its revision or rejection reason. |
 | `gent doctor [--online]` | Inspect local configuration, auth, daemon, relay observations, hooks and MCP installation without changing state or starting inference. `--online` also checks the saved account session. See [diagnostics](diagnostics.md). |
 
 Messages carry an explicit authenticated user or agent identity. Do not infer sender authority from the shell's active cluster or an agent ID passed as an argument. Relay and permission-management commands must expose their acting identity and target scope when added.
+
+`gent config edit` uses the selected cluster profile, including `--cluster NAME_OR_UUID`, and keeps that physical target if the default cluster changes while editing. `--editor COMMAND` overrides the environment; quote executable paths and arguments containing spaces. Arguments are passed literally without shell expansion. GUI editors need their wait option, for example `gent config edit --editor 'code --wait'`. `--json` and redirected stdin or stdout are refused. See [editing configuration](local-proof.md#edit-local-configuration) for validation, conflicts and retained drafts.
 
 Configuration mutations accept `--request-id UUID` for retrying an identical proposal. A retry returns the original result; reusing the ID with different content fails. The CLI waits about five seconds for acceptance, then reports a durable `queued` request if the owner remains unavailable. Queued edits survive daemon restarts and do not change effective policy before acceptance. Rejected mutations exit nonzero; `gent config request` can inspect their recorded reason. See [configuration administration](local-proof.md#configuration-administration) for grants, retries, and offline behavior.
 

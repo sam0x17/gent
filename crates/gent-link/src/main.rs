@@ -3,6 +3,7 @@ mod agent_recovery;
 mod auth;
 mod backup;
 mod cluster;
+mod config_editor;
 mod contexts;
 mod display;
 mod doctor;
@@ -379,6 +380,8 @@ enum NodeNameCommand {
 enum ConfigCommand {
     Path,
     Validate,
+    /// Edit a private draft and save validated changes without publishing them.
+    Edit(config_editor::Options),
     Apply,
     /// List the latest 100 local configuration requests, including offline edits.
     Requests,
@@ -612,6 +615,13 @@ async fn execute(cli: Cli) -> Result<()> {
         } else {
             contexts::print(&value);
         }
+        return Ok(());
+    }
+    if let Some(Command::Config {
+        command: Some(ConfigCommand::Edit(options)),
+    }) = cli.command
+    {
+        config_editor::execute(&root, cli.context.as_deref(), options, cli.json).await?;
         return Ok(());
     }
     let home = if pinned_runtime && cli.context.is_none() {
@@ -964,6 +974,9 @@ async fn execute(cli: Cli) -> Result<()> {
             config::load(&home)?;
             json!({"valid":true})
         }
+        Some(Command::Config {
+            command: Some(ConfigCommand::Edit(_)),
+        }) => unreachable!("editor dispatched before ordinary command output"),
         Some(Command::Config {
             command: Some(ConfigCommand::Apply),
         }) => {
