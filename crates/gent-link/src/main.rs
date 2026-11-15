@@ -741,12 +741,27 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Integration {
             command: integration::Command::ClaudeWake { config_dir },
         }) => integration::claude_wake::execute(&home, &config_dir).await?,
+        Some(Command::Integration {
+            command: integration::Command::Start(args),
+        }) => integration::runtime::start(&home, args).await?,
+        Some(Command::Integration {
+            command:
+                integration::Command::Status {
+                    host,
+                    config_dir,
+                    live: true,
+                },
+        }) => {
+            integration::runtime::status(&home, host.context("--live requires a host")?, config_dir)
+                .await?
+        }
         Some(Command::Integration { command }) => integration::execute(&home, command)?,
         Some(Command::Integrations) => integration::execute(
             &home,
             integration::Command::Status {
                 host: None,
                 config_dir: None,
+                live: false,
             },
         )?,
         Some(Command::Providers { .. }) => owner(&home, OwnerOp::Providers).await?,

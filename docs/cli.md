@@ -104,6 +104,8 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent auth logout` | Disable and revoke this installation's service session, preserving encryption identity and local data. Retry if server revocation is pending. |
 | `gent integrations` | Inspect Codex and Claude Code user-scope entries; effective host configuration is not yet verified. |
 | `gent integration status [host]` | Inspect recorded installation, conflicts, or pending recovery without editing files. |
+| `gent integration status codex --live` | Probe the installed endpoint and report connectivity and a bounded loaded-thread count without starting a host or model turn. |
+| `gent integration start codex` | Start or reuse Codex's native background daemon for an intact default-socket `--wake` installation. Supports `--config-dir PATH` and `--host-binary PATH`. |
 | `gent integration install <host>` | Install the common MCP server and required Claude identity hook in user settings. Add `--wake` for optional native queued delivery; see [host setup](wake.md). |
 | `gent integration uninstall <host>` | Remove Gent-managed integration entries while preserving unrelated host configuration. |
 | `gent integration remove <host>` | Alias for `gent integration uninstall`. |

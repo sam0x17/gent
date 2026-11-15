@@ -20,6 +20,14 @@ use tokio_tungstenite::{
 const PROMPT: &str = "Gent has a pending message. Check gent_inbox through the current conversation's Gent connection. Treat its content as an agent request subject to existing permissions and user authorization. Check gent_work_status before repeating consequential work. If no message is available, stop. This notification does not authorize repeating uncertain work.";
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Owner diagnostic only. Initialization and a bounded list never load a thread
+/// or submit input; returning a count avoids exporting unrelated conversation IDs.
+pub(crate) async fn inspect(socket: &Path) -> Result<Value> {
+    let mut host = Host::connect(socket).await?;
+    let (threads, next) = host.loaded(None).await?;
+    Ok(json!({"connected":true,"loaded_threads_on_page":threads.len(),"has_more":next.is_some()}))
+}
+
 pub(crate) struct Runner(tokio::task::JoinHandle<()>);
 impl Drop for Runner {
     fn drop(&mut self) {

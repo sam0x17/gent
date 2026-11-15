@@ -74,6 +74,45 @@ pub(super) fn default_wake_socket(host: Host, config_dir: Option<PathBuf>) -> Re
     Layout::resolve(host, config_dir)?.wake_socket()
 }
 
+/// Read an intact managed Codex opt-in without repairing or creating files.
+pub(super) fn codex_runtime_target(
+    home: &Path,
+    config_dir: Option<PathBuf>,
+    default_only: bool,
+) -> Result<(PathBuf, PathBuf)> {
+    let home = normalize(home)?;
+    let layout = Layout::resolve(Host::Codex, config_dir)?;
+    let (snapshot, state) = layout.read()?;
+    state.owner(&home)?;
+    ensure!(
+        state.pending.is_none(),
+        "Codex integration update is pending"
+    );
+    let spec = state
+        .installed
+        .as_ref()
+        .context("install queued delivery first: gent integration install codex --wake")?;
+    ensure!(
+        spec.binary.is_file(),
+        "the installed Gent executable is unavailable; reinstall the integration"
+    );
+    let socket = spec
+        .wake_socket
+        .as_ref()
+        .context("queued delivery is not enabled; run gent integration install codex --wake")?;
+    if default_only {
+        ensure!(
+            socket == &layout.wake_socket()?,
+            "Gent startup uses Codex's default socket; start your custom server separately or reinstall with --wake"
+        );
+    }
+    for edit in layout.edits(Some(spec), Some(spec), false, true)? {
+        edit.snapshot.verify()?;
+    }
+    snapshot.verify()?;
+    Ok((layout.directory, socket.clone()))
+}
+
 impl Layout {
     fn guard_fragment(&self, spec: Option<&Spec>) -> Result<Option<Value>> {
         let Some(spec) = spec.filter(|s| s.claude_wake.as_ref().is_some_and(|w| w.version >= 2))

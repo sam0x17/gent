@@ -203,6 +203,7 @@ pub(crate) async fn run(root: &Path, selected: Option<&str>, options: Options) -
                 integration::Command::Status {
                     host: Some(host),
                     config_dir: directory.clone(),
+                    live: false,
                 },
             );
             inspect_integration(&mut report, id, result.ok());

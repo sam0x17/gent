@@ -2,6 +2,7 @@
 //! The local host and OS user are trusted; this is not remote authentication.
 pub(crate) mod claude_wake;
 mod install;
+pub(crate) mod runtime;
 pub(crate) mod wake;
 use anyhow::{Context, Result, ensure};
 use clap::{Subcommand, ValueEnum};
@@ -52,7 +53,12 @@ pub enum Command {
         /// Host config directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
         #[arg(long, requires = "host")]
         config_dir: Option<PathBuf>,
+        /// Probe the installed Codex endpoint without starting a host or model turn.
+        #[arg(long, requires = "host")]
+        live: bool,
     },
+    /// Start or reuse Codex's background app server for an installed --wake integration.
+    Start(runtime::Args),
     /// Install the MCP connection and required conversation identity hook.
     Install(install::Args),
     /// Remove Gent-managed host entries, retaining conversations and Gent state.
@@ -90,10 +96,15 @@ pub enum Command {
 
 pub fn execute(home: &Path, command: Command) -> Result<Value> {
     match command {
-        Command::ClaudeWake { .. } | Command::ClaudeWakeGuard { .. } => {
+        Command::ClaudeWake { .. }
+        | Command::ClaudeWakeGuard { .. }
+        | Command::Start(_)
+        | Command::Status { live: true, .. } => {
             anyhow::bail!("native bridge requires async dispatch")
         }
-        Command::Status { host, config_dir } => install::status(home, host, config_dir),
+        Command::Status {
+            host, config_dir, ..
+        } => install::status(home, host, config_dir),
         Command::Install(args) => install::change(home, args, true),
         Command::Uninstall(args) => install::change(home, args, false),
         Command::Config {
