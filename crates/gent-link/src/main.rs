@@ -131,7 +131,7 @@ enum Command {
     },
     /// List registered agents as the local owner.
     Agents,
-    /// List enrolled nodes; remote presence is currently unknown.
+    /// List enrolled nodes and recent encrypted connectivity checks.
     Nodes,
     /// Inspect local file storage and clean expired handoff copies.
     Files {

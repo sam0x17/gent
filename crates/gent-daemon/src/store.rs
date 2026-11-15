@@ -30,6 +30,7 @@ mod mesh;
 mod network;
 mod pairing;
 mod permissions;
+mod presence;
 mod recovered;
 mod relay;
 pub(crate) mod removals;
@@ -132,6 +133,7 @@ impl Store {
         recovered::schema(&db)?;
         work::schema(&db)?;
         wake::schema(&db)?;
+        presence::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -645,18 +647,7 @@ impl StoreSession<'_> {
                 administrator,
                 before,
             } => self.permission_admin_history(administrator.as_deref(), before),
-            OwnerOp::Nodes => {
-                let links = self
-                    .db
-                    .prepare("SELECT peer,peer_key FROM network_links")?
-                    .query_map([], |r| {
-                        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
-                    })?
-                    .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
-                Ok(json!(self.state.state().nodes.iter().map(|(id, member)| {
-                    json!({"id":id,"name":member.name,"can_configure":member.can_configure,"data_link":links.get(id).is_some_and(|key| key.as_slice() == member.signing_key),"status":if id == self.identity.node.id() { "local" } else { "unknown" },"revision":self.state.checkpoint().revision})
-                }).collect::<Vec<_>>()))
-            }
+            OwnerOp::Nodes => self.nodes(),
             OwnerOp::Agents => Ok(serde_json::to_value(self.all_agents()?)?),
             OwnerOp::FilesStatus => self.files_status(),
             OwnerOp::FilesClean { dry_run } => self.files_clean(dry_run),

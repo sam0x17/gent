@@ -10,6 +10,8 @@ mod configuration_storage_tests;
 mod group_administration_tests;
 #[path = "owner_handoff_tests.rs"]
 mod owner_handoff_tests;
+#[path = "presence_tests.rs"]
+mod presence_tests;
 #[path = "retention_tests.rs"]
 mod retention_tests;
 #[path = "retries.rs"]

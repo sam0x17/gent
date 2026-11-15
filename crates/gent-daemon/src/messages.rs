@@ -50,6 +50,10 @@ impl Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
+    Presence {
+        challenge: Uuid,
+        reply: bool,
+    },
     OwnerPreparation {
         envelope: Box<owner_preparation::Envelope>,
     },

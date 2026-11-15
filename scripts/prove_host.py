@@ -53,7 +53,7 @@ def main():
     print(f'Proof state: {root}', flush=True)
 
     def cli(*command):
-        return json.loads(subprocess.check_output(base + list(command), text=True))
+        return json.loads(subprocess.check_output(base + ['--json', *command], text=True))
 
     daemon = None
     peer = None

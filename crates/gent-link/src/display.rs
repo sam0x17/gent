@@ -42,6 +42,17 @@ struct NodeStatus {
     data_link: bool,
     can_configure: bool,
     revision: u64,
+    #[serde(default)]
+    last_seen: Option<i64>,
+    #[serde(default)]
+    presence: Option<Presence>,
+}
+
+#[derive(Deserialize)]
+struct Presence {
+    reason: String,
+    observed_at: i64,
+    response_window_seconds: u64,
 }
 
 // Labels can contain Unicode formatting characters even when configuration
@@ -186,11 +197,49 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
                     if node.can_configure { "yes" } else { "no" }
                 )?;
                 writeln!(output, "  Configuration revision: {}", node.revision)?;
+                if node.status != "local" {
+                    let verified = node.last_seen.and_then(|at| u64::try_from(at).ok());
+                    writeln!(
+                        output,
+                        "  Last verified round trip: {}",
+                        verified.map(date).unwrap_or_else(|| "not recorded".into())
+                    )?;
+                    if let Some(presence) = &node.presence {
+                        if let Some(age) = node
+                            .last_seen
+                            .and_then(|at| presence.observed_at.checked_sub(at))
+                            .filter(|age| *age >= 0)
+                        {
+                            writeln!(output, "  Evidence age: {age} seconds")?;
+                        }
+                        let reason = match presence.reason.as_str() {
+                            "not_paired" => "waiting for encrypted pairing".into(),
+                            "stale_authority" => "signed configuration is stale".into(),
+                            "local_node_not_enrolled" => "this node is no longer enrolled".into(),
+                            "relay_not_configured" => "relay is not configured".into(),
+                            "recent_encrypted_round_trip" => "verified encrypted round trip".into(),
+                            "probe_timed_out" => format!(
+                                "latest probe exceeded {} seconds",
+                                presence.response_window_seconds
+                            ),
+                            "no_recent_encrypted_round_trip" => {
+                                "no recent encrypted round trip".into()
+                            }
+                            "awaiting_first_round_trip" => {
+                                "waiting for the first verified round trip".into()
+                            }
+                            other => visible(other),
+                        };
+                        writeln!(output, "  Check: {reason}")?;
+                    } else {
+                        writeln!(output, "  Check: not measured by this daemon")?;
+                    }
+                }
             }
-            if nodes.iter().any(|node| node.status == "unknown") {
+            if nodes.iter().any(|node| node.status != "local") {
                 writeln!(
                     output,
-                    "\nRemote presence has not been measured. Encrypted links record pairing."
+                    "\nPresence describes recent daemon communication. Agent activity is tracked separately."
                 )?;
             }
         }

@@ -327,9 +327,15 @@ async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>, files: files
             let mesh = store.mesh_tick();
             let preparation = store.owner_preparation_tick();
             let transfer = store.owner_transfer_tick();
-            let pending = match (mesh, preparation, transfer) {
-                (Ok(mesh), Ok(preparation), Ok(transfer)) => Ok(mesh || preparation || transfer),
-                (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+            let presence = store.presence_tick();
+            let pending = match (mesh, preparation, transfer, presence) {
+                (Ok(mesh), Ok(preparation), Ok(transfer), Ok(presence)) => {
+                    Ok(mesh || preparation || transfer || presence)
+                }
+                (Err(error), _, _, _)
+                | (_, Err(error), _, _)
+                | (_, _, Err(error), _)
+                | (_, _, _, Err(error)) => Err(error),
             };
             Ok((store.sync_streams()?, pending))
         })

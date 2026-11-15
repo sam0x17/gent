@@ -97,13 +97,20 @@ impl StoreSession<'_> {
             }
             _ => ("control", None, None),
         };
-        let deadline = deadline
-            .map(|expiry| {
-                expiry
-                    .checked_add(history::RETENTION)
-                    .context("event retention deadline overflow")
-            })
-            .transpose()?;
+        let deadline = if matches!(event, Event::Presence { .. }) {
+            // Probe ownership lives in one persistent row per peer. These
+            // transport retry IDs need only a short deduplication window;
+            // forgotten replies can never match a later random challenge.
+            Some(timestamp + presence::RETRY_RETENTION)
+        } else {
+            deadline
+                .map(|expiry| {
+                    expiry
+                        .checked_add(history::RETENTION)
+                        .context("event retention deadline overflow")
+                })
+                .transpose()?
+        };
         // Replayed expired messages must not recreate negative receipts forever.
         // The same check prevents old local message snapshots from requeueing.
         if deadline.is_some_and(|d| d <= timestamp) {

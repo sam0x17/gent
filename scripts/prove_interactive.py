@@ -174,7 +174,7 @@ def main():
     print(f'Interactive proof state: {root}', flush=True)
 
     def cli(*command):
-        return json.loads(subprocess.check_output(base + list(command), text=True))
+        return json.loads(subprocess.check_output(base + ['--json', *command], text=True))
 
     cli('cluster', 'new', 'interactive-proof', '--local')
     cli('integration', 'install', args.host, '--config-dir', str(installed))
