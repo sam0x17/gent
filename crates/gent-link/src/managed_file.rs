@@ -1,37 +1,15 @@
 use anyhow::{Context, Result, ensure};
-use fs2::FileExt;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     path::{Component, Path, PathBuf},
-    time::{Duration, Instant},
 };
 
 const LIMIT: u64 = 16 * 1024 * 1024;
 
-/// Locks are persistent, empty files: deleting one can split concurrent writers
-/// between old and new inodes. The OS user is a trusted endpoint.
-pub fn lock(path: &Path) -> Result<File> {
-    Snapshot::read(path)?.private()?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)?;
-    let until = Instant::now() + Duration::from_secs(3);
-    loop {
-        match file.try_lock_exclusive() {
-            Ok(()) => return Ok(file),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < until => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => return Err(e).context("Gent settings are busy; retry the command"),
-        }
-    }
-}
+mod locking;
+pub use locking::lock;
 
 // Canonical parents coordinate installers using /tmp and /private/tmp aliases.
 // Refuse a linked final component even when its destination does not exist.

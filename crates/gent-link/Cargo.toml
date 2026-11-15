@@ -52,7 +52,7 @@ sha2.workspace = true
 tempfile.workspace = true
 toml_edit = { version = "0.25", features = ["serde"] }
 jsonc-parser = { version = "0.34", features = ["cst"] }
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 reqwest.workspace = true
 getrandom.workspace = true
 
