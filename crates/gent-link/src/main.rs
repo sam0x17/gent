@@ -315,6 +315,9 @@ enum McpCommand {
         /// Select credentials using host-supplied conversation metadata.
         #[arg(long, value_enum, conflicts_with = "binding")]
         host: Option<integration::Host>,
+        /// Opt into queued Codex wake through an existing local app-server socket.
+        #[arg(long, requires = "host")]
+        wake_socket: Option<PathBuf>,
     },
 }
 #[derive(Subcommand)]
@@ -701,9 +704,14 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Clusters) => unreachable!(),
         Some(Command::Hooks { .. } | Command::Completions { .. }) => unreachable!(),
         Some(Command::Mcp {
-            command: McpCommand::Serve { binding, host },
+            command:
+                McpCommand::Serve {
+                    binding,
+                    host,
+                    wake_socket,
+                },
         }) => {
-            mcp::run(home, binding, host, explicit_context).await?;
+            mcp::run(home, binding, host, wake_socket, explicit_context).await?;
             return Ok(());
         }
         Some(Command::Gateway { command }) => {

@@ -57,7 +57,12 @@ pub enum Command {
     #[command(alias = "remove")]
     Uninstall(install::Args),
     /// Print MCP configuration and any required host hooks; does not edit settings.
-    Config { host: Host },
+    Config {
+        host: Host,
+        /// Opt into queued Codex wake through an existing local app-server socket.
+        #[arg(long)]
+        wake_socket: Option<PathBuf>,
+    },
     /// Receive a host's PreToolUse event on stdin. For host configuration only.
     #[command(hide = true)]
     Hook { host: Host },
@@ -68,7 +73,7 @@ pub fn execute(home: &Path, command: Command) -> Result<Value> {
         Command::Status { host, config_dir } => install::status(home, host, config_dir),
         Command::Install(args) => install::change(home, args, true),
         Command::Uninstall(args) => install::change(home, args, false),
-        Command::Config { host } => configuration(home, host),
+        Command::Config { host, wake_socket } => configuration(home, host, wake_socket.as_deref()),
         Command::Hook { host } => {
             ensure!(
                 host == Host::ClaudeCode,
@@ -90,11 +95,34 @@ pub fn execute(home: &Path, command: Command) -> Result<Value> {
     }
 }
 
-fn configuration(home: &Path, host: Host) -> Result<Value> {
+fn configuration(home: &Path, host: Host, wake_socket: Option<&Path>) -> Result<Value> {
     let home = fs::canonicalize(home).context("initialize this Gent node first")?;
     config::load(&home)?;
     let binary = fs::canonicalize(std::env::current_exe()?)?;
-    render_configuration(&home, &binary, host)
+    configure_wake(
+        render_configuration(&home, &binary, host)?,
+        host,
+        wake_socket,
+    )
+}
+
+fn configure_wake(mut fragments: Value, host: Host, socket: Option<&Path>) -> Result<Value> {
+    if let Some(socket) = socket {
+        ensure!(
+            host == Host::Codex,
+            "queued wake is currently supported only for Codex"
+        );
+        let path = socket.to_str().context("wake socket path must be UTF-8")?;
+        ensure!(
+            socket.is_absolute() && !path.chars().any(char::is_control),
+            "wake socket path must be absolute and contain no control characters"
+        );
+        fragments["mcp_servers"]["gent"]["args"]
+            .as_array_mut()
+            .expect("Codex arguments")
+            .extend([json!("--wake-socket"), json!(path)]);
+    }
+    Ok(fragments)
 }
 
 fn render_configuration(home: &Path, binary: &Path, host: Host) -> Result<Value> {
@@ -218,6 +246,7 @@ fn lock(path: &Path) -> Result<File> {
 
 struct Binding {
     credential: String,
+    codex_thread: Option<String>,
     _opened: crate::mcp::binding::Opened,
 }
 impl Binding {
@@ -225,6 +254,7 @@ impl Binding {
         let opened = crate::mcp::binding::open(path, cfg, true)?;
         Ok(Self {
             credential: opened.credential.clone(),
+            codex_thread: None,
             _opened: opened,
         })
     }
@@ -280,12 +310,31 @@ impl Bindings {
             // Separate lock protects initial credential creation, including two
             // hosts reconnecting before either has opened the binding file.
             let _lock = lock(&self.folder.join("bindings.lock"))?;
-            self.active.insert(
-                key.clone(),
-                Binding::open(&self.folder.join(format!("{key}.key")), &self.cfg)?,
-            );
+            let mut binding = Binding::open(&self.folder.join(format!("{key}.key")), &self.cfg)?;
+            if self.host == Host::Codex {
+                binding.codex_thread = meta
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .filter(|id| {
+                        uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == *id)
+                    })
+                    .map(str::to_owned);
+            }
+            self.active.insert(key.clone(), binding);
         }
         Ok(self.active[&key].credential.clone())
+    }
+
+    pub(crate) fn wake_targets(&self) -> Vec<(String, String)> {
+        self.active
+            .values()
+            .filter_map(|binding| {
+                binding
+                    .codex_thread
+                    .as_ref()
+                    .map(|thread| (thread.clone(), binding.credential.clone()))
+            })
+            .collect()
     }
 }
 
@@ -395,6 +444,55 @@ mod tests {
         config::initialize(folder.path(), "bindings").unwrap();
         folder
     }
+    #[test]
+    fn wake_targets_use_only_canonical_thread_metadata_and_current_bindings() {
+        let home = home();
+        let mut bindings = Bindings::new(home.path(), Host::Codex).unwrap();
+        let a = uuid::Uuid::now_v7().to_string();
+        let b = uuid::Uuid::now_v7().to_string();
+        let first = bindings
+            .credential(
+                "codex-mcp-client",
+                &json!({"threadId":a,"sessionId":b}),
+                "gent_register",
+                &json!({"threadId":b}),
+            )
+            .unwrap();
+        assert_eq!(bindings.wake_targets(), vec![(a.clone(), first.clone())]);
+        assert!(
+            bindings
+                .credential("other", &json!({"threadId":b}), "gent_register", &json!({}))
+                .is_err()
+        );
+        let second = bindings
+            .credential(
+                "codex-mcp-client",
+                &json!({"threadId":b,"sessionId":a}),
+                "gent_register",
+                &json!({}),
+            )
+            .unwrap();
+        bindings
+            .credential(
+                "codex-mcp-client",
+                &json!({"threadId":"legacy-non-uuid"}),
+                "gent_register",
+                &json!({}),
+            )
+            .unwrap();
+        let mut targets = bindings.wake_targets();
+        let mut expected = vec![(a, first), (b, second)];
+        targets.sort();
+        expected.sort();
+        assert_eq!(targets, expected);
+        assert!(
+            Bindings::new(home.path(), Host::ClaudeCode)
+                .unwrap()
+                .wake_targets()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn codex_threads_are_isolated_and_resume_without_model_selected_identity() {
         let home = home();

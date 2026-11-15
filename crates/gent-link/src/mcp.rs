@@ -614,8 +614,13 @@ pub async fn run(
     home: PathBuf,
     binding_path: Option<PathBuf>,
     host: Option<Host>,
+    wake_socket: Option<PathBuf>,
     explicit_context: bool,
 ) -> Result<()> {
+    anyhow::ensure!(
+        wake_socket.is_none() || host == Some(Host::Codex),
+        "--wake-socket requires --host codex"
+    );
     let cfg = config::load(&home)?;
     let mut guard = None;
     let credentials = if let Some(host) = host {
@@ -636,10 +641,23 @@ pub async fn run(
         );
         Credentials::Fixed(config::secret())
     };
+    let wake = if let Some(socket) = wake_socket {
+        let Credentials::Host(bindings) = &credentials else {
+            unreachable!()
+        };
+        Some(crate::wake::codex::Runner::start(
+            home.clone(),
+            socket,
+            bindings.clone(),
+        )?)
+    } else {
+        None
+    };
     let service = GentMcp { home, credentials }
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;
+    drop(wake);
     drop(guard);
     Ok(())
 }

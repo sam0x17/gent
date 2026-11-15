@@ -4,6 +4,8 @@ use gent_protocol::OwnerOp;
 use serde_json::Value;
 use std::path::Path;
 
+pub(crate) mod codex;
+
 #[derive(Subcommand)]
 pub enum Command {
     /// List local host dispatch evidence. This never starts or resumes a host.

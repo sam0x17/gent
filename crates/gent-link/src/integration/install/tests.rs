@@ -18,6 +18,7 @@ fn fixture(host: Host) -> (tempfile::TempDir, Layout, Spec) {
     let spec = Spec {
         home: root.join("gent ' $HOME"),
         binary: root.join("gent"),
+        wake_socket: None,
     };
     (temp, layout, spec)
 }
@@ -27,6 +28,25 @@ fn put(path: &Path, text: &str) {
 }
 fn get(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
+}
+
+#[test]
+fn codex_wake_opt_in_upgrades_legacy_install_and_removes_only_managed_arguments() {
+    let (_temp, layout, mut spec) = fixture(Host::Codex);
+    put(&layout.server, "model = 'keep-model'\n");
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    assert!(!get(&layout.record()).contains("wake_socket"));
+    spec.wake_socket = Some(spec.home.join("host socket"));
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    assert!(get(&layout.server).contains("--wake-socket"));
+    assert!(get(&layout.server).contains("keep-model"));
+    assert!(spec.fragments(Host::ClaudeCode).is_err());
+    let mut invalid = spec.clone();
+    invalid.wake_socket = Some(PathBuf::from("relative"));
+    assert!(mutate(&layout, &spec.home, Some(invalid)).is_err());
+    mutate(&layout, &spec.home, None).unwrap();
+    assert!(!get(&layout.server).contains("--wake-socket"));
+    assert!(get(&layout.server).contains("keep-model"));
 }
 
 #[test]

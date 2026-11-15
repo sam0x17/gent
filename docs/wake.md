@@ -1,8 +1,30 @@
 # Host dispatch journal
 
-Gent records a local host adapter's attempt to submit incoming-message input before that submission can begin. A lost daemon response or restart cannot grant a second submission for the same message. This is preparation for automatic delivery: no host runner or attachment mechanism is enabled, and agents still report `delivery: polling`.
+Gent records a local host adapter's attempt to submit incoming-message input before that submission can begin. A lost daemon response or restart cannot grant a second submission for the same message. An optional Codex adapter now uses this journal to queue an inbox notification for a loaded conversation through its existing local app-server socket.
 
 The tested Codex queue creates a new entry when the same client message ID is submitted again. Gent therefore cannot treat a repeated queue call as harmless. Claude's tested channel mechanism can deliver during an active turn and is not enabled. Generic MCP inbox access remains available on both hosts.
+
+## Enable Codex queued delivery
+
+Provide the absolute path of an existing Codex app-server Unix socket:
+
+```sh
+gent integration install codex --wake-socket /absolute/path/to/codex.sock
+```
+
+Restart the host's Gent MCP connection to load the setting. Use `--config-dir` when managing a separate Codex configuration directory. `gent integration config codex --wake-socket PATH` prints the equivalent fragment. Direct setups can use `gent --home PATH mcp serve --host codex --wake-socket PATH`.
+
+Gent does not start the Codex server. It resolves Codex's socket alias, requires a private socket and directory owned by the current OS user, and verifies the connected peer's user ID. The socket must serve the conversation that is using Gent. A standalone embedded host without that socket continues to use its inbox normally.
+
+After a conversation calls a Gent tool, its host-supplied thread ID selects the existing registration credential. The adapter checks those bindings for pending messages, waiting five seconds between sweeps. Before claiming one, it reads that exact thread's metadata and requires a loaded idle or active thread that accepts direct input. It then uses `thread/queue/add`; it never calls turn start, steering, resume, queue start or interruption. Busy queues and explicit interruption holds remain controlled by Codex.
+
+The queue receives a fixed instruction to check Gent's inbox, with no message content, file bytes or peer identity. The inbox rechecks current permissions when the model retrieves messages. Host model settings and approval rules remain unchanged. Gent does not answer approval or other server-initiated requests. Owners must configure ordinary host tool access separately.
+
+The adapter lives with the MCP process. It stops when that process exits. After an MCP process restart, a normal Gent tool call must establish each conversation binding again. Unloaded threads, missing sockets, unsupported host APIs and unavailable registrations leave messages pending. A lost response after a claim leaves an uncertain journal record and never triggers a repeated submission. Other bound conversations remain eligible when one fails.
+
+To disable queued delivery, run `gent integration install codex` without `--wake-socket`, then reconnect the host. This removes the managed socket option while preserving the ordinary MCP integration. No Codex service or model setting is changed.
+
+Daemon identity still reports `delivery: polling` for its durable inbox. That field does not describe this optional adapter's live connection status; inspect `gent wake` for dispatch evidence. Persistent attachment recovery, richer connection diagnostics, automatic socket discovery, cold resume and GUI acceptance remain unfinished.
 
 ## Owner inspection
 
@@ -28,7 +50,7 @@ Inbox observation does not resolve an uncertain dispatch. A submission report ne
 
 ## Adapter contract
 
-Three local agent RPCs exist for future adapters. They use the registration credential and are absent from the model-callable MCP tools:
+Three local agent RPCs support adapters. They use the registration credential and are absent from the model-callable MCP tools:
 
 1. `wake_pending` returns up to 50 currently accessible, unacknowledged, unexpired message IDs and expiry times with no existing claim. It includes no message text or files.
 2. `wake_claim` accepts a message ID, unique attempt ID and target. Only the first committed claim returns `may_submit: true`. An exact retry returns the saved record with `may_submit: false`, including after restart. Changing the attempt or target for a claimed message fails.
@@ -36,7 +58,7 @@ Three local agent RPCs exist for future adapters. They use the registration cred
 
 New claims recheck message permissions and relay queue visibility. All journal transitions use the existing immediate SQLite transaction. Adapter RPCs do not update agent `last_seen`, so background polling does not make the model appear active.
 
-The current target format supports a Codex thread UUID. The adapter supplies it; the journal does not establish that the thread belongs to the authenticated Gent agent. A future adapter must verify conversation identity before claiming and preserve host settings, busy queues and interruption holds. A process crash between claim and submission can leave an unused claim permanently uncertain. Never blindly retry an external submission after a lost response.
+The current target format supports a Codex thread UUID. The journal itself trusts the adapter's target report. The bundled adapter obtains that UUID from the same host metadata used to select the agent credential, then checks the connected server's thread identity and capability before claiming. Future adapters must preserve this binding and the host's busy queues and interruption holds. A process crash between claim and submission can leave an unused claim permanently uncertain. Never blindly retry an external submission after a lost response.
 
 ## Storage and recovery
 
@@ -56,4 +78,6 @@ cargo build -p gent-link --locked
 python3 scripts/prove_wake_journal.py --gent target/debug/gent
 ```
 
-Seven Rust tests cover restart, exact retries, conflicting attempts, concurrent claims, failed writes, permissions, expiry, revocation, storage and rate limits, and independent message/work state. The process proof drops a committed claim response, restarts the daemon and verifies that the retry grants no new submission. It also checks MCP tool exclusion, inbox observation, synthetic submission reporting and unchanged polling delivery. Both use synthetic host IDs and invoke no host queue or model; actual host attachment and automatic delivery require separate acceptance.
+Seven journal tests cover restart, exact retries, conflicting attempts, concurrent claims, failed writes, permissions, expiry, revocation, storage and rate limits, and independent message/work state. The journal process proof drops a committed claim response, restarts the daemon and verifies that the retry grants no new submission. It also checks MCP tool exclusion, inbox observation and synthetic submission reporting without invoking a host queue or model.
+
+`cargo test -p gent-link wake --locked` additionally covers thread identity and capability gates, exact queue response binding, private socket requirements, refusal to answer host approval requests, and installation upgrades/removal. Native installed-Codex proofs separately exercise actual metadata, queues, MCP calls, interrupted holds and lost queue responses. Real-model acceptance uses fresh synthetic conversations and normal host model access. Those proofs do not establish GUI support or exactly-once host execution across a Codex crash; Gent's journal controls its own submissions.

@@ -17,6 +17,9 @@ pub struct Args {
     /// Host config directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
+    /// Opt into queued Codex wake through an existing local app-server socket.
+    #[arg(long)]
+    pub wake_socket: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -24,6 +27,8 @@ pub struct Args {
 struct Spec {
     home: PathBuf,
     binary: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wake_socket: Option<PathBuf>,
 }
 impl Spec {
     fn fragments(&self, host: Host) -> Result<Value> {
@@ -38,7 +43,11 @@ impl Spec {
                 "installation paths cannot contain control characters"
             );
         }
-        render_configuration(&self.home, &self.binary, host)
+        super::configure_wake(
+            render_configuration(&self.home, &self.binary, host)?,
+            host,
+            self.wake_socket.as_deref(),
+        )
     }
 }
 
@@ -276,6 +285,10 @@ fn recover(layout: &Layout) -> Result<()> {
 }
 
 pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
+    ensure!(
+        install || args.wake_socket.is_none(),
+        "--wake-socket applies only to installation"
+    );
     let home = normalize(home)?;
     let layout = Layout::resolve(args.host, args.config_dir)?;
     let desired = if install {
@@ -283,6 +296,7 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
         Some(Spec {
             home: home.clone(),
             binary: std::fs::canonicalize(std::env::current_exe()?)?,
+            wake_socket: args.wake_socket,
         })
     } else {
         None
