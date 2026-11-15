@@ -3,6 +3,7 @@ mod auth;
 mod backup;
 mod cluster;
 mod contexts;
+mod display;
 mod doctor;
 mod files;
 mod gateway;
@@ -689,6 +690,20 @@ async fn execute(cli: Cli) -> Result<()> {
             command: Some(ClusterCommand::Owner { .. })
         })
     );
+    let display = match &cli.command {
+        None
+        | Some(Command::Cluster {
+            command: None | Some(ClusterCommand::Status),
+        }) => Some(display::View::Cluster),
+        Some(Command::Node { command: None }) => Some(display::View::Node),
+        Some(Command::Nodes) => Some(display::View::Nodes),
+        Some(Command::Agents) => Some(display::View::Agents),
+        Some(Command::Agent {
+            command: AgentCommand::Show { .. },
+        }) => Some(display::View::Agent),
+        Some(Command::Providers { .. }) => Some(display::View::Providers),
+        _ => None,
+    };
     let output = match cli.command {
         Some(Command::Recovery { command }) => owner_recovery::execute(&home, command).await?,
         Some(Command::Work { command }) => work::execute(&home, command).await?,
@@ -1022,6 +1037,8 @@ async fn execute(cli: Cli) -> Result<()> {
     };
     if cli.json {
         println!("{}", serde_json::to_string(&output)?);
+    } else if let Some(view) = display {
+        print!("{}", display::render(view, &output)?);
     } else if owner_transfer_output {
         owner_transfer::print(&output);
     } else if cluster_setup_output {
