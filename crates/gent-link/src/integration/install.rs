@@ -136,7 +136,7 @@ impl Layout {
     fn wake_socket(&self) -> Result<PathBuf> {
         ensure!(
             self.host == Host::Codex,
-            "queued wake is currently supported only for Codex"
+            "default app-server sockets are supported only for Codex; use `gent integration install claude-code --wake` for Claude"
         );
         // Codex resolves `--listen unix://` from this configuration directory.
         // Pin the advertised name; the running host owns its rendezvous link.
@@ -407,9 +407,6 @@ fn recover(layout: &Layout) -> Result<()> {
 }
 
 pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
-    if install && args.host == Host::ClaudeCode && args.wake {
-        claude_wake::enabled()?;
-    }
     ensure!(
         install || (!args.wake && args.wake_socket.is_none()),
         "--wake and --wake-socket apply only to installation"

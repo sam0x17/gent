@@ -145,7 +145,7 @@ fn configure_wake(mut fragments: Value, host: Host, socket: Option<&Path>) -> Re
     if let Some(socket) = socket {
         ensure!(
             host == Host::Codex,
-            "queued wake is currently supported only for Codex"
+            "wake sockets are supported only for Codex"
         );
         let path = socket.to_str().context("wake socket path must be UTF-8")?;
         ensure!(

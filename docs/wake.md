@@ -1,8 +1,8 @@
 # Host dispatch journal
 
-Gent records a local host adapter's attempt to submit incoming-message input before that submission can begin. A lost daemon response or restart cannot grant a second submission for the same message. An optional Codex adapter now uses this journal to queue an inbox notification for a loaded conversation through its existing local app-server socket.
+Gent records a local host adapter's attempt to submit incoming-message input before that submission can begin. A lost daemon response or restart cannot grant a second submission for the same message. Optional Codex and Claude Code adapters use this journal to queue inbox notifications for loaded conversations.
 
-The tested Codex queue creates a new entry when the same client message ID is submitted again. Gent therefore cannot treat a repeated queue call as harmless. Claude's tested channel mechanism can deliver during an active turn. Its native plugin adapter remains experimental while lifecycle acceptance is completed. Generic MCP inbox access remains available on both hosts.
+The tested Codex queue creates a new entry when the same client message ID is submitted again. Gent therefore cannot treat a repeated queue call as harmless. Claude's adapter uses native plugin input to wait for completed turns and respect explicit interruption. Generic MCP inbox access remains available on both hosts.
 
 ## Enable Codex queued delivery
 
@@ -38,11 +38,17 @@ To disable queued delivery, run `gent integration install codex` without either 
 
 Daemon identity still reports `delivery: polling` for its durable inbox. That field does not describe this optional adapter's live connection status; inspect `gent wake` for dispatch evidence. Live connection diagnostics, discovery of custom endpoints, automatic server startup, cold resume and GUI acceptance remain unfinished.
 
-## Claude native adapter investigation
+## Enable Claude Code queued delivery
 
-The `experimental-claude-wake` Cargo feature enables a development adapter for isolated native-host tests. Default builds reject both installation with `gent integration install claude-code --wake` and the hidden runtime bridge. Native tests cover the retained command guard, module reload, host restart/resume, installer replacement, opt-out/re-enable and interruption during a model response stream. Real-model acceptance remains incomplete.
+Use the managed installer, then start or restart Claude Code and register the conversation with Gent:
 
-The candidate installer manages a native plugin under the host configuration directory's `skills/gent-wake` and a separate `UserPromptSubmit` command hook in user settings. Version 3 installation records require both and set the command hook's `onFailure` to `block`. Version 1 and 2 records can be upgraded or removed, but cannot dispatch through the new bridge. The installer records the installed module bytes, an installation ID, node and cluster, and checks ownership before upgrading or removing files. Interrupted updates accept the recorded before/after versions; edited files and unrelated hooks are preserved. A pending update, disabled hook, old installation ID or changed binding prevents the Rust bridge from granting a usable response.
+```sh
+gent integration install claude-code --wake
+```
+
+This option is available in ordinary builds. Plain installation keeps inbox polling. Gent selects the Claude configuration directory from `--config-dir`, then `CLAUDE_CONFIG_DIR`, then `~/.claude`. `gent integration status claude-code` reports the recorded `claude_wake` installation ID, not live host connectivity. `gent integration config claude-code --wake` cannot produce this managed installation; use `install` instead. The adapter requires Claude's native function hooks and plugin-input API, tested on Linux Claude 2.1.323 and macOS Claude 2.1.311. It does not start a stopped host or load another conversation.
+
+The installer manages a native plugin under the host configuration directory's `skills/gent-wake` and a separate `UserPromptSubmit` command hook in user settings. Version 3 installation records require both and set the command hook's `onFailure` to `block`. Version 1 and 2 records can be upgraded or removed, but cannot dispatch through the new bridge. The installer records the installed module bytes, an installation ID, node and cluster, and checks ownership before upgrading or removing files. Interrupted updates accept the recorded before/after versions; edited files and unrelated hooks are preserved. A pending update, disabled hook, old installation ID or changed binding prevents the Rust bridge from granting a usable response.
 
 The module polls every five seconds, using a bounded JSON subprocess interface with argument vectors. Rust reads the exact session's existing Gent credential and pinned scope without creating missing keys or taking live MCP credential locks. It claims before returning a fixed inbox notification. Credentials, message content and files never enter that subprocess response or notification. One notification remains outstanding per module.
 
@@ -56,7 +62,9 @@ Direct module reload drops a held notification, and restoring the installed byte
 
 Actual installer replacement with a different executable path creates a new installation ID, blocks old queued input and restores fresh delivery without restarting the host. Reinstalling without `--wake` removes the plugin and command guard while retaining ordinary MCP access and the same agent identity. Re-enabling creates another installation ID and delivers an unclaimed message that arrived while disabled; previously claimed input remains uncertain without replay. The tested host retains the old executable for its existing MCP process and hooks. Restart Claude before removing that executable.
 
-Native stream observation also confirms that Escape during a partial text response aborts that exact turn. Both an already queued notification and a new arrival remain held without another model request. Explicit human input rearms delivery, and a fresh notification runs without replaying either old attempt. These proofs use isolated native hosts and a loopback model; they do not establish arbitrary crash recovery, operating-system restart or real-model acceptance. Automatic delivery remains disabled in default builds until the remaining acceptance work is complete.
+Native stream observation also confirms that Escape during a partial text response aborts that exact turn. Both an already queued notification and a new arrival cause no further model request. Explicit human input rearms delivery, and a fresh notification runs without replaying either old attempt. These lifecycle proofs use isolated native hosts and a loopback model.
+
+Separate real-model checks on both OSes use one initial registration turn and three automatic reply/acknowledgment exchanges. They cover initial delivery, a Gent daemon restart, and an actual Claude restart into the same synthetic session. Agent identity and native submission receipts remain exact, and resumed delivery needs no registration or human model turn. Those checks do not establish arbitrary crash recovery, operating-system restart or GUI delivery.
 
 ## Owner inspection
 

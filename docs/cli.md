@@ -104,7 +104,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent auth logout` | Disable and revoke this installation's service session, preserving encryption identity and local data. Retry if server revocation is pending. |
 | `gent integrations` | Inspect Codex and Claude Code user-scope entries; effective host configuration is not yet verified. |
 | `gent integration status [host]` | Inspect recorded installation, conflicts, or pending recovery without editing files. |
-| `gent integration install <host>` | Install the common MCP server and required Claude identity hook in user settings. Skills and lifecycle hooks remain pending. |
+| `gent integration install <host>` | Install the common MCP server and required Claude identity hook in user settings. Add `--wake` for optional native queued delivery; see [host setup](wake.md). |
 | `gent integration uninstall <host>` | Remove Gent-managed integration entries while preserving unrelated host configuration. |
 | `gent integration remove <host>` | Alias for `gent integration uninstall`. |
 | `gent mcp serve` | Serve the shared MCP interface over stdio, connecting the host's registered agents to the local daemon. |

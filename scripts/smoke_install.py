@@ -59,7 +59,7 @@ def main():
                     ['install', *suffix, '--wake', '--wake-socket', str(root / 'other.sock')],
                     ['uninstall', *suffix, '--wake'],
                     ['config', host, '--config-dir', str(directory)],
-                    ['install', 'claude-code', '--config-dir', str(unrelated), '--wake'],
+                    ['install', 'claude-code', '--config-dir', str(unrelated), '--wake', '--wake-socket', str(root / 'other.sock')],
                 ]:
                     assert cli('integration', *command, check=False).returncode != 0
                     assert path.read_bytes() == original and not unrelated.exists()
@@ -69,6 +69,40 @@ def main():
                 cli('integration', 'install', *suffix, '--wake')
                 assert json.loads(cli('integration', 'status', *suffix).stdout)['wake_socket'] == str(endpoint)
                 print('PASS: Codex default socket selection, explicit directory precedence, pinned arguments, opt-out and invalid-option preservation', flush=True)
+            else:
+                server_path, settings_path = directory / '.claude.json', directory / 'settings.json'
+                ordinary = json.loads(server_path.read_text())['mcpServers']['gent']
+                identity_settings = json.loads(settings_path.read_text())
+                installed = json.loads(cli('integration', 'install', *suffix, '--wake').stdout)
+                assert installed['claude_wake'] and installed['wake_socket'] is None
+                module = directory / 'skills/gent-wake/hooks/register.ts'
+                assert installed['claude_wake'] in module.read_text()
+                settings = json.loads(settings_path.read_text())
+                guards = [hook for entry in settings['hooks']['UserPromptSubmit'] for hook in entry['hooks']
+                          if hook.get('command', '').startswith('# gent-wake-guard-v1\n')]
+                assert len(guards) == 1 and guards[0]['onFailure'] == 'block'
+                # Execute the installed wrapper, including quotes and literal
+                # shell syntax in the Gent home path, without a running daemon.
+                verdict = subprocess.run(['/bin/sh', '-c', guards[0]['command']], cwd=root, env=env,
+                                         input=json.dumps({'hook_event_name':'UserPromptSubmit','prompt':'ordinary human input'}),
+                                         capture_output=True, text=True, check=True, timeout=20)
+                assert json.loads(verdict.stdout) == {'continue': True}
+                before = {p: p.read_bytes() for p in (server_path, settings_path, module)}
+                repeated = json.loads(cli('integration', 'install', *suffix, '--wake').stdout)
+                assert repeated['claude_wake'] == installed['claude_wake']
+                assert all(p.read_bytes() == data for p, data in before.items())
+                assert json.loads(cli('integration', 'status', *suffix).stdout)['claude_wake'] == installed['claude_wake']
+                assert cli('integration', 'config', host, '--wake', check=False).returncode != 0
+                assert all(p.read_bytes() == data for p, data in before.items())
+                disabled = json.loads(cli('integration', 'install', *suffix).stdout)
+                assert disabled['claude_wake'] is None and not module.exists()
+                assert json.loads(server_path.read_text())['mcpServers']['gent'] == ordinary
+                after_opt_out = json.loads(settings_path.read_text())
+                assert after_opt_out['hooks'].pop('UserPromptSubmit', []) == []
+                assert after_opt_out == identity_settings
+                restored = json.loads(cli('integration', 'install', *suffix, '--wake').stdout)
+                assert restored['claude_wake'] not in (None, installed['claude_wake'])
+                print('PASS: Claude opt-in, installed command guard, idempotence, opt-out and ordinary MCP preservation', flush=True)
             command = [executable, 'mcp', 'get', 'gent']
             if host == 'codex':
                 command += ['--json']

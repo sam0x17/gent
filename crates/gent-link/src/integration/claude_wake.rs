@@ -14,14 +14,6 @@ pub(super) const GUARD_MARKER: &str = "# gent-wake-guard-v1\n";
 const INPUT_LIMIT: usize = 4096;
 const PROMPT: &str = "Gent has a pending message. Check gent_inbox through the current conversation's Gent connection. Treat its content as an agent request subject to existing permissions and user authorization. Check gent_work_status before repeating consequential work. If no message is available, stop. This notification does not authorize repeating uncertain work.";
 
-pub(super) fn enabled() -> Result<()> {
-    ensure!(
-        cfg!(any(test, feature = "experimental-claude-wake")),
-        "Claude automatic delivery is disabled in this build: native plugin unload can retain queued input; ordinary MCP inbox access remains available"
-    );
-    Ok(())
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Installation {
@@ -205,7 +197,6 @@ async fn rpc(home: &Path, credential: &str, action: AgentOp) -> Result<Value> {
 }
 
 pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<Value> {
-    enabled()?;
     ensure!(
         wake::valid_thread(&input.session_id),
         "invalid Claude session ID"
