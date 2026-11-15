@@ -61,6 +61,12 @@ struct Scope {
     credential_hash: String,
 }
 
+/// Read-only scope validation for a watcher. The caller must verify its key
+/// snapshot again afterward; this does not acquire a model connection's lock.
+pub(crate) fn verify_existing_scope(path: &Path, cfg: &Config, credential: &str) -> Result<()> {
+    pin(path, cfg, credential, false)
+}
+
 /// Caller holds the binding file's exclusive lock through pinning and use.
 pub(crate) fn pin(path: &Path, cfg: &Config, credential: &str, may_initialize: bool) -> Result<()> {
     let mut name = path.as_os_str().to_owned();

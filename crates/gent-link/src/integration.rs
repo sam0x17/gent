@@ -1,6 +1,7 @@
 //! Host metadata selects credentials outside model-controlled tool arguments.
 //! The local host and OS user are trusted; this is not remote authentication.
 mod install;
+pub(crate) mod wake;
 use anyhow::{Context, Result, ensure};
 use clap::{Subcommand, ValueEnum};
 use fs2::FileExt;
@@ -246,7 +247,6 @@ fn lock(path: &Path) -> Result<File> {
 
 struct Binding {
     credential: String,
-    codex_thread: Option<String>,
     _opened: crate::mcp::binding::Opened,
 }
 impl Binding {
@@ -254,7 +254,6 @@ impl Binding {
         let opened = crate::mcp::binding::open(path, cfg, true)?;
         Ok(Self {
             credential: opened.credential.clone(),
-            codex_thread: None,
             _opened: opened,
         })
     }
@@ -265,6 +264,7 @@ pub struct Bindings {
     cfg: config::Config,
     folder: PathBuf,
     active: BTreeMap<String, Binding>,
+    wake_endpoint: Option<PathBuf>,
 }
 impl Bindings {
     pub fn new(home: &Path, host: Host) -> Result<Self> {
@@ -273,6 +273,7 @@ impl Bindings {
             cfg: config::load(home)?,
             folder: scope(home, host)?,
             active: BTreeMap::new(),
+            wake_endpoint: None,
         })
     }
     pub fn credential(
@@ -310,31 +311,32 @@ impl Bindings {
             // Separate lock protects initial credential creation, including two
             // hosts reconnecting before either has opened the binding file.
             let _lock = lock(&self.folder.join("bindings.lock"))?;
-            let mut binding = Binding::open(&self.folder.join(format!("{key}.key")), &self.cfg)?;
-            if self.host == Host::Codex {
-                binding.codex_thread = meta
-                    .get("threadId")
-                    .and_then(Value::as_str)
-                    .filter(|id| {
-                        uuid::Uuid::parse_str(id).is_ok_and(|u| !u.is_nil() && u.to_string() == *id)
-                    })
-                    .map(str::to_owned);
-            }
+            let binding = Binding::open(&self.folder.join(format!("{key}.key")), &self.cfg)?;
             self.active.insert(key.clone(), binding);
+        }
+        if self.host == Host::Codex
+            && let Some(thread) = meta.get("threadId").and_then(Value::as_str)
+            && wake::valid_thread(thread)
+        {
+            wake::remember(
+                &self.folder,
+                &self.cfg,
+                thread,
+                &self.active[&key].credential,
+                self.wake_endpoint.as_deref(),
+            )?;
         }
         Ok(self.active[&key].credential.clone())
     }
 
-    pub(crate) fn wake_targets(&self) -> Vec<(String, String)> {
-        self.active
-            .values()
-            .filter_map(|binding| {
-                binding
-                    .codex_thread
-                    .as_ref()
-                    .map(|thread| (thread.clone(), binding.credential.clone()))
-            })
-            .collect()
+    pub(crate) fn enable_wake(&mut self, home: &Path, endpoint: &Path) -> Result<wake::Registry> {
+        ensure!(
+            self.host == Host::Codex,
+            "queued wake requires Codex bindings"
+        );
+        let registry = wake::Registry::new(home, self.folder.clone(), self.cfg.clone(), endpoint)?;
+        self.wake_endpoint = Some(registry.endpoint.clone());
+        Ok(registry)
     }
 }
 
@@ -444,55 +446,6 @@ mod tests {
         config::initialize(folder.path(), "bindings").unwrap();
         folder
     }
-    #[test]
-    fn wake_targets_use_only_canonical_thread_metadata_and_current_bindings() {
-        let home = home();
-        let mut bindings = Bindings::new(home.path(), Host::Codex).unwrap();
-        let a = uuid::Uuid::now_v7().to_string();
-        let b = uuid::Uuid::now_v7().to_string();
-        let first = bindings
-            .credential(
-                "codex-mcp-client",
-                &json!({"threadId":a,"sessionId":b}),
-                "gent_register",
-                &json!({"threadId":b}),
-            )
-            .unwrap();
-        assert_eq!(bindings.wake_targets(), vec![(a.clone(), first.clone())]);
-        assert!(
-            bindings
-                .credential("other", &json!({"threadId":b}), "gent_register", &json!({}))
-                .is_err()
-        );
-        let second = bindings
-            .credential(
-                "codex-mcp-client",
-                &json!({"threadId":b,"sessionId":a}),
-                "gent_register",
-                &json!({}),
-            )
-            .unwrap();
-        bindings
-            .credential(
-                "codex-mcp-client",
-                &json!({"threadId":"legacy-non-uuid"}),
-                "gent_register",
-                &json!({}),
-            )
-            .unwrap();
-        let mut targets = bindings.wake_targets();
-        let mut expected = vec![(a, first), (b, second)];
-        targets.sort();
-        expected.sort();
-        assert_eq!(targets, expected);
-        assert!(
-            Bindings::new(home.path(), Host::ClaudeCode)
-                .unwrap()
-                .wake_targets()
-                .is_empty()
-        );
-    }
-
     #[test]
     fn codex_threads_are_isolated_and_resume_without_model_selected_identity() {
         let home = home();

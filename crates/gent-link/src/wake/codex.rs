@@ -1,6 +1,6 @@
 //! Opt-in attachment to an existing local Codex server. Never starts a server,
 //! resumes a thread, overrides its settings, or answers host approval requests.
-use crate::integration::Bindings;
+use crate::integration::{Bindings, wake::Registry};
 use anyhow::{Context, Result, ensure};
 use futures_util::{SinkExt, StreamExt};
 use gent_protocol::{AgentOp, Request, wake::WakeTarget};
@@ -36,14 +36,25 @@ impl Runner {
             socket.is_absolute(),
             "Codex wake socket path must be absolute"
         );
+        let registry = bindings
+            .lock()
+            .expect("host bindings lock poisoned")
+            .enable_wake(&home, &socket)?;
         Ok(Self(tokio::spawn(async move {
             let mut unavailable = false;
+            let mut lease = None;
+            let mut cursor = None;
             loop {
-                let targets = bindings
-                    .lock()
-                    .expect("host bindings lock poisoned")
-                    .wake_targets();
-                let result = sweep(&home, &socket, targets).await;
+                let result = async {
+                    if lease.is_none() {
+                        lease = registry.coordinator()?;
+                    }
+                    if lease.is_some() {
+                        sweep(&home, &socket, &registry, &mut cursor).await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
                 if result.is_err() && !unavailable {
                     eprintln!(
                         "Gent: Codex wake unavailable or submission uncertain; inspect gent wake. Inbox polling remains available."
@@ -71,11 +82,27 @@ async fn agent(home: &Path, credential: &str, action: AgentOp) -> Result<Value> 
     .context("Gent RPC timed out")?
 }
 
-async fn sweep(home: &Path, socket: &Path, targets: Vec<(String, String)>) -> Result<()> {
+async fn sweep(
+    home: &Path,
+    socket: &Path,
+    registry: &Registry,
+    cursor: &mut Option<String>,
+) -> Result<()> {
+    gent_daemon::recovery::ensure_active(home)?;
+    let mut host = Host::connect(socket).await?;
+    let (threads, next) = host.loaded(cursor.as_deref()).await?;
+    *cursor = next;
+    drop(host);
     let mut failed = false;
-    for (thread, credential) in targets {
+    for thread in threads {
         // A stale or unavailable conversation must not starve other bindings.
-        failed |= dispatch(home, socket, &thread, &credential).await.is_err();
+        match registry.credential(&thread) {
+            Ok(Some(credential)) => {
+                failed |= dispatch(home, socket, &thread, &credential).await.is_err()
+            }
+            Ok(None) => {}
+            Err(_) => failed = true,
+        }
     }
     ensure!(
         !failed,
@@ -142,6 +169,36 @@ struct Host {
     sequence: u64,
 }
 impl Host {
+    async fn loaded(&mut self, cursor: Option<&str>) -> Result<(Vec<String>, Option<String>)> {
+        let result = self
+            .rpc("thread/loaded/list", json!({"limit":128,"cursor":cursor}))
+            .await?;
+        let ids = result["data"]
+            .as_array()
+            .context("invalid loaded thread list")?;
+        ensure!(ids.len() <= 128, "too many loaded threads in one page");
+        let mut threads = Vec::new();
+        for id in ids {
+            let id = id.as_str().context("invalid loaded thread ID")?;
+            let uuid = uuid::Uuid::parse_str(id)?;
+            ensure!(
+                !uuid.is_nil() && uuid.to_string() == id && !threads.iter().any(|s| s == id),
+                "invalid or duplicate loaded thread ID"
+            );
+            threads.push(id.to_owned());
+        }
+        let next = match result.get("nextCursor") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(next))
+                if !next.is_empty() && next.len() <= 512 && Some(next.as_str()) != cursor =>
+            {
+                Some(next.clone())
+            }
+            _ => anyhow::bail!("invalid loaded thread cursor"),
+        };
+        Ok((threads, next))
+    }
+
     async fn connect(path: &Path) -> Result<Self> {
         // Codex uses a rendezvous symlink to a private socket. Resolve it, then
         // validate the endpoint and the connected OS peer, not a claimed UUID.

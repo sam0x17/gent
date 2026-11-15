@@ -38,6 +38,7 @@ impl Fixture {
                         json!({"thread":{"id":thread,"status":{"type":status},"canAcceptDirectInput":direct}})
                     }
                     "thread/queue/add" => response.clone(),
+                    "thread/loaded/list" => response.clone(),
                     method => panic!("forbidden host operation: {method}"),
                 };
                 if stream
@@ -57,6 +58,35 @@ impl Fixture {
             requests,
             task,
         }
+    }
+}
+
+#[tokio::test]
+async fn loaded_thread_pages_are_bounded_and_reject_substituted_cursors_and_ids() {
+    let thread = uuid::Uuid::now_v7().to_string();
+    for (data, next, cursor, valid) in [
+        (json!([thread]), json!("page-2"), None, true),
+        (json!([]), Value::Null, Some("page-2"), true),
+        (json!([thread, thread]), Value::Null, None, false),
+        (json!(["not-a-thread"]), Value::Null, None, false),
+        (json!([]), json!("page-2"), Some("page-2"), false),
+        (json!([]), json!("x".repeat(513)), None, false),
+        (json!(vec![thread.clone(); 129]), Value::Null, None, false),
+    ] {
+        let f = Fixture::new(
+            thread.clone(),
+            "idle",
+            true,
+            json!({"data":data,"nextCursor":next}),
+        );
+        let mut host = Host::connect(&f.path).await.unwrap();
+        let result = host.loaded(cursor).await;
+        assert_eq!(result.is_ok(), valid);
+        let requests = f.requests.lock().unwrap();
+        assert_eq!(
+            requests.last().unwrap()["params"],
+            json!({"limit":128,"cursor":cursor})
+        );
     }
 }
 
