@@ -74,6 +74,14 @@ Native stream observation also confirms that Escape during a partial text respon
 
 Separate real-model checks on both OSes use one initial registration turn and three automatic reply/acknowledgment exchanges. They cover initial delivery, a Gent daemon restart, and an actual Claude restart into the same synthetic session. Agent identity and native submission receipts remain exact, and resumed delivery needs no registration or human model turn. Those checks do not establish arbitrary crash recovery, operating-system restart or GUI delivery.
 
+## VS Code delivery
+
+Linux VS Code 1.146.0 with Claude Code extension 2.1.325 now passes automatic inbox/acknowledgment delivery through the installed user-scope `--wake` integration. The actual UI shows the plugin prompt and completed response. A notification waits through a held model stream; clicking Stop holds both queued and new notifications. Explicit human input permits fresh delivery without replaying old claims. Editor reload plus Gent daemon restart preserves the session and agent, and another message runs without registration or human input. Reinstalling without `--wake` stops automatic delivery while retaining ordinary MCP access.
+
+These lifecycle checks use an isolated profile, owner-approved Gent tools and a loopback model. They establish the extension's native execution and UI behavior; real-model IDE wake, macOS IDE wake and standalone desktop wake still need acceptance checks. The CLI real-model proofs above are separate.
+
+The tested Codex extension, `openai.chatgpt` 26.1111.21308 with bundled Codex 0.169.0-alpha.11.1, launches an embedded stdio app server without Gent's required Unix endpoint. Its managed `--wake` installation remains disconnected and messages stay pending. Reopening the original chat and asking it to check its inbox retrieves and acknowledges the message after editor/daemon restart. `gent integration start codex` starts a separate native background server; it does not move an embedded IDE chat to that server. Codex IDE automatic delivery remains unfinished.
+
 ## Owner inspection
 
 Run these commands on the recipient's node, selecting its cluster profile if needed:
