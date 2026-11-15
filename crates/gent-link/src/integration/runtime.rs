@@ -1,4 +1,4 @@
-//! Native runtime observations and owner-invoked Codex startup. Hosts retain
+//! Native runtime observations and owner-invoked startup. Hosts retain
 //! lifecycle ownership; inspecting Claude never starts or resumes a session.
 mod claude;
 mod process;
@@ -16,12 +16,14 @@ use tokio::process::Command;
 #[derive(clap::Args)]
 pub struct Args {
     pub host: Host,
-    /// Host configuration directory (defaults to CODEX_HOME or ~/.codex).
+    /// Exact native session UUID, required for Claude background sessions.
+    pub session_id: Option<String>,
+    /// Host configuration directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
-    /// Codex executable to use for a missing background server.
-    #[arg(long, default_value = "codex")]
-    pub host_binary: PathBuf,
+    /// Host executable (defaults to codex or claude).
+    #[arg(long)]
+    pub host_binary: Option<PathBuf>,
 }
 
 async fn probe(socket: &Path) -> Result<Value> {
@@ -96,10 +98,17 @@ async fn launch(binary: &Path, directory: &Path) -> Result<NativeStart> {
 }
 
 pub(crate) async fn start(home: &Path, args: Args) -> Result<Value> {
+    if args.host == Host::ClaudeCode {
+        return claude::start(home, args).await;
+    }
     ensure!(
-        args.host == Host::Codex,
-        "Gent startup currently supports Codex; start Claude Code normally"
+        args.session_id.is_none(),
+        "Codex startup takes no session ID; use native Codex resume after startup"
     );
+    let binary = args
+        .host_binary
+        .as_deref()
+        .unwrap_or_else(|| Path::new("codex"));
     let (directory, socket) = install::codex_runtime_target(home, args.config_dir, true)?;
     let (action, native, runtime) = match probe(&socket).await {
         Ok(runtime) => ("already_running", None, runtime),
@@ -117,7 +126,7 @@ pub(crate) async fn start(home: &Path, args: Args) -> Result<Value> {
                     ),
                 "existing Codex endpoint could not be verified: {error:#}"
             );
-            let native = launch(&args.host_binary, &directory).await?;
+            let native = launch(binary, &directory).await?;
             ensure!(
                 native.socket_path == socket,
                 "Codex started with an unexpected socket; inspect codex app-server daemon version"
@@ -142,7 +151,8 @@ pub(crate) async fn start(home: &Path, args: Args) -> Result<Value> {
     status["action"] = action.into();
     status["runtime"] = runtime;
     status["native_start"] = json!(native);
-    status["launch"] = json!({"command":args.host_binary,"args":["--remote","unix://"],"env":{"CODEX_HOME":directory}});
+    status["launch"] =
+        json!({"command":binary,"args":["--remote","unix://"],"env":{"CODEX_HOME":directory}});
     status["next"] = "Open Codex with --remote unix:// using the displayed CODEX_HOME. Resume an existing conversation explicitly if needed.".into();
     Ok(status)
 }

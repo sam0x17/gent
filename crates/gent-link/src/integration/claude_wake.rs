@@ -1,7 +1,6 @@
 //! Local native plugin bridge. The model never supplies these inputs or reads
 //! credentials. Every operation validates the pinned installation and session.
-use super::{Host, install, scope_path, session_key, wake};
-use crate::mcp::binding;
+use super::{claude_binding::credential, install, wake};
 use anyhow::{Context, Result, ensure};
 use gent_daemon::config;
 use gent_protocol::{AgentOp, Request, wake::WakeTarget};
@@ -157,28 +156,6 @@ pub(crate) async fn execute(home: &Path, directory: &Path) -> Result<Value> {
     ensure!(bytes.len() <= INPUT_LIMIT, "Claude bridge input too large");
     let input: Input = serde_json::from_slice(&bytes).context("invalid Claude bridge input")?;
     run(home, directory, input).await
-}
-
-// Read an existing binding without creating a key, adopting a legacy scope, or
-// competing with a live MCP connection's stable/credential file locks.
-fn credential(home: &Path, cfg: &config::Config, session: &str) -> Result<Option<String>> {
-    ensure!(wake::valid_thread(session), "invalid Claude session ID");
-    gent_daemon::recovery::ensure_active(home)?;
-    let path =
-        scope_path(home, cfg, Host::ClaudeCode).join(format!("{}.key", session_key(session, None)));
-    let key = wake::snapshot(&path)?;
-    crate::agent_recovery::ensure_ready(&path, cfg)?;
-    let Some(text) = &key.text else {
-        return Ok(None);
-    };
-    let credential = text.trim();
-    ensure!(
-        credential.len() == 64 && credential.bytes().all(|b| b.is_ascii_hexdigit()),
-        "invalid Claude binding credential"
-    );
-    binding::verify_existing_scope(&path, cfg, credential)?;
-    key.verify()?;
-    Ok(Some(credential.into()))
 }
 
 async fn rpc(home: &Path, credential: &str, action: AgentOp) -> Result<Value> {

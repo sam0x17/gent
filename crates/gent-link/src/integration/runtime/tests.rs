@@ -5,8 +5,9 @@ use std::{fs, os::unix::fs::PermissionsExt};
 fn args(directory: &Path) -> Args {
     Args {
         host: Host::Codex,
+        session_id: None,
         config_dir: Some(directory.into()),
-        host_binary: directory.join("must-not-launch"),
+        host_binary: Some(directory.join("must-not-launch")),
     }
 }
 

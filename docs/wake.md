@@ -96,7 +96,7 @@ The result includes `runtime.inspected`, `reported_running`, `session_count` and
 
 Rows with a reported PID become `reported_idle`, `reported_busy` or `reported_running`. Rows without one become `inactive_complete` for native `done`, `inactive_incomplete` for native `working`, `blocked` or `waiting`, and `inactive_unknown` otherwise. Stopping a completed session can retain `done` or produce `stopped`. These are native observations: an incomplete record does not prove recovery is underway, and a completion marker does not establish successful external work.
 
-`gent_bindings_checked` is false: the inventory does not authenticate Gent agent bindings or prove an agent can receive messages. Gent does not register agents, edit configuration, or start/resume sessions during inspection. The native Claude CLI can maintain its own profile cache. Gent-managed Claude startup remains unsupported.
+`gent_bindings_checked` is false: the inventory does not authenticate Gent agent bindings or prove an agent can receive messages. Gent does not register agents, edit configuration, or start/resume sessions during inspection. The native Claude CLI can maintain its own profile cache.
 
 ### Native Claude background sessions
 
@@ -111,6 +111,22 @@ Use the same Claude configuration directory and configure any required Gent tool
 Native background crash recovery depends on the session's state. In isolated SIGKILL tests, an idle session remained unloaded during a 20-second observation and delivered its queued message after explicit resume. For a crash during a streamed response, Claude's own background service restored the session and continued its unfinished turn without a new user prompt or Gent submission. Gent retained the old dispatch claims and unacknowledged messages, then delivered fresh work normally.
 
 Inspect `claude agents --json --all` and use `claude attach ID` for an already running session. An explicit resume while the session is running or recovering can create a copy. Gent does not currently automate Claude startup. Its single-use dispatch claims govern Gent submissions; they do not prevent native recovery from continuing saved work. Check `gent_work_status` before repeating consequential operations. These tests do not establish OS-reboot recovery or atomic external actions.
+
+### Reopen a Claude background agent
+
+After the original conversation has registered with Gent and entered Claude's native background service, its owner can reopen it with:
+
+```sh
+gent integration start claude-code SESSION_ID
+```
+
+Supply its full native session UUID, available from live status. Use the same `--config-dir PATH` as installation; `--host-binary PATH` selects the Claude executable. Gent requires its daemon, a current intact `--wake` installation and an existing local binding. An absent session, interactive-only session, unknown binding or mismatched native ID fails before attachment. Initial adoption into Claude's background service still uses Claude's own controls.
+
+Gent selects the session's exact short native ID from the inventory and invokes `claude attach` with closed stdin. It supplies no model input or settings overrides. A reported live worker is reused. For an inactive session, Gent first allows three seconds for the native supervisor to reconcile a recent exit, then makes at most three attachment attempts with two seconds between observations. The complete operation has a 30-second limit; command output is bounded and is not copied into the result. An exit code alone cannot establish success: Gent checks the installation, saved binding, native identity and reported worker before returning.
+
+The result contains the selected Gent agent, session metadata, `native_attach_attempts`, and `action: already_running` or `attached`. `gent_binding_checked: true` refers to the saved binding confirmed by Gent's daemon; `reported_running` comes from Claude's native inventory. This does not establish model availability or completion of pending work. On an error or timeout, inspect live status before retrying because the native service may have acted.
+
+Native Linux/macOS checks retain the original agent through live reuse, concurrent starts after a planned stop, and an idle worker crash plus Gent restart. Ordinary wake delivery retrieves and acknowledges pending messages afterward. Gent does not enable automatic Claude recovery with this command. Explicit attachment can let Claude continue its own saved work; review unfinished actions through the work journal before reopening an interrupted session. OS reboot and loss of Claude's background service remain unverified.
 
 ## VS Code delivery
 

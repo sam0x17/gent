@@ -1,6 +1,8 @@
 //! Native Claude session observations, separate from Gent registration or recovery.
 
 mod sessions;
+mod start;
+pub(super) use start::run as start;
 
 use super::{Host, install, process};
 use anyhow::{Context, Result, ensure};
@@ -13,11 +15,15 @@ use tokio::process::Command;
 
 const OUTPUT_LIMIT: u64 = 1024 * 1024;
 
-async fn inspect(binary: &Path, target: &install::ClaudeRuntime) -> Result<Value> {
+fn command(binary: &Path, target: &install::ClaudeRuntime) -> Result<Command> {
+    // Resolve explicit relative paths before changing to the host's directory.
+    let binary = if binary.components().count() > 1 {
+        std::path::absolute(binary)?
+    } else {
+        binary.into()
+    };
     let mut command = Command::new(binary);
-    command
-        .args(["agents", "--json", "--all"])
-        .current_dir(&target.directory);
+    command.current_dir(&target.directory);
     if target.custom_directory {
         command.env("CLAUDE_CONFIG_DIR", &target.directory);
     } else {
@@ -25,18 +31,25 @@ async fn inspect(binary: &Path, target: &install::ClaudeRuntime) -> Result<Value
         // location. Preserve the default installation's sibling-file layout.
         command.env_remove("CLAUDE_CONFIG_DIR");
     }
+    Ok(command)
+}
+
+async fn inspect(binary: &Path, target: &install::ClaudeRuntime) -> Result<Vec<sessions::Session>> {
+    let mut command = command(binary, target)?;
+    command.args(["agents", "--json", "--all"]);
     let output = process::output(command, Duration::from_secs(15), OUTPUT_LIMIT).await?;
     // Native stderr may contain account diagnostics; do not copy it into status.
     ensure!(
         output.status.success(),
         "Claude session inspection failed; run claude agents --json --all in the selected profile for details"
     );
-    let sessions = sessions::parse(&output.stdout)?;
+    sessions::parse(&output.stdout)
+}
+
+fn report(sessions: &[sessions::Session]) -> Value {
     let running = sessions.iter().filter(|row| row.pid.is_some()).count();
-    Ok(
-        json!({"inspected":true,"source":"claude_agents","reported_running":running,
-        "session_count":sessions.len(),"sessions":sessions,"gent_bindings_checked":false}),
-    )
+    json!({"inspected":true,"source":"claude_agents","reported_running":running,
+        "session_count":sessions.len(),"sessions":sessions,"gent_bindings_checked":false})
 }
 
 pub(super) async fn status(
@@ -64,7 +77,7 @@ pub(super) async fn status(
             current == target,
             "Claude integration changed during native inspection"
         );
-        Ok::<_, anyhow::Error>(observed)
+        Ok::<_, anyhow::Error>(report(&observed))
     }
     .await;
     status["runtime"] =
@@ -72,5 +85,7 @@ pub(super) async fn status(
     Ok(status)
 }
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;

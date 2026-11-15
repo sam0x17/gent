@@ -1,5 +1,6 @@
 //! Host metadata selects credentials outside model-controlled tool arguments.
 //! The local host and OS user are trusted; this is not remote authentication.
+mod claude_binding;
 pub(crate) mod claude_wake;
 pub(crate) mod codex_files;
 mod install;
@@ -63,7 +64,7 @@ pub enum Command {
         #[arg(long, requires = "live")]
         host_binary: Option<PathBuf>,
     },
-    /// Start or reuse Codex's background app server for an installed --wake integration.
+    /// Start/reuse Codex, or reopen an existing Claude background session.
     Start(runtime::Args),
     /// Select node-local conversations for automatic startup and idle recovery.
     Recovery {

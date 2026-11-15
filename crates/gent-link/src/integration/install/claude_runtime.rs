@@ -11,6 +11,19 @@ pub(crate) struct ClaudeRuntime {
     node_id: String,
 }
 
+impl ClaudeRuntime {
+    pub(crate) fn require_wake(&self) -> Result<()> {
+        ensure!(
+            self.spec
+                .claude_wake
+                .as_ref()
+                .is_some_and(|wake| wake.version == 3 && wake.module == claude_wake::MODULE),
+            "install current Claude queued delivery with gent integration install claude-code --wake"
+        );
+        Ok(())
+    }
+}
+
 pub(crate) fn claude_runtime_target(
     home: &Path,
     directory: Option<PathBuf>,

@@ -196,8 +196,9 @@ async fn recover(home: &Path, agent_id: &str, expected: &CodexRecovery) -> Resul
         home,
         runtime::Args {
             host: Host::Codex,
+            session_id: None,
             config_dir: Some(expected.config_dir.clone()),
-            host_binary: expected.host_binary.clone(),
+            host_binary: Some(expected.host_binary.clone()),
         },
     )
     .await?;

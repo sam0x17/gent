@@ -1,5 +1,8 @@
 use super::*;
-use crate::integration::{Bindings, now, record_hook};
+use crate::{
+    integration::{Bindings, Host, now, record_hook, scope_path, session_key},
+    mcp::binding,
+};
 use gent_protocol::{Effect, OwnerOp, Permission, Policy, Rule, Selector};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 

@@ -31,10 +31,10 @@ enum State {
 
 #[derive(Serialize)]
 pub(super) struct Session {
-    native_id: Option<String>,
-    session_id: Option<String>,
-    native_kind: String,
-    cwd: PathBuf,
+    pub native_id: Option<String>,
+    pub session_id: Option<String>,
+    pub native_kind: String,
+    pub cwd: PathBuf,
     pub pid: Option<u32>,
     native_status: Option<String>,
     native_state: Option<String>,
