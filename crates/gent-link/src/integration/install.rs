@@ -2,7 +2,7 @@
 mod claude_runtime;
 mod document;
 use crate::managed_file as files;
-pub(super) use claude_runtime::{ClaudeRuntime, claude_runtime_target};
+pub(super) use claude_runtime::{ClaudeRuntime, claude_runtime_pinned, claude_runtime_target};
 
 use super::{Host, claude_wake, render_configuration, vscode};
 use anyhow::{Context, Result, ensure};

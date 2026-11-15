@@ -10,17 +10,34 @@ pub struct HostRecovery {
     pub version: u8,
     pub cluster_id: String,
     pub node_id: String,
-    pub agents: BTreeMap<String, CodexRecovery>,
+    pub agents: BTreeMap<String, RecoveryAgent>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryHost {
+    #[default]
+    Codex,
+    ClaudeCode,
+}
+impl RecoveryHost {
+    fn is_codex(&self) -> bool {
+        *self == Self::Codex
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CodexRecovery {
+pub struct RecoveryAgent {
+    #[serde(default, skip_serializing_if = "RecoveryHost::is_codex")]
+    pub host: RecoveryHost,
     pub id: String,
     pub thread_id: String,
     pub config_dir: PathBuf,
     pub host_binary: PathBuf,
     pub credential_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<PathBuf>,
 }
 
 fn identifier(value: &str) -> Result<()> {
@@ -44,7 +61,7 @@ impl HostRecovery {
 
     fn validate(&self, config: &Config) -> Result<()> {
         ensure!(
-            self.version == 1
+            matches!(self.version, 1 | 2)
                 && self.cluster_id == config.cluster.id
                 && self.node_id == config.node.id
                 && self.agents.len() <= MAX_RECOVERY_AGENTS,
@@ -52,10 +69,20 @@ impl HostRecovery {
         );
         let mut targets = std::collections::BTreeSet::new();
         for (agent, entry) in &self.agents {
+            ensure!(
+                (entry.host == RecoveryHost::Codex && entry.working_dir.is_none())
+                    || (self.version == 2
+                        && entry.host == RecoveryHost::ClaudeCode
+                        && entry.working_dir.is_some()),
+                "host recovery target has an unsupported host or working directory"
+            );
             identifier(agent)?;
             identifier(&entry.id)?;
             identifier(&entry.thread_id)?;
-            for path in [&entry.config_dir, &entry.host_binary] {
+            for path in [&entry.config_dir, &entry.host_binary]
+                .into_iter()
+                .chain(entry.working_dir.as_ref())
+            {
                 ensure!(
                     path.is_absolute()
                         && path
@@ -73,7 +100,7 @@ impl HostRecovery {
                 "invalid host recovery credential binding"
             );
             ensure!(
-                targets.insert((&entry.config_dir, &entry.thread_id)),
+                targets.insert((entry.host, &entry.config_dir, &entry.thread_id)),
                 "host recovery has a duplicate conversation"
             );
         }
@@ -96,7 +123,14 @@ impl Config {
             .transpose()
     }
 
-    pub fn set_host_recovery(&mut self, value: HostRecovery) -> Result<()> {
+    pub fn set_host_recovery(&mut self, mut value: HostRecovery) -> Result<()> {
+        if value
+            .agents
+            .values()
+            .any(|entry| entry.host == RecoveryHost::ClaudeCode)
+        {
+            value.version = 2;
+        }
         value.validate(self)?;
         self.extra
             .insert("host_recovery".into(), toml::Value::try_from(value)?);
@@ -108,14 +142,40 @@ impl Config {
 mod tests {
     use super::*;
 
-    fn entry() -> CodexRecovery {
-        CodexRecovery {
+    fn entry() -> RecoveryAgent {
+        RecoveryAgent {
+            host: RecoveryHost::Codex,
+            working_dir: None,
             id: uuid::Uuid::new_v4().to_string(),
             thread_id: uuid::Uuid::new_v4().to_string(),
             config_dir: "/private/codex".into(),
             host_binary: "/private/bin/codex".into(),
             credential_hash: "a".repeat(64),
         }
+    }
+
+    #[test]
+    fn legacy_codex_entries_round_trip_and_claude_requires_versioned_cwd() {
+        let mut cfg = fresh("test").unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut selected = HostRecovery::new(&cfg);
+        selected.agents.insert(id.clone(), entry());
+        let legacy = toml::to_string(&selected).unwrap();
+        assert!(!legacy.contains("host =") && !legacy.contains("working_dir"));
+        assert_eq!(toml::from_str::<HostRecovery>(&legacy).unwrap(), selected);
+        selected.agents.get_mut(&id).unwrap().host = RecoveryHost::ClaudeCode;
+        assert!(cfg.set_host_recovery(selected.clone()).is_err());
+        selected.agents.get_mut(&id).unwrap().working_dir = Some("/work".into());
+        assert!(selected.validate(&cfg).is_err());
+        cfg.set_host_recovery(selected).unwrap();
+        let mut selected = cfg.host_recovery().unwrap().unwrap();
+        assert_eq!(selected.version, 2);
+        assert_eq!(
+            toml::from_str::<HostRecovery>(&toml::to_string(&selected).unwrap()).unwrap(),
+            selected
+        );
+        selected.agents.get_mut(&id).unwrap().working_dir = Some("relative".into());
+        assert!(cfg.set_host_recovery(selected).is_err());
     }
 
     #[test]

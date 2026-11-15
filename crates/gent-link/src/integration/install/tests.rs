@@ -615,3 +615,34 @@ fn recovery_refuses_changed_managed_fragments_and_normalized_paths_remain_stable
     fs::set_permissions(&record, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(mutate(&layout, &spec.home, None).is_err());
 }
+
+#[test]
+fn recovery_pins_both_claude_layouts_and_rejects_redirected_records() {
+    for custom in [false, true] {
+        let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
+        fs::set_permissions(
+            layout.directory.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        enable_claude(&mut spec);
+        let directory = layout.directory.parent().unwrap().join(".claude");
+        let server = if custom {
+            directory.join(".claude.json")
+        } else {
+            directory.parent().unwrap().join(".claude.json")
+        };
+        let layout = Layout::at(Host::ClaudeCode, directory, server).unwrap();
+        mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+        let runtime = claude_runtime_pinned(&spec.home, &layout.directory).unwrap();
+        runtime.require_wake().unwrap();
+        assert_eq!(runtime.custom_directory, custom);
+        assert_eq!(runtime.directory, layout.directory);
+        assert_eq!(layout.directory.join(".claude.json").exists(), custom);
+        let (snapshot, mut state) = layout.read().unwrap();
+        state.server = layout.directory.join("foreign.json");
+        save(&snapshot, &state).unwrap();
+        assert!(claude_runtime_pinned(&spec.home, &layout.directory).is_err());
+        assert!(!state.server.exists());
+    }
+}

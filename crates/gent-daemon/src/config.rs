@@ -10,7 +10,7 @@ use std::{
 };
 
 mod host_recovery;
-pub use host_recovery::{CodexRecovery, HostRecovery, MAX_RECOVERY_AGENTS};
+pub use host_recovery::{HostRecovery, MAX_RECOVERY_AGENTS, RecoveryAgent, RecoveryHost};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {

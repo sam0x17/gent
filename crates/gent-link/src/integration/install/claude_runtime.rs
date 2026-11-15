@@ -28,10 +28,47 @@ pub(crate) fn claude_runtime_target(
     home: &Path,
     directory: Option<PathBuf>,
 ) -> Result<ClaudeRuntime> {
+    validate(home, Layout::resolve(Host::ClaudeCode, directory)?)
+}
+
+/// Recover the recorded layout without consulting a daemon's ambient profile.
+pub(crate) fn claude_runtime_pinned(home: &Path, directory: &Path) -> Result<ClaudeRuntime> {
+    let layout = Layout::resolve(Host::ClaudeCode, Some(directory.into()))?;
+    let snapshot = Snapshot::read(&layout.record())?;
+    snapshot.private()?;
+    let state: State = serde_json::from_str(
+        snapshot
+            .text
+            .as_deref()
+            .context("Claude integration is not installed")?,
+    )
+    .map_err(|_| anyhow::anyhow!("invalid Claude installation record"))?;
+    state.owner(&normalize(home)?)?;
+    let default_server = layout
+        .directory
+        .parent()
+        .map(|parent| parent.join(".claude.json"));
+    ensure!(
+        state.server == layout.server
+            || (layout
+                .directory
+                .file_name()
+                .is_some_and(|name| name == ".claude")
+                && Some(&state.server) == default_server.as_ref()),
+        "Claude installation has an unsupported profile layout"
+    );
+    let target = validate(
+        home,
+        Layout::at(Host::ClaudeCode, layout.directory, state.server)?,
+    )?;
+    snapshot.verify()?;
+    Ok(target)
+}
+
+fn validate(home: &Path, layout: Layout) -> Result<ClaudeRuntime> {
     let home = normalize(home)?;
     gent_daemon::recovery::ensure_active(&home)?;
     let cfg = config::load(&home)?;
-    let layout = Layout::resolve(Host::ClaudeCode, directory)?;
     let (snapshot, state) = layout.read()?;
     state.owner(&home)?;
     ensure!(

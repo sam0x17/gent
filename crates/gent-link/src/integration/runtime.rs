@@ -1,6 +1,7 @@
 //! Native runtime observations and owner-invoked startup. Hosts retain
 //! lifecycle ownership; inspecting Claude never starts or resumes a session.
 mod claude;
+pub(super) use claude::recovery as claude_recovery;
 mod process;
 use super::{Host, install};
 use anyhow::{Context, Result, ensure};

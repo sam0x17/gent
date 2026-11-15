@@ -221,3 +221,26 @@ async fn bounded_native_commands_time_out_without_waiting_for_host_exit() {
     assert!(error.to_string().contains("timed out"));
     assert!(started.elapsed() < Duration::from_secs(5));
 }
+
+#[test]
+fn automatic_startup_uses_profile_and_excludes_transient_provider_environment() {
+    let fixture = Fixture::new();
+    fixture.install(true);
+    let target = install::claude_runtime_pinned(&fixture.home, &fixture.directory).unwrap();
+    let command = automatic_command(&fixture.binary, &target).unwrap();
+    let environment: std::collections::BTreeMap<_, _> = command.as_std().get_envs().collect();
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("CLAUDE_CONFIG_DIR")),
+        Some(&Some(fixture.directory.as_os_str()))
+    );
+    for key in [
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDECODE",
+        "CLAUDE_CODE_EXTRA_BODY",
+    ] {
+        assert!(!environment.contains_key(std::ffi::OsStr::new(key)));
+    }
+    assert!(environment.contains_key(std::ffi::OsStr::new("HOME")));
+}

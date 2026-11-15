@@ -1,5 +1,8 @@
-//! Native Claude session observations, separate from Gent registration or recovery.
+//! Native Claude observations and exact-session attachment with pinned bindings.
 
+mod eligibility;
+mod history;
+pub(in crate::integration) mod recovery;
 mod sessions;
 mod start;
 pub(super) use start::run as start;
@@ -30,6 +33,42 @@ fn command(binary: &Path, target: &install::ClaudeRuntime) -> Result<Command> {
         // Setting an explicit directory also changes Claude's .claude.json
         // location. Preserve the default installation's sibling-file layout.
         command.env_remove("CLAUDE_CONFIG_DIR");
+    }
+    Ok(command)
+}
+
+/// Automatic startup belongs to the selected native profile, not the shell
+/// which happened to launch Gent. Native settings/keychain retain authority
+/// over provider credentials, endpoints, model routing and host extensions.
+fn automatic_command(binary: &Path, target: &install::ClaudeRuntime) -> Result<Command> {
+    let mut command = command(binary, target)?;
+    command.env_clear();
+    for name in [
+        "HOME",
+        "PATH",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    if target.custom_directory {
+        command.env("CLAUDE_CONFIG_DIR", &target.directory);
+    } else {
+        command.env(
+            "HOME",
+            target.directory.parent().context("missing Claude home")?,
+        );
     }
     Ok(command)
 }
