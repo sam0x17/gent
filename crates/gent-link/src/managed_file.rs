@@ -178,7 +178,19 @@ impl Snapshot {
         Ok(())
     }
     pub fn write(&self, text: &str) -> Result<()> {
-        if self.text.as_deref() == Some(text) {
+        self.write_mode(text, None)
+    }
+    /// Generated launchers are atomically installed with private executable mode.
+    pub fn write_executable(&self, text: &str) -> Result<()> {
+        self.write_mode(text, Some(0o700))
+    }
+    pub fn executable(&self) -> bool {
+        self.stamp.as_ref().is_some_and(|m| m.mode & 0o777 == 0o700)
+    }
+    fn write_mode(&self, text: &str, mode: Option<u32>) -> Result<()> {
+        if self.text.as_deref() == Some(text)
+            && mode.is_none_or(|mode| self.stamp.as_ref().is_some_and(|m| m.mode & 0o777 == mode))
+        {
             return self.verify();
         }
         let parent = self
@@ -189,9 +201,9 @@ impl Snapshot {
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
         temporary
             .as_file()
-            .set_permissions(fs::Permissions::from_mode(
-                self.stamp.as_ref().map_or(0o600, |m| m.mode & 0o777),
-            ))?;
+            .set_permissions(fs::Permissions::from_mode(mode.unwrap_or_else(|| {
+                self.stamp.as_ref().map_or(0o600, |m| m.mode & 0o777)
+            })))?;
         temporary.write_all(text.as_bytes())?;
         temporary.as_file().sync_all()?;
         self.verify()?;

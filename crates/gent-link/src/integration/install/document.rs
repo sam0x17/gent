@@ -91,6 +91,70 @@ fn input(value: &Value) -> CstInputValue {
     }
 }
 
+/// VS Code permits comments and trailing commas, but not arbitrary JSON5.
+/// Keep unrelated settings/comments out of Gent's installation record.
+pub(super) struct VscodeDocument {
+    pub entry: Option<Value>,
+    root: CstRootNode,
+    original: String,
+}
+impl VscodeDocument {
+    pub fn parse(text: Option<&str>) -> Result<Self> {
+        let text = text.unwrap_or("{}\n");
+        let options = ParseOptions {
+            allow_comments: true,
+            allow_trailing_commas: true,
+            ..strict()
+        };
+        let ast = jsonc_parser::parse_to_ast(text, &Default::default(), &options)
+            .map_err(|_| anyhow::anyhow!("invalid JSONC in VS Code settings"))?;
+        let mut entry = None;
+        if let Some(value) = ast.value {
+            unique(&value)?;
+            let object = value
+                .as_object()
+                .context("VS Code settings must be a JSON object")?;
+            if let Some(property) = object
+                .properties
+                .iter()
+                .find(|p| p.name.as_str() == "chatgpt.cliExecutable")
+            {
+                entry = Some(match &property.value {
+                    ast::Value::StringLit(s) => Value::String(s.value.to_string()),
+                    ast::Value::NullKeyword(_) => Value::Null,
+                    _ => anyhow::bail!("invalid Codex executable override in VS Code settings"),
+                });
+            }
+        }
+        let root = CstRootNode::parse(text, &options)
+            .map_err(|_| anyhow::anyhow!("invalid JSONC in VS Code settings"))?;
+        Ok(Self {
+            entry,
+            root,
+            original: text.into(),
+        })
+    }
+    pub fn set(self, entry: Option<&Value>) -> Result<String> {
+        if self.entry.as_ref() == entry {
+            return Ok(self.original);
+        }
+        let object = self
+            .root
+            .object_value_or_create()
+            .context("VS Code settings must be a JSON object")?;
+        if let Some(old) = object.get("chatgpt.cliExecutable") {
+            if let Some(entry) = entry {
+                old.set_value(input(entry));
+            } else {
+                old.remove();
+            }
+        } else if let Some(entry) = entry {
+            object.append("chatgpt.cliExecutable", input(entry));
+        }
+        Ok(self.root.to_string())
+    }
+}
+
 pub struct Document {
     value: Value,
     format: Format,

@@ -82,7 +82,20 @@ These lifecycle checks use an isolated profile, owner-approved Gent tools and a 
 
 The tested Codex extension, `openai.chatgpt` 26.1111.21308 with bundled Codex 0.169.0-alpha.11.1, launches an embedded stdio app server without Gent's required Unix endpoint. Its managed `--wake` installation remains disconnected and messages stay pending. Reopening the original chat and asking it to check its inbox retrieves and acknowledges the message after editor/daemon restart. `gent integration start codex` starts a separate native background server; it does not move an embedded IDE chat to that server.
 
-A private Linux prototype connects a fresh IDE chat to packaged Codex 0.167.2 through the extension's development-only executable override and a stdio-to-WebSocket bridge. It passes automatic inbox/acknowledgment delivery and displays the completed turns before and after editor reload plus Gent restart. This route is not included in Gent's installer. Compatibility, approvals, interruption behavior and real-model acceptance through that route still need verification before offering supported Codex IDE wake.
+A separate experimental Rust route now connects a fresh IDE chat to the native background server through the extension's development-only executable override:
+
+```sh
+gent integration install codex --wake --vscode
+gent integration start codex
+```
+
+Reload VS Code, then open or explicitly resume a conversation. Installation preserves unrelated settings and JSON comments, refuses existing executable overrides, and records enough information to recover an interrupted update. It installs a small private shell launcher that invokes Gent's Rust transport. `--vscode-settings PATH` selects another VS Code user-settings file; the default is stable Code's user configuration on Linux or macOS. With a custom `--config-dir`, start both the server and VS Code with that `CODEX_HOME`; a mismatch is rejected.
+
+Linux VS Code 1.146.0, extension 26.1111.21308 and packaged Codex 0.167.2 pass registration and three automatic inbox/acknowledgment turns, including editor/Gent restart and delivery after a held busy request. Clicking the actual Stop button leaves queued and new messages paused without starting another model request during the observation. Protocol and installer process checks pass on Linux and macOS, including forwarding approval requests unchanged, waiting for the client's response, rejecting stale installations and exiting on server disconnect. The Mac checks do not establish Mac GUI behavior.
+
+The shared server controls model, tools, approvals and feature flags. Gent recognizes the tested IDE launch arguments without applying their `-c` overrides to the running server. Unknown invocation patterns fail with an extension-version diagnostic. Version compatibility beyond this tested pairing, native IDE approval UI, streaming interruption, explicit queue rearm and real-model delivery through this route remain unverified. Keep the route experimental until those checks pass.
+
+Run `gent integration install codex --wake` without `--vscode` to remove the IDE route while retaining ordinary MCP and CLI wake. `gent integration uninstall codex` removes both managed integrations. Reload the editor after either change; Gent leaves the native server's lifecycle under Codex control.
 
 ## Owner inspection
 

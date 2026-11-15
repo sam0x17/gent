@@ -140,6 +140,8 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
             config_dir: Some(directory.clone()),
             wake: true,
             wake_socket: None,
+            vscode: false,
+            vscode_settings: None,
         },
         true,
     )
@@ -329,6 +331,8 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
             config_dir: Some(directory.clone()),
             wake: false,
             wake_socket: None,
+            vscode: false,
+            vscode_settings: None,
         },
         false,
     )

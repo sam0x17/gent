@@ -544,6 +544,7 @@ async fn execute(cli: Cli) -> Result<()> {
                     | Command::Integration {
                         command: integration::Command::Hook { .. }
                             | integration::Command::ClaudeWake { .. }
+                            | integration::Command::CodexIde(_)
                     }
                     | Command::Cluster {
                         command: Some(ClusterCommand::PairingServe)
@@ -609,6 +610,16 @@ async fn execute(cli: Cli) -> Result<()> {
         contexts::resolve(&root, cli.context.as_deref())?
     };
     gent_daemon::recovery::ensure_active(&home)?;
+    if let Some(Command::Integration {
+        command: integration::Command::CodexIde(args),
+    }) = cli.command
+    {
+        integration::vscode::execute(&home, args).await?;
+        // Tokio's stdin may have an outstanding blocking read when the native
+        // server disconnects. Stdout has been flushed; do not wait for that read
+        // at runtime shutdown or leave the extension's child process hanging.
+        std::process::exit(0);
+    }
     if let Some(Command::Auth { command }) = cli.command {
         let status_only = matches!(command, None | Some(auth::Command::Status));
         let output = auth::execute(&home, command.unwrap_or(auth::Command::Status)).await?;

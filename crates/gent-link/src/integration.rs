@@ -3,6 +3,7 @@
 pub(crate) mod claude_wake;
 mod install;
 pub(crate) mod runtime;
+pub(crate) mod vscode;
 pub(crate) mod wake;
 use anyhow::{Context, Result, ensure};
 use clap::{Subcommand, ValueEnum};
@@ -92,11 +93,15 @@ pub enum Command {
         #[arg(long)]
         config_dir: PathBuf,
     },
+    /// Installed VS Code transport. The extension owns all input and approvals.
+    #[command(hide = true)]
+    CodexIde(vscode::Args),
 }
 
 pub fn execute(home: &Path, command: Command) -> Result<Value> {
     match command {
         Command::ClaudeWake { .. }
+        | Command::CodexIde(_)
         | Command::ClaudeWakeGuard { .. }
         | Command::Start(_)
         | Command::Status { live: true, .. } => {

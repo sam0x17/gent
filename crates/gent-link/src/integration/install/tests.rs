@@ -20,6 +20,7 @@ fn fixture(host: Host) -> (tempfile::TempDir, Layout, Spec) {
         binary: root.join("gent"),
         wake_socket: None,
         claude_wake: None,
+        codex_ide: None,
     };
     (temp, layout, spec)
 }
@@ -34,6 +35,117 @@ fn get(path: &Path) -> String {
 fn enable_claude(spec: &mut Spec) {
     let cfg = config::initialize(&spec.home, "claude-install").unwrap();
     spec.claude_wake = Some(claude_wake::Installation::new(&cfg));
+}
+
+fn enable_ide(layout: &Layout, spec: &mut Spec) -> PathBuf {
+    let settings = layout.directory.join("vscode-settings.json");
+    spec.wake_socket = Some(layout.wake_socket().unwrap());
+    spec.codex_ide = Some(vscode::Installation::new(settings.clone()));
+    settings
+}
+
+#[test]
+fn vscode_comments_user_settings_and_ownership_survive_install_move_and_removal() {
+    let (_temp, layout, mut spec) = fixture(Host::Codex);
+    let settings = enable_ide(&layout, &mut spec);
+    let original = "// user preferences\n{\n  \"window.zoomLevel\": 2, // keep\n  \"private\": \"never-journal-this\",\n}\n";
+    put(&settings, original);
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    let installed = get(&settings);
+    assert!(installed.contains("// user preferences") && installed.contains("// keep"));
+    assert!(installed.contains("never-journal-this"));
+    assert!(!get(&layout.record()).contains("never-journal-this"));
+    assert_eq!(
+        fs::metadata(layout.ide_launcher()).unwrap().mode() & 0o777,
+        0o700
+    );
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    assert_eq!(get(&settings), installed);
+    let moved = settings.with_file_name("another-profile.json");
+    spec.codex_ide.as_mut().unwrap().settings = moved.clone();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    assert!(
+        document::VscodeDocument::parse(Some(&get(&settings)))
+            .unwrap()
+            .entry
+            .is_none()
+    );
+    assert!(get(&settings).contains("never-journal-this"));
+    assert!(get(&moved).contains("chatgpt.cliExecutable"));
+    mutate(&layout, &spec.home, None).unwrap();
+    assert!(!layout.ide_launcher().exists());
+    assert!(
+        document::VscodeDocument::parse(Some(&get(&moved)))
+            .unwrap()
+            .entry
+            .is_none()
+    );
+}
+
+#[test]
+fn vscode_refuses_foreign_overrides_malformed_jsonc_and_edited_launchers_before_writes() {
+    let (_temp, layout, mut spec) = fixture(Host::Codex);
+    let settings = enable_ide(&layout, &mut spec);
+    for original in [
+        r#"{"chatgpt.cliExecutable":"/user/custom-codex"}"#,
+        r#"{"x":1,"x":2}"#,
+        r#"{"a":1 "b":2}"#,
+        r#"{'private-secret': 42}"#,
+    ] {
+        put(&settings, original);
+        assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
+        assert_eq!(get(&settings), original);
+        assert!(
+            !layout.server.exists() && !layout.ide_launcher().exists() && !layout.record().exists()
+        );
+    }
+    put(&settings, "{}");
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    let before = get(&settings);
+    put(&layout.ide_launcher(), "user edits");
+    assert!(mutate(&layout, &spec.home, None).is_err());
+    assert_eq!(get(&settings), before);
+    assert_eq!(get(&layout.ide_launcher()), "user edits");
+}
+
+#[test]
+fn vscode_install_update_and_uninstall_recover_every_partial_file_transition() {
+    for operation in 0..3 {
+        for completed in 0..4 {
+            let (_temp, layout, mut spec) = fixture(Host::Codex);
+            let settings = enable_ide(&layout, &mut spec);
+            put(&settings, "{\"user\":true,}\n");
+            if operation != 0 {
+                mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+            }
+            let desired = if operation == 2 {
+                None
+            } else {
+                Some(Spec {
+                    binary: spec.binary.with_file_name("new ' $binary"),
+                    ..spec.clone()
+                })
+            };
+            let (snapshot, mut state) = layout.read().unwrap();
+            let edits = layout
+                .edits(state.installed.as_ref(), desired.as_ref(), false, true)
+                .unwrap();
+            state.pending = Some(Transition {
+                after: desired.clone(),
+            });
+            save(&snapshot, &state).unwrap();
+            for edit in edits.into_iter().take(completed) {
+                edit.apply().unwrap();
+            }
+            recover(&layout).unwrap();
+            assert_eq!(layout.read().unwrap().1.installed, desired);
+            assert!(get(&settings).contains("\"user\":true"));
+            assert_eq!(layout.ide_launcher().exists(), desired.is_some());
+            if desired.is_some() {
+                assert!(Snapshot::read(&layout.ide_launcher()).unwrap().executable());
+            }
+        }
+    }
 }
 
 #[test]

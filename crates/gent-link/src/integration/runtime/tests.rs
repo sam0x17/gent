@@ -28,6 +28,8 @@ async fn runtime_checks_refuse_absent_polling_foreign_and_conflicting_installs_w
         config_dir: Some(dir.clone()),
         wake,
         wake_socket: socket,
+        vscode: false,
+        vscode_settings: None,
     };
     install::change(&home, options(false, None), true).unwrap();
     assert!(
@@ -73,6 +75,8 @@ async fn existing_codex_is_only_probed_and_invalid_responses_never_launch_a_repl
                 config_dir: Some(dir.clone()),
                 wake: true,
                 wake_socket: None,
+                vscode: false,
+                vscode_settings: None,
             },
             true,
         )

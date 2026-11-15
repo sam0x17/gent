@@ -172,6 +172,41 @@ async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) ->
     Ok(())
 }
 
+/// Authenticate a local endpoint before any protocol data is sent.
+pub(crate) async fn connect_socket(
+    path: &Path,
+    limit: usize,
+) -> Result<WebSocketStream<UnixStream>> {
+    // Codex uses a rendezvous symlink to a private socket. Resolve it, then
+    // validate the endpoint and the connected OS peer, not a claimed UUID.
+    let path = std::fs::canonicalize(path).context("Codex socket unavailable")?;
+    let meta = std::fs::symlink_metadata(&path)?;
+    let uid = rustix::process::geteuid().as_raw();
+    ensure!(
+        meta.file_type().is_socket() && meta.uid() == uid && meta.mode() & 0o077 == 0,
+        "Codex socket must be private and owned by the current user"
+    );
+    let parent = std::fs::metadata(path.parent().context("missing socket parent")?)?;
+    ensure!(
+        parent.is_dir() && parent.uid() == uid && parent.mode() & 0o077 == 0,
+        "Codex socket directory must be private and owned by the current user"
+    );
+    let stream = tokio::time::timeout(RPC_TIMEOUT, UnixStream::connect(path)).await??;
+    ensure!(
+        stream.peer_cred()?.uid() == uid,
+        "Codex socket peer belongs to another user"
+    );
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(limit))
+        .max_frame_size(Some(limit));
+    let (socket, _) = tokio::time::timeout(
+        RPC_TIMEOUT,
+        tokio_tungstenite::client_async_with_config("ws://localhost/", stream, Some(config)),
+    )
+    .await??;
+    Ok(socket)
+}
+
 struct Host {
     socket: WebSocketStream<UnixStream>,
     sequence: u64,
@@ -208,33 +243,7 @@ impl Host {
     }
 
     async fn connect(path: &Path) -> Result<Self> {
-        // Codex uses a rendezvous symlink to a private socket. Resolve it, then
-        // validate the endpoint and the connected OS peer, not a claimed UUID.
-        let path = std::fs::canonicalize(path).context("Codex socket unavailable")?;
-        let meta = std::fs::symlink_metadata(&path)?;
-        let uid = rustix::process::geteuid().as_raw();
-        ensure!(
-            meta.file_type().is_socket() && meta.uid() == uid && meta.mode() & 0o077 == 0,
-            "Codex socket must be private and owned by the current user"
-        );
-        let parent = std::fs::metadata(path.parent().context("missing socket parent")?)?;
-        ensure!(
-            parent.is_dir() && parent.uid() == uid && parent.mode() & 0o077 == 0,
-            "Codex socket directory must be private and owned by the current user"
-        );
-        let stream = tokio::time::timeout(RPC_TIMEOUT, UnixStream::connect(path)).await??;
-        ensure!(
-            stream.peer_cred()?.uid() == uid,
-            "Codex socket peer belongs to another user"
-        );
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(1024 * 1024))
-            .max_frame_size(Some(1024 * 1024));
-        let (socket, _) = tokio::time::timeout(
-            RPC_TIMEOUT,
-            tokio_tungstenite::client_async_with_config("ws://localhost/", stream, Some(config)),
-        )
-        .await??;
+        let socket = connect_socket(path, 1024 * 1024).await?;
         let mut host = Self {
             socket,
             sequence: 0,

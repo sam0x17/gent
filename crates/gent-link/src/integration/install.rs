@@ -2,7 +2,7 @@
 mod document;
 use crate::managed_file as files;
 
-use super::{Host, claude_wake, render_configuration};
+use super::{Host, claude_wake, render_configuration, vscode};
 use anyhow::{Context, Result, ensure};
 use document::Document;
 use files::{Snapshot, normalize};
@@ -23,6 +23,12 @@ pub struct Args {
     /// Opt into queued Codex wake through an existing local app-server socket.
     #[arg(long)]
     pub wake_socket: Option<PathBuf>,
+    /// Experimental Codex VS Code connection to the selected shared server.
+    #[arg(long)]
+    pub vscode: bool,
+    /// VS Code user settings JSONC (defaults to the stable Code installation).
+    #[arg(long, requires = "vscode")]
+    pub vscode_settings: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -34,9 +40,18 @@ struct Spec {
     wake_socket: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claude_wake: Option<claude_wake::Installation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_ide: Option<vscode::Installation>,
 }
 impl Spec {
     fn fragments(&self, host: Host) -> Result<Value> {
+        if let Some(ide) = &self.codex_ide {
+            ensure!(
+                host == Host::Codex && self.wake_socket.is_some() && self.claude_wake.is_none(),
+                "Codex IDE integration requires queued Codex delivery"
+            );
+            ide.validate()?;
+        }
         if let Some(wake) = &self.claude_wake {
             ensure!(
                 host == Host::ClaudeCode && self.wake_socket.is_none(),
@@ -113,7 +128,107 @@ pub(super) fn codex_runtime_target(
     Ok((layout.directory, socket.clone()))
 }
 
+pub(super) fn codex_ide_target(home: &Path, directory: &Path, id: &str) -> Result<PathBuf> {
+    let (directory, socket) = codex_runtime_target(home, Some(directory.into()), false)?;
+    let effective = Layout::resolve(Host::Codex, None)?;
+    ensure!(
+        effective.directory == directory,
+        "VS Code uses a different CODEX_HOME; reload it with the selected host directory"
+    );
+    let layout = Layout::resolve(Host::Codex, Some(directory))?;
+    let (snapshot, state) = layout.read()?;
+    ensure!(
+        state.pending.is_none(),
+        "Codex integration update is pending"
+    );
+    let ide = state
+        .installed
+        .as_ref()
+        .and_then(|s| s.codex_ide.as_ref())
+        .context("Codex IDE integration is not installed")?;
+    ensure!(
+        ide.id == id,
+        "Codex IDE launcher belongs to an old installation"
+    );
+    snapshot.verify()?;
+    Ok(socket)
+}
+
 impl Layout {
+    fn ide_launcher(&self) -> PathBuf {
+        self.directory.join("gent-vscode-codex")
+    }
+    fn ide_edits(
+        &self,
+        before: Option<&Spec>,
+        after: Option<&Spec>,
+        recovery: bool,
+        check_enabled: bool,
+    ) -> Result<Vec<Edit>> {
+        let mut edits = Vec::new();
+        let installations = [
+            before.and_then(|s| s.codex_ide.as_ref()),
+            after.and_then(|s| s.codex_ide.as_ref()),
+        ];
+        if installations.iter().all(Option::is_none) {
+            return Ok(edits);
+        }
+        let launcher = self.ide_launcher();
+        let generated = json!(launcher);
+        let paths: std::collections::BTreeSet<_> = installations
+            .iter()
+            .flatten()
+            .map(|v| &v.settings)
+            .collect();
+        for path in paths {
+            ensure!(
+                ![&self.server, &self.record(), &self.lock(), &launcher].contains(&path),
+                "VS Code settings overlap Gent-managed files"
+            );
+            let snapshot = Snapshot::read(path)?;
+            let doc = document::VscodeDocument::parse(snapshot.text.as_deref())?;
+            let source = installations[0]
+                .filter(|i| &i.settings == path)
+                .map(|_| &generated);
+            let target = installations[1]
+                .filter(|i| &i.settings == path)
+                .map(|_| &generated);
+            matches_entry(doc.entry.as_ref(), source, target, recovery, path)?;
+            edits.push(Edit {
+                snapshot,
+                text: Some(doc.set(target)?),
+                executable: false,
+            });
+        }
+        let script = |spec: Option<&Spec>| -> Result<Option<String>> {
+            spec.and_then(|s| s.codex_ide.as_ref().map(|ide| (s, ide)))
+                .map(|(s, ide)| ide.launcher(&s.home, &s.binary, &self.directory))
+                .transpose()
+        };
+        let source = script(before)?;
+        let target = script(after)?;
+        let snapshot = Snapshot::read(&launcher)?;
+        snapshot.private()?;
+        ensure!(
+            snapshot.text == source || (recovery && snapshot.text == target),
+            "Codex IDE launcher is unowned, missing or edited"
+        );
+        ensure!(
+            !check_enabled || recovery || source.is_none() || snapshot.executable(),
+            "Codex IDE launcher must have private executable permissions (0700)"
+        );
+        // Install the executable before exposing its path in the editor. The
+        // pending journal rejects use until every edit is committed.
+        edits.insert(
+            0,
+            Edit {
+                snapshot,
+                text: target,
+                executable: true,
+            },
+        );
+        Ok(edits)
+    }
     fn guard_fragment(&self, spec: Option<&Spec>) -> Result<Option<Value>> {
         let Some(spec) = spec.filter(|s| s.claude_wake.as_ref().is_some_and(|w| w.version >= 2))
         else {
@@ -274,6 +389,7 @@ impl Layout {
         recovery: bool,
         check_enabled: bool,
     ) -> Result<Vec<Edit>> {
+        let mut ide_edits = self.ide_edits(before, after, recovery, check_enabled)?;
         let manage_plugin = before.is_some_and(|s| s.claude_wake.is_some())
             || after.is_some_and(|s| s.claude_wake.is_some());
         let plugin_before = self.plugin_files(before)?;
@@ -301,6 +417,7 @@ impl Layout {
         let mut edits = vec![Edit {
             text: Some(doc.set_server(target)?),
             snapshot,
+            executable: false,
         }];
         if let Some(path) = &self.settings {
             let snapshot = Snapshot::read(path)?;
@@ -335,6 +452,7 @@ impl Layout {
             edits.push(Edit {
                 text: Some(text),
                 snapshot,
+                executable: false,
             });
         }
         if self.host == Host::ClaudeCode && manage_plugin {
@@ -348,9 +466,11 @@ impl Layout {
                 edits.push(Edit {
                     snapshot,
                     text: after,
+                    executable: false,
                 });
             }
         }
+        edits.append(&mut ide_edits);
         Ok(edits)
     }
 }
@@ -388,6 +508,7 @@ struct Transition {
 struct Edit {
     snapshot: Snapshot,
     text: Option<String>,
+    executable: bool,
 }
 impl Edit {
     fn apply(&self) -> Result<()> {
@@ -397,6 +518,8 @@ impl Edit {
         // Uninstalling an absent integration must not create empty host files.
         if self.snapshot.text.is_none() && matches!(text.trim(), "" | "{}") {
             self.snapshot.verify()
+        } else if self.executable {
+            self.snapshot.write_executable(text)
         } else {
             self.snapshot.write(text)
         }
@@ -447,8 +570,16 @@ fn recover(layout: &Layout) -> Result<()> {
 
 pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     ensure!(
-        install || (!args.wake && args.wake_socket.is_none()),
-        "--wake and --wake-socket apply only to installation"
+        install
+            || (!args.wake
+                && args.wake_socket.is_none()
+                && !args.vscode
+                && args.vscode_settings.is_none()),
+        "wake and VS Code options apply only to installation"
+    );
+    ensure!(
+        !args.vscode || (args.host == Host::Codex && (args.wake || args.wake_socket.is_some())),
+        "--vscode requires Codex with --wake or --wake-socket"
     );
     let home = normalize(home)?;
     let layout = Layout::resolve(args.host, args.config_dir)?;
@@ -464,7 +595,24 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
             binary: std::fs::canonicalize(std::env::current_exe()?)?,
             wake_socket,
             claude_wake: None,
+            codex_ide: None,
         };
+        if args.vscode {
+            let settings = vscode::settings_path(args.vscode_settings)?;
+            let previous = layout
+                .read()?
+                .1
+                .installed
+                .filter(|s| {
+                    s.home == desired.home
+                        && s.binary == desired.binary
+                        && s.wake_socket == desired.wake_socket
+                })
+                .and_then(|s| s.codex_ide)
+                .filter(|ide| ide.settings == settings);
+            desired.codex_ide =
+                Some(previous.unwrap_or_else(|| vscode::Installation::new(settings)));
+        }
         if args.wake && args.host == Host::ClaudeCode {
             let previous = layout.read()?.1.installed;
             let existing = previous
@@ -487,6 +635,9 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     let mut result = inspect(&layout, &home)?;
     result["action"] = if install { "installed" } else { "uninstalled" }.into();
     result["next"] = "Restart the host's Gent MCP connection or open a new host session to load these user settings.".into();
+    if install && args.vscode {
+        result["next"] = "Start the selected server with gent integration start codex, then reload VS Code and open or explicitly resume a chat. The experimental route uses the extension's development-only executable override; existing embedded chats are not moved automatically.".into();
+    }
     Ok(result)
 }
 
@@ -537,6 +688,17 @@ fn inspect(layout: &Layout, home: &Path) -> Result<Value> {
         "/mcpServers/gent"
     };
     let mut exact = doc.server()? == fragments.as_ref().and_then(|f| f.pointer(pointer));
+    if let Some(spec) = &state.installed
+        && let Some(ide) = &spec.codex_ide
+    {
+        let settings = Snapshot::read(&ide.settings)?;
+        let document = document::VscodeDocument::parse(settings.text.as_deref())?;
+        let launcher = Snapshot::read(&layout.ide_launcher())?;
+        exact &= document.entry == Some(json!(layout.ide_launcher()))
+            && launcher.text == Some(ide.launcher(&spec.home, &spec.binary, &layout.directory)?)
+            && launcher.executable();
+        result["vscode"] = json!({"experimental":true,"settings":ide.settings,"launcher":layout.ide_launcher(),"installation_id":ide.id});
+    }
     if state
         .installed
         .as_ref()

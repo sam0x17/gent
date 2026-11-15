@@ -22,6 +22,8 @@ gent doctor
 
 Linux uses systemd user services; macOS uses LaunchAgents. This setup needs a working user service session. Headless systems without one can run `gent daemon run` in the foreground. Shell setup also supports `--shell bash` and `--shell fish`. Integration installation preserves unrelated host settings. New agents remain subject to the cluster's permission defaults; installing the connector does not grant access to other chats.
 
+Automatic host delivery is an optional [separate setup](wake.md). Codex's experimental [VS Code route](wake.md#vs-code-delivery) adds `--vscode` to its `--wake` installation and connects the editor to the native background server. Read the tested versions and remaining checks before enabling that route.
+
 For a separate install prefix, add `--root /absolute/install/prefix` to `cargo install`, then use its `bin/gent`. The daemon records the installed executable's absolute path. Keep that executable available while its service or connector entries are installed. Use `--home /absolute/state/path` to isolate Gent state for a trial. Commands with `--cluster` select a profile within that state.
 
 ## Private source archives
