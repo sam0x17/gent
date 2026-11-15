@@ -75,6 +75,34 @@ pub(super) fn default_wake_socket(host: Host, config_dir: Option<PathBuf>) -> Re
 }
 
 impl Layout {
+    fn guard_fragment(&self, spec: Option<&Spec>) -> Result<Option<Value>> {
+        let Some(spec) = spec.filter(|s| s.claude_wake.as_ref().is_some_and(|w| w.version >= 2))
+        else {
+            return Ok(None);
+        };
+        let args = [
+            spec.binary.to_str().context("invalid executable path")?,
+            "--home",
+            spec.home.to_str().context("invalid Gent home")?,
+            "--json",
+            "integration",
+            "claude-wake-guard",
+            "--config-dir",
+            self.directory.to_str().context("invalid host directory")?,
+        ];
+        let command = format!(
+            "{}{} || exit 2",
+            claude_wake::GUARD_MARKER,
+            args.into_iter()
+                .map(super::shell_arg)
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        Ok(Some(
+            json!({"hooks":[{"type":"command","command":command,"timeout":35}]}),
+        ))
+    }
+
     fn plugin_files(&self, spec: Option<&Spec>) -> Result<Vec<(PathBuf, Option<String>)>> {
         let root = self.directory.join("skills/gent-wake");
         let wake = spec.and_then(|s| s.claude_wake.as_ref());
@@ -209,6 +237,8 @@ impl Layout {
             || after.is_some_and(|s| s.claude_wake.is_some());
         let plugin_before = self.plugin_files(before)?;
         let plugin_after = self.plugin_files(after)?;
+        let guard_before = self.guard_fragment(before)?;
+        let guard_after = self.guard_fragment(after)?;
         let before = before.map(|s| s.fragments(self.host)).transpose()?;
         let after = after.map(|s| s.fragments(self.host)).transpose()?;
         let pointer = if self.host == Host::Codex {
@@ -249,8 +279,20 @@ impl Layout {
                 recovery,
                 path,
             )?;
+            let mut text = doc.set_hook(target)?;
+            if guard_before.is_some() || guard_after.is_some() {
+                let doc = Document::parse(Some(&text), Host::ClaudeCode)?;
+                matches_entry(
+                    doc.wake_guard()?,
+                    guard_before.as_ref(),
+                    guard_after.as_ref(),
+                    recovery,
+                    path,
+                )?;
+                text = doc.set_wake_guard(guard_after.as_ref())?;
+            }
             edits.push(Edit {
-                text: Some(doc.set_hook(target)?),
+                text: Some(text),
                 snapshot,
             });
         }
@@ -393,6 +435,7 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
                 .filter(|w| {
                     w.cluster_id == cfg.cluster.id
                         && w.node_id == cfg.node.id
+                        && w.version == 2
                         && w.module == claude_wake::MODULE
                 });
             desired.claude_wake =
@@ -531,6 +574,10 @@ pub(super) fn claude_wake(
         .as_ref()
         .context("Claude automatic delivery is disabled")?;
     ensure!(wake.id == id, "Claude wake installation changed");
+    ensure!(
+        wake.version == 2,
+        "Claude wake needs the retained command guard; reinstall the integration and restart Claude"
+    );
     let edits = layout.edits(Some(spec), Some(spec), false, true)?;
     for edit in edits {
         edit.snapshot.verify()?;

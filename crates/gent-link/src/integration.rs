@@ -80,11 +80,19 @@ pub enum Command {
         #[arg(long)]
         config_dir: PathBuf,
     },
+    /// Retained Claude UserPromptSubmit command guard. For host settings only.
+    #[command(hide = true)]
+    ClaudeWakeGuard {
+        #[arg(long)]
+        config_dir: PathBuf,
+    },
 }
 
 pub fn execute(home: &Path, command: Command) -> Result<Value> {
     match command {
-        Command::ClaudeWake { .. } => anyhow::bail!("native bridge requires async dispatch"),
+        Command::ClaudeWake { .. } | Command::ClaudeWakeGuard { .. } => {
+            anyhow::bail!("native bridge requires async dispatch")
+        }
         Command::Status { host, config_dir } => install::status(home, host, config_dir),
         Command::Install(args) => install::change(home, args, true),
         Command::Uninstall(args) => install::change(home, args, false),

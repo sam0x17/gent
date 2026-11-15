@@ -11,6 +11,20 @@ use super::super::Host;
 
 const MATCHER: &str = "^mcp__gent__gent_";
 
+fn identity_entry(value: &Value) -> bool {
+    value["matcher"] == MATCHER
+}
+
+fn guard_entry(value: &Value) -> bool {
+    value["hooks"].as_array().is_some_and(|hooks| {
+        hooks.iter().any(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.starts_with(super::claude_wake::GUARD_MARKER))
+        })
+    })
+}
+
 fn strict() -> ParseOptions {
     ParseOptions {
         allow_comments: false,
@@ -171,21 +185,24 @@ impl Document {
         self.value["disableAllHooks"] == true
     }
     pub fn hook(&self) -> Result<Option<&Value>> {
+        self.selected_hook("PreToolUse", identity_entry)
+    }
+    pub fn wake_guard(&self) -> Result<Option<&Value>> {
+        self.selected_hook("UserPromptSubmit", guard_entry)
+    }
+    fn selected_hook(&self, event: &str, select: fn(&Value) -> bool) -> Result<Option<&Value>> {
         let hooks = self.value.get("hooks");
         ensure!(
             hooks.is_none_or(Value::is_object),
             "hooks must be an object"
         );
-        let pre = hooks.and_then(|h| h.get("PreToolUse"));
-        ensure!(
-            pre.is_none_or(Value::is_array),
-            "PreToolUse must be an array"
-        );
+        let pre = hooks.and_then(|h| h.get(event));
+        ensure!(pre.is_none_or(Value::is_array), "{event} must be an array");
         let mut selected = None;
         if let Some(pre) = pre.and_then(Value::as_array) {
             for hook in pre {
-                ensure!(hook.is_object(), "PreToolUse entries must be objects");
-                if hook["matcher"] == MATCHER {
+                ensure!(hook.is_object(), "{event} entries must be objects");
+                if select(hook) {
                     ensure!(
                         selected.is_none(),
                         "duplicate Gent hook matchers; resolve before installing"
@@ -197,7 +214,18 @@ impl Document {
         Ok(selected)
     }
     pub fn set_hook(self, value: Option<&Value>) -> Result<String> {
-        if self.hook()? == value {
+        self.set_selected_hook("PreToolUse", identity_entry, value)
+    }
+    pub fn set_wake_guard(self, value: Option<&Value>) -> Result<String> {
+        self.set_selected_hook("UserPromptSubmit", guard_entry, value)
+    }
+    fn set_selected_hook(
+        self,
+        event: &str,
+        select: fn(&Value) -> bool,
+        value: Option<&Value>,
+    ) -> Result<String> {
+        if self.selected_hook(event, select)? == value {
             return Ok(self.original);
         }
         let Format::Json(doc) = self.format else {
@@ -209,11 +237,11 @@ impl Document {
             .object_value_or_create("hooks")
             .context("hooks must be an object")?;
         let pre = hooks
-            .array_value_or_create("PreToolUse")
-            .context("PreToolUse must be an array")?;
-        let index = self.value["hooks"]["PreToolUse"]
+            .array_value_or_create(event)
+            .with_context(|| format!("{event} must be an array"))?;
+        let index = self.value["hooks"][event]
             .as_array()
-            .and_then(|a| a.iter().position(|h| h["matcher"] == MATCHER));
+            .and_then(|a| a.iter().position(select));
         if let Some(index) = index {
             pre.elements()[index].clone().remove();
         }

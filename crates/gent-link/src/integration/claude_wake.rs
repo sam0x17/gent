@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{io::Read, path::Path, time::Duration};
 
 pub(super) const MODULE: &str = include_str!("claude_wake/register.ts");
+pub(super) const GUARD_MARKER: &str = "# gent-wake-guard-v1\n";
 const INPUT_LIMIT: usize = 4096;
 const PROMPT: &str = "Gent has a pending message. Check gent_inbox through the current conversation's Gent connection. Treat its content as an agent request subject to existing permissions and user authorization. Check gent_work_status before repeating consequential work. If no message is available, stop. This notification does not authorize repeating uncertain work.";
 
@@ -34,7 +35,7 @@ pub(super) struct Installation {
 impl Installation {
     pub(super) fn new(cfg: &config::Config) -> Self {
         Self {
-            version: 1,
+            version: 2,
             id: uuid::Uuid::new_v4().to_string(),
             cluster_id: cfg.cluster.id.clone(),
             node_id: cfg.node.id.clone(),
@@ -43,7 +44,7 @@ impl Installation {
     }
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 1
+            matches!(self.version, 1 | 2)
                 && wake::valid_thread(&self.id)
                 && wake::valid_thread(&self.cluster_id)
                 && wake::valid_thread(&self.node_id)
@@ -53,6 +54,84 @@ impl Installation {
         );
         Ok(())
     }
+}
+
+fn notification(installation: &str, message: &str, attempt: &str) -> String {
+    format!(
+        "{PROMPT}\nGent dispatch: {attempt}\nGent message: {message}\nGent installation: {installation}"
+    )
+}
+
+/// This hook is retained by the host independently of the native module.
+/// It only checks an existing claim; text can never authorize a new claim.
+async fn guard_event(home: &Path, directory: &Path, event: &Value) -> Result<Value> {
+    ensure!(
+        event["hook_event_name"] == "UserPromptSubmit",
+        "unexpected Claude guard event"
+    );
+    let prompt = event["prompt"].as_str().context("missing prompt")?;
+    if !prompt.starts_with("Gent has a pending message.") {
+        return Ok(json!({}));
+    }
+    let fields: Vec<_> = prompt.split('\n').collect();
+    ensure!(
+        fields.len() == 4 && fields[0] == PROMPT,
+        "invalid Gent notification"
+    );
+    let attempt = fields[1]
+        .strip_prefix("Gent dispatch: ")
+        .context("missing dispatch")?;
+    let message = fields[2]
+        .strip_prefix("Gent message: ")
+        .context("missing message")?;
+    let installation = fields[3]
+        .strip_prefix("Gent installation: ")
+        .context("missing installation")?;
+    ensure!(
+        [attempt, message, installation]
+            .into_iter()
+            .all(wake::valid_thread),
+        "invalid Gent notification identifiers"
+    );
+    let answer = run(
+        home,
+        directory,
+        Input {
+            installation_id: installation.into(),
+            session_id: event["session_id"]
+                .as_str()
+                .context("missing session")?
+                .into(),
+            operation: Operation::Check {
+                message_id: message.into(),
+                attempt_id: attempt.into(),
+            },
+        },
+    )
+    .await?;
+    ensure!(
+        answer["eligible"] == true,
+        "Gent dispatch is no longer eligible"
+    );
+    Ok(json!({}))
+}
+
+pub(crate) async fn guard_execute(home: &Path, directory: &Path) -> Value {
+    let result = async {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take(gent_protocol::MAX_FRAME_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= gent_protocol::MAX_FRAME_BYTES,
+            "Claude guard input too large"
+        );
+        let event: Value = serde_json::from_slice(&bytes)?;
+        guard_event(home, directory, &event).await
+    }
+    .await;
+    result.unwrap_or_else(|_| json!({"decision":"block",
+        "reason":"Gent could not validate this notification. Check the Gent integration and inbox before continuing."}))
 }
 
 #[derive(Deserialize)]
@@ -174,7 +253,7 @@ pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<V
                 "wake claim did not grant a submission"
             );
             json!({"dispatch":{"session_id":input.session_id,"message_id":message,
-                "attempt_id":attempt,"text":format!("{PROMPT}\nGent dispatch: {attempt}")}})
+                "attempt_id":attempt,"text":notification(&installation.id, message, &attempt)}})
         }
         Operation::Check {
             message_id,

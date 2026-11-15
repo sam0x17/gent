@@ -30,6 +30,29 @@ fn path(home: &Path, cfg: &config::Config, session: &str) -> PathBuf {
     scope_path(home, cfg, Host::ClaudeCode).join(format!("{}.key", session_key(session, None)))
 }
 
+#[tokio::test]
+async fn retained_guard_passes_human_input_without_state_but_rejects_broken_notifications() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("missing-home");
+    let directory = root.path().join("missing-host");
+    let mut event = json!({"hook_event_name":"UserPromptSubmit", "prompt":"Please continue."});
+    assert_eq!(
+        guard_event(&home, &directory, &event).await.unwrap(),
+        json!({})
+    );
+    event["prompt"] = format!("{PROMPT}\nGent dispatch: legacy-attempt").into();
+    assert!(guard_event(&home, &directory, &event).await.is_err());
+    event["prompt"] = notification(
+        &uuid::Uuid::new_v4().to_string(),
+        &uuid::Uuid::now_v7().to_string(),
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .into();
+    event["session_id"] = uuid::Uuid::new_v4().to_string().into();
+    assert!(guard_event(&home, &directory, &event).await.is_err());
+    assert!(!home.exists() && !directory.exists());
+}
+
 #[test]
 fn read_only_bridge_keeps_live_credentials_and_parent_child_sessions_separate() {
     let home = home();
@@ -172,9 +195,14 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
             .collect(),
         ..Default::default()
     };
-    crate::owner(home.path(), OwnerOp::SetPolicy { policy })
-        .await
-        .unwrap();
+    crate::owner(
+        home.path(),
+        OwnerOp::SetPolicy {
+            policy: policy.clone(),
+        },
+    )
+    .await
+    .unwrap();
     let message = rpc(
         home.path(),
         &sender,
@@ -195,6 +223,49 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
     assert!(!answer.to_string().contains(&key));
     assert_eq!(answer["dispatch"]["message_id"], message["message_id"]);
     let dispatch = &answer["dispatch"];
+    let guard = json!({"hook_event_name":"UserPromptSubmit", "session_id":session,
+        "prompt":dispatch["text"]});
+    assert_eq!(
+        guard_event(home.path(), &directory, &guard).await.unwrap(),
+        json!({})
+    );
+    for field in ["session_id", "installation_id", "message_id", "attempt_id"] {
+        let mut changed = guard.clone();
+        let replacement = uuid::Uuid::new_v4().to_string();
+        if field == "session_id" {
+            changed[field] = replacement.into();
+        } else {
+            let original = if field == "installation_id" {
+                &generation
+            } else {
+                dispatch[field].as_str().unwrap()
+            };
+            changed["prompt"] = guard["prompt"]
+                .as_str()
+                .unwrap()
+                .replace(original, &replacement)
+                .into();
+        }
+        assert!(
+            guard_event(home.path(), &directory, &changed)
+                .await
+                .is_err(),
+            "accepted changed {field}"
+        );
+    }
+    crate::owner(
+        home.path(),
+        OwnerOp::SetPolicy {
+            policy: Policy::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(guard_event(home.path(), &directory, &guard).await.is_err());
+    crate::owner(home.path(), OwnerOp::SetPolicy { policy })
+        .await
+        .unwrap();
+    assert!(guard_event(home.path(), &directory, &guard).await.is_ok());
     let check = || Operation::Check {
         message_id: dispatch["message_id"].as_str().unwrap().into(),
         attempt_id: dispatch["attempt_id"].as_str().unwrap().into(),
@@ -237,6 +308,7 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
         run(home.path(), &directory, input(check())).await.unwrap()["eligible"],
         false
     );
+    assert!(guard_event(home.path(), &directory, &guard).await.is_err());
     let saved = crate::owner(
         home.path(),
         OwnerOp::WakeShow {
@@ -262,6 +334,7 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
     )
     .unwrap();
     assert!(run(home.path(), &directory, input(report())).await.is_err());
+    assert!(guard_event(home.path(), &directory, &guard).await.is_err());
     assert!(
         !directory
             .join("skills/gent-wake/hooks/register.ts")

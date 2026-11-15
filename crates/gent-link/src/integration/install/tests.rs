@@ -37,6 +37,51 @@ fn enable_claude(spec: &mut Spec) {
 }
 
 #[test]
+fn retained_guard_upgrades_legacy_installs_preserves_other_hooks_and_fails_closed() {
+    let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
+    enable_claude(&mut spec);
+    let current = spec.clone();
+    spec.claude_wake.as_mut().unwrap().version = 1;
+    let settings = layout.settings.as_ref().unwrap();
+    let other = json!({"hooks":[{"type":"command", "command":"echo user-hook"}]});
+    put(
+        settings,
+        &json!({"hooks":{"UserPromptSubmit":[other]}}).to_string(),
+    );
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    assert!(
+        Document::parse(Some(&get(settings)), Host::ClaudeCode)
+            .unwrap()
+            .wake_guard()
+            .unwrap()
+            .is_none()
+    );
+    mutate(&layout, &spec.home, Some(current.clone())).unwrap();
+    let doc = Document::parse(Some(&get(settings)), Host::ClaudeCode).unwrap();
+    let guard = doc.wake_guard().unwrap().unwrap();
+    let command = guard["hooks"][0]["command"].as_str().unwrap();
+    // Missing runtime must use Claude's blocking exit status, not its ordinary
+    // hook-error path. The fixture's home contains a quote and a dollar sign.
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", command])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let original = get(settings);
+    let mut value: Value = serde_json::from_str(&original).unwrap();
+    value["hooks"]["UserPromptSubmit"]
+        .as_array_mut()
+        .unwrap()
+        .push(guard.clone());
+    put(settings, &value.to_string());
+    assert!(mutate(&layout, &spec.home, None).is_err());
+    put(settings, &original);
+    mutate(&layout, &spec.home, None).unwrap();
+    let value: Value = serde_json::from_str(&get(settings)).unwrap();
+    assert_eq!(value["hooks"]["UserPromptSubmit"], json!([other]));
+}
+
+#[test]
 fn claude_plugin_installation_preserves_owned_versions_and_revokes_old_helpers() {
     let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
     enable_claude(&mut spec);

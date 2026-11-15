@@ -555,6 +555,17 @@ async fn execute(cli: Cli) -> Result<()> {
         .or_else(|| std::env::var_os("GENT_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".gent")))
         .context("cannot locate home; pass --home")?;
+    // A retained host guard must pass unrelated human input even after Gent
+    // is removed or archived. Its notification path still checks all scope
+    // and recovery guards; errors become a blocking hook response.
+    if let Some(Command::Integration {
+        command: integration::Command::ClaudeWakeGuard { ref config_dir },
+    }) = cli.command
+    {
+        let value = integration::claude_wake::guard_execute(&root, config_dir).await;
+        println!("{}", serde_json::to_string(&value)?);
+        return Ok(());
+    }
     // Archived profile references must never redirect a command to live state.
     gent_daemon::recovery::ensure_active(&root)?;
     if let Some(Command::Doctor(options)) = cli.command {
