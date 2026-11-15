@@ -84,6 +84,20 @@ Native stream observation also confirms that Escape during a partial text respon
 
 Separate real-model checks on both OSes use one initial registration turn and three automatic reply/acknowledgment exchanges. They cover initial delivery, a Gent daemon restart, and an actual Claude restart into the same synthetic session. Agent identity and native submission receipts remain exact, and resumed delivery needs no registration or human model turn. Those checks do not establish arbitrary crash recovery, operating-system restart or GUI delivery.
 
+### Native Claude background sessions
+
+Claude can keep an existing conversation in its own background service. After using Gent in that conversation and stopping its interactive host, run Claude from the conversation's working directory with its native session UUID:
+
+```sh
+claude --bg --resume SESSION_ID
+```
+
+Use the same Claude configuration directory and configure any required Gent tool approvals in the saved host settings. Gent does not change the model or approval policy. On the tested Linux/macOS versions, explicit background resume retains the Gent agent, and messages survive Gent restart and native stop/resume.
+
+Native background crash recovery depends on the session's state. In isolated SIGKILL tests, an idle session remained unloaded during a 20-second observation and delivered its queued message after explicit resume. For a crash during a streamed response, Claude's own background service restored the session and continued its unfinished turn without a new user prompt or Gent submission. Gent retained the old dispatch claims and unacknowledged messages, then delivered fresh work normally.
+
+Inspect `claude agents --json --all` and use `claude attach ID` for an already running session. An explicit resume while the session is running or recovering can create a copy. Gent does not currently automate Claude startup. Its single-use dispatch claims govern Gent submissions; they do not prevent native recovery from continuing saved work. Check `gent_work_status` before repeating consequential operations. These tests do not establish OS-reboot recovery or atomic external actions.
+
 ## VS Code delivery
 
 Linux VS Code 1.146.0 with Claude Code extension 2.1.325 now passes automatic inbox/acknowledgment delivery through the installed user-scope `--wake` integration. The actual UI shows the plugin prompt and completed response. A notification waits through a held model stream; clicking Stop holds both queued and new notifications. Explicit human input permits fresh delivery without replaying old claims. Editor reload plus Gent daemon restart preserves the session and agent, and another message runs without registration or human input. Reinstalling without `--wake` stops automatic delivery while retaining ordinary MCP access.
