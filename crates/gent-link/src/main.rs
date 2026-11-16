@@ -534,7 +534,7 @@ async fn execute(cli: Cli) -> Result<()> {
     let request_id = cli
         .request_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let explicit_context = cli.home.is_some() || cli.context.is_some();
+    let explicit_binding_scope = cli.home.is_some() || cli.context.is_some();
     let root = cli
         .home
         .or_else(|| std::env::var_os("GENT_HOME").map(PathBuf::from))
@@ -635,13 +635,9 @@ async fn execute(cli: Cli) -> Result<()> {
     }) = cli.command
     {
         let status_only = matches!(command, None | Some(service::GatewayCommand::Status));
-        let output = gateway::execute(
-            &home,
-            gateway::Command::Service { command },
-            explicit_context,
-        )
-        .await?
-        .context("missing gateway service result")?;
+        let output = gateway::execute(&home, gateway::Command::Service { command })
+            .await?
+            .context("missing gateway service result")?;
         if cli.json {
             println!("{}", serde_json::to_string(&output)?);
         } else {
@@ -749,16 +745,12 @@ async fn execute(cli: Cli) -> Result<()> {
                     wake_socket,
                 },
         }) => {
-            mcp::run(home, binding, host, wake_socket, explicit_context).await?;
+            mcp::run(home, binding, host, wake_socket, explicit_binding_scope).await?;
             return Ok(());
         }
         Some(Command::Gateway { command }) => {
-            let Some(value) = gateway::execute(
-                &home,
-                command.unwrap_or(gateway::Command::Status),
-                explicit_context,
-            )
-            .await?
+            let Some(value) =
+                gateway::execute(&home, command.unwrap_or(gateway::Command::Status)).await?
             else {
                 return Ok(());
             };

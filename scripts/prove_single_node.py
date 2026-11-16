@@ -46,7 +46,7 @@ def main():
             cfg = tomllib.loads(config.read_text()) if host == 'codex' else json.loads(config.read_text())
             spec = cfg['mcp_servers' if host == 'codex' else 'mcpServers']['gent']
             assert spec['args'][spec['args'].index('--home') + 1] == str(directory)
-            client = Client([spec['command'], *spec['args']], client_name='codex-mcp-client' if host == 'codex' else 'claude-code')
+            client = Client(['env', 'GENT_HOME=' + str(directory), spec['command'], *spec['args'][2:]], client_name='codex-mcp-client' if host == 'codex' else 'claude-code')
             clients.append(client)
             args = {'name': host, 'provider': host}
             if host == 'codex':

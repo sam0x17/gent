@@ -133,9 +133,9 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent gateway clients keys refresh ID --expect-revision N` | Explicitly re-fetch the client's metadata and keys, preserving its callback selection. |
 | `gent gateway run ... --client-metadata ID` | Enable CIMD discovery and bounded runtime metadata/key refresh for an existing signed host. Repeat for additional hosts. |
 | `gent gateway clients list` / `gent gateway clients revoke ID` | Inspect or revoke remote host grants. |
-| `gent gateway run` | Serve Streamable HTTP in the foreground with explicit `--home` or `--cluster`; non-loopback listeners require direct TLS. |
+| `gent gateway run` | Serve Streamable HTTP in the foreground on this node; non-loopback listeners require direct TLS. |
 | `gent gateway service [status]` | Inspect listener readiness and its systemd/launchd registration; exits 3 when unavailable. |
-| `gent gateway service install` | Validate and save the complete listener options, then start its user service. Requires explicit `--home` or `--cluster`. |
+| `gent gateway service install` | Validate and save the complete listener options, then start its user service. |
 | `gent gateway service start` / `stop` / `restart` | Control the installed listener independently of its daemon. |
 | `gent gateway service logs [--lines N]` | Read the listener's journal or private log. |
 | `gent gateway service uninstall` / `remove` | Remove the listener service, preserving the daemon, host grants and stored agent state. |

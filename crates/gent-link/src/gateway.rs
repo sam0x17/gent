@@ -156,15 +156,11 @@ pub struct Run {
     file_downloads: Vec<String>,
 }
 
-pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Option<Value>> {
+pub async fn execute(home: &Path, command: Command) -> Result<Option<Value>> {
     let home = managed_file::normalize(home)?;
     match command {
         Command::Service { command } => {
             let command = command.unwrap_or(crate::service::GatewayCommand::Status);
-            ensure!(
-                explicit || !matches!(command, crate::service::GatewayCommand::Install(_)),
-                "gateway service install requires a pinned --home or --cluster"
-            );
             Ok(Some(crate::service::gateway(&home, command).await?))
         }
         Command::Oauth { command } => {
@@ -176,10 +172,6 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
             }))
         }
         Command::Run(options) => {
-            ensure!(
-                explicit,
-                "gateway run requires a pinned --home or --cluster"
-            );
             server::run(home, options).await?;
             Ok(None)
         }

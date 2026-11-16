@@ -20,7 +20,7 @@ In another terminal:
 gent --home /private/path/gent-node gateway run --listen 127.0.0.1:8787
 ```
 
-The endpoint is `http://127.0.0.1:8787/mcp`. Plain HTTP is restricted to loopback for local tests. `gateway run` requires explicit `--home` or `--cluster`; it runs in the foreground until interrupted. For a persistent listener, use the [gateway service](#persistent-listener).
+The endpoint is `http://127.0.0.1:8787/mcp`. Plain HTTP is restricted to loopback for local tests. `gateway run` uses this node in `~/.gent` and runs in the foreground until interrupted. For a persistent listener, use the [gateway service](#persistent-listener).
 
 Transfer the private export's `token` to the trusted host's credential store outside prompts and tool arguments. Send it as `Authorization: Bearer TOKEN` on every request, including initialization and tool discovery. Credentials are never printed by Gent. They expire after 720 hours by default; `--ttl-hours` accepts 1 through 8760. An identical `clients add` retry with the same export preserves its token.
 
@@ -102,7 +102,7 @@ gent --home /private/path/gent-node gateway service status
 gent --home /private/path/gent-node gateway service logs --lines 50
 ```
 
-Linux uses a systemd user service; macOS uses a LaunchAgent. The same login/session requirements as the [daemon service](local-proof.md#daemon-services) apply. `gateway service install` requires explicit `--home` or `--cluster` and accepts the listener, TLS, metadata and file-capability options from `gateway run`. Use a fixed nonzero port. TLS paths are resolved to absolute paths; the private service file saves arguments and paths, never key or credential contents. The installed command stays on its physical node directory across cluster switches. Subsequent CLI service commands address the selected profile; use `--cluster ID` when controlling a different profile.
+Linux uses a systemd user service; macOS uses a LaunchAgent. The same login/session requirements as the [daemon service](local-proof.md#daemon-services) apply. `gateway service install` uses the same node and accepts the listener, TLS, metadata and file-capability options from `gateway run`. Use a fixed nonzero port. TLS paths are resolved to absolute paths; the private service file saves arguments and paths, never key or credential contents. The installed command and subsequent CLI service commands use the same node directory.
 
 `gateway service` defaults to `status`. Use `start`, `stop`, `restart`, `logs`, and `uninstall` (`remove` is an alias) to manage the listener. An identical install or start preserves its PID. Changed install arguments replace the saved configuration and restart a running listener. Supply the complete intended options on every install; omitted capability flags are removed. Installation and start/restart validate the TLS material and selected host capabilities before replacing or stopping a working listener. Binding conflicts and later runtime failures can still prevent startup; inspect status and logs to diagnose them.
 
@@ -148,7 +148,7 @@ Reads require host-owned conversation metadata on every call and recheck current
 Enable file inputs for an existing client by selecting each exact download origin when starting the gateway. Use origins from the host's actual documented file service; no provider origin is trusted by default:
 
 ```sh
-gent --home /absolute/node/profile gateway run \
+gent --home /absolute/test-node gateway run \
   --file-origin CLIENT_UUID=https://files.example
 ```
 
@@ -169,7 +169,7 @@ The owner grants ordinary permissions and time-limited relay selection through t
 Enable outgoing links for selected existing hosts at gateway startup:
 
 ```sh
-gent --home /absolute/node/profile gateway run --file-downloads CLIENT_UUID
+gent --home /absolute/test-node gateway run --file-downloads CLIENT_UUID
 ```
 
 Repeat the flag for more hosts, retaining it across restarts. Public access requires the direct TLS setup above. The option enables `gent_file_link {file_id}` for those hosts; unselected hosts cannot mint links even if discovery shows the tool. The call needs ordinary host authentication and conversation/user metadata, including mTLS when required by that host. The file must be ready and currently accessible to the issuing agent.
@@ -194,7 +194,7 @@ Private `gateway/state.json` stores host token digests and persistent agent cred
 
 The registry admits at most 32 host records, 256 conversations per host, and 4096 conversations total, with a 2 MiB state limit. Revoked and expired records retain their bindings and consume capacity. Host-grant lifetime extension and record retirement are future work; a replacement host grant needs a new name and export. OAuth access-token refresh works within the original grant lifetime. The server permits 64 simultaneous connections and 16 filesystem workers, with a 6 MiB request limit, 10-second TLS/header deadlines, 30-second request deadline and 60-second connection lifetime. Filesystem worker slots remain occupied if their requesting connection disappears. Clients reconnect and retry safely using operation IDs. File reads are bounded per call; repeated or concurrent reads have no separate bandwidth quota.
 
-Changing the selected cluster cannot retarget a running gateway. An explicit physical `--home` also pins `gateway run` after restart. A `--cluster` selection is resolved once at startup. Administrative commands, including `clients add`, use the ordinary selected-profile rules, so use the intended profile consistently. Account logout does not revoke these independent local host grants; use `gateway clients revoke`. Service logout may separately prevent the daemon from using Gent's relay.
+The gateway and its administration commands use the node’s sole cluster. Reset retires its managed service and archives its client grants. Account logout does not revoke these independent local host grants; use `gateway clients revoke`. Service logout may separately prevent the daemon from using Gent's relay.
 
 ## Verification
 
@@ -208,7 +208,7 @@ python3 scripts/prove_gateway.py --gent target/debug/gent --downloads
 python3 scripts/prove_gateway_mtls.py --gent target/debug/gent
 ```
 
-Tests cover separate conversations and host namespaces, absent and forged identity inputs, duplicate headers, wrong hosts/origins, proxy headers, credential expiry/revocation, registry recovery, concurrent allocation, bounded filesystem work and direct TLS trust. The HTTP/daemon test exchanges a PNG, reply and receipt, recovers a relay turn across both process layers restarting, and checks agent revocation. The CLI proof checks physical-node pinning across profile switches and restarts, live host revocation and clean foreground shutdown. All host calls in these tests are synthetic.
+Tests cover separate conversations and host namespaces, absent and forged identity inputs, duplicate headers, wrong hosts/origins, proxy headers, credential expiry/revocation, registry recovery, concurrent allocation, bounded filesystem work and direct TLS trust. The HTTP/daemon test exchanges a PNG, reply and receipt, recovers a relay turn across both process layers restarting, and checks agent revocation. The CLI proof checks second-cluster refusal and node identity across restarts, live host revocation and clean foreground shutdown. All host calls in these tests are synthetic.
 
 With `--files`, the native proof additionally imports a 32 MiB file, an empty file and a generated PNG larger than 1 MiB through local stdio MCP, then retrieves them through HTTP after daemon/gateway restart. It verifies exact reassembly and image blocks, forwarding, missing or changed conversation metadata, malformed arguments, hidden local tools, message permission changes and agent revocation. Daemon tests cover image-view size limits, incomplete objects, tampered chunks, expiry and unauthorized IDs. This proves the MCP representation without a hosted provider or model rendering step.
 

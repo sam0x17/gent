@@ -33,7 +33,7 @@ def main():
 
         def cli(*arguments, success=True):
             result = subprocess.run(
-                [str(binary), "--home", str(home), "--json", *arguments],
+                ["env", "GENT_HOME=" + str(home), str(binary), "--json", *arguments],
                 check=False, capture_output=True, text=True, timeout=20,
             )
             if success:
@@ -46,7 +46,7 @@ def main():
             path = root / f"process-{len(logs)}.log"
             with path.open("wb") as log:
                 process = subprocess.Popen(
-                    [str(binary), "--home", str(home), *arguments],
+                    ["env", "GENT_HOME=" + str(home), str(binary), *arguments],
                     stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                 )
             processes.append(process)

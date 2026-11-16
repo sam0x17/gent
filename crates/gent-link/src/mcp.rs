@@ -671,7 +671,7 @@ pub async fn run(
     binding_path: Option<PathBuf>,
     host: Option<Host>,
     wake_socket: Option<PathBuf>,
-    explicit_context: bool,
+    explicit_binding_scope: bool,
 ) -> Result<()> {
     anyhow::ensure!(
         wake_socket.is_none() || host == Some(Host::Codex),
@@ -680,14 +680,10 @@ pub async fn run(
     let cfg = config::load(&home)?;
     let mut guard = None;
     let credentials = if let Some(host) = host {
-        anyhow::ensure!(
-            explicit_context,
-            "host bindings require a pinned --home or --cluster; use gent integration install to configure the host"
-        );
         Credentials::Host(Arc::new(Mutex::new(Bindings::new(&home, host)?)))
     } else if let Some(path) = binding_path {
         // A binding file is selected outside the model by the owner/host per conversation.
-        let opened = binding::open(&path, &cfg, explicit_context)?;
+        let opened = binding::open(&path, &cfg, explicit_binding_scope)?;
         let credential = opened.credential.clone();
         guard = Some(opened);
         Credentials::Fixed(credential)
