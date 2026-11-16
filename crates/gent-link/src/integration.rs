@@ -4,6 +4,7 @@ mod claude_binding;
 pub(crate) mod claude_wake;
 pub(crate) mod codex_files;
 mod install;
+pub(crate) use install::retire;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod vscode;

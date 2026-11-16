@@ -40,18 +40,16 @@ fn check_pin(saved: &Saved, pin: Option<&ServiceConfig>) -> Result<()> {
 }
 
 pub async fn renew(home: &Path, pin: Option<&ServiceConfig>) -> Result<Value> {
-    let location = source::Location::open(home)?;
-    let directory = &location.directory;
+    let directory = source::directory(home)?;
+    let directory = &directory;
     let path = directory.join("session.json");
     // A missing login must not create an auth directory or start authentication.
     let saved = read(&path)?.context("sign in with gent auth login before renewing")?;
-    location.check_saved(&saved)?;
     check_pin(&saved, pin)?;
     let _lock = managed_file::lock(&directory.join("session.lock"))?;
     let snapshot = Snapshot::read(&path)?;
     snapshot.private()?;
     let mut saved = read(&path)?.context("account login disappeared; sign in again")?;
-    location.check_saved(&saved)?;
     snapshot.verify()?;
     check_pin(&saved, pin)?;
     let previous = saved.session.as_ref().expect("account checked");
@@ -88,7 +86,7 @@ pub async fn renew(home: &Path, pin: Option<&ServiceConfig>) -> Result<Value> {
         "account":renewed, "renewed":extended, "renewal_due":due(&renewed, now()?)});
     saved.session = Some(renewed);
     snapshot.write(&(serde_json::to_string(&saved)? + "\n"))?;
-    Ok(location.describe(result))
+    Ok(result)
 }
 
 async fn maintain(home: &Path) {
@@ -102,10 +100,9 @@ async fn maintain(home: &Path) {
             let Some(pin) = cfg.service else {
                 return Ok(());
             };
-            let location = source::Location::open(home)?;
-            let saved = read(&location.directory.join("session.json"))?
+            let directory = source::directory(home)?;
+            let saved = read(&directory.join("session.json"))?
                 .context("sign in with gent auth login to renew this node's session")?;
-            location.check_saved(&saved)?;
             check_pin(&saved, Some(&pin))?;
             if due(saved.session.as_ref().expect("account checked"), now()?) {
                 crate::cluster::installation(home)?; // Recheck identity and relay pins.

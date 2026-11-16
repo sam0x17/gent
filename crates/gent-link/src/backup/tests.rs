@@ -114,7 +114,7 @@ fn encrypted_round_trip_is_complete_private_guarded_and_scoped() {
     assert!(!f.output.join("clusters").exists());
     assert!(!f.output.join("daemon.lock").exists());
     assert!(Store::open(&f.output).is_err());
-    assert!(crate::contexts::resolve(&f.output, None).is_err());
+    assert!(crate::node_home::resolve(&f.output, None).is_err());
     assert_eq!(fs::metadata(&f.key).unwrap().mode() & 0o777, 0o600);
     assert_eq!(fs::metadata(&f.archive).unwrap().mode() & 0o777, 0o600);
 }
@@ -310,7 +310,7 @@ fn publication_race_preserves_the_destination_and_scopes_are_explicit() {
     assert_eq!(fs::read(f.output.join("payload")).unwrap(), b"verified");
     let peer = f._directory.path().join("other-profile");
     config::initialize(&peer, "other").unwrap();
-    crate::contexts::add(&f.home, &peer).unwrap();
+    crate::node_home::tests::legacy_registry(&f.home, &peer);
     let mut cfg = config::load(&f.home).unwrap();
     cfg.relay = Some(config::RelayConfig {
         endpoint: "http://127.0.0.1:8787".into(),

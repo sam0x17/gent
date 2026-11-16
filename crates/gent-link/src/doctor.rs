@@ -1,6 +1,6 @@
 //! Bounded diagnosis with fixed messages and whitelisted evidence. Never echo
 //! parser errors, configuration bodies, credentials, agent data or host output.
-use crate::{auth, contexts, gateway, hooks, integration, owner, service};
+use crate::{auth, gateway, hooks, integration, node_home, owner, service};
 use gent_daemon::config;
 use gent_protocol::OwnerOp;
 use serde::Serialize;
@@ -168,28 +168,28 @@ pub(crate) async fn run(root: &Path, selected: Option<&str>, options: Options) -
         online: options.online,
         checks: vec![],
     };
-    let resolved = contexts::resolve(root, selected);
+    let resolved = node_home::resolve(root, selected);
     match resolved {
         Ok(home) => {
             report.home = Some(home.clone());
-            match contexts::inspect(&home) {
+            match node_home::inspect(&home) {
                 Ok(cfg) => {
                     report.cluster_id = Some(cfg.cluster.id.clone());
                     let valid = cfg.validate().is_ok();
                     report.add("configuration", if valid { Status::Pass } else { Status::Warn },
                         if valid { "Private cluster configuration is valid." } else { "Local identity is valid but the editable names or policy are invalid." },
                         json!({"node_id":cfg.node.id}), (!valid).then_some(("Validate the local edit before applying it; signed daemon authority is separate.", &["config", "validate"][..])));
-                    inspect_profile(&mut report, &home, &cfg, options.online).await;
+                    inspect_node(&mut report, &home, &cfg, options.online).await;
                 }
                 Err(_) => {
                     let absent = !home.exists();
                     report.add("configuration", Status::Fail, if absent { "Gent is not set up in this directory." } else { "Configuration is missing, invalid or not private." }, json!({}),
-                        if absent { Some(("Start guided setup.", &["daemon", "install"])) } else { Some(("Inspect this profile's config.toml and file permissions. Preserve existing keys and state.", &[])) });
+                        if absent { Some(("Start guided setup.", &["daemon", "install"])) } else { Some(("Inspect this node's config.toml and file permissions. Preserve existing keys and state.", &[])) });
                 }
             }
         }
-        Err(_) => report.add("configuration", Status::Fail, "The requested cluster profile cannot be resolved safely.", json!({}),
-            Some(("Inspect the root config.toml, profile paths and --cluster selection. No fallback profile was probed.", &[]))),
+        Err(_) => report.add("configuration", Status::Fail, "This node cannot be opened safely.", json!({}),
+            Some(("Inspect config.toml and directory permissions. Legacy profiles require gent node reset and fresh enrollment.", &[]))),
     }
     let home = report.home.clone();
     if let Some(home) = home.as_deref() {
@@ -212,7 +212,9 @@ pub(crate) async fn run(root: &Path, selected: Option<&str>, options: Options) -
             );
             inspect_integration(&mut report, id, result.ok());
             let check = report.checks.last_mut().expect("integration check");
-            if let Some(command) = check.next.as_mut().and_then(|n| n.command.as_mut()) {
+            if let Some(command) = check.next.as_mut().and_then(|n| n.command.as_mut())
+                && command.iter().any(|arg| arg == "integration")
+            {
                 command.push(
                     if host == integration::Host::Codex {
                         "codex"
@@ -221,8 +223,8 @@ pub(crate) async fn run(root: &Path, selected: Option<&str>, options: Options) -
                     }
                     .into(),
                 );
+                advice_path(check, "--config-dir", directory.as_deref());
             }
-            advice_path(check, "--config-dir", directory.as_deref());
         }
     }
     let shell = options.hooks.shell;
@@ -276,7 +278,7 @@ fn protected_file(path: &Path) -> bool {
 fn credential_file(path: &Path) -> bool {
     protected_file(path) && fs::symlink_metadata(path).is_ok_and(|m| m.len() <= 512)
 }
-async fn inspect_profile(report: &mut Report, home: &Path, cfg: &config::Config, online: bool) {
+async fn inspect_node(report: &mut Report, home: &Path, cfg: &config::Config, online: bool) {
     let owner_ok = credential_file(&home.join("owner.key"))
         && config::read_private(&home.join("owner.key")).is_ok();
     let identity = home.join("identity.key");
@@ -287,7 +289,7 @@ async fn inspect_profile(report: &mut Report, home: &Path, cfg: &config::Config,
     let state_ok = owner_ok && (new || (protected_file(&identity) && protected_file(&db)));
     report.add("local_state", if !state_ok {Status::Fail} else if new {Status::Skip} else {Status::Pass},
         if !state_ok {"Key or database files are missing, linked or insufficiently protected."} else if new {"The daemon has not initialized endpoint state yet."} else {"Key and database paths are protected; the live probe checks signed state."}, json!({}),
-        (!state_ok).then_some(("Preserve this profile. Inspect missing files and ownership before restarting; do not generate replacement keys or copy in an older database.", &[][..])));
+        (!state_ok).then_some(("Preserve this node. Inspect missing files and ownership before restarting; do not generate replacement keys or copy in an older database.", &[][..])));
     let socket = fs::symlink_metadata(home.join("daemon.sock"));
     let socket_ok = socket.as_ref().is_ok_and(|m| {
         m.file_type().is_socket()
@@ -344,7 +346,7 @@ async fn inspect_profile(report: &mut Report, home: &Path, cfg: &config::Config,
         Some(v) if v["installed"] == false && v["loaded"] == false => report.add(
             "service",
             Status::Skip,
-            "No managed service is installed for this profile; foreground daemons are supported.",
+            "No managed service is installed for this node; foreground daemons are supported.",
             json!({"available":v["available"]}),
             None,
         ),
@@ -386,17 +388,17 @@ async fn inspect_profile(report: &mut Report, home: &Path, cfg: &config::Config,
 
 fn inspect_daemon(report: &mut Report, value: Option<Value>, cfg: &config::Config) {
     let Some(v) = value else {
-        report.add("daemon", Status::Fail, "No authenticated diagnostic response from this profile's daemon.", json!({}), Some(("Inspect daemon status and logs before restarting. An older daemon may need an upgrade.", &["daemon", "status"])));
+        report.add("daemon", Status::Fail, "No authenticated diagnostic response from this node's daemon.", json!({}), Some(("Inspect daemon status and logs before restarting. An older daemon may need an upgrade.", &["daemon", "status"])));
         return;
     };
     if v["version"] != 1 || v["cluster_id"] != cfg.cluster.id || v["node_id"] != cfg.node.id {
         report.add(
             "daemon",
             Status::Fail,
-            "The daemon response does not match this profile or diagnostic version.",
+            "The daemon response does not match this node or diagnostic version.",
             json!({}),
             Some((
-                "Preserve state and inspect the process serving this profile's socket.",
+                "Preserve state and inspect the process serving this node's socket.",
                 &[],
             )),
         );
@@ -416,12 +418,12 @@ fn inspect_daemon(report: &mut Report, value: Option<Value>, cfg: &config::Confi
         (!ready).then_some(("Check system time and the active owner's renewal/revocation state. Reconnecting cannot override removal.", &[][..])));
     report.add("config_projection", if v["config_saved"] == true {Status::Pass} else {Status::Warn},
         if v["config_saved"] == true {"No committed configuration is waiting for a file write."} else {"Signed configuration is committed but its TOML projection is pending."}, json!({}),
-        (v["config_saved"] != true).then_some(("Check free space and profile permissions; normal daemon maintenance retries the write.", &[][..])));
+        (v["config_saved"] != true).then_some(("Check free space and node directory permissions; normal daemon maintenance retries the write.", &[][..])));
     if v["relay"]["configured"] != true {
         report.add(
             "relay",
             Status::Skip,
-            "This profile has no relay configured.",
+            "This node has no relay configured.",
             json!({}),
             None,
         );
@@ -448,7 +450,7 @@ fn inspect_account(report: &mut Report, value: Option<Value>, required: bool, on
         report.add(
             "account",
             Status::Fail,
-            "Saved account state or its profile pin is invalid.",
+            "Saved account state or its node pin is invalid.",
             json!({}),
             Some((
                 "Inspect the account source and service/account pins; preserve cluster keys.",
@@ -480,7 +482,7 @@ fn inspect_account(report: &mut Report, value: Option<Value>, required: bool, on
         "signed_out" if !required => report.add(
             "account",
             Status::Skip,
-            "No account session is required for this development profile.",
+            "No account session is required for this development node.",
             evidence,
             None,
         ),
@@ -524,8 +526,8 @@ fn inspect_account(report: &mut Report, value: Option<Value>, required: bool, on
 fn inspect_integration(report: &mut Report, id: &'static str, value: Option<Value>) {
     match value {
         Some(v) if v["state"] == "absent" => report.add(id, Status::Skip, "Optional user-scope MCP integration is not installed.", json!({}), None),
-        Some(v) if v["state"] == "configured" && v["current_home"] == true && v["binary_available"] == true => report.add(id, Status::Pass, "Managed MCP configuration matches this profile; effective GUI/project settings were not tested.", json!({}), None),
-        Some(v) if v["state"] == "configured" && v["current_home"] == false => report.add(id, Status::Skip, "This user-scope integration is pinned to another Gent profile.", json!({"integration_home":v["gent_home"]}), Some(("To use this host with the selected profile, explicitly move its installation. Reapply --wake or other installation options if needed.", &["integration", "install", "--move"]))),
+        Some(v) if v["state"] == "configured" && v["current_home"] == true && v["binary_available"] == true => report.add(id, Status::Pass, "Managed MCP configuration matches this node; effective GUI/project settings were not tested.", json!({}), None),
+        Some(v) if v["state"] == "configured" && v["current_home"] == false => report.add(id, Status::Warn, "This integration points to an obsolete Gent directory.", json!({"integration_home":v["gent_home"]}), Some(("Run gent node reset to retire legacy installations, re-enroll, then reinstall the host integration.", &["node", "reset"]))),
         _ => report.add(id, Status::Warn, "MCP configuration is edited, disabled, incomplete or points to an unavailable binary.", json!({}), Some(("Inspect installation status; preserve unrelated host settings and pending operations.", &["integration", "status"]))),
     }
 }

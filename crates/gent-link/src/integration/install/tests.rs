@@ -1,5 +1,5 @@
 use super::*;
-mod profile_move;
+mod retirement;
 use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -51,7 +51,7 @@ fn vscode_comments_user_settings_and_ownership_survive_install_move_and_removal(
     let settings = enable_ide(&layout, &mut spec);
     let original = "// user preferences\n{\n  \"window.zoomLevel\": 2, // keep\n  \"private\": \"never-journal-this\",\n}\n";
     put(&settings, original);
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     let installed = get(&settings);
     assert!(installed.contains("// user preferences") && installed.contains("// keep"));
     assert!(installed.contains("never-journal-this"));
@@ -60,11 +60,11 @@ fn vscode_comments_user_settings_and_ownership_survive_install_move_and_removal(
         fs::metadata(layout.ide_launcher()).unwrap().mode() & 0o777,
         0o700
     );
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     assert_eq!(get(&settings), installed);
     let moved = settings.with_file_name("another-profile.json");
     spec.codex_ide.as_mut().unwrap().settings = moved.clone();
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     assert!(
         document::VscodeDocument::parse(Some(&get(&settings)))
             .unwrap()
@@ -73,7 +73,7 @@ fn vscode_comments_user_settings_and_ownership_survive_install_move_and_removal(
     );
     assert!(get(&settings).contains("never-journal-this"));
     assert!(get(&moved).contains("chatgpt.cliExecutable"));
-    mutate(&layout, &spec.home, None, false).unwrap();
+    mutate(&layout, &spec.home, None).unwrap();
     assert!(!layout.ide_launcher().exists());
     assert!(
         document::VscodeDocument::parse(Some(&get(&moved)))
@@ -94,17 +94,17 @@ fn vscode_refuses_foreign_overrides_malformed_jsonc_and_edited_launchers_before_
         r#"{'private-secret': 42}"#,
     ] {
         put(&settings, original);
-        assert!(mutate(&layout, &spec.home, Some(spec.clone()), false).is_err());
+        assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
         assert_eq!(get(&settings), original);
         assert!(
             !layout.server.exists() && !layout.ide_launcher().exists() && !layout.record().exists()
         );
     }
     put(&settings, "{}");
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     let before = get(&settings);
     put(&layout.ide_launcher(), "user edits");
-    assert!(mutate(&layout, &spec.home, None, false).is_err());
+    assert!(mutate(&layout, &spec.home, None).is_err());
     assert_eq!(get(&settings), before);
     assert_eq!(get(&layout.ide_launcher()), "user edits");
 }
@@ -117,7 +117,7 @@ fn vscode_install_update_and_uninstall_recover_every_partial_file_transition() {
             let settings = enable_ide(&layout, &mut spec);
             put(&settings, "{\"user\":true,}\n");
             if operation != 0 {
-                mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+                mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
             }
             let desired = if operation == 2 {
                 None
@@ -161,7 +161,7 @@ fn retained_guard_upgrades_legacy_installs_preserves_other_hooks_and_fails_close
         settings,
         &json!({"hooks":{"UserPromptSubmit":[other]}}).to_string(),
     );
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     assert!(
         Document::parse(Some(&get(settings)), Host::ClaudeCode)
             .unwrap()
@@ -170,7 +170,7 @@ fn retained_guard_upgrades_legacy_installs_preserves_other_hooks_and_fails_close
             .is_none()
     );
     spec.claude_wake.as_mut().unwrap().version = 2;
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     let legacy = Document::parse(Some(&get(settings)), Host::ClaudeCode).unwrap();
     assert!(legacy.wake_guard().unwrap().unwrap()["hooks"][0]["onFailure"].is_null());
     assert!(
@@ -181,7 +181,7 @@ fn retained_guard_upgrades_legacy_installs_preserves_other_hooks_and_fails_close
         )
         .is_err()
     );
-    mutate(&layout, &spec.home, Some(current.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(current.clone())).unwrap();
     let doc = Document::parse(Some(&get(settings)), Host::ClaudeCode).unwrap();
     let guard = doc.wake_guard().unwrap().unwrap();
     assert_eq!(guard["hooks"][0]["onFailure"], "block");
@@ -200,9 +200,9 @@ fn retained_guard_upgrades_legacy_installs_preserves_other_hooks_and_fails_close
         .unwrap()
         .push(guard.clone());
     put(settings, &value.to_string());
-    assert!(mutate(&layout, &spec.home, None, false).is_err());
+    assert!(mutate(&layout, &spec.home, None).is_err());
     put(settings, &original);
-    mutate(&layout, &spec.home, None, false).unwrap();
+    mutate(&layout, &spec.home, None).unwrap();
     let value: Value = serde_json::from_str(&get(settings)).unwrap();
     assert_eq!(value["hooks"]["UserPromptSubmit"], json!([other]));
 }
@@ -212,13 +212,13 @@ fn claude_plugin_installation_preserves_owned_versions_and_revokes_old_helpers()
     let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
     enable_claude(&mut spec);
     let id = spec.claude_wake.as_ref().unwrap().id.clone();
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     assert_eq!(
         claude_wake(&spec.home, &layout.directory, &id).unwrap().id,
         id
     );
     let record = get(&layout.record());
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     assert_eq!(get(&layout.record()), record);
     let module = layout.directory.join("skills/gent-wake/hooks/register.ts");
     assert!(get(&module).contains("--config-dir"));
@@ -229,7 +229,7 @@ fn claude_plugin_installation_preserves_owned_versions_and_revokes_old_helpers()
     let wake = next.claude_wake.as_mut().unwrap();
     wake.id = uuid::Uuid::new_v4().to_string();
     wake.module.push_str("\n// fixture upgraded module\n");
-    mutate(&layout, &spec.home, Some(next.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(next.clone())).unwrap();
     assert_ne!(get(&module), previous);
     assert!(claude_wake(&spec.home, &layout.directory, &id).is_err());
     let id = &next.claude_wake.as_ref().unwrap().id;
@@ -237,7 +237,7 @@ fn claude_plugin_installation_preserves_owned_versions_and_revokes_old_helpers()
     let keep = module.with_file_name("user-notes.txt");
     put(&keep, "user content");
     next.claude_wake = None;
-    mutate(&layout, &spec.home, Some(next), false).unwrap();
+    mutate(&layout, &spec.home, Some(next)).unwrap();
     assert!(claude_wake(&spec.home, &layout.directory, &spec.claude_wake.unwrap().id).is_err());
     assert!(!module.exists());
     assert_eq!(get(&keep), "user content");
@@ -251,7 +251,7 @@ fn claude_wake_recovers_every_install_upgrade_and_removal_boundary() {
             let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
             enable_claude(&mut spec);
             if operation > 0 {
-                mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+                mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
             }
             let mut desired = spec.clone();
             desired.binary = desired.binary.with_file_name("updated-gent");
@@ -276,7 +276,7 @@ fn claude_wake_recovers_every_install_upgrade_and_removal_boundary() {
                 )
                 .is_err()
             );
-            mutate(&layout, &spec.home, desired.clone(), false).unwrap();
+            mutate(&layout, &spec.home, desired.clone()).unwrap();
             assert_eq!(layout.read().unwrap().1.installed, desired);
             assert_eq!(
                 inspect(&layout, &spec.home).unwrap()["state"],
@@ -294,12 +294,12 @@ fn claude_wake_recovers_every_install_upgrade_and_removal_boundary() {
 fn claude_wake_preserves_modified_plugin_files_and_refuses_disabled_identity_hook() {
     let (_temp, layout, mut spec) = fixture(Host::ClaudeCode);
     enable_claude(&mut spec);
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     let record = get(&layout.record());
     let module = layout.directory.join("skills/gent-wake/hooks/register.ts");
     let original = get(&module);
     put(&module, "user edited module");
-    assert!(mutate(&layout, &spec.home, None, false).is_err());
+    assert!(mutate(&layout, &spec.home, None).is_err());
     assert_eq!(get(&module), "user edited module");
     assert_eq!(get(&layout.record()), record);
     let id = &spec.claude_wake.as_ref().unwrap().id;
@@ -311,7 +311,7 @@ fn claude_wake_preserves_modified_plugin_files_and_refuses_disabled_identity_hoo
     put(settings, &value.to_string());
     assert!(claude_wake(&spec.home, &layout.directory, id).is_err());
     // Uninstall still works when all hooks have been disabled.
-    mutate(&layout, &spec.home, None, false).unwrap();
+    mutate(&layout, &spec.home, None).unwrap();
     assert!(!module.exists());
 }
 
@@ -330,7 +330,7 @@ fn claude_bridge_uses_recorded_default_layout_without_creating_another_config() 
         layout.directory.parent().unwrap().join(".claude.json"),
     )
     .unwrap();
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     let id = &spec.claude_wake.as_ref().unwrap().id;
     assert!(claude_wake(&spec.home, &layout.directory, id).is_ok());
     assert!(!layout.directory.join(".claude.json").exists());
@@ -340,17 +340,17 @@ fn claude_bridge_uses_recorded_default_layout_without_creating_another_config() 
 fn codex_wake_opt_in_upgrades_legacy_install_and_removes_only_managed_arguments() {
     let (_temp, layout, mut spec) = fixture(Host::Codex);
     put(&layout.server, "model = 'keep-model'\n");
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     assert!(!get(&layout.record()).contains("wake_socket"));
     spec.wake_socket = Some(spec.home.join("host socket"));
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     assert!(get(&layout.server).contains("--wake-socket"));
     assert!(get(&layout.server).contains("keep-model"));
     assert!(spec.fragments(Host::ClaudeCode).is_err());
     let mut invalid = spec.clone();
     invalid.wake_socket = Some(PathBuf::from("relative"));
-    assert!(mutate(&layout, &spec.home, Some(invalid), false).is_err());
-    mutate(&layout, &spec.home, None, false).unwrap();
+    assert!(mutate(&layout, &spec.home, Some(invalid)).is_err());
+    mutate(&layout, &spec.home, None).unwrap();
     assert!(!get(&layout.server).contains("--wake-socket"));
     assert!(get(&layout.server).contains("keep-model"));
 }
@@ -372,20 +372,20 @@ fn installation_preserves_unrelated_text_and_removal_preserves_state() {
                 "{\n  \"permissions\": { \"deny\": [\"Bash\"] },\n  \"hooks\": {\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"true\"}]}]}\n}\n",
             );
         }
-        mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+        mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
         let first = get(&layout.server);
         let record = get(&layout.record());
         assert!(!record.contains("PRIVATE-SENTINEL") && !record.contains("existing-model"));
         assert_eq!(fs::metadata(&layout.server).unwrap().mode() & 0o777, 0o640);
         assert_eq!(fs::metadata(layout.record()).unwrap().mode() & 0o777, 0o600);
         assert_eq!(inspect(&layout, &spec.home).unwrap()["state"], "configured");
-        mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+        mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
         assert_eq!(get(&layout.server), first);
         assert_eq!(get(&layout.record()), record);
         spec.binary = spec.binary.with_file_name("upgraded binary '$SHELL");
-        mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+        mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
         assert!(get(&layout.server).contains("upgraded binary"));
-        mutate(&layout, &spec.home, None, false).unwrap();
+        mutate(&layout, &spec.home, None).unwrap();
         assert_eq!(inspect(&layout, &spec.home).unwrap()["state"], "absent");
         let final_text = get(&layout.server);
         if host == Host::Codex {
@@ -399,7 +399,7 @@ fn installation_preserves_unrelated_text_and_removal_preserves_state() {
             assert_eq!(value["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
         }
         let last = get(&layout.server);
-        mutate(&layout, &spec.home, None, false).unwrap();
+        mutate(&layout, &spec.home, None).unwrap();
         assert_eq!(get(&layout.server), last);
     }
 }
@@ -418,7 +418,7 @@ fn malformed_duplicate_foreign_or_edited_entries_fail_without_echoing_secrets() 
     ] {
         let (_temp, layout, spec) = fixture(Host::ClaudeCode);
         put(layout.settings.as_ref().unwrap(), invalid);
-        let error = mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap_err();
+        let error = mutate(&layout, &spec.home, Some(spec.clone())).unwrap_err();
         assert!(!format!("{error:#}").contains("PRIVATE-SENTINEL"));
         assert!(!layout.server.exists() && !layout.record().exists());
         assert_eq!(get(layout.settings.as_ref().unwrap()), invalid);
@@ -428,13 +428,13 @@ fn malformed_duplicate_foreign_or_edited_entries_fail_without_echoing_secrets() 
     assert!(
         !format!(
             "{:#}",
-            mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap_err()
+            mutate(&layout, &spec.home, Some(spec.clone())).unwrap_err()
         )
         .contains("PRIVATE-SENTINEL")
     );
     put(&layout.server, "[mcp_servers.gent]\ncommand = 'foreign'\n");
-    assert!(mutate(&layout, &spec.home, Some(spec.clone()), false).is_err());
-    assert!(mutate(&layout, &spec.home, None, false).is_err());
+    assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
+    assert!(mutate(&layout, &spec.home, None).is_err());
     // An identical manually added entry still has no Gent ownership record.
     let fragment = spec.fragments(Host::Codex).unwrap()["mcp_servers"]["gent"].clone();
     put(
@@ -444,13 +444,13 @@ fn malformed_duplicate_foreign_or_edited_entries_fail_without_echoing_secrets() 
             .set_server(Some(&fragment))
             .unwrap(),
     );
-    assert!(mutate(&layout, &spec.home, Some(spec.clone()), false).is_err());
+    assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
     fs::remove_file(&layout.server).unwrap();
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     let edited = format!("{}enabled = false\n", get(&layout.server));
     put(&layout.server, &edited);
     assert_eq!(inspect(&layout, &spec.home).unwrap()["state"], "conflict");
-    assert!(mutate(&layout, &spec.home, None, false).is_err());
+    assert!(mutate(&layout, &spec.home, None).is_err());
     assert_eq!(get(&layout.server), edited);
 }
 
@@ -459,14 +459,14 @@ fn disabled_hooks_and_changed_hook_preflight_precede_all_writes() {
     let (_temp, layout, spec) = fixture(Host::ClaudeCode);
     let path = layout.settings.as_ref().unwrap();
     put(path, "{\"disableAllHooks\":true}");
-    assert!(mutate(&layout, &spec.home, Some(spec.clone()), false).is_err());
+    assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
     assert!(!layout.server.exists() && !layout.record().exists());
     put(path, "{}");
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     let initial = get(&layout.server);
     let text = get(path);
     put(path, &text.replace("\"timeout\": 10", "\"timeout\": 11"));
-    assert!(mutate(&layout, &spec.home, None, false).is_err());
+    assert!(mutate(&layout, &spec.home, None).is_err());
     assert_eq!(get(&layout.server), initial);
     put(path, &text);
     let mut value: Value = serde_json::from_str(&text).unwrap();
@@ -476,7 +476,7 @@ fn disabled_hooks_and_changed_hook_preflight_precede_all_writes() {
         inspect(&layout, &spec.home).unwrap()["state"],
         "hooks_disabled"
     );
-    mutate(&layout, &spec.home, None, false).unwrap();
+    mutate(&layout, &spec.home, None).unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&get(path)).unwrap()["disableAllHooks"],
         true
@@ -490,7 +490,7 @@ fn recovery_finishes_each_partial_operation_and_retains_later_unrelated_edits() 
         for completed in 0..=2 {
             let (_temp, layout, spec) = fixture(Host::ClaudeCode);
             if operation > 0 {
-                mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+                mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
             }
             let desired = if operation == 2 {
                 None
@@ -522,7 +522,7 @@ fn recovery_finishes_each_partial_operation_and_retains_later_unrelated_edits() 
                 "recovery_pending"
             );
             assert_eq!(before_status, get(&layout.record()));
-            mutate(&layout, &spec.home, desired.clone(), false).unwrap();
+            mutate(&layout, &spec.home, desired.clone()).unwrap();
             assert_eq!(layout.read().unwrap().1.installed, desired);
             assert_eq!(
                 serde_json::from_str::<Value>(&get(&layout.server)).unwrap()["newHostSetting"],
@@ -538,28 +538,28 @@ fn path_links_shared_files_concurrent_changes_and_other_owners_are_rejected() {
     let (temp, layout, spec) = fixture(Host::Codex);
     let target = temp.path().join("absent");
     std::os::unix::fs::symlink(&target, &layout.server).unwrap();
-    assert!(mutate(&layout, &spec.home, Some(spec.clone()), false).is_err());
+    assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
     assert!(!target.exists());
     fs::remove_file(&layout.server).unwrap();
     put(&layout.server, "");
     let link = temp.path().join("hardlink");
     fs::hard_link(&layout.server, &link).unwrap();
-    assert!(mutate(&layout, &spec.home, Some(spec.clone()), false).is_err());
+    assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
     fs::remove_file(link).unwrap();
     fs::set_permissions(&layout.server, fs::Permissions::from_mode(0o666)).unwrap();
-    assert!(mutate(&layout, &spec.home, Some(spec.clone()), false).is_err());
+    assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
     fs::set_permissions(&layout.server, fs::Permissions::from_mode(0o600)).unwrap();
     let snapshot = Snapshot::read(&layout.server).unwrap();
     put(&layout.server, "# host changed this\n");
     assert!(snapshot.write("discarded edit").is_err());
     assert_eq!(get(&layout.server), "# host changed this\n");
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     let foreign = Spec {
         home: temp.path().join("other"),
         ..spec.clone()
     };
-    assert!(mutate(&layout, &foreign.home, Some(foreign.clone()), false).is_err());
-    assert!(mutate(&layout, &foreign.home, None, false).is_err());
+    assert!(mutate(&layout, &foreign.home, Some(foreign.clone())).is_err());
+    assert!(mutate(&layout, &foreign.home, None).is_err());
     assert!(
         !inspect(&layout, &foreign.home).unwrap()["current_home"]
             .as_bool()
@@ -573,7 +573,7 @@ fn read_only_status_and_absent_uninstall_do_not_create_host_files() {
     fs::remove_dir(&layout.directory).unwrap();
     assert_eq!(inspect(&layout, &spec.home).unwrap()["state"], "absent");
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
-    mutate(&layout, &spec.home, None, false).unwrap();
+    mutate(&layout, &spec.home, None).unwrap();
     assert!(!layout.server.exists() && !layout.record().exists());
 }
 
@@ -584,9 +584,9 @@ fn inline_toml_server_tables_survive_install_and_remove() {
         &layout.server,
         "# inline\nmcp_servers = {other = {command = 'other'}}\nmodel = 'mine'\n",
     );
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     assert_eq!(inspect(&layout, &spec.home).unwrap()["state"], "configured");
-    mutate(&layout, &spec.home, None, false).unwrap();
+    mutate(&layout, &spec.home, None).unwrap();
     assert!(get(&layout.server).contains("other = {command = 'other'}"));
     assert!(get(&layout.server).contains("model = 'mine'"));
 }
@@ -603,18 +603,18 @@ fn recovery_refuses_changed_managed_fragments_and_normalized_paths_remain_stable
         layout.settings.as_ref().unwrap(),
         "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"^mcp__gent__gent_\",\"hooks\":[]}]}}",
     );
-    assert!(mutate(&layout, &spec.home, Some(spec.clone()), false).is_err());
+    assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
     assert!(!layout.server.exists());
     assert!(layout.read().unwrap().1.pending.is_some());
     fs::remove_file(layout.settings.as_ref().unwrap()).unwrap();
-    mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
     let again = Layout::at(layout.host, layout.directory.clone(), layout.server.clone()).unwrap();
     assert_eq!(again.server, layout.server);
     assert_eq!(again.settings, layout.settings);
     assert_eq!(inspect(&again, &spec.home).unwrap()["state"], "configured");
     let record = layout.record();
     fs::set_permissions(&record, fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(mutate(&layout, &spec.home, None, false).is_err());
+    assert!(mutate(&layout, &spec.home, None).is_err());
 }
 
 #[test]
@@ -634,7 +634,7 @@ fn recovery_pins_both_claude_layouts_and_rejects_redirected_records() {
             directory.parent().unwrap().join(".claude.json")
         };
         let layout = Layout::at(Host::ClaudeCode, directory, server).unwrap();
-        mutate(&layout, &spec.home, Some(spec.clone()), false).unwrap();
+        mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
         let runtime = claude_runtime_pinned(&spec.home, &layout.directory).unwrap();
         runtime.require_wake().unwrap();
         assert_eq!(runtime.custom_directory, custom);

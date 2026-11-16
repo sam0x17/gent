@@ -22,9 +22,9 @@ pub(crate) fn pending(home: &Path) -> Result<Option<(PathBuf, String)>> {
     Ok(Some((saved.file, saved.name)))
 }
 
-pub async fn join(root: &Path, home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Value> {
+pub async fn join(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Value> {
     if !args.code_route()? {
-        return crate::contexts::provision::join(root, home, args).await;
+        return crate::node_home::provision::join(home, args).await;
     }
     ensure!(
         args.name.is_empty(),
@@ -42,6 +42,18 @@ pub async fn join(root: &Path, home: &Path, mut args: crate::pairing::JoinArgs) 
     };
     let code = Code::parse(raw.trim())?;
     let id = code.id();
+    if crate::managed_file::Snapshot::read(&gent_daemon::config::path(home))?
+        .text
+        .is_some()
+    {
+        let saved = home
+            .join("auth/enrollment")
+            .join(format!("{id}.gent-invite"));
+        ensure!(
+            storage::private(&saved)?.text.is_some(),
+            "this node is already enrolled; run gent node reset before joining with a new code"
+        );
+    }
     // The code authenticates encrypted bootstrap data; it never selects an origin.
     if io::stdin().is_terminal() && io::stderr().is_terminal() {
         auth::execute(
@@ -126,20 +138,15 @@ pub async fn join(root: &Path, home: &Path, mut args: crate::pairing::JoinArgs) 
     drop(service);
     args.name.clone_from(name);
     let install = !args.no_daemon;
-    let mut result = crate::contexts::provision::join(
-        root,
+    let mut result = crate::node_home::provision::join(
         home,
         args.with_invitation(file, offer.anchor.cluster_id.clone()),
     )
     .await?;
     storage::private(&journal)?.remove()?;
     if install {
-        let selected = result["profile"]["home"]
-            .as_str()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.to_path_buf());
         let status = crate::service::execute(
-            &selected,
+            home,
             crate::DaemonCommand::Install {
                 local: None,
                 setup: crate::setup::Options::default(),

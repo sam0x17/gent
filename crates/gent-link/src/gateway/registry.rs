@@ -1,7 +1,8 @@
 use super::mtls::{Peer, Policy as TlsPolicy};
 use crate::{
-    auth, contexts,
+    auth,
     managed_file::{self, Snapshot},
+    node_home,
 };
 use anyhow::{Context, Result, ensure};
 use gent_daemon::config;
@@ -343,7 +344,7 @@ impl Registry {
     }
     fn open_locked(home: &Path) -> Result<Self> {
         let home = managed_file::normalize(home)?;
-        let cfg = contexts::inspect(&home)?;
+        let cfg = node_home::inspect(&home)?;
         let id = cfg
             .gateway_registry()?
             .context("configure a host with gent gateway clients add first")?;
@@ -412,7 +413,7 @@ impl Registry {
             "gateway node directory changed"
         );
         directory_check(&self.directory())?;
-        let cfg = contexts::inspect(&self.home)?;
+        let cfg = node_home::inspect(&self.home)?;
         ensure!(
             cfg.gateway_registry()?.as_ref() == Some(&self.id)
                 && cfg.cluster.id == self.cluster
@@ -551,7 +552,7 @@ impl Registry {
 }
 
 pub(super) fn diagnose(home: &Path) -> Result<Value> {
-    let cfg = contexts::inspect(home)?;
+    let cfg = node_home::inspect(home)?;
     if cfg.gateway_registry()?.is_none() {
         ensure!(
             !home.join("gateway/state.json").try_exists()?,
@@ -612,7 +613,7 @@ pub(super) fn add_client(
     config::private_dir(&directory)?;
     directory_check(&directory)?;
     let _lock = managed_file::lock(&directory.join("state.lock"))?;
-    let cfg = contexts::inspect(home)?;
+    let cfg = node_home::inspect(home)?;
     if cfg.gateway_registry()?.is_none() {
         let file = snapshot(&directory.join("state.json"))?;
         let state = if let Some(text) = &file.text {

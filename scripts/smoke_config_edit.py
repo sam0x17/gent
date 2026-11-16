@@ -196,38 +196,21 @@ def exercise(f):
     checks.append("headless and JSON reject before editor or draft creation")
     f.path.write_text("secret = 'DO_NOT_ECHO_THIS_VALUE\n")
     code, output = f.edit(EDITOR=f.editor)
-    assert code != 0 and "cannot resolve the cluster profile" in output, output
+    assert code != 0 and "cannot open this node" in output, output
     assert "DO_NOT_ECHO_THIS_VALUE" not in output and not f.receipt.exists()
     f.reset()
     checks.append("invalid original refuses without echoing TOML values")
 
-    # Selection stays bound to the physical profile while an editor is open.
-    peer = f.root / "peer"
-    subprocess.run(
-        [f.binary, "--home", str(peer), "cluster", "new", "peer", "--local"],
-        check=True,
-        capture_output=True,
-        timeout=15,
-    )
+    # --cluster asserts the node identity; it never selects another directory.
     own_id = tomllib.loads(f.path.read_text())["cluster"]["id"]
-    peer_path = peer / "config.toml"
-    peer_original = peer_path.read_bytes()
-    f.cli("cluster", "add", str(peer))
-    code, output = f.edit(context="peer", EDITOR=f.editor)
+    code, output = f.edit(context=own_id, EDITOR=f.editor)
     assert code == 0, output
-    assert "editor_preference" in peer_path.read_text()
-    peer_path.write_bytes(peer_original)
-    f.cli("cluster", "switch", "peer")
-    code, output = f.edit(
-        "switch",
-        EDITOR=f.editor,
-        EDIT_CONCURRENT=json.dumps(f.base + ["cluster", "switch", own_id]),
-    )
-    assert code == 0, output
-    assert "editor_preference" in peer_path.read_text()
-    assert "editor_preference" not in f.path.read_text()
-    checks.append("explicit and active profiles stay pinned across context switch")
+    assert "editor_preference" in f.path.read_text()
     f.reset()
+    code, output = f.edit(context="another-cluster", EDITOR=f.editor)
+    assert code != 0 and "cannot open this node" in output, output
+    assert not f.receipt.exists()
+    checks.append("cluster assertion cannot redirect the editor")
 
     # Only apply publishes shared settings. A real signed mutation during the
     # editor also exercises the daemon's projection lock and stale-save check.

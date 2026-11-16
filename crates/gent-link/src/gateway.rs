@@ -9,7 +9,7 @@ mod mtls;
 pub(crate) mod registry;
 mod server;
 mod service_options;
-use crate::{contexts, managed_file};
+use crate::{managed_file, node_home};
 use anyhow::{Result, ensure};
 use clap::{Args, Subcommand};
 pub(crate) use registry::{Permit, Registry};
@@ -187,7 +187,7 @@ pub async fn execute(home: &Path, command: Command, explicit: bool) -> Result<Op
         | Command::Clients {
             command: None | Some(ClientCommand::List),
         } => {
-            let cfg = contexts::inspect(&home)?;
+            let cfg = node_home::inspect(&home)?;
             if cfg.gateway_registry()?.is_none() {
                 return Ok(Some(
                     json!({"configured":false,"clients":[],"running":"not_probed"}),

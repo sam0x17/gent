@@ -31,7 +31,6 @@ impl Fixture {
         install::change(
             &self.home,
             install::Args {
-                move_profile: false,
                 host: Host::ClaudeCode,
                 config_dir: Some(self.directory.clone()),
                 wake,

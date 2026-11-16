@@ -51,69 +51,6 @@ pub struct Options {
     rc_file: Option<PathBuf>,
 }
 
-impl Options {
-    pub(crate) async fn profile_login(&self, home: &Path, human: bool) -> Result<()> {
-        let interactive =
-            human && !self.no_input && io::stdin().is_terminal() && io::stderr().is_terminal();
-        ensure!(
-            interactive || self.headless || self.no_browser,
-            "sign in with gent auth login before adding a service profile"
-        );
-        let cfg = crate::contexts::inspect(home)?;
-        let service = self
-            .service
-            .clone()
-            .or_else(|| cfg.service.map(|s| s.origin));
-        auth::execute(
-            home,
-            auth::Command::Login {
-                headless: self.headless,
-                no_browser: self.no_browser,
-                service,
-            },
-        )
-        .await?;
-        Ok(())
-    }
-    pub(crate) fn intent(
-        &mut self,
-        local: Option<&str>,
-        human: bool,
-    ) -> Result<Option<crate::contexts::provision::Intent>> {
-        use crate::contexts::provision::Intent;
-        if let Some(name) = local {
-            return Ok(Some(Intent::New {
-                name: name.into(),
-                local: true,
-            }));
-        }
-        if let Some(name) = &self.new_cluster {
-            return Ok(Some(Intent::New {
-                name: name.clone(),
-                local: false,
-            }));
-        }
-        if let Some(file) = &self.invite_file {
-            if self.name.is_none() {
-                self.name = Some(prompt(
-                    human
-                        && !self.no_input
-                        && io::stdin().is_terminal()
-                        && io::stderr().is_terminal(),
-                    "Node name: ",
-                    "joining needs --name NODE",
-                )?);
-            }
-            return Ok(Some(crate::pairing::JoinArgs::invitation_intent(
-                file,
-                self.name.as_deref().expect("name checked"),
-                None,
-            )?));
-        }
-        Ok(None)
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum Plan {
     Existing,
@@ -210,6 +147,11 @@ fn plan(
         ensure!(
             !staged && joining.is_none(),
             "a node join is pending; rerun the original join command"
+        );
+        ensure!(
+            cfg.as_ref()
+                .is_none_or(|c| c.cluster.local_only && c.cluster.name == name),
+            "this node already belongs to a cluster; run gent node reset before enrolling in another cluster"
         );
         return Ok(Plan::Local(name));
     }
@@ -429,7 +371,7 @@ pub async fn install(
         Plan::Existing => None,
         Plan::CodeJoin { code } => {
             enrollment = Some(
-                crate::enrollment::join(&home, &home, {
+                crate::enrollment::join(&home, {
                     let mut args = crate::pairing::JoinArgs::code(Some(code));
                     args.no_daemon = true;
                     args

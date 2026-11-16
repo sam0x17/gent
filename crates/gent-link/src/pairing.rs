@@ -91,24 +91,7 @@ impl JoinArgs {
         self.no_daemon = false;
         self
     }
-    pub(crate) fn invitation_intent(
-        file: &Path,
-        name: &str,
-        cluster: Option<&str>,
-    ) -> Result<crate::contexts::provision::Intent> {
-        let invitation = crate::invitations::decode_file(file)?;
-        let offer = &invitation.offer().offer;
-        ensure!(
-            cluster.is_none_or(|id| id == offer.anchor.cluster_id),
-            "invitation belongs to another cluster"
-        );
-        Ok(crate::contexts::provision::Intent::Join {
-            cluster: offer.anchor.cluster_id.clone(),
-            name: name.into(),
-            route: serde_json::json!({"kind":"invitation","anchor":offer.anchor,"service":offer.service}),
-        })
-    }
-    pub(crate) fn intent(&self) -> Result<crate::contexts::provision::Intent> {
+    pub(crate) fn target_cluster(&self) -> Result<String> {
         if let Some(file) = &self.invite_file {
             ensure!(
                 self.remote_home.is_none()
@@ -116,24 +99,20 @@ impl JoinArgs {
                     && self.remote_gent == "gent",
                 "invitation joins do not accept SSH paths or relay overrides"
             );
-            return Self::invitation_intent(file, &self.name, self.cluster.as_deref());
+            let invitation = crate::invitations::decode_file(file)?;
+            let cluster = &invitation.offer().offer.anchor.cluster_id;
+            ensure!(
+                self.cluster.as_ref().is_none_or(|id| id == cluster),
+                "invitation belongs to another cluster"
+            );
+            return Ok(cluster.clone());
         }
         remote_command(self)?;
-        let mut route = serde_json::json!({"kind":"ssh","via":self.via,"remote_home":self.remote_home,
-                "remote_gent":self.remote_gent,"relay_endpoint":self.relay_endpoint});
-        if let Some(target) = &self.replace_node {
-            route["replace_node"] = serde_json::json!(target);
-        }
-        Ok(crate::contexts::provision::Intent::Join {
-            cluster: self
-                .cluster
-                .clone()
-                .context("SSH joining requires a cluster ID")?,
-            name: self.name.clone(),
-            route,
-        })
+        self.cluster
+            .clone()
+            .context("SSH joining requires a cluster ID")
     }
-    pub(crate) fn existing(&self, home: &Path, pinned_node: Option<&str>) -> Result<Option<Value>> {
+    pub(crate) fn existing(&self, home: &Path) -> Result<Option<Value>> {
         if crate::managed_file::Snapshot::read(&gent_daemon::config::path(home))?
             .text
             .is_none()
@@ -143,7 +122,7 @@ impl JoinArgs {
         if gent_daemon::config::pending_join(home)?.exists() {
             return Ok(None);
         }
-        let cfg = crate::contexts::inspect(home)?;
+        let cfg = crate::node_home::inspect(home)?;
         let replacement = pairing::installed_replacement(home)?;
         ensure!(
             self.replace_node
@@ -171,8 +150,7 @@ impl JoinArgs {
             );
         } else {
             ensure!(
-                self.cluster.as_deref() == Some(&cfg.cluster.id)
-                    && pinned_node.map_or(self.name == cfg.node.name, |node| node == cfg.node.id),
+                self.cluster.as_deref() == Some(&cfg.cluster.id) && self.name == cfg.node.name,
                 "installed node does not match the requested join"
             );
         }

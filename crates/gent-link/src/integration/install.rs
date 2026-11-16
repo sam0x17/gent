@@ -19,9 +19,6 @@ pub struct Args {
     /// Host config directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
-    /// Move this host's managed integration to the selected Gent profile.
-    #[arg(long = "move")]
-    pub move_profile: bool,
     /// Enable native queued delivery (Codex uses its default app-server socket).
     #[arg(long, conflicts_with = "wake_socket")]
     pub wake: bool,
@@ -103,7 +100,7 @@ pub(super) fn codex_runtime_target(
     let home = normalize(home)?;
     let layout = Layout::resolve(Host::Codex, config_dir)?;
     let (snapshot, state) = layout.read()?;
-    state.owner(&home, false)?;
+    state.owner(&home)?;
     ensure!(
         state.pending.is_none(),
         "Codex integration update is pending"
@@ -531,17 +528,7 @@ impl Edit {
     }
 }
 impl State {
-    fn owner(&self, home: &Path, move_profile: bool) -> Result<()> {
-        if move_profile {
-            ensure!(
-                self.pending.as_ref().is_none_or(|pending| pending
-                    .after
-                    .as_ref()
-                    .is_some_and(|spec| spec.home == home)),
-                "another integration change is pending; finish it with its original profile and options before moving"
-            );
-            return Ok(());
-        }
+    fn owner(&self, home: &Path) -> Result<()> {
         for spec in self
             .installed
             .iter()
@@ -549,7 +536,7 @@ impl State {
         {
             ensure!(
                 spec.home == home,
-                "host integration belongs to another Gent home: {}; use gent integration install HOST --move to move it to the selected profile, or select its cluster ID with --cluster before uninstalling (see gent --json clusters)",
+                "host integration belongs to another Gent home: {}; run gent node reset to archive legacy node state before re-enrolling",
                 spec.home.display()
             );
         }
@@ -586,12 +573,11 @@ fn recover(layout: &Layout) -> Result<()> {
 pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     ensure!(
         install
-            || (!args.move_profile
-                && !args.wake
+            || (!args.wake
                 && args.wake_socket.is_none()
                 && !args.vscode
                 && args.vscode_settings.is_none()),
-        "move, wake and VS Code options apply only to installation"
+        "wake and VS Code options apply only to installation"
     );
     ensure!(
         !args.vscode || (args.host == Host::Codex && (args.wake || args.wake_socket.is_some())),
@@ -647,7 +633,7 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     } else {
         None
     };
-    mutate(&layout, &home, desired, args.move_profile)?;
+    mutate(&layout, &home, desired)?;
     let mut result = inspect(&layout, &home)?;
     result["action"] = if install { "installed" } else { "uninstalled" }.into();
     result["next"] = "Restart the host's Gent MCP connection or open a new host session to load these user settings.".into();
@@ -657,16 +643,16 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     Ok(result)
 }
 
-fn mutate(layout: &Layout, home: &Path, desired: Option<Spec>, move_profile: bool) -> Result<()> {
-    ensure!(
-        !move_profile || desired.as_ref().is_some_and(|spec| spec.home == home),
-        "moving requires an installation for the selected profile"
-    );
+fn mutate(layout: &Layout, home: &Path, desired: Option<Spec>) -> Result<()> {
     files::directory(&layout.directory)?;
     let lock = layout.lock();
     let _guard = files::lock(&lock)?;
+    mutate_locked(layout, home, desired)
+}
+
+fn mutate_locked(layout: &Layout, home: &Path, desired: Option<Spec>) -> Result<()> {
     let (_, state) = layout.read()?;
-    state.owner(home, move_profile)?;
+    state.owner(home)?;
     recover(layout)?;
     let (snapshot, mut state) = layout.read()?;
     let edits = layout.edits(
@@ -784,7 +770,7 @@ pub(super) fn claude_wake(
         state.pending.is_none(),
         "Claude integration update is pending"
     );
-    state.owner(&home, false)?;
+    state.owner(&home)?;
     let spec = state
         .installed
         .as_ref()
@@ -823,3 +809,38 @@ pub fn status(home: &Path, host: Option<Host>, config_dir: Option<PathBuf>) -> R
 
 #[cfg(test)]
 mod tests;
+
+/// Remove only managed entries pointing into the state being retired. Other
+/// host settings and installations outside this node remain untouched.
+pub(crate) fn retire(homes: &[PathBuf]) -> Result<()> {
+    for host in [Host::Codex, Host::ClaudeCode] {
+        let layout = Layout::resolve(host, None)?;
+        retire_layout(&layout, homes)?;
+    }
+    Ok(())
+}
+
+fn retire_layout(layout: &Layout, homes: &[PathBuf]) -> Result<()> {
+    if Snapshot::read(&layout.record())?.text.is_none() {
+        return Ok(());
+    }
+    let _lock = files::lock(&layout.lock())?;
+    let (_, state) = layout.read()?;
+    let specs: Vec<_> = state
+        .installed
+        .iter()
+        .chain(state.pending.iter().filter_map(|p| p.after.as_ref()))
+        .collect();
+    if !specs.iter().any(|s| homes.contains(&s.home)) {
+        return Ok(());
+    }
+    ensure!(
+        specs.iter().all(|s| homes.contains(&s.home)),
+        "host installation has a pending change outside the node being reset; finish that change first"
+    );
+    recover(layout)?;
+    if let Some(spec) = layout.read()?.1.installed {
+        mutate_locked(layout, &spec.home, None)?;
+    }
+    Ok(())
+}

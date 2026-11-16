@@ -43,7 +43,7 @@ pub(crate) fn claude_runtime_pinned(home: &Path, directory: &Path) -> Result<Cla
             .context("Claude integration is not installed")?,
     )
     .map_err(|_| anyhow::anyhow!("invalid Claude installation record"))?;
-    state.owner(&normalize(home)?, false)?;
+    state.owner(&normalize(home)?)?;
     let default_server = layout
         .directory
         .parent()
@@ -70,7 +70,7 @@ fn validate(home: &Path, layout: Layout) -> Result<ClaudeRuntime> {
     gent_daemon::recovery::ensure_active(&home)?;
     let cfg = config::load(&home)?;
     let (snapshot, state) = layout.read()?;
-    state.owner(&home, false)?;
+    state.owner(&home)?;
     ensure!(
         state.pending.is_none(),
         "Claude integration update is pending"

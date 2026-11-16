@@ -58,7 +58,7 @@ gent nodes
 gent cluster
 gent cluster new
 gent cluster join my-cluster-id
-gent cluster switch
+gent node reset  # only when retiring local state for fresh enrollment
 gent daemon status
 gent daemon install
 gent daemon uninstall
@@ -68,7 +68,7 @@ gent hooks uninstall
 
 These are independent command examples. `gent hooks remove` aliases `gent hooks uninstall`. See [the CLI design](docs/cli.md) for command behavior, guided setup, and scripting conventions.
 
-Cluster configuration uses TOML at `~/.gent/config.toml`, with local node settings, an active cluster selection, and separate profiles for joined clusters. Switching clusters changes the CLI context without moving running agents or pending work. Private keys stay in an OS credential store or protected local key store, outside the TOML file. Encrypt shared configuration before replication.
+Cluster configuration uses TOML at `~/.gent/config.toml`. A node belongs to one cluster, shared by every local chat and CLI command. Reset and re-enroll to replace that membership. Future multi-cluster support would use simultaneous memberships, with per-agent access.
 
 Agents register with the local daemon through the same MCP tools, or through an authorized remote connector for hosted chats. `gent providers list` summarizes the hosts announced by those agents. Setup helpers can detect Codex and Claude Code integration configuration; other MCP-capable hosts use the same server. Model settings, inference credentials, and conversation history stay with the host. Agents using LM Studio, llama.cpp, or other model backends participate through their MCP host without a dedicated Gent model integration. See [MCP hosts and agent registration](docs/providers.md).
 

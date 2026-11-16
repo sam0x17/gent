@@ -32,13 +32,13 @@ gent daemon install --invite-file /private/path/laptop.gent-invite --name laptop
 
 JSON output and non-terminal input never trigger setup questions. Sign in separately, then pass `--new NAME` or `--invite-file FILE --name NODE` with `--no-input` for scripts. `--no-input` also prevents starting login. An explicit `--headless` or `--no-browser` may initiate the existing bounded login flow without a terminal. Add `--hooks --shell zsh` (or `bash`/`fish`) to install shell support explicitly; `--rc-file PATH` chooses a startup file. Shell setup preserves unrelated content. A shell failure after enrollment reports that the daemon is already installed and gives the separate retry command.
 
-The installer checks service-manager availability and service ownership before enrollment. Cancellation or missing choices leave a fresh state directory uncreated. Completed installs preserve node identity and can be repeated while the managed daemon runs, without an account request or a daemon restart when the service definition is unchanged. Interrupted first-node creation resumes with bare `gent daemon install`; additional-profile creation needs its original explicit setup command; interrupted invitation enrollment needs the original file/name, or an explicit `--continue` with a valid replacement. Pending SSH joins must resume through the original `gent cluster join --via ...` command. Stop the daemon before a retry that needs enrollment or credential repair. The running daemon renews active sessions before expiry; expired credentials still require the reconnect procedure below.
+The installer checks service-manager availability and service ownership before enrollment. Cancellation or missing choices leave a fresh state directory uncreated. Completed installs preserve node identity and can be repeated while the managed daemon runs, without an account request or a daemon restart when the service definition is unchanged. Interrupted first-node creation resumes with bare `gent daemon install`; interrupted invitation enrollment needs the original file/name, or an explicit `--continue` with a valid replacement. Pending SSH joins must resume through the original `gent cluster join --via ...` command. Stop the daemon before a retry that needs enrollment or credential repair. The running daemon renews active sessions before expiry; expired credentials still require the reconnect procedure below.
 
 After installation, connect hosts with `gent integration install codex` and `gent integration install claude-code`. The daemon installer prints these commands; host settings use their separate installers.
 
 Use `gent auth login --service https://YOUR_ACCOUNT_ORIGIN` for an alternate deployment. The account service advertises its relay through authenticated `GET /v1/transport/config`. Account credentials go only to the saved login origin. The CLI accepts HTTPS origins, with HTTP restricted to explicit loopback fixtures; an HTTPS account service cannot select an HTTP relay. The initial relay address is pinned locally. A later discovery response cannot silently move an existing node to another relay.
 
-`gent cluster new NAME` uses the primary directory for first setup, allowing an existing login under `auth/`. Once that node is configured, it reserves a child profile and selects it after successful setup. See [local cluster profiles](local-proof.md#local-cluster-profiles) for shared-account behavior and retries. It creates the node and cluster UUIDs, owner signing key, node signing key and signed genesis locally before reserving their IDs at the account service. The service receives those IDs and a transport credential, never the signing keys, policy or display names. The credential grants access to cluster ciphertext; local signed authority still controls agents and decryption.
+`gent cluster new NAME` creates the node in `~/.gent`, allowing an existing login under `auth/`. It creates fresh node and cluster IDs, keys and transport state. Once configured, the node cannot create or join another cluster until `gent node reset`. `gent cluster new NAME --local` creates a development cluster without service enrollment; existing development or SSH-paired clusters are not automatically converted to service transport.
 
 `--local` retains the independent development setup. Existing development or SSH-paired clusters are not automatically converted to service transport. They can have compacted mailbox history that requires a separate migration procedure.
 
@@ -69,20 +69,26 @@ The private code contains 256 random bits and expires after 15 minutes. It encry
 
 For scripts, use `gent node add NAME --code-out PRIVATE_FILE` and `gent cluster join --code-file PRIVATE_FILE`. For a terminal prompt instead of a code in shell history, run `gent cluster join` without an argument. JSON output omits the code. `--no-daemon` limits joining to enrollment when a separate manager controls the daemon. Private retry state lives under `auth/enrollment/`.
 
-## Moving an existing installation to another cluster
+## Re-enroll an existing machine
 
-Joining another cluster preserves the old local profile and selects the new one. Existing daemon services and host integrations remain pinned to their original profile. Move each host integration explicitly after joining:
+A node belongs to one cluster. CLI commands, services and every chat use the same node in `~/.gent`; there is no profile selection. Older installations with profiles require a clean reset:
+
+```sh
+gent node reset
+```
+
+Reset stops and uninstalls Gent's managed daemon and gateway services, including legacy children under `~/.gent/clusters/`. It removes managed Codex and Claude Code entries for those directories while preserving unrelated host settings. It archives the old directory as a private sibling named `.gent.retired-UUID`, keeps that archive offline, and restores only `auth/session.json` into a fresh `~/.gent`. Repeat the command if interrupted. Foreground processes must be stopped first; edited host entries require resolution before reset can proceed.
+
+Reset is local: it does not remove membership from the old cluster. On an existing owner node, remove the retired node ID with `gent node remove OLD_NODE_ID`, then issue a fresh code with `gent node add NAME`. On the reset machine:
 
 ```sh
 gent cluster join CODE
-gent integration install codex --move
-gent integration install claude-code --move
+gent integration install codex
+gent integration install claude-code
 gent doctor --online
 ```
 
-If already joined, start with the integration commands. `--move` updates the managed MCP entry and required host hook together, preserving unrelated host settings and the login and local data in both profiles. As with ordinary installation, pass `--wake` or other installation options to enable those features. An interrupted move resumes with the same target profile and options; altered managed entries still require resolution. Restart or resume the host so it loads the new MCP configuration and hook. Existing messages and agent identities remain in their original clusters.
-
-If the old cluster has been retired, use `gent --cluster OLD_CLUSTER_ID daemon uninstall` to stop its service explicitly. `gent doctor` shows the recorded installation directory and a move command when an integration belongs to another profile. `gent --json clusters` lists profile directories and IDs. `--home` selects the profile registry's root; use `--cluster` when an operation must target a particular entry in that registry.
+Join assigns the name from the code and starts the daemon. The node and its agents receive fresh identities; old messages and bindings stay in the archive. Reload the host's Gent MCP connection after reinstalling. For Codex in VS Code, run **Developer: Reload Window** and reopen the chat. There is no profile move step.
 
 ## Add another machine with an invitation
 

@@ -1,6 +1,6 @@
 # Diagnose a Gent installation
 
-Run `gent doctor` to inspect the selected cluster profile, daemon, account state, gateway, MCP installations and shell hooks. It reports problems and suggested commands without starting a model or changing setup.
+Run `gent doctor` to inspect this node, daemon, account state, gateway, MCP installations and shell hooks. It reports problems and suggested commands without starting a model or changing setup.
 
 ```sh
 gent doctor
@@ -16,7 +16,7 @@ Exit codes are 0 when the available checks pass, 3 when a check warns or fails, 
 
 | Check | Evidence and limits |
 | --- | --- |
-| Configuration | Validates the selected private profile's identity/routing and editable names/policy. Invalid local policy edits can be diagnosed while the daemon continues using signed state. Failed profile selection never falls back to another profile. |
+| Configuration | Validates the node's identity/routing and editable names/policy. Invalid local policy edits can be diagnosed while the daemon continues using signed state. A failed cluster identity assertion never selects another node. |
 | Local state | Checks owner credential format and protected key/database paths. It does not open or migrate an offline database. After initialization, a missing key or database is a failure. |
 | Daemon | Probes an owned, private Unix socket with the owner credential. The response must match the selected node, cluster and diagnostic version. The deadline is two seconds. Older binaries without this operation need upgrading. |
 | Authority | The live daemon verifies signed state and reports revision, expiry, membership and a request-clock watermark ahead of wall time. Reconnecting cannot override removal. |
@@ -25,7 +25,7 @@ Exit codes are 0 when the available checks pass, 3 when a check warns or fails, 
 | Service | Inspects systemd/launchd registration, enablement, PID and binary availability. A running managed service must match the authenticated daemon PID. Queries have a three-second deadline. Foreground daemons need no managed service. |
 | Account | Distinguishes cached, expired, pending-login, pending-logout and remotely verified state. An unexpired cache alone does not establish current service authorization. Shared account-source pins are checked. |
 | Gateway | Validates registry/node/cluster pins, clock watermark and active host grants without creating a lock or listener. It does not prove endpoint reachability or provider metadata. |
-| Codex and Claude Code | Inspects Gent-managed user-scope entries, required hooks and binary availability. Entries pinned to another profile are identified separately. Effective project, GUI and managed-policy settings remain host-specific. |
+| Codex and Claude Code | Inspects Gent-managed user-scope entries, required hooks and binary availability. Entries pointing to an obsolete directory are warnings requiring reset and reinstallation. Effective project, GUI and managed-policy settings remain host-specific. |
 | Shell | Inspects the managed block and referenced binary. It does not source the startup file or test the current shell. |
 
 Components are observed separately, so this is not an atomic snapshot of the installation. The daemon probe uses a read-only transaction: it does not advance request clocks, project configuration, initialize state, wake synchronization or run maintenance. Existing daemon work can proceed independently. Relay observations reset on daemon restart and never authorize delivery.
@@ -62,6 +62,6 @@ python3 scripts/prove_doctor.py --gent target/debug/gent
 python3 scripts/prove_service.py target/debug/gent
 ```
 
-The native proof uses private disposable profiles and host configuration. It checks missing setup, both installed MCP hosts, a live daemon, byte/mode/inventory preservation, gateway inspection without lock creation, pending projection, an advanced clock watermark, profile switching, host-error redaction and an unresponsive socket. Rust tests also verify authentication, unchanged database/config bytes, optional account requests, service/account pins and relay outage/recovery. These checks do not establish backup restoration or lost-key recovery.
+The native proof uses a private disposable node and host configuration. It checks missing setup, both installed MCP hosts, a live daemon, byte/mode/inventory preservation, gateway inspection without lock creation, pending projection, an advanced clock watermark, second-cluster refusal, host-error redaction and an unresponsive socket. Rust tests also verify authentication, unchanged database/config bytes, optional account requests, service/account pins and relay outage/recovery. These checks do not establish backup restoration or lost-key recovery.
 
 The separate service proof creates and removes a temporary service through the real user service manager. It also checks doctor's PID correlation, stopped-service warning, preservation of an edited registration, and foreground-process distinction. It retains its temporary files if cleanup fails.

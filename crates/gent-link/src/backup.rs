@@ -90,7 +90,7 @@ pub fn execute(command: Command, home: Option<&Path>, context: Option<&str>) -> 
                 .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".gent")))
                 .context("cannot locate home; pass --home")?;
             recovery::ensure_active(&root)?;
-            let home = crate::contexts::resolve(&root, context)?;
+            let home = crate::node_home::resolve(&root, context)?;
             create(&home, &archive, &identity)
         }
         Command::Verify { archive, identity }

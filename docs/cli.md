@@ -54,6 +54,7 @@ The current build guides missing login and cluster enrollment through `gent daem
 | --- | --- |
 | `gent` | Show the current node, active cluster, authentication, and daemon status. |
 | `gent node` | Show details for the current node. |
+| `gent node reset` | Archive local node state for fresh enrollment, keeping the GitHub login. |
 | `gent node name` | Print the current node's name. |
 | `gent node name set my-node` | Rename the current node and publish its updated encrypted metadata to its joined clusters. |
 | `gent node admin grant NODE_UUID` | On the active owner, authorize an enrolled node to submit configuration edits. |
@@ -65,11 +66,9 @@ The current build guides missing login and cluster enrollment through `gent daem
 | `gent cluster status` | Explicit alias for the same cluster status view. |
 | `gent cluster connect` | Resume service setup or replace an invalid relay credential on an owner or joined node, preserving local identity. Stop the daemon first. |
 | `gent cluster renew` | Renew the signed configuration lease locally on the owner, or request renewal from an authorized joined node. |
-| `gent clusters` | List the user's configured or authorized clusters, marking the active one. |
 | `gent cluster new [name]` | Create and select a cluster, establishing its initial owner keys and policy locally. |
 | `gent node add NAME` | Issue a one-time code for a named node. Add `--no-configure` for messaging-only membership. |
 | `gent cluster join [CODE]` | Join as the name assigned by the invitation and start the daemon; prompt for the code if omitted. |
-| `gent cluster switch [cluster]` | Select an already joined cluster; show a picker when the argument is omitted in an interactive terminal. |
 | `gent cluster invite --out FILE` | Create a private, single-node invitation; expires after 15 minutes. |
 | `gent cluster invitations` | List this owner's invitation status without secrets. |
 | `gent cluster invitations revoke ID` | Close local admission, then revoke service routing; retry if offline. |
@@ -79,7 +78,7 @@ Names are display labels. Renaming a node must preserve its stable identity, key
 
 Changing the active cluster selects the default context for subsequent CLI commands. It does not move existing agents, pending messages, or relay attachments into another cluster, and it does not leave the old cluster. The daemon can maintain separate connections for joined clusters. An explicit `--cluster <id-or-name>` selects a cluster for one applicable command without changing the default. Keep identities, queues, keys, and policy isolated by cluster.
 
-Local profiles support `gent clusters`, `gent cluster add PATH`, `gent cluster switch [ID_OR_UNIQUE_NAME]` and `--cluster`. Creation and joining through an initialized primary directory reserve a separate profile and select it after setup succeeds. Explicit `gent daemon install --new`, `--local`, or `--invite-file --name` use the same journal; bare install uses the selected profile. Repeat the original setup command after interruption. Each profile has its own daemon, keys and state directory; managed service profiles share a pinned account-session store. Installed daemon and MCP entry points stay on their original cluster across switches. See [local cluster profiles](local-proof.md#local-cluster-profiles) for retry, shared-login and reconnect behavior.
+Each node belongs to one cluster in `~/.gent`, shared by CLI commands and all chats. A second cluster creation or join is refused. `gent node reset` stops managed services, archives old state, removes its managed host entries, and preserves the GitHub session for fresh enrollment. See [re-enrollment](service-setup.md#re-enroll-an-existing-machine).
 
 `gent nodes` lists signed membership and reports `local`, `connected`, `degraded`, `disconnected`, or `unknown`, with the last verified round trip and its age. Remote connectivity requires a matching encrypted probe reply within 30 seconds; successful evidence remains recent for 90 seconds unless a newer probe times out. Its `data_link` field records pairing to the current signing key, independently of connectivity. A disconnected node can still have running local agents. Authorized owner CLI queries can list the cluster's nodes; agent-facing queries retain their enumeration permissions. See [node connectivity](node-presence.md) for status reasons, restart behavior and the requirement to upgrade both nodes from pre-presence builds.
 
@@ -121,7 +120,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent integration recovery list` | Inspect selected agents and their persisted recovery budget without contacting a host. |
 | `gent integration recovery inspect AGENT_ID` | Check a selection's native readiness without startup; Claude reports why an uncertain history or job needs owner review. |
 | `gent integration recovery disable AGENT_ID` | Remove a recovery selection while leaving native hosts and ordinary MCP delivery running. |
-| `gent integration install <host>` | Install the common MCP server and required Claude identity hook in user settings. Add `--move` to retarget a managed installation from another profile, and `--wake` for optional native queued delivery; see [host setup](wake.md). |
+| `gent integration install <host>` | Install the common MCP server and required Claude identity hook in user settings. Add `--wake` for optional native queued delivery; see [host setup](wake.md). |
 | `gent integration uninstall <host>` | Remove Gent-managed integration entries while preserving unrelated host configuration. |
 | `gent integration remove <host>` | Alias for `gent integration uninstall`. |
 | `gent mcp serve` | Serve the shared MCP interface over stdio, connecting the host's registered agents to the local daemon. |
@@ -145,7 +144,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 
 The [user-controlled gateway](gateway.md) uses authenticated host credentials and required per-call conversation metadata. `clients add --oauth-resource URL --redirect-uri URL` configures an [OAuth client](gateway-oauth.md) with PKCE and refresh support. Hosted provider support and native hosted attachment handles remain unverified.
 
-The auth commands are implemented as a prototype. `gent auth login --headless` uses GitHub device authorization; SSH sessions select it automatically. `--no-browser` instead prints a browser authorization URL and waits on a local loopback callback. `--service ORIGIN` selects an account service. The default `https://api.gent.link` is not deployed. Both paths pass local fixture proofs on Linux and macOS; real GitHub consent remains unverified. See [account login](local-proof.md#account-login) before trying the commands.
+The auth commands are implemented as a prototype. `gent auth login --headless` uses GitHub device authorization; SSH sessions select it automatically. `--no-browser` instead prints a browser authorization URL and waits on a local loopback callback. `--service ORIGIN` selects an account service. The default `https://api.gent.link` is deployed for the private trial. GitHub device consent and hosted enrollment have been verified; browser callback acceptance remains separate. See [account login](local-proof.md#account-login) before trying the commands.
 
 Status checks the service without changing local state and never reports an offline cached identity as authenticated. Status exits 3 when signed out or unavailable. Logout disables the local credential before contacting the service; an offline attempt reports `revocation_pending`, exits 3 and can be retried. Interrupted login can also leave revocation pending until its session commits or the candidate's 15-minute creation window closes. Successful mutations exit 0; malformed state and other failures exit 1. `--json` supports these results without exposing credentials.
 
@@ -208,7 +207,7 @@ Additional command families should follow the same grammar as their functionalit
 
 Messages carry an explicit authenticated user or agent identity. Do not infer sender authority from the shell's active cluster or an agent ID passed as an argument. Relay and permission-management commands must expose their acting identity and target scope when added.
 
-`gent config edit` uses the selected cluster profile, including `--cluster NAME_OR_UUID`, and keeps that physical target if the default cluster changes while editing. `--editor COMMAND` overrides the environment; quote executable paths and arguments containing spaces. Arguments are passed literally without shell expansion. GUI editors need their wait option, for example `gent config edit --editor 'code --wait'`. `--json` and redirected stdin or stdout are refused. See [editing configuration](local-proof.md#edit-local-configuration) for validation, conflicts and retained drafts.
+`gent config edit` edits this node’s `~/.gent/config.toml`. `--editor COMMAND` overrides the environment; quote executable paths and arguments containing spaces. Arguments are passed literally without shell expansion. GUI editors need their wait option, for example `gent config edit --editor 'code --wait'`. `--json` and redirected stdin or stdout are refused. See [editing configuration](local-proof.md#edit-local-configuration) for validation, conflicts and retained drafts.
 
 Configuration mutations accept `--request-id UUID` for retrying an identical proposal. A retry returns the original result; reusing the ID with different content fails. The CLI waits about five seconds for acceptance, then reports a durable `queued` request if the owner remains unavailable. Queued edits survive daemon restarts and do not change effective policy before acceptance. Rejected mutations exit nonzero; `gent config request` can inspect their recorded reason. See [configuration administration](local-proof.md#configuration-administration) for grants, retries, and offline behavior.
 
@@ -218,7 +217,7 @@ Incoming delivery wakes or resumes idle agents where the host supports it, queue
 
 Distinguish a mobile notification from an agent turn or user response. A notification can invite the user to return without starting a turn. Server coordinators use the ordinary wake/queue policy and can continue authorized work while the phone is unavailable.
 
-`~/.gent/config.toml` holds local settings, the active cluster selection, and separate profiles for joined clusters. Only each cluster's shared policy and authorized metadata are replicated to its members. Keep authentication secrets and private keys in an OS credential store or protected local key store outside TOML.
+`~/.gent/config.toml` holds local settings and the node’s sole cluster configuration. Only each cluster's shared policy and authorized metadata are replicated to its members. Keep authentication secrets and private keys in an OS credential store or protected local key store outside TOML.
 
 ## Local message history (implemented)
 
@@ -252,4 +251,4 @@ All support `--json` and use local owner authority. Authenticated receiver check
 
 `gent agent recover ARCHIVE --identity KEY --from-agent OLD_UUID --name NAME` prepares a fresh agent and assigns that history. Choose `--binding NEW_PATH`, `--host codex|claude-code --conversation HOST_ID`, or `--gateway-client CLIENT_UUID --conversation HOST_ID`. Claude children also use `--subagent`; gateway hosts with a user policy require `--subject HOST_USER_ID`. The destination must be unused, and `--from-import` works here too. Reconnect the host to the replacement node after recovery. See [conversation recovery](recovery.md#recover-a-conversation-binding) for retry behavior and gateway authentication requirements.
 
-Restored-node activation remains unimplemented. The CLI refuses state marked `recovery-required.json` before selecting a cluster profile or contacting a daemon. A copied profile registry cannot redirect commands to a live external node. Removing the marker does not make old encryption state safe to resume.
+Restored-node activation remains unimplemented. The CLI refuses state marked `recovery-required.json` before contacting a daemon. Archived node state cannot redirect commands to a live directory. Removing the marker does not make old encryption state safe to resume.

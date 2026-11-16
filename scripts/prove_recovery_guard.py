@@ -14,6 +14,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import tomllib
 
 from smoke_mcp import Client, PNG
 
@@ -76,13 +77,19 @@ def main():
             assert daemon.wait(timeout=10) == 0, daemon.stderr.read()
             daemon.stderr.close()
             daemon = None
-            command(home, 'cluster', 'add', str(peer))
-            command(home, 'cluster', 'switch', 'peer')
             shutil.copytree(home, recovered)
             # Make the copied registry internally valid, with a live external
             # peer selected. The guard must run before resolving that reference.
             config = recovered / 'config.toml'
-            config.write_text(config.read_text().replace(str(home), str(recovered)))
+            text = config.read_text().replace(str(home), str(recovered))
+            own = tomllib.loads(text)
+            external = tomllib.loads((peer / 'config.toml').read_text())
+            text = text.replace('version = 1', 'version = 2', 1)
+            text += '\n[contexts]\nversion = 1\nactive_cluster = ' + json.dumps(external['cluster']['id']) + '\n'
+            for path, cfg in [(recovered, own), (peer, external)]:
+                text += '\n[contexts.profiles.' + json.dumps(cfg['cluster']['id']) + ']\n'
+                text += 'home = ' + json.dumps(str(path)) + '\nnode_id = ' + json.dumps(cfg['node']['id']) + '\n'
+            config.write_text(text)
             marker = recovered / 'recovery-required.json'
             marker.write_text('{"version":1}')
             marker.chmod(0o600)
@@ -92,8 +99,8 @@ def main():
                 listener.listen()
                 listener.setblocking(False)
                 for args in [
-                    ('config',), ('nodes',), ('cluster',), ('clusters',),
-                    ('cluster', 'switch', 'peer'), ('cluster', 'new', 'fresh', '--local'),
+                    ('config',), ('nodes',), ('cluster',),
+                    ('cluster', 'new', 'fresh', '--local'),
                     ('daemon', 'run'), ('daemon', 'status'), ('auth', 'status'),
                     ('doctor', '--online'), ('gateway',),
                     ('mcp', 'serve', '--binding', str(folder / 'external.key')),

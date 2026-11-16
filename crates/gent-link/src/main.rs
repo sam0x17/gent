@@ -4,7 +4,6 @@ mod auth;
 mod backup;
 mod cluster;
 mod config_editor;
-mod contexts;
 mod display;
 mod doctor;
 mod enrollment;
@@ -17,6 +16,7 @@ mod invitations;
 mod managed_file;
 mod mcp;
 mod node;
+mod node_home;
 mod owner_recovery;
 mod owner_transfer;
 mod pairing;
@@ -41,11 +41,11 @@ use std::{io::Write, path::PathBuf};
     after_help = "Guided setup: gent daemon install\nScripted setup: gent auth login && gent daemon install --new demo --no-input\nLocal development: gent daemon install --local demo\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
 )]
 struct Cli {
-    /// State directory (default: ~/.gent). Use a separate directory for experiments.
-    #[arg(long, global = true)]
+    /// Isolated state directory for development (default: ~/.gent).
+    #[arg(long, global = true, hide = true)]
     home: Option<PathBuf>,
-    /// Use a registered cluster for this command without changing the default.
-    #[arg(long = "cluster", global = true)]
+    /// Assert this node belongs to this cluster; never select another directory.
+    #[arg(long = "cluster", global = true, hide = true)]
     context: Option<String>,
     /// Machine-readable output.
     #[arg(long, global = true)]
@@ -91,8 +91,6 @@ enum Command {
         #[command(subcommand)]
         command: Option<ClusterCommand>,
     },
-    /// List local cluster profiles and the selected CLI context.
-    Clusters,
     /// Install, control, or inspect the local daemon.
     Daemon {
         #[command(subcommand)]
@@ -250,16 +248,6 @@ enum ClusterCommand {
         #[command(subcommand)]
         command: Option<owner_transfer::Command>,
     },
-    /// Register an initialized local directory; does not join or move an agent.
-    Add {
-        directory: PathBuf,
-    },
-    /// Change the default CLI context; running agents and daemons keep their cluster.
-    Switch {
-        cluster: Option<String>,
-    },
-    /// List registered local cluster profiles.
-    List,
     /// Create a service cluster after gent auth login, or a local development cluster.
     New {
         name: String,
@@ -349,6 +337,8 @@ enum AgentCommand {
 }
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Stop local services and archive this node for fresh enrollment; keep GitHub login.
+    Reset,
     /// Issue a one-time invitation that assigns this name to the joining node.
     Add(enrollment::AddArgs),
     /// Remove another node from signed membership and revoke its service access (owner only).
@@ -544,29 +534,7 @@ async fn execute(cli: Cli) -> Result<()> {
     let request_id = cli
         .request_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // Installed services and MCP entries already pass an explicit physical
-    // --home. Preserve that binding, including after a service/host restart.
     let explicit_context = cli.home.is_some() || cli.context.is_some();
-    let pinned_runtime = cli.home.is_some()
-        && matches!(
-            &cli.command,
-            Some(
-                Command::Daemon {
-                    command: Some(DaemonCommand::Run)
-                } | Command::Mcp { .. }
-                    | Command::Gateway {
-                        command: Some(gateway::Command::Run(_))
-                    }
-                    | Command::Integration {
-                        command: integration::Command::Hook { .. }
-                            | integration::Command::ClaudeWake { .. }
-                            | integration::Command::CodexIde(_)
-                    }
-                    | Command::Cluster {
-                        command: Some(ClusterCommand::PairingServe)
-                    }
-            )
-        );
     let root = cli
         .home
         .or_else(|| std::env::var_os("GENT_HOME").map(PathBuf::from))
@@ -583,7 +551,17 @@ async fn execute(cli: Cli) -> Result<()> {
         println!("{}", serde_json::to_string(&value)?);
         return Ok(());
     }
-    // Archived profile references must never redirect a command to live state.
+    if matches!(
+        cli.command,
+        Some(Command::Node {
+            command: Some(NodeCommand::Reset)
+        })
+    ) {
+        let output = node_home::reset::execute(&root).await?;
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+    // Archived state must never redirect a command to live state.
     gent_daemon::recovery::ensure_active(&root)?;
     if let Some(Command::Doctor(options)) = cli.command {
         let report = doctor::run(&root, cli.context.as_deref(), options).await;
@@ -597,29 +575,6 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         return Ok(());
     }
-    let context_output = match &cli.command {
-        Some(
-            Command::Clusters
-            | Command::Cluster {
-                command: Some(ClusterCommand::List),
-            },
-        ) => Some(contexts::list(&root)?),
-        Some(Command::Cluster {
-            command: Some(ClusterCommand::Add { directory }),
-        }) => Some(contexts::add(&root, directory)?),
-        Some(Command::Cluster {
-            command: Some(ClusterCommand::Switch { cluster }),
-        }) => Some(contexts::switch(&root, cluster.clone(), !cli.json)?),
-        _ => None,
-    };
-    if let Some(value) = context_output {
-        if cli.json {
-            println!("{}", serde_json::to_string(&value)?);
-        } else {
-            contexts::print(&value);
-        }
-        return Ok(());
-    }
     if let Some(Command::Config {
         command: Some(ConfigCommand::Edit(options)),
     }) = cli.command
@@ -627,11 +582,7 @@ async fn execute(cli: Cli) -> Result<()> {
         config_editor::execute(&root, cli.context.as_deref(), options, cli.json).await?;
         return Ok(());
     }
-    let home = if pinned_runtime && cli.context.is_none() {
-        root.clone()
-    } else {
-        contexts::resolve(&root, cli.context.as_deref())?
-    };
+    let home = node_home::resolve(&root, cli.context.as_deref())?;
     gent_daemon::recovery::ensure_active(&home)?;
     if let Some(Command::Integration {
         command: integration::Command::CodexIde(args),
@@ -665,7 +616,7 @@ async fn execute(cli: Cli) -> Result<()> {
         let status_only = matches!(command, None | Some(DaemonCommand::Status));
         let output = match command.unwrap_or(DaemonCommand::Status) {
             DaemonCommand::Install { local, setup } => {
-                contexts::provision::install(&root, &home, local, setup, !cli.json).await?
+                node_home::provision::install(&home, local, setup, !cli.json).await?
             }
             action => service::execute(&home, action).await?,
         };
@@ -749,6 +700,9 @@ async fn execute(cli: Cli) -> Result<()> {
         _ => None,
     };
     let output = match cli.command {
+        Some(Command::Node {
+            command: Some(NodeCommand::Reset),
+        }) => unreachable!(),
         Some(Command::Recovery { command }) => owner_recovery::execute(&home, command).await?,
         Some(Command::Work { command }) => work::execute(&home, command).await?,
         Some(Command::Wake { command }) => wake::execute(&home, command).await?,
@@ -756,7 +710,7 @@ async fn execute(cli: Cli) -> Result<()> {
         None => owner(&home, OwnerOp::Status).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::New { name, local }),
-        }) => contexts::provision::create(&root, &home, name, local).await?,
+        }) => node_home::provision::create(&home, name, local).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Connect),
         }) => cluster::connect(&home, None).await?,
@@ -768,7 +722,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }) => owner_transfer::execute(&home, &request_id, command).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Join(args)),
-        }) => enrollment::join(&root, &home, args).await?,
+        }) => enrollment::join(&home, args).await?,
         Some(Command::Node {
             command: Some(NodeCommand::Add(args)),
         }) => enrollment::add(&home, args).await?,
@@ -786,7 +740,6 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Some(Command::Cluster { .. }) => owner(&home, OwnerOp::Status).await?,
         Some(Command::Daemon { .. } | Command::Auth { .. }) => unreachable!(),
-        Some(Command::Clusters) => unreachable!(),
         Some(Command::Hooks { .. } | Command::Completions { .. }) => unreachable!(),
         Some(Command::Mcp {
             command:

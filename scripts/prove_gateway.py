@@ -131,10 +131,9 @@ def main():
                 from gateway_download_checks import DownloadChecks
                 downloads = DownloadChecks(home, files)
             inputs = InputChecks(binary, home, cli, rpc, token) if args.host_files else None
-            # The primary CLI now selects another managed profile. Both running
-            # and restarted --home runtimes must remain on the physical node.
-            cli("cluster", "new", "selected-elsewhere", "--local")
-            assert cli("gateway", "status")["configured"] is False
+            # A second cluster cannot change the node used by a running gateway.
+            cli("cluster", "new", "second", "--local", success=False)
+            assert cli("gateway", "status")["configured"] is True
             assert call("gent_identity", {})["agent"]["id"] == first["agent"]["id"]
             stop(gateway)
             stop(daemon)
@@ -171,7 +170,7 @@ def main():
                               "host_file_inputs": bool(inputs),
                               "file_downloads": bool(downloads),
                               "platform": os.uname().sysname,
-                              "checks": ["private host export", "separate conversations", "profile switch isolation",
+                              "checks": ["private host export", "separate conversations", "second cluster refused",
                                          "daemon and gateway restart", "live host revocation", "clean shutdown",
                                          "no bearer or conversation metadata in process logs"]}))
         finally:

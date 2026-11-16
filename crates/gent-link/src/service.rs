@@ -404,3 +404,22 @@ async fn control(home: &Path, kind: Kind, mut action: Action) -> Result<Value> {
     }
     Ok(service.status().await)
 }
+
+/// Stop both Gent-owned processes before their state is archived. An absent
+/// service needs no manager; an installed service must be removed normally.
+pub(crate) async fn retire(home: &Path) -> Result<()> {
+    for kind in [Kind::Gateway, Kind::Daemon] {
+        let service = Service::with_kind(home, kind).await?;
+        if service.installed()?.is_some() {
+            control(home, kind, Action::Uninstall).await?;
+        } else {
+            let state = service.manager.inspect().await;
+            ensure!(
+                !state.loaded,
+                "a Gent service is loaded without its registration; inspect service status before resetting"
+            );
+            service.no_foreground(&state).await?;
+        }
+    }
+    Ok(())
+}

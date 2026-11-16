@@ -90,31 +90,19 @@ async fn stopped_profiles_and_bad_credentials_are_reported_without_initializatio
 }
 
 #[tokio::test]
-async fn selected_profiles_are_pinned_and_broken_selection_never_falls_back() {
+async fn cluster_assertion_never_selects_another_node() {
     let dir = root();
-    let home = dir.path().join("primary");
-    let second = dir.path().join("second");
-    let first = config::initialize(&home, "primary").unwrap();
-    let other = config::initialize(&second, "secondary").unwrap();
-    contexts::add(&home, &second).unwrap();
-    contexts::switch(&home, Some(other.cluster.id.clone()), false).unwrap();
-    let report = run(&home, Some(&first.cluster.id), options(dir.path())).await;
-    assert_eq!(report.cluster_id, Some(first.cluster.id.clone()));
-    let advice = check(&report, "daemon")
-        .next
-        .as_ref()
-        .unwrap()
-        .command
-        .as_ref()
-        .unwrap();
-    assert!(
-        advice
-            .windows(2)
-            .any(|s| s == ["--cluster", first.cluster.id.as_str()])
-    );
-    fs::remove_file(config::path(&second)).unwrap();
+    let home = dir.path().join("node");
+    let cfg = config::initialize(&home, "personal").unwrap();
+    let report = run(&home, Some(&cfg.cluster.id), options(dir.path())).await;
+    assert_eq!(report.cluster_id, Some(cfg.cluster.id.clone()));
+    let report = run(&home, Some("another-cluster"), options(dir.path())).await;
+    assert!(report.home.is_none());
+    assert!(!report.checks.iter().any(|c| c.id == "daemon"));
+    crate::node_home::tests::legacy_registry(&home, &home.join("clusters/old"));
     let report = run(&home, None, options(dir.path())).await;
     assert!(report.home.is_none());
+    assert_eq!(check(&report, "configuration").status, Status::Fail);
     assert!(!report.checks.iter().any(|c| c.id == "daemon"));
 }
 

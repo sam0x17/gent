@@ -158,11 +158,11 @@ pub(crate) async fn execute(
         !json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "config edit requires an interactive terminal without --json; use gent config path and gent config validate for scripted edits"
     );
-    // Resolve once before opening the editor. Profile errors can include TOML
+    // Resolve once before opening the editor. Configuration errors can include TOML
     // values; keep them private just like draft validation errors.
-    let home = crate::contexts::resolve(root, selected).map_err(|_| {
+    let home = crate::node_home::resolve(root, selected).map_err(|_| {
         anyhow::anyhow!(
-            "cannot resolve the cluster profile; config edit requires valid existing configuration and an active profile"
+            "cannot open this node; config edit requires valid existing configuration without legacy profiles"
         )
     })?;
     let command = options

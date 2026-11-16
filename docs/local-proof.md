@@ -8,7 +8,7 @@ The source CLI also has [recoverable service setup](service-setup.md), tested ag
 
 ## Build and verify
 
-Use [`gent doctor`](diagnostics.md) to diagnose the selected profile without changing setup. It inspects local credentials, the live daemon's signed authority and relay observations, service registration, gateway pins, and user-scope host/shell integrations. `--online` also checks a saved Gent account session. The report gives suggested commands; it does not repair state or establish hosted-provider compatibility.
+Use [`gent doctor`](diagnostics.md) to diagnose this node without changing setup. It inspects local credentials, the live daemon's signed authority and relay observations, service registration, gateway pins, and user-scope host/shell integrations. `--online` also checks a saved Gent account session. The report gives suggested commands; it does not repair state or establish hosted-provider compatibility.
 
 Use Rust 1.98 or newer and Python 3 for the process-level test. Run from this repository's root:
 
@@ -61,7 +61,7 @@ gent cluster
 gent config path
 ```
 
-`--local` is required to create a development cluster. This build supports one local cluster per state directory. For foreground use, run `gent cluster new demo --local` followed by `gent daemon run`; stop it with Ctrl-C or SIGTERM. A restart preserves identities, permissions, and queued messages. For an account service, `gent daemon install` guides login and owner/invitation enrollment; see [service setup](service-setup.md) for explicit choices and noninteractive use. Use the local cluster profiles below to create, join and select additional clusters.
+`--local` is required to create a development cluster. Each node belongs to one cluster, shared by every local chat. For foreground use, run `gent cluster new demo --local` followed by `gent daemon run`; stop it with Ctrl-C or SIGTERM. A restart preserves identities, permissions, and queued messages. For an account service, `gent daemon install` guides login and owner/invitation enrollment; see [service setup](service-setup.md) for explicit choices and noninteractive use. Use the local cluster profiles below to create, join and select additional clusters.
 
 ## Account login
 
@@ -345,13 +345,13 @@ The draft has mode 0600 in a mode-0700 directory under the selected node. Gent r
 
 Saving does not contact the daemon or publish shared names or policy. Run `gent config apply` promptly: a later incoming signed revision can still replace unapplied shared edits. Machine-local settings keep their existing reload/restart requirements. `--request-id` applies to publication, not draft editing. For scripted edits, use `gent config path`, edit the file, and run `gent config validate` before applying.
 
-The native terminal check uses two disposable profiles and a real daemon, without provider calls:
+The native terminal check uses a disposable node and a real daemon, without provider calls:
 
 ```sh
 python3 scripts/smoke_config_edit.py target/debug/gent
 ```
 
-It checks editor selection, literal arguments, atomic editor saves, failed/invalid drafts, headless refusal, profile selection, concurrent signed changes and explicit publication.
+It checks editor selection, literal arguments, atomic editor saves, failed/invalid drafts, headless refusal, cluster identity assertions, concurrent signed changes and explicit publication.
 
 ### Signed configuration storage
 
@@ -417,39 +417,15 @@ The harness schedules host turns and grants test permissions; it does not inject
 
 The bundled [agent guidance](../crates/gent-link/skills/gent/SKILL.md) is advertised through MCP server instructions. It covers returned agent IDs, retry IDs, receipt semantics, file bytes, polling, and the current relay limits. Messaging grants do not authorize policy changes or confer human authority.
 
-## Local cluster profiles
+## One cluster per node
 
-`gent clusters` (also `gent cluster list`) lists local profiles without contacting a daemon or account service. Register an already initialized directory with `gent cluster add PATH`. This records its cluster ID, node ID and absolute directory; it neither joins a remote cluster nor copies state. From an initialized primary directory, create and select another local development profile with:
+A machine's node uses `~/.gent/config.toml`. All local CLI, daemon and MCP connections use that node. Creating or joining another cluster is refused once enrolled. Retrying the original completed setup preserves its identity. `gent clusters`, `cluster add`, `cluster switch`, and integration `--move` have been removed.
 
-```sh
-gent daemon install --local scratch
-gent clusters
-gent cluster switch scratch
-gent --cluster CLUSTER_UUID agents
-```
+Use `gent node reset` for [clean re-enrollment](service-setup.md#re-enroll-an-existing-machine). It archives local node state and legacy children, removes their managed services and host entries, and preserves the GitHub session. Archived identities cannot be activated. Future multi-cluster work would add simultaneous node memberships and per-agent membership, not selectable profiles.
 
-The primary directory must already be initialized. `gent cluster switch ID_OR_UNIQUE_NAME` changes the default for subsequent CLI commands. Without an argument it offers a numbered terminal picker; JSON and non-terminal invocations require the argument. `--cluster` selects one profile for a command without changing the default. Names follow each profile's current display label; ambiguous names require an ID. Missing, replaced, linked or mismatched selected state produces an error, without falling back to another cluster. Listing reports unavailable profiles so the user can select a remaining valid one.
+The hidden `--home` override and `GENT_HOME` remain for isolated test nodes and installed service commands. They do not provide a profile registry. The hidden legacy `--cluster` flag only asserts the current cluster's identity; it cannot redirect commands.
 
-Registration upgrades the primary `~/.gent/config.toml` to version 2 and stores the local registry under `[contexts]`. It retains the original cluster's `[node]`, `[cluster]` and policy at that path, with its original keys and database. Additional profiles keep their own config, keys, queues and daemon service in their recorded directories. Imported profiles retain their own account stores; managed service profiles share the account store used during setup. `gent config path` returns the selected profile's configuration path. The registry allows 128 profiles, including the original, and never enters encrypted cluster configuration sync. Configuration writes share `config.lock`; daemon projections preserve the latest selection even if they loaded an older file before a switch.
-
-Switching leaves existing daemons, agents, inboxes, relay attachments and installed host entries in their original cluster. Each profile currently runs its own service. Installed service/MCP/hook commands pass an explicit physical `--home`; those runtime entry points keep interpreting it as that fixed directory. Ordinary CLI commands use that directory's selected context. Use `--cluster CLUSTER_UUID` to override selection explicitly, including for runtime commands. An unpinned new ephemeral MCP connection selects the default once at launch. Existing fixed bindings reject a reconnect into another cluster; installed Codex and Claude entries remain pinned across reconnects and daemon restarts.
-
-`gent cluster new NAME [--local]`, `gent cluster join ...`, and explicit creation/join flags on `gent daemon install` reserve additional profiles under `~/.gent/clusters/SETUP_UUID` once the primary directory is initialized. Successful setup registers and selects the profile. Bare `gent daemon install` operates on the current selection. For service setup:
-
-```sh
-gent auth login
-gent daemon install --new work --no-input
-# Or join another cluster using a privately transferred invitation:
-gent daemon install --invite-file /private/laptop.gent-invite --name laptop --no-input
-```
-
-Repeat the original command after an interruption. `gent clusters` lists pending setup directories. The journal retains the original creation name or joining cluster, node name and route, so retries preserve the reserved directory and identities even if the last response was lost. Completed creation and managed join retries reuse their original options after display-name changes; completed node IDs remain pinned. Changed join options are refused; invitation replacement still requires `--continue` and the same trust anchor. Keep `profile-setup.json` with the primary configuration in backups. Missing established records require restoration. Setup records and registered profiles each have a 128-entry limit; completed records remain for retries. Creating multiple profiles with the same original name requires separate primary directories.
-
-Managed service profiles use one account store and lock, without copying account bearer files. `gent auth login`, `renew`, and `logout` through a linked profile operate on that shared store; human and JSON output identify it. Logout affects every profile using that store. Node signing keys, transport credentials and message queues remain separate. The source directory, node/cluster identity, account and service are pinned in private metadata. Preserve the source directory when backing up or moving profiles. A missing reference, changed account or changed service fails instead of silently creating a different login. Use an explicit original `--cluster` when recovering a source account whose identity no longer matches. First setup and explicit `--headless`/`--no-browser` installation retain guided login.
-
-Configuration version 3 records the required local fields in `local_features`; losing a registry, account reference or setup-journal pin then fails validation. Ordinary configuration projections retain these local fields. They are not cluster policy and do not sync to another machine. `cluster add` still imports existing directories without changing their authentication. Use a short primary directory, such as the default `~/.gent`, so child daemon socket paths fit the operating system's Unix socket limit. A single daemon supervising several profiles and profile removal remain future work.
-
-Run `python3 scripts/prove_contexts.py target/debug/gent` for the opt-in native-service proof. It creates a second profile through the primary CLI, repeats creation and installation without restarting its daemon, runs two isolated systemd/launchd services, installs MCP entries in temporary host directories, switches contexts with a PNG queued, reconnects both synthetic host clients, checks binding isolation, restarts both services, and exercises the terminal picker. Cleanup removes its services and host entries. It makes no model calls and uses no account service or network relay.
+Run `python3 scripts/prove_single_node.py target/debug/gent` for the opt-in systemd/launchd proof. It retires a legacy root and child, preserves a synthetic account session, creates a fresh node, verifies that a second cluster is refused, and registers both synthetic Codex and Claude MCP clients against the same node. It uses disposable host settings without model or account calls.
 
 ## Configuration administration
 
