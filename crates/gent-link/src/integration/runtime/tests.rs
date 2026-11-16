@@ -27,6 +27,7 @@ async fn runtime_checks_refuse_absent_polling_foreign_and_conflicting_installs_w
     );
     assert!(!dir.exists());
     let options = |wake, socket| install::Args {
+        move_profile: false,
         host: Host::Codex,
         config_dir: Some(dir.clone()),
         wake,
@@ -74,6 +75,7 @@ async fn existing_codex_is_only_probed_and_invalid_responses_never_launch_a_repl
         install::change(
             &home,
             install::Args {
+                move_profile: false,
                 host: Host::Codex,
                 config_dir: Some(dir.clone()),
                 wake: true,

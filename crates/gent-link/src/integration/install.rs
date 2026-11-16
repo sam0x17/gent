@@ -19,6 +19,9 @@ pub struct Args {
     /// Host config directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
+    /// Move this host's managed integration to the selected Gent profile.
+    #[arg(long = "move")]
+    pub move_profile: bool,
     /// Enable native queued delivery (Codex uses its default app-server socket).
     #[arg(long, conflicts_with = "wake_socket")]
     pub wake: bool,
@@ -100,7 +103,7 @@ pub(super) fn codex_runtime_target(
     let home = normalize(home)?;
     let layout = Layout::resolve(Host::Codex, config_dir)?;
     let (snapshot, state) = layout.read()?;
-    state.owner(&home)?;
+    state.owner(&home, false)?;
     ensure!(
         state.pending.is_none(),
         "Codex integration update is pending"
@@ -528,7 +531,17 @@ impl Edit {
     }
 }
 impl State {
-    fn owner(&self, home: &Path) -> Result<()> {
+    fn owner(&self, home: &Path, move_profile: bool) -> Result<()> {
+        if move_profile {
+            ensure!(
+                self.pending.as_ref().is_none_or(|pending| pending
+                    .after
+                    .as_ref()
+                    .is_some_and(|spec| spec.home == home)),
+                "another integration change is pending; finish it with its original profile and options before moving"
+            );
+            return Ok(());
+        }
         for spec in self
             .installed
             .iter()
@@ -536,7 +549,7 @@ impl State {
         {
             ensure!(
                 spec.home == home,
-                "host integration belongs to another Gent home: {}; use that --home to uninstall it first",
+                "host integration belongs to another Gent home: {}; use gent integration install HOST --move to move it to the selected profile, or select its cluster ID with --cluster before uninstalling (see gent --json clusters)",
                 spec.home.display()
             );
         }
@@ -573,11 +586,12 @@ fn recover(layout: &Layout) -> Result<()> {
 pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     ensure!(
         install
-            || (!args.wake
+            || (!args.move_profile
+                && !args.wake
                 && args.wake_socket.is_none()
                 && !args.vscode
                 && args.vscode_settings.is_none()),
-        "wake and VS Code options apply only to installation"
+        "move, wake and VS Code options apply only to installation"
     );
     ensure!(
         !args.vscode || (args.host == Host::Codex && (args.wake || args.wake_socket.is_some())),
@@ -633,7 +647,7 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     } else {
         None
     };
-    mutate(&layout, &home, desired)?;
+    mutate(&layout, &home, desired, args.move_profile)?;
     let mut result = inspect(&layout, &home)?;
     result["action"] = if install { "installed" } else { "uninstalled" }.into();
     result["next"] = "Restart the host's Gent MCP connection or open a new host session to load these user settings.".into();
@@ -643,12 +657,16 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     Ok(result)
 }
 
-fn mutate(layout: &Layout, home: &Path, desired: Option<Spec>) -> Result<()> {
+fn mutate(layout: &Layout, home: &Path, desired: Option<Spec>, move_profile: bool) -> Result<()> {
+    ensure!(
+        !move_profile || desired.as_ref().is_some_and(|spec| spec.home == home),
+        "moving requires an installation for the selected profile"
+    );
     files::directory(&layout.directory)?;
     let lock = layout.lock();
     let _guard = files::lock(&lock)?;
     let (_, state) = layout.read()?;
-    state.owner(home)?;
+    state.owner(home, move_profile)?;
     recover(layout)?;
     let (snapshot, mut state) = layout.read()?;
     let edits = layout.edits(
@@ -766,7 +784,7 @@ pub(super) fn claude_wake(
         state.pending.is_none(),
         "Claude integration update is pending"
     );
-    state.owner(&home)?;
+    state.owner(&home, false)?;
     let spec = state
         .installed
         .as_ref()

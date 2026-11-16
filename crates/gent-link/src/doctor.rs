@@ -126,6 +126,9 @@ impl Report {
                 Status::Skip => "SKIP",
             };
             println!("{status:4} {}: {}", check.id, check.summary);
+            if let Some(home) = check.evidence["integration_home"].as_str() {
+                println!("     Installed for: {}", home.escape_debug());
+            }
             if let Some(next) = &check.next {
                 println!("     {}", next.message);
                 if let Some(command) = &next.command {
@@ -522,7 +525,7 @@ fn inspect_integration(report: &mut Report, id: &'static str, value: Option<Valu
     match value {
         Some(v) if v["state"] == "absent" => report.add(id, Status::Skip, "Optional user-scope MCP integration is not installed.", json!({}), None),
         Some(v) if v["state"] == "configured" && v["current_home"] == true && v["binary_available"] == true => report.add(id, Status::Pass, "Managed MCP configuration matches this profile; effective GUI/project settings were not tested.", json!({}), None),
-        Some(v) if v["state"] == "configured" && v["current_home"] == false => report.add(id, Status::Skip, "This user-scope integration is pinned to another Gent profile.", json!({}), None),
+        Some(v) if v["state"] == "configured" && v["current_home"] == false => report.add(id, Status::Skip, "This user-scope integration is pinned to another Gent profile.", json!({"integration_home":v["gent_home"]}), Some(("To use this host with the selected profile, explicitly move its installation. Reapply --wake or other installation options if needed.", &["integration", "install", "--move"]))),
         _ => report.add(id, Status::Warn, "MCP configuration is edited, disabled, incomplete or points to an unavailable binary.", json!({}), Some(("Inspect installation status; preserve unrelated host settings and pending operations.", &["integration", "status"]))),
     }
 }

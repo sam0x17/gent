@@ -139,6 +139,7 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
     let result = install::change(
         home.path(),
         install::Args {
+            move_profile: false,
             host: Host::ClaudeCode,
             config_dir: Some(directory.clone()),
             wake: true,
@@ -330,6 +331,7 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
     install::change(
         home.path(),
         install::Args {
+            move_profile: false,
             host: Host::ClaudeCode,
             config_dir: Some(directory.clone()),
             wake: false,

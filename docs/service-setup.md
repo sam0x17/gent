@@ -71,18 +71,18 @@ For scripts, use `gent node add NAME --code-out PRIVATE_FILE` and `gent cluster 
 
 ## Moving an existing installation to another cluster
 
-Joining another cluster preserves the old local profile and selects the new one. Existing daemon services and host integrations remain pinned to their original profile. If the old cluster has been retired, stop its daemon and remove its host bindings before joining:
+Joining another cluster preserves the old local profile and selects the new one. Existing daemon services and host integrations remain pinned to their original profile. Move each host integration explicitly after joining:
 
 ```sh
-gent daemon uninstall
-gent integration uninstall codex
-gent integration uninstall claude-code
 gent cluster join CODE
-gent integration install codex
-gent integration install claude-code
+gent integration install codex --move
+gent integration install claude-code --move
+gent doctor --online
 ```
 
-This preserves the login and local cluster data. Run the uninstall commands while the old cluster is selected. If already joined, use `gent --cluster OLD_CLUSTER_ID daemon uninstall` and `gent --cluster OLD_CLUSTER_ID integration uninstall HOST` to address the old profile explicitly, then install each integration for the selected new cluster. Restart the hosts' MCP connections or open new host sessions afterward.
+If already joined, start with the integration commands. `--move` updates the managed MCP entry and required host hook together, preserving unrelated host settings and the login and local data in both profiles. As with ordinary installation, pass `--wake` or other installation options to enable those features. An interrupted move resumes with the same target profile and options; altered managed entries still require resolution. Restart or resume the host so it loads the new MCP configuration and hook. Existing messages and agent identities remain in their original clusters.
+
+If the old cluster has been retired, use `gent --cluster OLD_CLUSTER_ID daemon uninstall` to stop its service explicitly. `gent doctor` shows the recorded installation directory and a move command when an integration belongs to another profile. `gent --json clusters` lists profile directories and IDs. `--home` selects the profile registry's root; use `--cluster` when an operation must target a particular entry in that registry.
 
 ## Add another machine with an invitation
 

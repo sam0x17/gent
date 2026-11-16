@@ -109,6 +109,23 @@ def main():
             value, checks = doctor(code=3)
             assert value['cluster_id'] != cluster and checks['daemon']['status'] == 'fail'
             assert checks['codex']['status'] == 'skip'
+            # Follow the exact advice to move both bindings to the selected profile.
+            selected = value['cluster_id']
+            for host in ['codex', 'claude_code']:
+                assert checks[host]['evidence']['integration_home'] == str(home)
+                advice = checks[host]['next']['command']
+                assert '--move' in advice and selected in advice
+                moved = subprocess.run([str(binary), '--json', *advice[1:]],
+                                       capture_output=True, text=True, timeout=15)
+                assert moved.returncode == 0, moved.stderr
+                assert json.loads(moved.stdout)['current_home'] is True
+            value, checks = doctor(code=3)
+            assert value['cluster_id'] == selected
+            assert checks['codex']['status'] == checks['claude_code']['status'] == 'pass'
+            assert (home / 'owner.key').read_text().strip() == key
+            for host, directory in [('codex', 'codex'), ('claude-code', 'claude')]:
+                cli('--cluster', cluster, 'integration', 'install', host, '--move',
+                    '--config-dir', str(root / directory))
             # Raw host parse errors must never enter the diagnostic report.
             host_config = root / 'codex' / 'config.toml'
             original = host_config.read_bytes()
@@ -150,7 +167,7 @@ def main():
             print(json.dumps({'status': 'passed', 'proof': 'doctor', 'platform': os.uname().sysname,
                               'checks': ['missing setup', 'both installed MCP hosts', 'live authenticated probe',
                                          'no file changes', 'gateway inspection without lock creation',
-                                         'clock and projection diagnosis', 'profile isolation',
+                                         'clock and projection diagnosis', 'profile isolation', 'explicit integration move',
                                          'host-error redaction', 'bounded unresponsive socket']}))
         finally:
             if process and process.poll() is None:
