@@ -99,8 +99,25 @@ impl ClaimedNode {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Purpose {
     NewNode,
-    NamedNode { name: String, inviter: String },
-    Continue { node: ClaimedNode },
+    NamedNode {
+        name: String,
+        inviter: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<ClaimedNode>,
+    },
+    Continue {
+        node: ClaimedNode,
+    },
+}
+
+impl Purpose {
+    pub fn continuation(&self) -> Option<&ClaimedNode> {
+        match self {
+            Self::Continue { node } => Some(node),
+            Self::NamedNode { continuation, .. } => continuation.as_ref(),
+            Self::NewNode => None,
+        }
+    }
 }
 
 pub struct Options {
@@ -189,10 +206,10 @@ impl SignedOffer {
                 "invitation cannot replace the signing owner"
             );
         }
-        if let Purpose::Continue { node } = &offer.purpose {
+        if let Some(node) = offer.purpose.continuation() {
             node.validate(offer)?;
         }
-        if let Purpose::NamedNode { name, inviter } = &offer.purpose {
+        if let Purpose::NamedNode { name, inviter, .. } = &offer.purpose {
             label(name)?;
             id(inviter)?;
             ensure!(
@@ -302,7 +319,7 @@ impl OwnerInvitation {
             "wrong invitation owner"
         );
         state.authorize_node(issuer.id(), &issuer.public_key(), now)?;
-        if let Purpose::Continue { node } = &options.purpose {
+        if let Some(node) = options.purpose.continuation() {
             state.authorize_node(&node.id, &node.key, now)?;
             let member = &state.state().nodes[&node.id];
             ensure!(
@@ -311,8 +328,8 @@ impl OwnerInvitation {
             );
         }
         if let Some(target) = &options.replaces {
-            match &options.purpose {
-                Purpose::NewNode | Purpose::NamedNode { .. } => {
+            match options.purpose.continuation() {
+                None => {
                     let member = state
                         .state()
                         .nodes
@@ -324,7 +341,7 @@ impl OwnerInvitation {
                         "replacement target key or configuration privileges changed"
                     );
                 }
-                Purpose::Continue { .. } => ensure!(
+                Some(_) => ensure!(
                     !state.state().nodes.contains_key(&target.id)
                         && state.state().retired_nodes.contains(&target.id)
                         && state.state().retired_keys.contains(&target.signing_key),
@@ -507,7 +524,7 @@ impl SignedClaim {
             "invitation claim binding mismatch"
         );
         claim.node.validate(&offer.offer)?;
-        if let Purpose::Continue { node } = &offer.offer.purpose {
+        if let Some(node) = offer.offer.purpose.continuation() {
             ensure!(
                 &claim.node == node,
                 "continuation requires the original node"

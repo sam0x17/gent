@@ -102,12 +102,8 @@ pub(super) async fn serve(
         .await;
     };
     let check_store = store.clone();
-    let (check, slot) = tokio::task::spawn_blocking(move || {
-        let check = check_store
-            .lock()
-            .expect("store lock poisoned")
-            .handle(request);
-        (check, slot)
+    let (check, slot) = access::run(check_store, "file admission", move |store| {
+        Ok((store.handle(request), slot))
     })
     .await?;
     response(stream.get_mut(), &check).await?;
@@ -127,17 +123,14 @@ pub(super) async fn serve(
         format!("{:x}", Sha256::digest(&bytes)) == sha256,
         "file body digest mismatch"
     );
-    let result = tokio::task::spawn_blocking(move || {
+    let result = access::run(store, "file import", move |store| {
         // Keep capacity occupied if the socket times out while the transaction
         // is running. Authentication and all quotas are checked again at commit.
         let _slot = slot;
-        store
-            .lock()
-            .expect("store lock poisoned")
-            .handle(Request::Agent {
-                credential,
-                action: AgentOp::FileReceiveData { file, bytes },
-            })
+        Ok(store.handle(Request::Agent {
+            credential,
+            action: AgentOp::FileReceiveData { file, bytes },
+        }))
     })
     .await?;
     response(stream.get_mut(), &result).await

@@ -206,13 +206,7 @@ async fn local<T: Send + 'static>(
     store: SharedStore,
     operation: impl FnOnce(&mut Store) -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    tokio::task::spawn_blocking(move || {
-        let mut guard = store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("store lock poisoned"))?;
-        operation(&mut guard)
-    })
-    .await?
+    crate::access::run(store, "encrypted sync", operation).await
 }
 
 async fn transfer(store: SharedStore, relay: Relay, entry: Stream) -> Result<Option<u64>> {
@@ -295,26 +289,31 @@ struct Retry {
 /// Start only when the owner has configured a relay endpoint and private token
 /// file. The task needs no MCP turn and never publishes plaintext pairing metadata.
 pub fn start(store: SharedStore) -> Result<Option<JoinHandle<()>>> {
-    let (settings, wakeup) = {
+    let (settings, wakeup, health) = {
         let guard = store
             .lock()
             .map_err(|_| anyhow::anyhow!("store lock poisoned"))?;
-        (guard.relay_settings(), guard.sync_wakeup.clone())
+        (
+            guard.relay_settings(),
+            guard.sync_wakeup.clone(),
+            guard.sync_health.clone(),
+        )
     };
     let Some((settings, home)) = settings else {
         return Ok(None);
     };
     let relay = Relay::open(&settings, &home).context("encrypted relay setup failed")?;
     let files = files::Scheduler::new(crate::file_transport::FileRelay::open(&settings, &home)?);
-    Ok(Some(tokio::spawn(run(store, relay, wakeup, files))))
+    Ok(Some(tokio::spawn(run(store, relay, wakeup, files, health))))
 }
 
-async fn run(store: SharedStore, relay: Relay, wakeup: Arc<Notify>, files: files::Scheduler) {
-    let health = store
-        .lock()
-        .expect("store lock poisoned")
-        .sync_health
-        .clone();
+async fn run(
+    store: SharedStore,
+    relay: Relay,
+    wakeup: Arc<Notify>,
+    files: files::Scheduler,
+    health: Arc<health::Health>,
+) {
     let push =
         notifications::Listener::start(relay.clone(), wakeup.clone(), health.connected.clone());
     let _files = files.start(store.clone());

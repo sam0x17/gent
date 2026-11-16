@@ -35,6 +35,20 @@ pub(super) fn clock(db: &Connection, observed: i64) -> Result<i64> {
     )?)
 }
 
+/// Pure owner diagnostics do not admit requests or advance durable time.
+pub(super) fn diagnostic_clock(db: &Connection, observed: i64) -> Result<i64> {
+    ensure!(
+        (0..i64::MAX - 365 * LIFETIME).contains(&observed),
+        "invalid request clock"
+    );
+    let saved: i64 = db.query_row(
+        "SELECT floor FROM request_clock WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(saved.max(observed))
+}
+
 pub(super) fn issued(id: &str) -> Option<i64> {
     let id_parsed = Uuid::parse_str(id).ok()?;
     if id_parsed.to_string() != id

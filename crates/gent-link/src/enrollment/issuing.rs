@@ -85,7 +85,9 @@ pub async fn add(home: &Path, args: AddArgs) -> Result<Value> {
         Some(value) if value.created.saturating_add(LIFETIME) > auth::now()? => value,
         _ => {
             let value = Saved {
-                code: Code::generate()?.expose().to_string(),
+                code: Code::named(&cfg.cluster.name, &args.name)?
+                    .expose()
+                    .to_string(),
                 cluster: cfg.cluster.id.clone(),
                 node: cfg.node.id.clone(),
                 session: service.session_hash(),

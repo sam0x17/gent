@@ -67,16 +67,14 @@ The current build guides missing login and cluster enrollment through `gent daem
 | `gent cluster connect` | Resume service setup or replace an invalid relay credential on an owner or joined node, preserving local identity. Stop the daemon first. |
 | `gent cluster renew` | Renew the signed configuration lease locally on the owner, or request renewal from an authorized joined node. |
 | `gent cluster new [name]` | Create and select a cluster, establishing its initial owner keys and policy locally. |
-| `gent node add NAME` | Issue a one-time code for a named node. Add `--no-configure` for messaging-only membership. |
-| `gent cluster join [CODE]` | Join as the name assigned by the invitation and start the daemon; prompt for the code if omitted. |
+| `gent node add NAME` | Issue a code labeled with the cluster and node names, or continue that exact enrolled node. Add `--no-configure` for messaging-only membership. |
+| `gent cluster join [CODE]` | Join as the assigned node and start the daemon. With no code, resume a saved join or prompt for a code. |
 | `gent cluster invite --out FILE` | Create a private, single-node invitation; expires after 15 minutes. |
 | `gent cluster invitations` | List this owner's invitation status without secrets. |
 | `gent cluster invitations revoke ID` | Close local admission, then revoke service routing; retry if offline. |
 | `gent cluster leave` | Leave the active cluster after showing the consequences for local access and pending work. |
 
 Names are display labels. Renaming a node must preserve its stable identity, keys, and policy relationships. Reject ambiguous name lookups with a list of authorized matches and their IDs. Human-readable cluster names and node names remain encrypted in routing storage; a hosted web bridge may see only the labels included in its agent's authorized view.
-
-Changing the active cluster selects the default context for subsequent CLI commands. It does not move existing agents, pending messages, or relay attachments into another cluster, and it does not leave the old cluster. The daemon can maintain separate connections for joined clusters. An explicit `--cluster <id-or-name>` selects a cluster for one applicable command without changing the default. Keep identities, queues, keys, and policy isolated by cluster.
 
 Each node belongs to one cluster in `~/.gent`, shared by CLI commands and all chats. A second cluster creation or join is refused. `gent node reset` stops managed services, archives old state, removes its managed host entries, and preserves the GitHub session for fresh enrollment. See [re-enrollment](service-setup.md#re-enroll-an-existing-machine).
 

@@ -271,10 +271,26 @@ impl Store {
         {
             return self.owner_transfer(&credential, action);
         }
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let timestamp = requests::clock(&tx, now())?;
+        // Idle service probes and removal polling must not force a disk flush
+        // or wake the encrypted transport on every observation. Pending config
+        // projection retains its usual repair path.
+        let read_only = matches!(
+            &request,
+            Request::Owner {
+                action: OwnerOp::Status | OwnerOp::Nodes | OwnerOp::NodeRemovals { .. },
+                ..
+            }
+        ) && !runtime::projection_pending(&self.db)?;
+        let tx = self.db.transaction_with_behavior(if read_only {
+            TransactionBehavior::Deferred
+        } else {
+            TransactionBehavior::Immediate
+        })?;
+        let timestamp = if read_only {
+            requests::diagnostic_clock(&tx, now())?
+        } else {
+            requests::clock(&tx, now())?
+        };
         let state = self.identity.state(&tx)?;
         let mut config = self.config.clone();
         config.policy = state.state().policy.clone();
@@ -304,6 +320,9 @@ impl Store {
             }
         };
         tx.commit()?;
+        if read_only {
+            return Ok(value);
+        }
         // Also wakes directory/message publication after a committed agent RPC.
         self.sync_wakeup.notify_one();
         // Filesystem projection is retryable after the authoritative commit.

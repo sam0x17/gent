@@ -42,6 +42,69 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
+    fn idle_status_and_removal_polls_do_not_write_or_wake_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("node");
+        config::initialize(&home, "diagnostic").unwrap();
+        let mut store = Store::open(&home).unwrap();
+        let key = config::read_private(&home.join("owner.key")).unwrap();
+        store
+            .db
+            .execute("UPDATE request_clock SET floor=?1", [now() - 60])
+            .unwrap();
+        let before = fs::read(home.join("state.sqlite3")).unwrap();
+        let changes = store.db.total_changes();
+        for action in [
+            OwnerOp::Status,
+            OwnerOp::Nodes,
+            OwnerOp::NodeRemovals {
+                after: None,
+                pending_only: true,
+            },
+        ] {
+            assert!(
+                store
+                    .execute(Request::Owner {
+                        credential: "wrong".into(),
+                        action: action.clone()
+                    })
+                    .is_err()
+            );
+            store
+                .execute(Request::Owner {
+                    credential: key.clone(),
+                    action,
+                })
+                .unwrap();
+        }
+        assert_eq!(store.db.total_changes(), changes);
+        assert_eq!(fs::read(home.join("state.sqlite3")).unwrap(), before);
+        // State-changing requests still commit their monotonic admission clock.
+        store
+            .execute(Request::Owner {
+                credential: key.clone(),
+                action: OwnerOp::RenameNode {
+                    name: "renamed".into(),
+                },
+            })
+            .unwrap();
+        let clock: i64 = store
+            .db
+            .query_row("SELECT floor FROM request_clock", [], |r| r.get(0))
+            .unwrap();
+        assert!(clock >= now() - 1);
+        // A status request can still repair a pending filesystem projection.
+        runtime::queue_projection(&store.db).unwrap();
+        let status = store
+            .execute(Request::Owner {
+                credential: key,
+                action: OwnerOp::Status,
+            })
+            .unwrap();
+        assert_eq!(status["config_saved"], true);
+    }
+
+    #[test]
     fn diagnosis_requires_owner_and_preserves_clock_database_and_pending_projection() {
         let dir = tempfile::tempdir().unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();

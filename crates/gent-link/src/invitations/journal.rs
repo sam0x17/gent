@@ -3,7 +3,7 @@
 use super::*;
 use gent_crypto::{
     NodeIdentity,
-    invitation::{ClaimedNode, Purpose, SignedOffer},
+    invitation::{ClaimedNode, SignedOffer},
 };
 use gent_daemon::store::invitations::{Action, Invocation};
 use std::collections::BTreeMap;
@@ -127,13 +127,12 @@ impl Journal {
                     && old.service == new.service
                     && old.can_configure == new.can_configure
                     && old.replaces == new.replaces
-                    && saved.node.is_some()
                     && saved.receipt.is_none()
                     && !saved.superseded.contains(&new.id)
                     && saved.superseded.len() < 16,
                 "replacement invitation changes the pinned owner, service, privileges or completed join"
             );
-            if let Purpose::Continue { node } = &new.purpose {
+            if let Some(node) = new.purpose.continuation() {
                 ensure!(
                     saved.node.as_ref() == Some(node),
                     "continuation invitation belongs to another node"
@@ -148,7 +147,7 @@ impl Journal {
         }
         ensure!(
             saved.session == session,
-            "invitation exchange is pinned to the original login; obtain a replacement invitation and use --continue"
+            "invitation exchange is pinned to the original login; obtain a fresh invitation for this node"
         );
         let journal = Self {
             path,
@@ -182,7 +181,7 @@ impl Journal {
             name == self.saved.name && self.saved.node.as_ref().is_none_or(|saved| *saved == claim),
             "staged invitation identity changed"
         );
-        if let Purpose::Continue { node } = &self.saved.offer.offer.purpose {
+        if let Some(node) = self.saved.offer.offer.purpose.continuation() {
             ensure!(
                 *node == claim,
                 "continuation requires the original staged node identity"

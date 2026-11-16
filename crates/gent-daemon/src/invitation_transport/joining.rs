@@ -190,7 +190,7 @@ async fn exchange(
     // committed effects without restoring uncertain Noise counters.
     let mut deadline = Instant::now() + wait;
     let maximum = deadline + super::retry::MAX_DELAY;
-    let timed_out = "invitation response timed out; owner must be online";
+    let timed_out = "invitation response timed out; the owner or relay did not respond in time; retry the saved join";
     let mut uploaded = false;
     loop {
         mailbox.check_time()?;

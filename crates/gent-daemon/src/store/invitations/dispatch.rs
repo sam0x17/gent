@@ -204,6 +204,16 @@ impl Store {
             Action::Pair { action } => match action {
                 PairingOp::Snapshot => {}
                 PairingOp::Enroll { request } => {
+                    if matches!(&row.offer.offer.purpose, Purpose::NamedNode { .. }) {
+                        ensure!(
+                            state
+                                .state()
+                                .nodes
+                                .iter()
+                                .all(|(id, member)| id == &node.id || member.name != node.name),
+                            "this node name is already enrolled; run gent node add with the same name for a continuation code"
+                        );
+                    }
                     ensure!(request.len() <= 8192, "enrollment request too large");
                     let signed = SignedEnrollment::decode(&STANDARD.decode(request)?)?;
                     signed.fingerprint()?;

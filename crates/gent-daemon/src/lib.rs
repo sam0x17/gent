@@ -1,4 +1,5 @@
 //! Native daemon with local agent RPC and encrypted configuration/message sync.
+mod access;
 pub mod config;
 pub mod encrypted;
 pub mod file_objects;
@@ -27,7 +28,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::Semaphore,
+    sync::{OwnedSemaphorePermit, Semaphore},
 };
 
 pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value> {
@@ -84,6 +85,13 @@ pub async fn run(home: &Path) -> Result<()> {
     let permits = Arc::new(Semaphore::new(32));
     let uploads = Arc::new(Semaphore::new(2));
     let mut maintenance = tokio::time::interval(Duration::from_secs(15 * 60));
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut maintenance_tasks = tokio::task::JoinSet::new();
+    let mut requests = tokio::task::JoinSet::new();
+    let mut busy = serde_json::to_vec(&Response::Error(
+        "daemon is busy; retry the same request".into(),
+    ))?;
+    busy.push(b'\n');
     let sync_task = sync::start(store.clone())?;
     let invitation_task = invitation_transport::owner::start(store.clone());
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -95,22 +103,27 @@ pub async fn run(home: &Path) -> Result<()> {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break,
             _=terminate.recv()=>break,
-            _=maintenance.tick()=> {
+            _=maintenance.tick(), if maintenance_tasks.is_empty()=> {
                 let store = store.clone();
-                tokio::task::spawn_blocking(move || {
-                    if let Err(error) = store.lock().expect("store lock poisoned").maintain() {
-                        eprintln!("Gent configuration maintenance pending: {error}");
-                    }
-                }).await?;
+                maintenance_tasks.spawn(access::run(store, "maintenance", |store| store.maintain()));
             }
+            result=maintenance_tasks.join_next(), if !maintenance_tasks.is_empty()=> {
+                if let Some(result) = result
+                    && let Err(error) = result? {
+                    eprintln!("Gent configuration maintenance pending: {error}");
+                }
+            }
+            _=requests.join_next(), if !requests.is_empty()=> {}
             connection=listener.accept()=> {
                 let (stream,_)=connection?;
-                let Ok(permit)=permits.clone().try_acquire_owned() else { continue; };
+                let Ok(permit)=permits.clone().try_acquire_owned() else {
+                    let _ = stream.try_write(&busy);
+                    continue;
+                };
                 let store=store.clone();
                 let uploads=uploads.clone();
-                tokio::spawn(async move {
-                    let _permit=permit;
-                    let _=serve(stream,store,uploads).await;
+                requests.spawn(async move {
+                    let _=serve(stream,store,uploads,permit).await;
                 });
             }
         }
@@ -128,6 +141,7 @@ async fn serve(
     stream: UnixStream,
     store: Arc<Mutex<store::Store>>,
     uploads: Arc<Semaphore>,
+    permit: OwnedSemaphorePermit,
 ) -> Result<()> {
     let started = tokio::time::Instant::now();
     let mut stream = BufReader::new(stream);
@@ -174,22 +188,34 @@ async fn serve(
                 .await
                 .context("file receive timed out")?;
             }
-            tokio::time::timeout_at(
+            match tokio::time::timeout_at(
                 deadline,
-                tokio::task::spawn_blocking(move || {
-                    store.lock().expect("store lock poisoned").handle(request)
+                access::run(store, "local request", move |store| {
+                    // Keep capacity reserved until the transaction or cancelled
+                    // queue entry exits, even after its socket times out.
+                    let _permit = permit;
+                    Ok(store.handle(request))
                 }),
             )
-            .await
-            .context("daemon operation timed out")??
+            .await {
+                Ok(result) => result?,
+                Err(_) => Response::Error("daemon operation timed out; local storage is busy or the operation is still finishing; retry with the same request ID".into()),
+            }
         }
         Err(_) => Response::Error("invalid request".into()),
     };
     let mut response = serde_json::to_vec(&response)?;
     response.push(b'\n');
     ensure!(response.len() <= MAX_FRAME_BYTES, "response too large");
-    tokio::time::timeout_at(deadline, stream.get_mut().write_all(&response))
-        .await
-        .context("response write timed out")??;
+    // A timed-out transaction still deserves a complete protocol error frame.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        stream.get_mut().write_all(&response),
+    )
+    .await
+    .context("response write timed out")??;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

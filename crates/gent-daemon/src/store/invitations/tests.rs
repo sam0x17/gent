@@ -1123,7 +1123,7 @@ async fn committed_grants_and_links_recover_after_failed_journal_completion() {
 
 #[tokio::test]
 async fn explicit_continuation_recovers_original_node_and_crypto_requests_across_offers() {
-    for boundary in [4, 7] {
+    for (named, boundary) in [(false, 4), (false, 7), (true, 2), (true, 4), (true, 7)] {
         let mut peer = EncryptedPeer::new(true);
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("joined");
@@ -1137,7 +1137,33 @@ async fn explicit_continuation_recovers_original_node_and_crypto_requests_across
             .unwrap();
         peer.fixture.reopen();
         assert!(handshake(&mut peer.fixture.store, &peer.invitation, &node, "joined").is_err());
-        let replacement = peer.fixture.issue(true, Some(node.id()));
+        let replacement = if named {
+            let issuer = peer.fixture.store.identity.node.id().to_string();
+            let bytes = peer
+                .fixture
+                .store
+                .create_invitation_at(
+                    &Uuid::now_v7().to_string(),
+                    true,
+                    None,
+                    None,
+                    Some(("joined", &issuer)),
+                    now() as u64,
+                )
+                .unwrap();
+            let invitation = Invitation::decode(&bytes).unwrap();
+            assert_eq!(
+                invitation.offer().offer.purpose.continuation().unwrap().id,
+                node.id()
+            );
+            peer.fixture
+                .store
+                .activate_invitation(&peer.fixture.credential, &invitation.offer().offer.id)
+                .unwrap();
+            invitation
+        } else {
+            peer.fixture.issue(true, Some(node.id()))
+        };
         assert_ne!(replacement.offer().offer.id, original);
         assert!(
             handshake(

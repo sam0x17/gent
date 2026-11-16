@@ -10,20 +10,55 @@ use chacha20poly1305::{
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-pub struct Code(Zeroizing<[u8; 32]>);
+mod names;
+
+pub struct Code {
+    secret: Zeroizing<[u8; 32]>,
+    names: Option<(String, String)>,
+}
 
 impl Code {
     pub fn generate() -> Result<Self> {
         let mut secret = Zeroizing::new([0; 32]);
         getrandom::fill(secret.as_mut())
             .map_err(|_| anyhow::anyhow!("pairing randomness unavailable"))?;
-        Ok(Self(secret))
+        Ok(Self {
+            secret,
+            names: None,
+        })
+    }
+
+    pub fn named(cluster: &str, node: &str) -> Result<Self> {
+        names::validate(cluster)?;
+        names::validate(node)?;
+        let mut code = Self::generate()?;
+        code.names = Some((cluster.into(), node.into()));
+        Ok(code)
+    }
+
+    pub fn names(&self) -> Option<(&str, &str)> {
+        self.names
+            .as_ref()
+            .map(|(cluster, node)| (cluster.as_str(), node.as_str()))
     }
 
     pub fn parse(value: &str) -> Result<Self> {
-        let raw = value
-            .strip_prefix("gent1-")
-            .ok_or_else(|| anyhow::anyhow!("invalid pairing code"))?;
+        ensure!(value.len() <= 1024, "invalid pairing code");
+        let (names, raw) = if let Some(raw) = value.strip_prefix("gent2-") {
+            let mut parts = raw.split('.');
+            let cluster = names::decode(parts.next().unwrap_or_default())?;
+            let node = names::decode(parts.next().unwrap_or_default())?;
+            let secret = parts.next().unwrap_or_default();
+            ensure!(parts.next().is_none(), "invalid pairing code");
+            (Some((cluster, node)), secret)
+        } else {
+            (
+                None,
+                value
+                    .strip_prefix("gent1-")
+                    .ok_or_else(|| anyhow::anyhow!("invalid pairing code"))?,
+            )
+        };
         ensure!(raw.len() == 43, "invalid pairing code");
         let bytes = Zeroizing::new(
             URL_SAFE_NO_PAD
@@ -36,32 +71,54 @@ impl Code {
             "invalid pairing code"
         );
         secret.copy_from_slice(&bytes);
-        Ok(Self(secret))
+        Ok(Self { secret, names })
     }
 
     pub fn expose(&self) -> Zeroizing<String> {
-        Zeroizing::new(format!(
-            "gent1-{}",
-            URL_SAFE_NO_PAD.encode(self.0.as_slice())
-        ))
+        let secret = URL_SAFE_NO_PAD.encode(self.secret.as_slice());
+        Zeroizing::new(match &self.names {
+            Some((cluster, node)) => format!(
+                "gent2-{}.{}.{secret}",
+                names::encode(cluster),
+                names::encode(node)
+            ),
+            None => format!("gent1-{secret}"),
+        })
     }
 
     pub fn id(&self) -> String {
         let mut hash = Sha256::new();
-        hash.update(b"gent/pairing-lookup/v1\0");
-        hash.update(self.0.as_slice());
+        if let Some(names) = &self.names {
+            hash.update(b"gent/pairing-lookup/v2\0");
+            hash.update(serde_json::to_vec(names).expect("string tuple"));
+        } else {
+            hash.update(b"gent/pairing-lookup/v1\0");
+        }
+        hash.update(self.secret.as_slice());
         format!("{:x}", hash.finalize())
     }
 
     fn key(&self) -> Zeroizing<[u8; 32]> {
         let mut hash = Sha256::new();
         hash.update(b"gent/pairing-encryption/v1\0");
-        hash.update(self.0.as_slice());
+        hash.update(self.secret.as_slice());
         Zeroizing::new(hash.finalize().into())
     }
 
     fn context(&self, account: &str, cluster: &str, created: u64, response: bool) -> Vec<u8> {
         // All variable fields are length-framed by JSON; direction prevents reflection.
+        if let Some(names) = &self.names {
+            return serde_json::to_vec(&(
+                "gent/pairing-capsule/v2",
+                self.id(),
+                account,
+                cluster,
+                created,
+                response,
+                names,
+            ))
+            .expect("string tuple");
+        }
         serde_json::to_vec(&(
             "gent/pairing-capsule/v1",
             self.id(),
@@ -136,7 +193,10 @@ impl Code {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests;
+
+#[cfg(test)]
+mod legacy_tests {
     use super::*;
 
     #[test]

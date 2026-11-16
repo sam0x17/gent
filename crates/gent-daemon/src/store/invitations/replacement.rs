@@ -29,10 +29,7 @@ impl Store {
             let node = record
                 .claim
                 .as_ref()
-                .or(match &offer.purpose {
-                    Purpose::Continue { node } => Some(node),
-                    Purpose::NewNode | Purpose::NamedNode { .. } => None,
-                })
+                .or(offer.purpose.continuation())
                 .context("replacement target was already retired by another enrollment")?;
             state.authorize_node(&node.id, &node.key, timestamp)?;
             ensure!(

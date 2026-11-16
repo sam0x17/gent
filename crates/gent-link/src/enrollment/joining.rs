@@ -1,6 +1,9 @@
 use super::*;
 use gent_crypto::invitation::{Invitation, Purpose};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Pending {
@@ -19,6 +22,28 @@ pub(crate) fn pending(home: &Path) -> Result<Option<(PathBuf, String)>> {
     };
     let saved: Pending = serde_json::from_str(&text)
         .map_err(|_| anyhow::anyhow!("invalid saved node invitation"))?;
+    if let Some(native) = crate::invitations::installation(home)? {
+        ensure!(
+            native.name == saved.name && native.offer.offer.anchor.cluster_id == saved.cluster,
+            "saved join destination disagrees with its identity journal; existing identity was preserved"
+        );
+        if crate::invitations::decode_file(&saved.file)?.offer() != &native.offer {
+            // The native journal commits a replacement before this convenience
+            // record. Recover that crash boundary using the exact signed offer.
+            for (index, entry) in std::fs::read_dir(home.join("auth/enrollment"))?.enumerate() {
+                ensure!(index < 512, "saved invitation cache exceeds capacity");
+                let path = entry?.path();
+                if path.extension().is_some_and(|ext| ext == "gent-invite")
+                    && crate::invitations::decode_file(&path)?.offer() == &native.offer
+                {
+                    return Ok(Some((path, saved.name)));
+                }
+            }
+            anyhow::bail!(
+                "the current invitation file is missing; enter its code again; existing identity was preserved"
+            );
+        }
+    }
     Ok(Some((saved.file, saved.name)))
 }
 
@@ -30,31 +55,44 @@ pub async fn join(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Val
         args.name.is_empty(),
         "the invitation code supplies the node name; omit --name"
     );
-    let raw = match (&args.cluster, &args.code_file) {
-        (Some(code), None) => Zeroizing::new(code.clone()),
-        (None, Some(file)) => Zeroizing::new(
-            storage::private(file)?
-                .text
-                .context("code file is missing")?,
-        ),
-        (None, None) => prompt("Node invitation code: ")?,
-        _ => anyhow::bail!("supply either a code or --code-file"),
+    let resume = if args.cluster.is_none() && args.code_file.is_none() {
+        pending(home)?
+    } else {
+        None
     };
-    let code = Code::parse(raw.trim())?;
-    let id = code.id();
+    let code = if resume.is_some() {
+        None
+    } else {
+        let raw = match (&args.cluster, &args.code_file) {
+            (Some(code), None) => Zeroizing::new(code.clone()),
+            (None, Some(file)) => Zeroizing::new(
+                storage::private(file)?
+                    .text
+                    .context("code file is missing")?,
+            ),
+            (None, None) => prompt("Node invitation code: ")?,
+            _ => anyhow::bail!("supply either a code or --code-file"),
+        };
+        Some(Code::parse(raw.trim())?)
+    };
+    let directory = home.join("auth/enrollment");
+    let file = match (&code, resume) {
+        (Some(code), _) => directory.join(format!("{}.gent-invite", code.id())),
+        (None, Some((file, _))) => file,
+        _ => unreachable!("code or saved invitation selected"),
+    };
     if crate::managed_file::Snapshot::read(&gent_daemon::config::path(home))?
         .text
         .is_some()
     {
-        let saved = home
-            .join("auth/enrollment")
-            .join(format!("{id}.gent-invite"));
         ensure!(
-            storage::private(&saved)?.text.is_some(),
+            storage::private(&file)?.text.is_some()
+                || crate::invitations::installation(home)?.is_some_and(|saved| !saved.complete),
             "this node is already enrolled; run gent node reset before joining with a new code"
         );
     }
     // The code authenticates encrypted bootstrap data; it never selects an origin.
+    storage::directory(home)?;
     if io::stdin().is_terminal() && io::stderr().is_terminal() {
         auth::execute(
             home,
@@ -66,13 +104,14 @@ pub async fn join(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Val
         )
         .await?;
     }
-    let directory = storage::directory(home)?;
     let _lock = managed_file::lock(&directory.join("joining.lock"))?;
     let service = auth::Service::open(home).await?;
-    let file = directory.join(format!("{id}.gent-invite"));
     let snapshot = storage::private(&file)?;
     if snapshot.text.is_none() {
-        let record = service.pairing_read(&id).await.context("node invitation unavailable; check the code or run gent node add NAME on the existing node for a fresh invitation")?;
+        let code = code
+            .as_ref()
+            .context("saved invitation is missing; enter its original code")?;
+        let record = service.pairing_read(&code.id()).await.context("node invitation unavailable; check the code or run gent node add NAME on the existing node for a fresh invitation")?;
         ensure!(
             record.created_at <= auth::now()?.saturating_add(60)
                 && record.expires_at > auth::now()?,
@@ -107,6 +146,12 @@ pub async fn join(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Val
         offer.replaces.is_none(),
         "node code cannot replace an existing identity"
     );
+    if let Some((_, expected)) = code.as_ref().and_then(Code::names) {
+        ensure!(
+            expected == name,
+            "invitation code and signed node name differ"
+        );
+    }
     service.check_invitation_service(&offer.service)?;
     let journal = directory.join("pending-join.json");
     let snapshot = storage::private(&journal)?;
@@ -115,35 +160,44 @@ pub async fn join(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Val
             .map_err(|_| anyhow::anyhow!("invalid saved node invitation"))?;
         ensure!(
             saved.account == service.session.account_id
-                && saved.session == service.session_hash()
                 && saved.service == service.origin()?.as_str()
-                && saved.file == file
                 && saved.name == *name
                 && saved.cluster == offer.anchor.cluster_id,
-            "another node join is pending; resume its original code and login"
+            "a join for node {} is pending; run gent cluster join to resume it; this code names a different destination or account",
+            saved.name
         );
-    } else {
-        storage::write(
-            &journal,
-            &Pending {
-                account: service.session.account_id.clone(),
-                session: service.session_hash(),
-                service: service.origin()?.to_string(),
-                file: file.clone(),
-                name: name.clone(),
-                cluster: offer.anchor.cluster_id.clone(),
-            },
-        )?;
     }
+    // The native journal verifies the owner, cluster, privileges and exact
+    // continuation key. A different code can never silently change identity.
+    crate::invitations::prepare_code_join(home, invitation.offer(), name, &service.session_hash())?;
+    storage::write(
+        &journal,
+        &Pending {
+            account: service.session.account_id.clone(),
+            session: service.session_hash(),
+            service: service.origin()?.to_string(),
+            file: file.clone(),
+            name: name.clone(),
+            cluster: offer.anchor.cluster_id.clone(),
+        },
+    )?;
     drop(service);
+    if io::stderr().is_terminal() {
+        if let Some((cluster, _)) = code.as_ref().and_then(Code::names) {
+            eprintln!("Joining cluster {cluster} as {name}...");
+        } else {
+            eprintln!("Joining as {name}...");
+        }
+    }
     args.name.clone_from(name);
     let install = !args.no_daemon;
     let mut result = crate::node_home::provision::join(
         home,
         args.with_invitation(file, offer.anchor.cluster_id.clone()),
     )
-    .await?;
-    storage::private(&journal)?.remove()?;
+    .await.with_context(|| format!(
+        "join for node {name} is saved; retry with gent cluster join; if the invitation expires, run gent node add {name} on an existing node and join with the fresh code"
+    ))?;
     if install {
         let status = crate::service::execute(
             home,
@@ -156,6 +210,7 @@ pub async fn join(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Val
         .context("node enrolled; finish starting its daemon with gent daemon install")?;
         result["daemon"] = status["daemon"].clone();
     }
+    storage::private(&journal)?.remove()?;
     result["pairing"] = json!("code_verified");
     result["next"] = json!(
         "Connect agents with gent integration install codex or gent integration install claude-code."

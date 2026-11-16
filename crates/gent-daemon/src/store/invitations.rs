@@ -134,7 +134,7 @@ fn record(db: &Connection, id: &str) -> Result<Record> {
 fn observe(db: &Connection, wall: u64) -> Result<u64> {
     ensure!(wall > 0 && wall < (1 << 53), "invalid invitation clock");
     db.execute(
-        "UPDATE invitation_clock SET floor=MAX(floor,?1) WHERE singleton=1",
+        "UPDATE invitation_clock SET floor=?1 WHERE singleton=1 AND floor<?1",
         [wall],
     )?;
     let floor: u64 = db.query_row(
@@ -402,6 +402,7 @@ impl Store {
             } else {
                 ensure!(
                     record.history_floor.is_none()
+                        && record.offer.offer.purpose.continuation().is_none()
                         && matches!(
                             record.offer.offer.purpose,
                             Purpose::NewNode | Purpose::NamedNode { .. }
@@ -504,12 +505,31 @@ impl Store {
             "invitation creation request expired or is from the future"
         );
         let state = self.identity.state(&self.db)?;
-        let purpose = match continuation {
-            None => name.map_or(Purpose::NewNode, |(name, inviter)| Purpose::NamedNode {
-                name: name.into(),
-                inviter: inviter.into(),
-            }),
-            Some(id) => {
+        let purpose = match (continuation, name) {
+            (None, Some((name, inviter))) => {
+                let mut matching = state
+                    .state()
+                    .nodes
+                    .iter()
+                    .filter(|(_, member)| member.name == name);
+                let existing = matching.next();
+                ensure!(
+                    matching.next().is_none(),
+                    "multiple nodes have this name; use an explicit node ID invitation"
+                );
+                let continuation = existing.map(|(id, member)| ClaimedNode {
+                    id: id.clone(),
+                    key: member.signing_key,
+                    name: member.name.clone(),
+                });
+                Purpose::NamedNode {
+                    name: name.into(),
+                    inviter: inviter.into(),
+                    continuation,
+                }
+            }
+            (None, None) => Purpose::NewNode,
+            (Some(id), _) => {
                 let member = state
                     .state()
                     .nodes
@@ -697,8 +717,18 @@ impl Store {
             return Ok(());
         }
         ensure!(row.phase == "issued", "invitation is not claimable");
-        let floor = match &offer.offer.purpose {
-            Purpose::NewNode | Purpose::NamedNode { .. } => {
+        let floor = match offer.offer.purpose.continuation() {
+            None => {
+                if matches!(&offer.offer.purpose, Purpose::NamedNode { .. }) {
+                    ensure!(
+                        !state
+                            .state()
+                            .nodes
+                            .values()
+                            .any(|member| member.name == node.name),
+                        "this node name is already enrolled; run gent node add with the same name for a continuation code"
+                    );
+                }
                 ensure!(
                     !state.state().nodes.contains_key(&node.id)
                         && !state.state().retired_nodes.contains(&node.id)
@@ -712,7 +742,7 @@ impl Store {
                 );
                 None
             }
-            Purpose::Continue { node: expected } => {
+            Some(expected) => {
                 ensure!(node == expected, "continuation identity changed");
                 state.authorize_node(&node.id, &node.key, timestamp)?;
                 let member = &state.state().nodes[&node.id];

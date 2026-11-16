@@ -1108,8 +1108,7 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
           CREATE TABLE IF NOT EXISTS configuration_requests (id TEXT PRIMARY KEY, group_id BLOB NOT NULL);
           CREATE TABLE IF NOT EXISTS stream_confirmed (
             group_id BLOB PRIMARY KEY,reader TEXT NOT NULL,reader_key BLOB NOT NULL,
-            sequence INTEGER NOT NULL,digest BLOB NOT NULL,receipt BLOB NOT NULL);
-          PRAGMA user_version=26;",
+            sequence INTEGER NOT NULL,digest BLOB NOT NULL,receipt BLOB NOT NULL);",
         )?;
     crate::store::invitations::schema(&schema, version)?;
     crate::store::removals::schema(&schema, version)?;
@@ -1141,6 +1140,12 @@ pub(crate) fn open_database(home: &Path, filename: &str) -> Result<Connection> {
     )?;
     history::schema(&schema, version)?;
     requests::schema(&schema)?;
+    // Setting user_version, even to its existing value, dirties the header and
+    // forces a durable commit. Runtime stream operations reopen this database;
+    // keep schema verification read-only unless an upgrade actually changes it.
+    if version != 26 {
+        schema.pragma_update(None, "user_version", 26)?;
+    }
     schema.commit()?;
     Ok(db)
 }
@@ -1170,3 +1175,6 @@ pub(crate) fn initialize_authority(
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod database_tests;

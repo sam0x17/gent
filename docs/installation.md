@@ -30,7 +30,7 @@ Linux uses systemd user services; macOS uses LaunchAgents. This setup needs a wo
 
 Automatic host delivery is an optional [separate setup](wake.md). Codex's experimental [VS Code route](wake.md#vs-code-delivery) adds `--vscode` to its `--wake` installation and connects the editor to the native background server. Read the tested versions and remaining checks before enabling that route.
 
-For a separate install prefix, add `--root /absolute/install/prefix` to `cargo install`, then use its `bin/gent`. The daemon records the installed executable's absolute path. Keep that executable available while its service or connector entries are installed. Use `--home /absolute/state/path` to isolate Gent state for a trial. Commands with `--cluster` select a profile within that state.
+For a separate install prefix, add `--root /absolute/install/prefix` to `cargo install`, then use its `bin/gent`. The daemon records the installed executable's absolute path. Keep that executable available while its service or connector entries are installed. Use `--home /absolute/state/path` to isolate Gent state for a trial. The hidden `--cluster` option only asserts that the selected node belongs to that cluster; it never selects a profile.
 
 ## Private source archives
 

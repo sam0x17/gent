@@ -32,13 +32,7 @@ async fn local<T: Send + 'static>(
     store: SharedStore,
     operation: impl FnOnce(&mut Store) -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    tokio::task::spawn_blocking(move || {
-        let mut guard = store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("store lock poisoned"))?;
-        operation(&mut guard)
-    })
-    .await?
+    crate::access::run(store, "invitation", operation).await
 }
 
 enum Phase {

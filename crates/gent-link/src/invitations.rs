@@ -5,6 +5,23 @@ mod journal;
 pub use joining::join;
 pub(crate) use journal::installation;
 
+/// Code-based retries carry an owner-authenticated destination. Validate the
+/// replacement against the durable pins before changing the code's UI journal.
+pub(crate) fn prepare_code_join(
+    home: &Path,
+    offer: &gent_crypto::invitation::SignedOffer,
+    name: &str,
+    session: &str,
+) -> Result<()> {
+    if installation(home)?
+        .is_some_and(|saved| saved.complete && saved.offer == *offer && saved.name == name)
+    {
+        return Ok(());
+    }
+    drop(journal::Journal::open(home, offer, name, session, true)?);
+    Ok(())
+}
+
 use crate::{
     auth,
     managed_file::{self, Snapshot},
