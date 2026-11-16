@@ -17,27 +17,28 @@ use tokio::{
 
 #[derive(Args)]
 #[command(
-    after_help = "Invitation: gent cluster join --invite-file /private/laptop.gent-invite --name laptop\nSSH: gent cluster join CLUSTER_UUID --via sam@owner-host --name laptop\nTransfer invitation files privately; SSH host keys must already be trusted. The owner daemon must be running."
+    after_help = "Through Gent: gent cluster join --name laptop\nThen run gent cluster approve on the owner and enter the displayed code.\nInvitation: gent cluster join --invite-file /private/laptop.gent-invite --name laptop\nSSH: gent cluster join CLUSTER_UUID --via sam@owner-host --name laptop\nKeep pairing codes and invitation files private; SSH host keys must already be trusted. The owner daemon must be running."
 )]
 pub struct JoinArgs {
-    #[arg(required_unless_present = "invite_file")]
-    cluster: Option<String>,
+    pub(crate) cluster: Option<String>,
     /// SSH destination of an existing owner node (for example sam@studio).
-    #[arg(
-        long,
-        required_unless_present = "invite_file",
-        conflicts_with = "invite_file"
-    )]
-    via: Option<String>,
+    #[arg(long, conflicts_with = "invite_file")]
+    pub(crate) via: Option<String>,
     /// Private invitation received through a trusted channel; pairing uses the relay.
     #[arg(long)]
-    invite_file: Option<PathBuf>,
+    pub(crate) invite_file: Option<PathBuf>,
     /// Replace a staged invitation while preserving its original node identity.
     #[arg(long = "continue", requires = "invite_file")]
     continue_invitation: bool,
     /// Friendly name of this new node.
     #[arg(long)]
-    name: String,
+    pub(crate) name: String,
+    /// Write the secret one-time pairing code to a private file for automation.
+    #[arg(long, conflicts_with_all = ["via", "invite_file"])]
+    pub(crate) code_out: Option<PathBuf>,
+    /// Start a fresh code after expiry, only before an invitation was received.
+    #[arg(long, conflicts_with_all = ["via", "invite_file"])]
+    pub(crate) new_pairing: bool,
     /// Retire this lost joined node and enroll a fresh identity through SSH.
     #[arg(long, conflicts_with = "invite_file")]
     replace_node: Option<String>,
@@ -53,6 +54,42 @@ pub struct JoinArgs {
 }
 
 impl JoinArgs {
+    pub(crate) fn code(cluster: Option<String>, name: String) -> Self {
+        Self {
+            cluster,
+            name,
+            via: None,
+            invite_file: None,
+            continue_invitation: false,
+            code_out: None,
+            new_pairing: false,
+            replace_node: None,
+            remote_gent: "gent".into(),
+            remote_home: None,
+            relay_endpoint: None,
+        }
+    }
+    pub(crate) fn code_route(&self) -> Result<bool> {
+        let code = self.via.is_none() && self.invite_file.is_none();
+        if code {
+            ensure!(
+                self.remote_home.is_none()
+                    && self.relay_endpoint.is_none()
+                    && self.remote_gent == "gent"
+                    && self.replace_node.is_none()
+                    && !self.continue_invitation,
+                "pairing codes do not accept SSH options or replacement/continuation overrides"
+            );
+        }
+        Ok(code)
+    }
+    pub(crate) fn with_invitation(mut self, file: PathBuf, cluster: String) -> Self {
+        self.cluster = Some(cluster);
+        self.invite_file = Some(file);
+        self.code_out = None;
+        self.new_pairing = false;
+        self
+    }
     pub(crate) fn invitation_intent(
         file: &Path,
         name: &str,
@@ -403,6 +440,8 @@ mod tests {
     #[test]
     fn ssh_arguments_preserve_remote_paths_and_require_authentication() {
         let mut args = JoinArgs {
+            code_out: None,
+            new_pairing: false,
             cluster: Some("cluster".into()),
             via: Some("sam@studio".into()),
             invite_file: None,

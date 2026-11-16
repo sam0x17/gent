@@ -10,7 +10,13 @@ gent daemon install
 
 The package is `gent-link`; its executable is `gent`. Cargo normally installs it under `~/.cargo/bin`. Rust 1.98 or newer and a working native C compiler/linker are required. On macOS, install the Xcode command-line tools. On Linux, install your distribution's C build tools. SQLite is bundled; HTTPS uses Rustls. Building requires access to the locked crates.io dependencies or a populated Cargo cache.
 
-`gent daemon install` guides account login and cluster creation or invitation enrollment, then installs a user service. Hosted setup requires the configured account and relay services; the default `api.gent.link` service is not deployed yet. To try local messaging now:
+For access to the private GitHub source, install or upgrade directly:
+
+```sh
+cargo install --locked --git ssh://git@github.com/sam0x17/gent.git gent-link --force
+```
+
+`gent daemon install` guides GitHub login and cluster creation or pairing, then installs a user service. The default account and relay services are deployed for the owner-only private trial. See [service setup](service-setup.md#add-another-machine-through-gent) to join an existing cluster through Gent. For an independent local trial:
 
 ```sh
 gent daemon install --local demo

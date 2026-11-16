@@ -1,4 +1,5 @@
 //! Native account login. Service credentials never grant cluster key authority.
+mod pairing;
 pub mod renewal;
 pub(crate) mod source;
 use crate::managed_file::{self, Snapshot};
@@ -139,6 +140,13 @@ fn client() -> Result<Client> {
 }
 
 async fn response(request: reqwest::RequestBuilder) -> Result<(StatusCode, Value)> {
+    response_limit(request, 64 * 1024).await
+}
+
+async fn response_limit(
+    request: reqwest::RequestBuilder,
+    limit: usize,
+) -> Result<(StatusCode, Value)> {
     let mut response = request
         .send()
         .await
@@ -151,7 +159,7 @@ async fn response(request: reqwest::RequestBuilder) -> Result<(StatusCode, Value
         .map_err(|_| anyhow::anyhow!("could not read the authentication response"))?
     {
         ensure!(
-            bytes.len().saturating_add(chunk.len()) <= 64 * 1024,
+            bytes.len().saturating_add(chunk.len()) <= limit,
             "authentication response too large"
         );
         bytes.extend_from_slice(&chunk);

@@ -1,6 +1,6 @@
 # Service cluster setup
 
-The source build can provision an owner and join additional nodes through private-file invitations or a trusted SSH channel against a configured Gent account service. The public account and messaging services are not deployed yet. Real GitHub consent remains unverified.
+The source build can provision an owner and join additional nodes through a private pairing code, an invitation file or trusted SSH. The account service at `https://api.gent.link` and ciphertext relay at `https://relay.gent.link` are deployed for the private trial. GitHub sign-in is currently restricted to the trial owner; real device consent works.
 
 The [invitation enrollment guide](invitation-enrollment.md) documents the implemented commands, protected file transfer, expiry and interrupted-join recovery.
 
@@ -10,7 +10,7 @@ For a configured service, run the guided installer in a terminal:
 gent daemon install
 ```
 
-On an unconfigured node it asks whether to create a cluster or join with a private invitation, collects the missing name/file, signs in with GitHub, and starts the per-user service. It offers shell PATH and completion setup for Zsh, Bash or Fish. Each step remains available independently:
+On an unconfigured node it asks whether to create a cluster, join with a pairing code, or use an invitation file. It collects the missing information, signs in with GitHub, and starts the per-user service. It offers shell PATH and completion setup for Zsh, Bash or Fish. Each step remains available independently:
 
 ```sh
 gent auth login
@@ -41,6 +41,35 @@ Use `gent auth login --service https://YOUR_ACCOUNT_ORIGIN` for an alternate dep
 `gent cluster new NAME` uses the primary directory for first setup, allowing an existing login under `auth/`. Once that node is configured, it reserves a child profile and selects it after successful setup. See [local cluster profiles](local-proof.md#local-cluster-profiles) for shared-account behavior and retries. It creates the node and cluster UUIDs, owner signing key, node signing key and signed genesis locally before reserving their IDs at the account service. The service receives those IDs and a transport credential, never the signing keys, policy or display names. The credential grants access to cluster ciphertext; local signed authority still controls agents and decryption.
 
 `--local` retains the independent development setup. Existing development or SSH-paired clusters are not automatically converted to service transport. They can have compacted mailbox history that requires a separate migration procedure.
+
+## Add another machine through Gent
+
+On the new machine, sign into the same GitHub account and request enrollment:
+
+```sh
+gent auth login
+gent cluster join --name laptop
+```
+
+The CLI selects the account's sole cluster, or asks you to select a cluster ID if there are several. You can pass an explicit ID after `join`. Keep the command running. It displays a private code starting with `gent1-`.
+
+On the existing owner node, with its daemon running:
+
+```sh
+gent cluster approve
+```
+
+Paste the code from the new machine and confirm the displayed device and cluster. On the new machine, enrollment finishes through Gent's HTTPS services. Then run:
+
+```sh
+gent daemon install
+gent integration install codex
+gent integration install claude-code
+```
+
+There is no SSH requirement or invitation file to transfer. The code contains 256 random bits and expires after 15 minutes. It encrypts and authenticates the invitation before the service receives it. Share it only with the intended owner; Gent never receives the code or its derived encryption key. GitHub login authorizes service access, while owner approval grants encrypted cluster membership. An offline owner cannot approve enrollment.
+
+Use `gent cluster approve --no-configure` for messaging-only membership. For scripts, use `join --code-out PRIVATE_FILE` and `approve --code-file PRIVATE_FILE --yes`; never put the code in command arguments. Rerun the same join or approval command after an interruption. Exact retries preserve identities and ciphertext. Before an invitation has arrived, an expired request can be replaced with `join --new-pairing`. After receipt, resume the saved invitation or use the explicit continuation process in the [invitation guide](invitation-enrollment.md). Private journals live under `auth/enrollment/`; expired approval files are removed on later approvals.
 
 ## Add another machine with an invitation
 

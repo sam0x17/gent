@@ -7,6 +7,7 @@ mod config_editor;
 mod contexts;
 mod display;
 mod doctor;
+mod enrollment;
 mod files;
 mod gateway;
 mod groups;
@@ -271,8 +272,10 @@ enum ClusterCommand {
     Status,
     /// Renew the locally held owner-signed configuration lease.
     Renew,
-    /// Join with a private invitation file or through a trusted SSH owner node.
+    /// Join through Gent with a pairing code, a private invitation, or trusted SSH.
     Join(pairing::JoinArgs),
+    /// Approve another device using the one-time code it displays.
+    Approve(enrollment::ApproveArgs),
     /// Create a private invitation for one new node; the owner daemon must be online.
     Invite(invitations::InviteArgs),
     /// List or revoke this owner's invitations.
@@ -765,7 +768,10 @@ async fn execute(cli: Cli) -> Result<()> {
         }) => owner_transfer::execute(&home, &request_id, command).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Join(args)),
-        }) => contexts::provision::join(&root, &home, args).await?,
+        }) => enrollment::join(&root, &home, args).await?,
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Approve(args)),
+        }) => enrollment::approve(&home, args).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Invite(args)),
         }) => invitations::create(&home, args).await?,

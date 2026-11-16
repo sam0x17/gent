@@ -119,6 +119,10 @@ enum Plan {
     Existing,
     Local(String),
     Connect(Option<String>),
+    CodeJoin {
+        cluster: Option<String>,
+        name: String,
+    },
     Join {
         file: PathBuf,
         name: String,
@@ -232,6 +236,16 @@ fn plan(
             "already configured; existing identity was preserved; omit --new"
         );
     }
+    if options.invite_file.is_none()
+        && options.new_cluster.is_none()
+        && !configured
+        && let Some((cluster, name)) = crate::enrollment::pending(home)?
+    {
+        return Ok(Plan::CodeJoin {
+            cluster: Some(cluster),
+            name,
+        });
+    }
     if options.invite_file.is_none() && staged {
         ensure!(
             joining.is_some(),
@@ -266,12 +280,18 @@ fn plan(
             }
             let choice = prompt(
                 interactive,
-                "Set up Gent: [1] Create a cluster  [2] Join with an invitation  [q] Cancel: ",
+                "Set up Gent: [1] Create a cluster  [2] Join with a pairing code  [3] Join with an invitation file  [q] Cancel: ",
                 "no Gent configuration; use --new NAME or --invite-file FILE --name NODE after gent auth login, or --local NAME for development",
             )?;
             match choice.as_str() {
                 "1" | "new" => options.new_cluster = Some(prompt(true, "Cluster name: ", "")?),
                 "2" | "join" => {
+                    return Ok(Plan::CodeJoin {
+                        cluster: None,
+                        name: prompt(true, "Node name: ", "")?,
+                    });
+                }
+                "3" | "invitation" => {
                     options.invite_file = Some(PathBuf::from(prompt(
                         true,
                         "Private invitation file: ",
@@ -375,7 +395,10 @@ pub async fn install(
             std::env::var_os("SHELL").as_deref(),
         )?);
     }
-    let needs_login = matches!(plan, Plan::Connect(_) | Plan::Join { .. });
+    let needs_login = matches!(
+        plan,
+        Plan::Connect(_) | Plan::Join { .. } | Plan::CodeJoin { .. }
+    );
     if needs_login {
         if interactive || options.headless || options.no_browser {
             if human {
@@ -405,6 +428,17 @@ pub async fn install(
     let mut enrollment = None;
     let local = match plan {
         Plan::Existing => None,
+        Plan::CodeJoin { cluster, name } => {
+            enrollment = Some(
+                crate::enrollment::join(
+                    &home,
+                    &home,
+                    crate::pairing::JoinArgs::code(cluster, name),
+                )
+                .await?,
+            );
+            None
+        }
         Plan::Local(name) => Some(name),
         Plan::Connect(name) => {
             enrollment = Some(cluster::connect(&home, name.as_deref()).await.context(

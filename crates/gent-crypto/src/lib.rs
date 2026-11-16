@@ -6,6 +6,7 @@
 //! trust boundary. Do not upload these plaintext records to a routing service.
 mod authority;
 pub mod files;
+pub mod pairing;
 pub mod stream;
 
 pub use authority::*;

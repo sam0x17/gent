@@ -1,12 +1,18 @@
 # Invitation enrollment design
 
-Draft, November 14, 2026. The offer, claim, encrypted channel, owner admission journal, daemon polling and joining session driver are implemented. Private-file CLI enrollment now connects these components to the local account and relay Workers, with durable invocation IDs, independent node credentials and explicit continuation. Physical Linux-Mac enrollment now passes in both directions against local Workers, including continuation after actual expiry. Scoped replacement of a lost joined node is also implemented. Hosted deployment remains unverified. SSH joining is also available.
+November 15, 2026. The offer, claim, encrypted channel, owner admission journal, daemon polling and joining session driver are implemented. Private-file CLI enrollment connects these components to the account and relay Workers, with durable invocation IDs, independent node credentials and explicit continuation. Physical Linux-Mac enrollment passes in both directions against local Workers, including continuation after actual expiry. Scoped replacement of a lost joined node and SSH joining are also available. The private trial services are deployed.
 
 An invitation admits one trusted daemon to an existing cluster. It must authenticate the owner independently of Gent's service, protect bootstrap metadata and keys, and preserve the same joining identity across interruptions. Initial enrollment requires the same human account on both machines. Hosted agents and future multi-user admission need separate, narrower capabilities.
 
 ## Trust and delivery
 
-The owner creates an invitation through its local owner-authenticated CLI. The interface writes a private file, which the user transfers through an independently trusted channel:
+`gent cluster join --name laptop` now supports code-authenticated delivery through Gent. The joining device generates a 256-bit random secret and displays it locally as `gent1-` plus 43 base64url characters. The owner enters it into `gent cluster approve`, checks the device/cluster and confirms. The owner CLI encrypts a normal invitation; the new device decrypts it and continues through the existing Noise protocol. See [setup commands](service-setup.md#add-another-machine-through-gent).
+
+SHA-256 with separate domain strings derives the lookup ID and encryption key from the random secret. ChaCha20-Poly1305 uses a random 96-bit nonce and authenticates the account, cluster, lookup ID, creation time and direction. The service receives only the ID, account/cluster routing metadata, timestamps and ciphertext. It cannot replace the native trust anchor without the private code. This is a high-entropy secret transfer, not a short-password protocol. A person who obtains the code can decrypt or forge bootstrap data, so keep it out of chats and untrusted clipboard services.
+
+Requests expire after 15 minutes. The service bounds packet sizes and retains at most eight requests per cluster and 128 globally. Requests and approvals allow only identical retries; approval binds the active owner node and account session. Private local journals preserve codes and ciphertext across retries. A lost approval response cannot issue a second invitation. Before receipt of an invitation, `--new-pairing` replaces an expired request; after receipt, the existing continuation rules below apply. Revocation and expiry checks remain active during native admission.
+
+The original file interface remains available. The owner creates an invitation through its local owner-authenticated CLI. The interface writes a private file, which the user transfers through an independently trusted channel:
 
 ```sh
 gent cluster invite --out /private/path/laptop.gent-invite
@@ -151,7 +157,7 @@ Service revocation stops transport; native revocation stops further cryptographi
 
 Offers and claims use RFC 8785 canonical JSON and domain-separated Ed25519 signatures. Unknown fields and noncanonical encodings are rejected. A signed offer permits up to 8 KiB plus the bounded 128 KiB [owner succession chain](owner-succession.md); private joining/owner file encodings permit 16 KiB plus that chain and use distinct structures. Epoch-zero records omit the chain and preserve their existing canonical format. The joining file contains the signed offer, PSK and routing secret. The owner record additionally contains the Noise responder private key. Decoding verifies the owner signature, responder-key shape and routing-secret SHA-256 binding; protected delivery supplies provenance, and the handshake verifies the PSK. Admission separately requires the current owner epoch and issuer authority. The owner record also checks the private/public responder-key match. Private-file parse errors do not echo their input.
 
-Offer IDs are UUIDv7; handshake attempt IDs remain UUIDv4. Earlier component-only UUIDv4 offers are rejected. There is no released invitation CLI or deployed invitation service to migrate.
+Offer IDs are UUIDv7; handshake attempt IDs remain UUIDv4. Earlier component-only UUIDv4 offers are rejected. The private trial now deploys this invitation service; no earlier UUIDv4 offer format was released.
 
 The prologue is `gent/invitation-channel/v1\0` followed by canonical JSON for `[signed_offer, attempt_id]`. Offer signing uses `gent/invitation-offer/v1\0` followed by the offer body; the claim's offer fingerprint hashes that same domain followed by the complete signed offer. Claim signing uses `gent/invitation-claim/v1\0`. The claim contains the invitation ID, offer fingerprint, completed Noise handshake hash, node ID/key/name and validity period. Neither handshake message may carry an application payload; each is exactly 48 bytes.
 

@@ -36,6 +36,16 @@ pub struct InviteArgs {
     #[arg(long, conflicts_with = "continue_node")]
     replace_node: Option<String>,
 }
+impl InviteArgs {
+    pub(crate) fn pairing(output: PathBuf, can_configure: bool) -> Self {
+        Self {
+            out: output,
+            no_configure: !can_configure,
+            continue_node: None,
+            replace_node: None,
+        }
+    }
+}
 #[derive(Subcommand)]
 pub enum Command {
     List,
