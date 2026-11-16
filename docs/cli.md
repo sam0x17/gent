@@ -67,8 +67,8 @@ The current build guides missing login and cluster enrollment through `gent daem
 | `gent cluster renew` | Renew the signed configuration lease locally on the owner, or request renewal from an authorized joined node. |
 | `gent clusters` | List the user's configured or authorized clusters, marking the active one. |
 | `gent cluster new [name]` | Create and select a cluster, establishing its initial owner keys and policy locally. |
-| `gent cluster join [cluster-id] --name NODE` | Request a private pairing code; selects the sole owned cluster or prompts for an ID. |
-| `gent cluster approve` | On the owner node, enter the new device's code and confirm enrollment. Add `--no-configure` for messaging-only membership. |
+| `gent node add NAME` | Issue a one-time code for a named node. Add `--no-configure` for messaging-only membership. |
+| `gent cluster join [CODE]` | Join as the name assigned by the invitation and start the daemon; prompt for the code if omitted. |
 | `gent cluster switch [cluster]` | Select an already joined cluster; show a picker when the argument is omitted in an interactive terminal. |
 | `gent cluster invite --out FILE` | Create a private, single-node invitation; expires after 15 minutes. |
 | `gent cluster invitations` | List this owner's invitation status without secrets. |

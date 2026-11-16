@@ -29,6 +29,7 @@ mod history;
 pub mod invitations;
 mod mesh;
 mod network;
+pub mod node_invites;
 mod pairing;
 mod permissions;
 mod presence;
@@ -566,6 +567,12 @@ impl StoreSession<'_> {
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
+            OwnerOp::NodeInvite {
+                request_id,
+                name,
+                can_configure,
+                activate,
+            } => self.request_node_invite(&request_id, &name, can_configure, activate),
             OwnerOp::AgentRecover {
                 directory,
                 manifest_sha256,

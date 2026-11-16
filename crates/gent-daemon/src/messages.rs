@@ -50,6 +50,9 @@ impl Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
+    NodeInvite {
+        envelope: Box<crate::store::node_invites::Envelope>,
+    },
     Presence {
         challenge: Uuid,
         reply: bool,

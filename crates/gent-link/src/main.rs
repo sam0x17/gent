@@ -274,8 +274,6 @@ enum ClusterCommand {
     Renew,
     /// Join through Gent with a pairing code, a private invitation, or trusted SSH.
     Join(pairing::JoinArgs),
-    /// Approve another device using the one-time code it displays.
-    Approve(enrollment::ApproveArgs),
     /// Create a private invitation for one new node; the owner daemon must be online.
     Invite(invitations::InviteArgs),
     /// List or revoke this owner's invitations.
@@ -351,6 +349,8 @@ enum AgentCommand {
 }
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Issue a one-time invitation that assigns this name to the joining node.
+    Add(enrollment::AddArgs),
     /// Remove another node from signed membership and revoke its service access (owner only).
     Remove { node: String },
     /// List durable removal progress. Confirmation refers to service access, not peer sync.
@@ -769,9 +769,9 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Cluster {
             command: Some(ClusterCommand::Join(args)),
         }) => enrollment::join(&root, &home, args).await?,
-        Some(Command::Cluster {
-            command: Some(ClusterCommand::Approve(args)),
-        }) => enrollment::approve(&home, args).await?,
+        Some(Command::Node {
+            command: Some(NodeCommand::Add(args)),
+        }) => enrollment::add(&home, args).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Invite(args)),
         }) => invitations::create(&home, args).await?,

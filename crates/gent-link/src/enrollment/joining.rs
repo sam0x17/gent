@@ -1,245 +1,157 @@
 use super::*;
-use gent_protocol::service::pairing::Registration;
-use zeroize::Zeroize;
+use gent_crypto::invitation::{Invitation, Purpose};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Pending {
-    version: u8,
-    code: String,
-    cluster: String,
     account: String,
-    service: String,
     session: String,
+    service: String,
+    file: PathBuf,
     name: String,
-    created: u64,
-    request: String,
-}
-impl Drop for Pending {
-    fn drop(&mut self) {
-        self.code.zeroize();
-    }
+    cluster: String,
 }
 
-pub(crate) fn pending(home: &Path) -> Result<Option<(String, String)>> {
-    let directory = home.join("auth/enrollment");
-    if !directory.exists() {
+pub(crate) fn pending(home: &Path) -> Result<Option<(PathBuf, String)>> {
+    let path = home.join("auth/enrollment/pending-join.json");
+    let Some(text) = storage::private(&path)?.text else {
         return Ok(None);
-    }
-    config::private_dir(&directory)?;
-    let mut found = None;
-    for (index, entry) in std::fs::read_dir(directory)?.enumerate() {
-        ensure!(index < 128, "pairing journal exceeds capacity");
-        let path = entry?.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("joining-") && n.ends_with(".json"))
-        {
-            let snapshot = storage::private(&path)?;
-            let saved: Pending = serde_json::from_str(
-                snapshot
-                    .text
-                    .as_deref()
-                    .context("missing pairing request")?,
-            )
-            .map_err(|_| anyhow::anyhow!("invalid saved pairing request"))?;
-            ensure!(
-                found.is_none(),
-                "multiple pending pairings; resume gent cluster join with an explicit cluster ID and node name"
-            );
-            found = Some((saved.cluster.clone(), saved.name.clone()));
-        }
-    }
-    Ok(found)
+    };
+    let saved: Pending = serde_json::from_str(&text)
+        .map_err(|_| anyhow::anyhow!("invalid saved node invitation"))?;
+    Ok(Some((saved.file, saved.name)))
 }
 
-async fn cluster(service: &auth::Service, selected: Option<&str>) -> Result<String> {
-    let available = service.available_clusters().await?;
-    if let Some(selected) = selected {
-        ensure!(
-            available.iter().any(|c| c.id == selected),
-            "this account does not own the requested cluster"
-        );
-        return Ok(selected.into());
-    }
-    ensure!(
-        !available.is_empty(),
-        "No clusters yet. Create one on your first machine with gent cluster new NAME."
-    );
-    if available.len() == 1 {
-        return Ok(available[0].id.clone());
-    }
-    eprintln!("Choose a cluster:");
-    for (index, c) in available.iter().enumerate() {
-        eprintln!("  {}. {}", index + 1, c.id);
-    }
-    let choice = prompt("Cluster number: ")?
-        .parse::<usize>()
-        .ok()
-        .and_then(|n| n.checked_sub(1))
-        .and_then(|n| available.get(n));
-    Ok(choice
-        .context("select a listed cluster, or pass its ID to gent cluster join")?
-        .id
-        .clone())
-}
-
-pub async fn join(root: &Path, home: &Path, args: crate::pairing::JoinArgs) -> Result<Value> {
+pub async fn join(root: &Path, home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Value> {
     if !args.code_route()? {
         return crate::contexts::provision::join(root, home, args).await;
     }
-    config::label(&args.name)?;
     ensure!(
-        args.code_out.is_some() || io::stderr().is_terminal(),
-        "run pairing in a terminal, or use --code-out PRIVATE_FILE for automation"
+        args.name.is_empty(),
+        "the invitation code supplies the node name; omit --name"
     );
+    let raw = match (&args.cluster, &args.code_file) {
+        (Some(code), None) => Zeroizing::new(code.clone()),
+        (None, Some(file)) => Zeroizing::new(
+            storage::private(file)?
+                .text
+                .context("code file is missing")?,
+        ),
+        (None, None) => prompt("Node invitation code: ")?,
+        _ => anyhow::bail!("supply either a code or --code-file"),
+    };
+    let code = Code::parse(raw.trim())?;
+    let id = code.id();
+    // The code authenticates encrypted bootstrap data; it never selects an origin.
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        auth::execute(
+            home,
+            auth::Command::Login {
+                headless: true,
+                no_browser: false,
+                service: None,
+            },
+        )
+        .await?;
+    }
     let directory = storage::directory(home)?;
     let _lock = managed_file::lock(&directory.join("joining.lock"))?;
     let service = auth::Service::open(home).await?;
-    let selected = cluster(&service, args.cluster.as_deref()).await?;
-    let journal = directory.join(format!("joining-{selected}.json"));
-    let snapshot = storage::private(&journal)?;
-    let mut saved: Option<Pending> = snapshot
-        .text
-        .as_deref()
-        .map(|s| {
-            serde_json::from_str(s).map_err(|_| anyhow::anyhow!("invalid saved pairing request"))
-        })
-        .transpose()?;
-    if args.new_pairing {
-        if let Some(old) = &saved {
-            let old_code = Code::parse(&old.code)?;
-            ensure!(
-                !directory
-                    .join(format!("{}.gent-invite", old_code.id()))
-                    .exists(),
-                "an invitation was already received; resume the original join before starting another pairing"
-            );
-            ensure!(
-                auth::now()? >= old.created.saturating_add(LIFETIME),
-                "the current code has not expired; resume its join"
-            );
-        }
-        saved = None;
+    let file = directory.join(format!("{id}.gent-invite"));
+    let snapshot = storage::private(&file)?;
+    if snapshot.text.is_none() {
+        let record = service.pairing_read(&id).await.context("node invitation unavailable; check the code or run gent node add NAME on the existing node for a fresh invitation")?;
+        ensure!(
+            record.created_at <= auth::now()?.saturating_add(60)
+                && record.expires_at > auth::now()?,
+            "node invitation expired or is from the future"
+        );
+        let bytes = code.open(
+            &service.session.account_id,
+            &record.cluster_id,
+            record.created_at,
+            true,
+            &record.capsule,
+        )?;
+        let invitation = Invitation::decode(&bytes)?;
+        let offer = &invitation.offer().offer;
+        ensure!(
+            offer.anchor.cluster_id == record.cluster_id
+                && offer.id == record.invitation_id
+                && offer.issued_at == record.created_at
+                && offer.expires_at == record.expires_at,
+            "service changed the invitation binding"
+        );
+        invitation.offer().verify(&offer.anchor, auth::now()?)?;
+        service.check_invitation_service(&offer.service)?;
+        snapshot.write(std::str::from_utf8(&bytes).context("invalid invitation encoding")?)?;
     }
-    let pending = match saved {
-        Some(value) => value,
-        None => {
-            let code = Code::generate()?;
-            let created = auth::now()?;
-            let request = Request {
-                version: 1,
-                name: args.name.clone(),
-                service: service.origin()?.to_string(),
-            };
-            let value = Pending {
-                version: 1,
-                code: code.expose().to_string(),
-                cluster: selected.clone(),
-                account: service.session.account_id.clone(),
-                service: service.origin()?.to_string(),
-                session: service.session_hash(),
-                name: args.name.clone(),
-                created,
-                request: code.seal(
-                    &service.session.account_id,
-                    &selected,
-                    created,
-                    false,
-                    &serde_json::to_vec(&request)?,
-                )?,
-            };
-            storage::write(&journal, &value)?;
-            value
-        }
+    let invitation = crate::invitations::decode_file(&file)?;
+    let offer = &invitation.offer().offer;
+    let Purpose::NamedNode { name, .. } = &offer.purpose else {
+        anyhow::bail!("this code is not a named node invitation");
     };
     ensure!(
-        pending.version == 1
-            && pending.cluster == selected
-            && pending.account == service.session.account_id
-            && pending.service == service.origin()?.as_str()
-            && pending.session == service.session_hash()
-            && pending.name == args.name,
-        "saved pairing belongs to different options or login; use its original name, cluster and account session"
+        offer.replaces.is_none(),
+        "node code cannot replace an existing identity"
     );
-    let code = Code::parse(&pending.code)?;
-    let id = code.id();
-    let file = directory.join(format!("{id}.gent-invite"));
-    if !file.exists() {
+    service.check_invitation_service(&offer.service)?;
+    let journal = directory.join("pending-join.json");
+    let snapshot = storage::private(&journal)?;
+    if let Some(text) = &snapshot.text {
+        let saved: Pending = serde_json::from_str(text)
+            .map_err(|_| anyhow::anyhow!("invalid saved node invitation"))?;
         ensure!(
-            auth::now()? < pending.created.saturating_add(LIFETIME),
-            "pairing code expired before enrollment; rerun with --new-pairing"
+            saved.account == service.session.account_id
+                && saved.session == service.session_hash()
+                && saved.service == service.origin()?.as_str()
+                && saved.file == file
+                && saved.name == *name
+                && saved.cluster == offer.anchor.cluster_id,
+            "another node join is pending; resume its original code and login"
         );
-        let registered = service
-            .pairing_create(
-                &id,
-                &Registration {
-                    cluster_id: selected.clone(),
-                    created_at: pending.created,
-                    request: pending.request.clone(),
-                },
-            )
-            .await?;
-        check_record(&registered, &id, &selected, pending.created)?;
-        ensure!(
-            registered.request == pending.request,
-            "pairing service changed encrypted request"
-        );
-        if let Some(path) = &args.code_out {
-            storage::code_file(&managed_file::normalize(path)?, &code)?;
-        } else {
-            eprintln!(
-                "Pairing code: {}\nOn an enrolled owner node, run gent cluster approve and enter this code.\nKeep it private. It expires in 15 minutes.",
-                code.expose().as_str()
-            );
-        }
-        eprintln!("Waiting for approval...");
-        let mut record = registered;
-        loop {
-            ensure!(
-                auth::now()? < pending.created.saturating_add(LIFETIME),
-                "pairing expired; rerun with --new-pairing before an invitation is received"
-            );
-            check_record(&record, &id, &selected, pending.created)?;
-            ensure!(
-                record.request == pending.request,
-                "pairing service changed encrypted request"
-            );
-            if let Some(response) = &record.response {
-                let bytes =
-                    code.open(&pending.account, &selected, pending.created, true, response)?;
-                let invitation = gent_crypto::invitation::Invitation::decode(&bytes)?;
-                ensure!(
-                    invitation.offer().offer.anchor.cluster_id == selected
-                        && invitation.offer().offer.replaces.is_none()
-                        && matches!(
-                            invitation.offer().offer.purpose,
-                            gent_crypto::invitation::Purpose::NewNode
-                        ),
-                    "pairing approval has a different cluster or purpose"
-                );
-                service.check_invitation_service(&invitation.offer().offer.service)?;
-                invitation
-                    .offer()
-                    .verify(&invitation.offer().offer.anchor, auth::now()?)?;
-                storage::private(&file)?
-                    .write(std::str::from_utf8(&bytes).context("invalid invitation encoding")?)?;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            record = service
-                .pairing_read(&id)
-                .await
-                .context("pairing interrupted; rerun the same command to resume")?;
-        }
+    } else {
+        storage::write(
+            &journal,
+            &Pending {
+                account: service.session.account_id.clone(),
+                session: service.session_hash(),
+                service: service.origin()?.to_string(),
+                file: file.clone(),
+                name: name.clone(),
+                cluster: offer.anchor.cluster_id.clone(),
+            },
+        )?;
     }
-    drop(service); // Existing enrollment opens the same login lock.
-    let mut result =
-        crate::contexts::provision::join(root, home, args.with_invitation(file, selected)).await?;
+    drop(service);
+    args.name.clone_from(name);
+    let install = !args.no_daemon;
+    let mut result = crate::contexts::provision::join(
+        root,
+        home,
+        args.with_invitation(file, offer.anchor.cluster_id.clone()),
+    )
+    .await?;
+    storage::private(&journal)?.remove()?;
+    if install {
+        let selected = result["profile"]["home"]
+            .as_str()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.to_path_buf());
+        let status = crate::service::execute(
+            &selected,
+            crate::DaemonCommand::Install {
+                local: None,
+                setup: crate::setup::Options::default(),
+            },
+        )
+        .await
+        .context("node enrolled; finish starting its daemon with gent daemon install")?;
+        result["daemon"] = status["daemon"].clone();
+    }
     result["pairing"] = json!("code_verified");
     result["next"] = json!(
-        "Run gent daemon install, then connect your agents with gent integration install codex or gent integration install claude-code."
+        "Connect agents with gent integration install codex or gent integration install claude-code."
     );
     Ok(result)
 }

@@ -12,6 +12,70 @@ struct Fixture {
     store: Store,
     credential: String,
 }
+
+#[test]
+fn named_invitation_binds_claim_and_reuses_only_the_original_node() {
+    let mut f = Fixture::new();
+    let request = Uuid::now_v7().to_string();
+    let issuer = f.store.identity.node.id().to_string();
+    let bytes = f
+        .store
+        .create_invitation_at(
+            &request,
+            true,
+            None,
+            None,
+            Some(("laptop", &issuer)),
+            now() as u64,
+        )
+        .unwrap();
+    let invitation = Invitation::decode(&bytes).unwrap();
+    assert_eq!(
+        *bytes,
+        *f.store
+            .create_invitation_at(
+                &request,
+                true,
+                None,
+                None,
+                Some(("laptop", &issuer)),
+                now() as u64
+            )
+            .unwrap()
+    );
+    assert!(
+        f.store
+            .create_invitation_at(
+                &request,
+                true,
+                None,
+                None,
+                Some(("different", &issuer)),
+                now() as u64
+            )
+            .is_err()
+    );
+    f.store
+        .activate_invitation(&f.credential, &invitation.offer().offer.id)
+        .unwrap();
+    let node = NodeIdentity::generate().unwrap();
+    let wrong = ClaimedNode {
+        id: node.id().into(),
+        key: node.public_key(),
+        name: "different".into(),
+    };
+    assert!(
+        f.store
+            .claim_invitation(invitation.offer(), &wrong, now() as u64)
+            .is_err()
+    );
+    assert!(handshake(&mut f.store, &invitation, &node, "different").is_err());
+    handshake(&mut f.store, &invitation, &node, "laptop").unwrap();
+    f.reopen();
+    handshake(&mut f.store, &invitation, &node, "laptop").unwrap();
+    let second = NodeIdentity::generate().unwrap();
+    assert!(handshake(&mut f.store, &invitation, &second, "laptop").is_err());
+}
 impl Fixture {
     fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
@@ -583,7 +647,7 @@ fn expiry_cleanup_commits_its_clock_and_cannot_recreate_old_creation_requests() 
     assert!(
         fixture
             .store
-            .create_invitation_at(&request, true, None, None, before)
+            .create_invitation_at(&request, true, None, None, None, before)
             .is_err()
     );
     assert_eq!(
@@ -1248,7 +1312,7 @@ fn invitation_and_handshake_capacity_preserve_retries_revocation_and_expiry_clea
     assert!(
         fixture
             .store
-            .create_invitation_at(&request, true, None, None, expires)
+            .create_invitation_at(&request, true, None, None, None, expires)
             .is_err()
     );
 }

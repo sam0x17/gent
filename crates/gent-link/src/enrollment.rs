@@ -1,9 +1,9 @@
 //! Code-authenticated invitation delivery over the account service. Cluster
 //! joining continues through the existing Noise protocol and durable journals.
-mod approval;
+mod issuing;
 mod joining;
 mod storage;
-pub use approval::{ApproveArgs, approve};
+pub use issuing::{AddArgs, add};
 pub use joining::join;
 pub(crate) use joining::pending;
 
@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use gent_crypto::pairing::Code;
 use gent_daemon::config;
-use gent_protocol::service::pairing::{LIFETIME, Record};
+use gent_protocol::service::pairing::LIFETIME;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -23,29 +23,10 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    version: u8,
-    name: String,
-    service: String,
-}
-
-fn check_record(record: &Record, id: &str, cluster: &str, created: u64) -> Result<()> {
-    ensure!(
-        record.id == id
-            && record.cluster_id == cluster
-            && record.created_at == created
-            && record.expires_at == created.saturating_add(LIFETIME),
-        "pairing request binding changed"
-    );
-    Ok(())
-}
-
 fn prompt(label: &str) -> Result<Zeroizing<String>> {
     ensure!(
         io::stdin().is_terminal() && io::stderr().is_terminal(),
-        "pairing approval needs a terminal, or --code-file with --yes"
+        "enter a node invitation code, or use --code-file PRIVATE_FILE"
     );
     eprint!("{label}");
     io::stderr().flush()?;

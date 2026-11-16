@@ -8,6 +8,8 @@ mod administration_tests;
 mod configuration_storage_tests;
 #[path = "group_administration_tests.rs"]
 mod group_administration_tests;
+#[path = "node_invite_tests.rs"]
+mod node_invite_tests;
 #[path = "owner_handoff_tests.rs"]
 mod owner_handoff_tests;
 #[path = "presence_tests.rs"]

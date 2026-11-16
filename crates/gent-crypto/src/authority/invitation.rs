@@ -66,6 +66,12 @@ impl ClaimedNode {
         id(&self.id)?;
         public_key(&self.key)?;
         label(&self.name)?;
+        if let Purpose::NamedNode { name, .. } = &offer.purpose {
+            ensure!(
+                &self.name == name,
+                "invitation requires its assigned node name"
+            );
+        }
         ensure!(
             self.id != offer.issuer_id
                 && self.key != offer.issuer_key
@@ -93,6 +99,7 @@ impl ClaimedNode {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Purpose {
     NewNode,
+    NamedNode { name: String, inviter: String },
     Continue { node: ClaimedNode },
 }
 
@@ -185,6 +192,14 @@ impl SignedOffer {
         if let Purpose::Continue { node } = &offer.purpose {
             node.validate(offer)?;
         }
+        if let Purpose::NamedNode { name, inviter } = &offer.purpose {
+            label(name)?;
+            id(inviter)?;
+            ensure!(
+                offer.replaces.is_none(),
+                "named invitation cannot replace a node"
+            );
+        }
         lifetime(offer.issued_at, offer.expires_at, OFFER_LIFETIME)?;
         verify(
             &owner,
@@ -209,6 +224,18 @@ impl SignedOffer {
             "invitation is from another owner epoch"
         );
         state.authorize_node(&self.offer.issuer_id, &self.offer.issuer_key, now)?;
+        if let Purpose::NamedNode { inviter, .. } = &self.offer.purpose {
+            let node = state
+                .state()
+                .nodes
+                .get(inviter)
+                .context("inviting node is no longer enrolled")?;
+            state.authorize_node(inviter, &node.signing_key, now)?;
+            ensure!(
+                inviter == &self.offer.issuer_id || node.can_configure,
+                "inviting node no longer has configuration authority"
+            );
+        }
         Ok(())
     }
 }
@@ -285,7 +312,7 @@ impl OwnerInvitation {
         }
         if let Some(target) = &options.replaces {
             match &options.purpose {
-                Purpose::NewNode => {
+                Purpose::NewNode | Purpose::NamedNode { .. } => {
                     let member = state
                         .state()
                         .nodes

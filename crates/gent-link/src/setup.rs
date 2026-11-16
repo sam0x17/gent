@@ -120,8 +120,7 @@ enum Plan {
     Local(String),
     Connect(Option<String>),
     CodeJoin {
-        cluster: Option<String>,
-        name: String,
+        code: String,
     },
     Join {
         file: PathBuf,
@@ -239,11 +238,12 @@ fn plan(
     if options.invite_file.is_none()
         && options.new_cluster.is_none()
         && !configured
-        && let Some((cluster, name)) = crate::enrollment::pending(home)?
+        && let Some((file, name)) = crate::enrollment::pending(home)?
     {
-        return Ok(Plan::CodeJoin {
-            cluster: Some(cluster),
+        return Ok(Plan::Join {
+            file,
             name,
+            replace: false,
         });
     }
     if options.invite_file.is_none() && staged {
@@ -280,15 +280,14 @@ fn plan(
             }
             let choice = prompt(
                 interactive,
-                "Set up Gent: [1] Create a cluster  [2] Join with a pairing code  [3] Join with an invitation file  [q] Cancel: ",
+                "Set up Gent: [1] Create a cluster  [2] Join with a node invitation code  [3] Join with an invitation file  [q] Cancel: ",
                 "no Gent configuration; use --new NAME or --invite-file FILE --name NODE after gent auth login, or --local NAME for development",
             )?;
             match choice.as_str() {
                 "1" | "new" => options.new_cluster = Some(prompt(true, "Cluster name: ", "")?),
                 "2" | "join" => {
                     return Ok(Plan::CodeJoin {
-                        cluster: None,
-                        name: prompt(true, "Node name: ", "")?,
+                        code: prompt(true, "Node invitation code: ", "")?,
                     });
                 }
                 "3" | "invitation" => {
@@ -428,13 +427,13 @@ pub async fn install(
     let mut enrollment = None;
     let local = match plan {
         Plan::Existing => None,
-        Plan::CodeJoin { cluster, name } => {
+        Plan::CodeJoin { code } => {
             enrollment = Some(
-                crate::enrollment::join(
-                    &home,
-                    &home,
-                    crate::pairing::JoinArgs::code(cluster, name),
-                )
+                crate::enrollment::join(&home, &home, {
+                    let mut args = crate::pairing::JoinArgs::code(Some(code));
+                    args.no_daemon = true;
+                    args
+                })
                 .await?,
             );
             None

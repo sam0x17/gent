@@ -112,7 +112,7 @@ impl Code {
         value: &str,
     ) -> Result<Zeroizing<Vec<u8>>> {
         ensure!(
-            value.len() <= gent_protocol::service::pairing::MAX_RESPONSE,
+            value.len() <= gent_protocol::service::pairing::MAX_CAPSULE,
             "pairing capsule too large"
         );
         let bytes = URL_SAFE_NO_PAD

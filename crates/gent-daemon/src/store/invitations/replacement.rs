@@ -31,7 +31,7 @@ impl Store {
                 .as_ref()
                 .or(match &offer.purpose {
                     Purpose::Continue { node } => Some(node),
-                    Purpose::NewNode => None,
+                    Purpose::NewNode | Purpose::NamedNode { .. } => None,
                 })
                 .context("replacement target was already retired by another enrollment")?;
             state.authorize_node(&node.id, &node.key, timestamp)?;

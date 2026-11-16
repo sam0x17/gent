@@ -663,6 +663,13 @@ pub enum OwnerOp {
     Invitation {
         action: InvitationOp,
     },
+    /// Local administrator request, forwarded over authenticated node streams.
+    NodeInvite {
+        request_id: String,
+        name: String,
+        can_configure: bool,
+        activate: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

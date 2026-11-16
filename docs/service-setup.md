@@ -10,7 +10,7 @@ For a configured service, run the guided installer in a terminal:
 gent daemon install
 ```
 
-On an unconfigured node it asks whether to create a cluster, join with a pairing code, or use an invitation file. It collects the missing information, signs in with GitHub, and starts the per-user service. It offers shell PATH and completion setup for Zsh, Bash or Fish. Each step remains available independently:
+On an unconfigured node it asks whether to create a cluster, join with a node invitation code, or use an invitation file. It collects the missing information, signs in with GitHub, and starts the per-user service. It offers shell PATH and completion setup for Zsh, Bash or Fish. Each step remains available independently:
 
 ```sh
 gent auth login
@@ -44,32 +44,45 @@ Use `gent auth login --service https://YOUR_ACCOUNT_ORIGIN` for an alternate dep
 
 ## Add another machine through Gent
 
-On the new machine, sign into the same GitHub account and request enrollment:
+On any existing configuration-authorized node:
 
 ```sh
-gent auth login
-gent cluster join --name laptop
+gent node add laptop
 ```
 
-The CLI selects the account's sole cluster, or asks you to select a cluster ID if there are several. You can pass an explicit ID after `join`. Keep the command running. It displays a private code starting with `gent1-`.
-
-On the existing owner node, with its daemon running:
+This prints a one-time code and the complete command for the new machine:
 
 ```sh
-gent cluster approve
+gent cluster join CODE
 ```
 
-Paste the code from the new machine and confirm the displayed device and cluster. On the new machine, enrollment finishes through Gent's HTTPS services. Then run:
+The code supplies both the cluster and the signed node name. There is no approval command to run afterward. Joining checks the existing GitHub login, offers device login if needed in a terminal, enrolls the node, and installs and starts its daemon. Then connect whichever hosts you use:
 
 ```sh
-gent daemon install
 gent integration install codex
 gent integration install claude-code
 ```
 
-There is no SSH requirement or invitation file to transfer. The code contains 256 random bits and expires after 15 minutes. It encrypts and authenticates the invitation before the service receives it. Share it only with the intended owner; Gent never receives the code or its derived encryption key. GitHub login authorizes service access, while owner approval grants encrypted cluster membership. An offline owner cannot approve enrollment.
+Gent carries the invitation and enrollment over its HTTPS services; direct access between machines is unnecessary. An authorized joined node forwards issuance to the signing owner over its established encrypted connection. The signing owner must remain online during issuance and enrollment. Messaging-only nodes cannot issue codes. `gent node add laptop --no-configure` creates a messaging-only invitation.
 
-Use `gent cluster approve --no-configure` for messaging-only membership. For scripts, use `join --code-out PRIVATE_FILE` and `approve --code-file PRIVATE_FILE --yes`; never put the code in command arguments. Rerun the same join or approval command after an interruption. Exact retries preserve identities and ciphertext. Before an invitation has arrived, an expired request can be replaced with `join --new-pairing`. After receipt, resume the saved invitation or use the explicit continuation process in the [invitation guide](invitation-enrollment.md). Private journals live under `auth/enrollment/`; expired approval files are removed on later approvals.
+The private code contains 256 random bits and expires after 15 minutes. It encrypts the owner-signed invitation before Gent receives it. Native admission binds the name and allows one joining identity. A second machine cannot reuse it. Rerunning an interrupted command resumes the same invitation and node; changing its options is rejected. After expiry, `gent node add NAME` issues a fresh code. A partially admitted node still uses the explicit continuation procedure in the invitation guide.
+
+For scripts, use `gent node add NAME --code-out PRIVATE_FILE` and `gent cluster join --code-file PRIVATE_FILE`. For a terminal prompt instead of a code in shell history, run `gent cluster join` without an argument. JSON output omits the code. `--no-daemon` limits joining to enrollment when a separate manager controls the daemon. Private retry state lives under `auth/enrollment/`.
+
+## Moving an existing installation to another cluster
+
+Joining another cluster preserves the old local profile and selects the new one. Existing daemon services and host integrations remain pinned to their original profile. If the old cluster has been retired, stop its daemon and remove its host bindings before joining:
+
+```sh
+gent daemon uninstall
+gent integration uninstall codex
+gent integration uninstall claude-code
+gent cluster join CODE
+gent integration install codex
+gent integration install claude-code
+```
+
+This preserves the login and local cluster data. Run the uninstall commands while the old cluster is selected. If already joined, use `gent --cluster OLD_CLUSTER_ID daemon uninstall` and `gent --cluster OLD_CLUSTER_ID integration uninstall HOST` to address the old profile explicitly, then install each integration for the selected new cluster. Restart the hosts' MCP connections or open new host sessions afterward.
 
 ## Add another machine with an invitation
 

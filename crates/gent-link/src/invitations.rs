@@ -35,14 +35,18 @@ pub struct InviteArgs {
     /// Authorize a fresh identity to replace this exact lost joined node.
     #[arg(long, conflicts_with = "continue_node")]
     replace_node: Option<String>,
+    /// Bind this invitation to an exact name for the new node.
+    #[arg(long, conflicts_with_all = ["continue_node", "replace_node"])]
+    name: Option<String>,
 }
 impl InviteArgs {
-    pub(crate) fn pairing(output: PathBuf, can_configure: bool) -> Self {
+    pub(crate) fn pairing(output: PathBuf, can_configure: bool, name: String) -> Self {
         Self {
             out: output,
             no_configure: !can_configure,
             continue_node: None,
             replace_node: None,
+            name: Some(name),
         }
     }
 }
@@ -82,6 +86,33 @@ async fn local(home: &Path, action: InvitationOp) -> Result<Value> {
     crate::owner(home, OwnerOp::Invitation { action }).await
 }
 
+async fn named(home: &Path, record: &Creation, activate: bool) -> Result<Value> {
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let value = crate::owner(
+            home,
+            OwnerOp::NodeInvite {
+                request_id: record.request.clone(),
+                name: record.name.clone().context("missing assigned name")?,
+                can_configure: record.configure,
+                activate,
+            },
+        )
+        .await?;
+        if let Some(error) = value["error"].as_str() {
+            anyhow::bail!("node invitation rejected: {error}");
+        }
+        if value["state"] != "pending" {
+            return Ok(value);
+        }
+        ensure!(
+            tokio::time::Instant::now() < until,
+            "waiting for the signing owner; keep both daemons online and rerun gent node add with the same name"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Creation {
@@ -95,6 +126,8 @@ struct Creation {
     continuation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replace_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
 fn clean_creation_records(directory: &Path, retain: &Path) -> Result<usize> {
@@ -178,6 +211,7 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
                 configure: !args.no_configure,
                 continuation: args.continue_node.clone(),
                 replace_node: args.replace_node.clone(),
+                name: args.name.clone(),
             };
             saved.write(&serde_json::to_string(&value)?)?;
             value
@@ -191,19 +225,24 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
             && record.session == service.session_hash()
             && record.configure == !args.no_configure
             && record.continuation == args.continue_node
-            && record.replace_node == args.replace_node,
+            && record.replace_node == args.replace_node
+            && record.name == args.name,
         "invitation retry options or issuing login changed; use the original options and login, or a new output file"
     );
-    let value = local(
-        &home,
-        InvitationOp::Create {
-            request_id: record.request.clone(),
-            can_configure: record.configure,
-            continuation: record.continuation.clone(),
-            replace_node: record.replace_node.clone(),
-        },
-    )
-    .await?;
+    let value = if record.name.is_some() {
+        named(&home, &record, false).await?
+    } else {
+        local(
+            &home,
+            InvitationOp::Create {
+                request_id: record.request.clone(),
+                can_configure: record.configure,
+                continuation: record.continuation.clone(),
+                replace_node: record.replace_node.clone(),
+            },
+        )
+        .await?
+    };
     let bytes = zeroize::Zeroizing::new(
         STANDARD.decode(
             value["private_invitation"]
@@ -217,7 +256,7 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
     invitation.offer().verify(&offer.anchor, auth::now()?)?;
     ensure!(
         offer.anchor.cluster_id == cfg.cluster.id
-            && offer.issuer_id == cfg.node.id
+            && (record.name.is_some() || offer.issuer_id == cfg.node.id)
             && (offer.can_configure == record.configure
                 || (record.replace_node.is_some() && record.configure && !offer.can_configure)),
         "local invitation identity changed"
@@ -225,7 +264,9 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
     use gent_crypto::invitation::Purpose;
     ensure!(
         match (&offer.purpose, &record.continuation, &record.replace_node) {
-            (Purpose::NewNode, None, None) => offer.replaces.is_none(),
+            (Purpose::NamedNode { name, .. }, None, None) =>
+                record.name.as_ref() == Some(name) && offer.replaces.is_none(),
+            (Purpose::NewNode, None, None) => record.name.is_none() && offer.replaces.is_none(),
             (Purpose::NewNode, None, Some(id)) => offer
                 .replaces
                 .as_ref()
@@ -243,13 +284,17 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
         "invitation output changed; existing file preserved"
     );
     service.register_invitation(invitation.offer()).await?;
-    local(
-        &home,
-        InvitationOp::Activate {
-            id: offer.id.clone(),
-        },
-    )
-    .await?;
+    if record.name.is_some() {
+        named(&home, &record, true).await?;
+    } else {
+        local(
+            &home,
+            InvitationOp::Activate {
+                id: offer.id.clone(),
+            },
+        )
+        .await?;
+    }
     destination.write(text)?;
     Ok(
         json!({"invitation":offer.id,"file":output,"expires_at":offer.expires_at,

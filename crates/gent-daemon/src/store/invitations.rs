@@ -20,6 +20,7 @@ const MAX_INVITATION_OPERATIONS: u64 = 8192;
 const MAX_GRANTS: u64 = 4;
 
 pub(crate) fn schema(db: &Connection, previous: i64) -> Result<()> {
+    super::node_invites::schema(db)?;
     if previous >= 14 {
         for table in ["invitations", "invitation_operations", "invitation_clock"] {
             let exists: bool = db.query_row(
@@ -268,6 +269,7 @@ impl Store {
     /// Local scheduling metadata only. No private offer material leaves Store.
     /// This rechecks current native authority even when service access survives.
     pub(crate) fn invitation_jobs(&mut self) -> Result<Vec<SignedOffer>> {
+        self.process_node_invites()?;
         if self.config.service.is_none()
             || !self
                 .identity
@@ -400,7 +402,10 @@ impl Store {
             } else {
                 ensure!(
                     record.history_floor.is_none()
-                        && matches!(record.offer.offer.purpose, Purpose::NewNode),
+                        && matches!(
+                            record.offer.offer.purpose,
+                            Purpose::NewNode | Purpose::NamedNode { .. }
+                        ),
                     "invitation node is no longer enrolled"
                 );
             }
@@ -441,15 +446,17 @@ impl Store {
             can_configure,
             continuation,
             replace_node,
+            None,
             now() as u64,
         )
     }
-    fn create_invitation_at(
+    pub(super) fn create_invitation_at(
         &mut self,
         request: &str,
         can_configure: bool,
         continuation: Option<&str>,
         replace_node: Option<&str>,
+        name: Option<(&str, &str)>,
         wall: u64,
     ) -> Result<Zeroizing<Vec<u8>>> {
         let _lock = config::state_lock(&self.home, "invitation.lock")?;
@@ -460,9 +467,16 @@ impl Store {
             "choose replacement or continuation, not both"
         );
         // Preserve the original ordinary-invitation retry fingerprint.
-        let intent: [u8; 32] = Sha256::digest(match replace_node {
-            None => serde_jcs::to_vec(&(can_configure, continuation, &service))?,
-            Some(target) => serde_jcs::to_vec(&(can_configure, continuation, &service, target))?,
+        ensure!(
+            name.is_none() || (continuation.is_none() && replace_node.is_none()),
+            "named invitations must enroll a new node"
+        );
+        let intent: [u8; 32] = Sha256::digest(match (replace_node, name) {
+            (_, Some(name)) => serde_jcs::to_vec(&("named", can_configure, name, &service))?,
+            (None, None) => serde_jcs::to_vec(&(can_configure, continuation, &service))?,
+            (Some(target), None) => {
+                serde_jcs::to_vec(&(can_configure, continuation, &service, target))?
+            }
         })
         .into();
         let previous: Option<(String, Vec<u8>)> = self
@@ -491,7 +505,10 @@ impl Store {
         );
         let state = self.identity.state(&self.db)?;
         let purpose = match continuation {
-            None => Purpose::NewNode,
+            None => name.map_or(Purpose::NewNode, |(name, inviter)| Purpose::NamedNode {
+                name: name.into(),
+                inviter: inviter.into(),
+            }),
             Some(id) => {
                 let member = state
                     .state()
@@ -530,7 +547,7 @@ impl Store {
                 removals::replacement_target(&self.db, &state, &node.id, &node.key)?,
                 can_configure,
             ),
-            (Purpose::NewNode, None) => (None, can_configure),
+            (Purpose::NewNode | Purpose::NamedNode { .. }, None) => (None, can_configure),
             _ => unreachable!("exclusive replacement and continuation checked"),
         };
         let tx = self.db.unchecked_transaction()?;
@@ -663,6 +680,12 @@ impl Store {
         node: &ClaimedNode,
         timestamp: u64,
     ) -> Result<()> {
+        if let Purpose::NamedNode { name, .. } = &offer.offer.purpose {
+            ensure!(
+                &node.name == name,
+                "invitation requires its assigned node name"
+            );
+        }
         let row = record(&self.db, &offer.offer.id)?;
         let state = self.invitation_authority(&row, timestamp)?;
         ensure!(
@@ -675,7 +698,7 @@ impl Store {
         }
         ensure!(row.phase == "issued", "invitation is not claimable");
         let floor = match &offer.offer.purpose {
-            Purpose::NewNode => {
+            Purpose::NewNode | Purpose::NamedNode { .. } => {
                 ensure!(
                     !state.state().nodes.contains_key(&node.id)
                         && !state.state().retired_nodes.contains(&node.id)
