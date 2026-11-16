@@ -137,7 +137,11 @@ impl Service {
         Ok(())
     }
     async fn wait(&self, running: bool) -> Result<()> {
-        let until = tokio::time::Instant::now() + Duration::from_secs(10);
+        // A fresh database can still be initializing at ten seconds on slow
+        // storage. Keep waiting for authenticated readiness from the same
+        // managed process; a live PID alone is never sufficient.
+        let timeout = Duration::from_secs(if running { 30 } else { 10 });
+        let until = tokio::time::Instant::now() + timeout;
         loop {
             if let Ok(value) = self.probe().await {
                 if running {
@@ -154,8 +158,9 @@ impl Service {
             }
             ensure!(
                 tokio::time::Instant::now() < until,
-                "{} did not reach the requested state; inspect its service status and logs",
-                self.kind.name()
+                "{} did not reach the requested state within {} seconds; inspect its service status and logs",
+                self.kind.name(),
+                timeout.as_secs()
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
