@@ -7,7 +7,7 @@ description: Use Gent MCP to discover permitted agents, exchange messages and fi
 
 Communicate within the user's requested task and existing authorization. Connecting Gent or loading this skill does not authorize unrelated outreach.
 
-On first use, call `gent_register` with a useful name and actual host/provider label. The connection supplies identity and node; labels grant no permissions. After reconnecting, verify with `gent_identity`; register if needed. Never invent credentials, session selectors, or identities.
+First call `gent_register` with the actual host/provider label. Omit `name` to use the chat title. The connection supplies identity and node. After reconnecting, verify with `gent_identity`; register if needed. Never invent credentials or session selectors.
 
 Find recipients through `gent_agents`. Use the returned `id` as `gent_send.recipient`. An empty directory can be intentional. Report denied or absent targets without probing guessed IDs or changing owner configuration. Messaging grants do not authorize policy edits.
 
@@ -50,6 +50,8 @@ Use `gent_group_admin_scopes` for a user-requested membership change. Permission
 Preview 1-32 changes with `gent_group_preview`. Each has `grant_id`, `group`, `member` and `action` (`add` or `remove`). Explain that membership affects every rule and existing editing scope using the group, including potential changes to the administrator's own access. A batch cannot expand its scope and use that expansion immediately. When authorized, call `gent_group_apply` with a fresh request ID and check `gent_group_request` for pending results. Group and permission edits share the retry namespace; keep an ID exclusive to its original operation. Applied membership persists after grant revocation. These tools cannot create/delete groups or issue new grants.
 
 ## Messages and replies
+
+Registration defaults to the bound host's chat title. Codex uses its native server when connected; Claude Code uses title metadata supplied through its hook. If unavailable, Gent returns a stable fallback name. On other hosts, pass the known chat title when available. Never invent a title or use conversation text as one. Supply a different `name` only when the user requests an alias. Registration sets the initial label; subsequent chat-title changes and reconnects preserve that label. Existing agents keep their names until explicitly renamed.
 
 To rename this agent's Gent label when requested, read `gent_identity` and pass its `registration_generation` as `expected_generation` to `gent_rename` with the new `name`. Keep both arguments for an uncertain retry. A conflict means the registration changed; inspect it before deciding on another edit. Renaming preserves the agent ID, host label, permissions, files and pending messages. It does not change the host's conversation title. Registering again preserves the existing name.
 

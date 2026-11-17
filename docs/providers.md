@@ -9,12 +9,29 @@ For a local host, `gent mcp serve` provides an MCP server over stdio and connect
 The registration flow is:
 
 1. Establish an authenticated local daemon or remote connector connection.
-2. Register the current agent with a display name, provider/host label, and available session metadata and capabilities.
+2. Register the current agent with its provider/host label. Omit `name` to use the host's chat title, or supply a user-selected alias.
 3. Bind the registration to an authenticated connection and a stable Gent agent identity. Return the agent's own location and permitted capabilities.
 4. Use the shared tools to discover allowed peers, send messages and files, retrieve incoming messages, acknowledge delivery, and reply.
 5. Reconnect to the same registration when the host can prove continuity. Update presence without duplicating the agent.
 
 The daemon determines the local node identity. Provider labels and model-supplied agent IDs are descriptive metadata, not authentication. Registering does not grant permission to discover or message other agents; normal cluster policy applies.
+
+## Default agent names
+
+Call `gent_register` with `provider` and omit `name`. Codex uses the bound thread's `name` from its connected native server, including the server behind Gent's VS Code integration. The lookup requests metadata only, checks the returned thread ID, and has a two-second deadline. It never loads or resumes a conversation or submits a model turn.
+
+Claude Code's binding hook uses the current session's saved title: its `custom-title.json` sidecar, or explicit `custom-title` / `ai-title` records in a bounded transcript tail. It does not infer a title from a prompt or summary. Child agents do not inherit their parent's title. Missing or unsupported metadata, unnamed chats, and unavailable native servers use a stable name such as `codex-abc123...`, `claude-code-abc123...`, or `agent-abc123...`. The suffix derives from the binding; it is not the credential or host session ID. Other MCP hosts can supply their known chat title as `name` when they cannot expose it through an adapter.
+
+Host titles are trimmed and shortened at a UTF-8 character boundary to Gent's 128-byte limit. Empty titles and control characters trigger the fallback. Explicit aliases retain the usual validation. Names are labels, not unique identifiers; use the IDs from `gent_agents` to address messages.
+
+The default is chosen when a new agent registers. Existing registrations and explicit renames keep their names across reconnects and later host-title changes. Use `gent_rename` to change an existing Gent label without re-enrollment. Restart the host's Gent MCP connection after upgrading to load the optional-name tool schema and guidance.
+
+The native process proof checks defaults, fallback stability, aliases and Claude hook isolation. With `--codex`, it additionally creates a disposable native thread named `cit` and verifies that another MCP client discovers it under that name, without provider inference:
+
+```sh
+uv run --with websockets python scripts/prove_chat_names.py \
+  --gent target/release/gent --codex /absolute/path/to/codex
+```
 
 ## Rename an agent
 

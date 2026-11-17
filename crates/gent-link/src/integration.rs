@@ -4,6 +4,7 @@ mod claude_binding;
 pub(crate) mod claude_wake;
 pub(crate) mod codex_files;
 mod install;
+pub(crate) mod naming;
 pub(crate) use install::retire;
 pub(crate) mod recovery;
 pub(crate) mod runtime;
@@ -370,17 +371,7 @@ impl Bindings {
             // sessionId can identify a tree of forked threads. Only threadId
             // identifies this conversation; never fall back to the tree root.
             Host::Codex => session_key(identifier(meta.get("threadId"))?, None),
-            Host::ClaudeCode => {
-                let id = identifier(meta.get("claudecode/toolUseId"))?;
-                let path = self
-                    .folder
-                    .join("calls")
-                    .join(format!("{}.json", digest(&json!(id))));
-                let ticket: Ticket = serde_json::from_slice(&read_bounded(&path)
-                    .context("Gent's Claude Code PreToolUse hook is required for every call; configure or re-enable it")?)?;
-                ticket.verify(now()?, tool, arguments)?;
-                ticket.binding
-            }
+            Host::ClaudeCode => self.ticket(meta, tool, arguments)?.binding,
         };
         if !self.active.contains_key(&key) {
             ensure!(
@@ -406,6 +397,54 @@ impl Bindings {
             )?;
         }
         Ok(self.active[&key].credential.clone())
+    }
+
+    fn ticket(&self, meta: &Value, tool: &str, arguments: &Value) -> Result<Ticket> {
+        let id = identifier(meta.get("claudecode/toolUseId"))?;
+        let path = self
+            .folder
+            .join("calls")
+            .join(format!("{}.json", digest(&json!(id))));
+        let ticket: Ticket = serde_json::from_slice(&read_bounded(&path)
+            .context("Gent's Claude Code PreToolUse hook is required for every call; configure or re-enable it")?)?;
+        ticket.verify(now()?, tool, arguments)?;
+        Ok(ticket)
+    }
+
+    /// Called only after credential() authenticated this exact host call.
+    pub(crate) fn registration_name(
+        &self,
+        meta: &Value,
+        credential: &str,
+        arguments: &Value,
+    ) -> Result<naming::Source> {
+        let (key, source) = match self.host {
+            Host::Codex => {
+                let thread = identifier(meta.get("threadId"))?;
+                let source = match &self.wake_endpoint {
+                    Some(endpoint) if wake::valid_thread(thread) => naming::Source::Codex {
+                        endpoint: endpoint.clone(),
+                        thread: thread.into(),
+                    },
+                    _ => naming::Source::Title(None),
+                };
+                (session_key(thread, None), source)
+            }
+            Host::ClaudeCode => {
+                let ticket = self.ticket(meta, "gent_register", arguments)?;
+                (
+                    ticket.binding,
+                    naming::Source::Title(ticket.registration_name),
+                )
+            }
+        };
+        ensure!(
+            self.active
+                .get(&key)
+                .is_some_and(|b| b.credential == credential),
+            "host naming binding changed"
+        );
+        Ok(source)
     }
 
     pub(crate) fn enable_wake(&mut self, home: &Path, endpoint: &Path) -> Result<wake::Registry> {
@@ -449,6 +488,8 @@ struct Ticket {
     created_at: u64,
     binding: String,
     call: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registration_name: Option<String>,
 }
 impl Ticket {
     fn verify(&self, time: u64, tool: &str, arguments: &Value) -> Result<()> {
@@ -464,6 +505,13 @@ impl Ticket {
             self.call == digest(&json!([tool, arguments])),
             "host call does not match its hook handoff"
         );
+        if let Some(name) = &self.registration_name {
+            config::label(name)?;
+            ensure!(
+                tool == "gent_register" && arguments.get("name").is_none(),
+                "unexpected registration title"
+            );
+        }
         Ok(())
     }
 }
@@ -493,6 +541,9 @@ fn record_hook(home: &Path, input: &Value, time: u64) -> Result<()> {
         created_at: time,
         binding: session_key(session, agent),
         call: digest(&json!([tool, arguments])),
+        registration_name: (tool == "gent_register" && arguments.get("name").is_none())
+            .then(|| naming::claude_title(input))
+            .flatten(),
     };
     let folder = scope(home, Host::ClaudeCode)?.join("calls");
     config::private_dir(&folder)?;
@@ -532,8 +583,8 @@ fn record_hook(home: &Path, input: &Value, time: u64) -> Result<()> {
         count < MAX_TICKETS,
         "too many pending host call handoffs; retry after older calls expire"
     );
-    // Only hashes and a timestamp persist. Hook input may contain user content;
-    // never write that content, session IDs, credentials, or transcripts here.
+    // Only hashes, a timestamp and an optional registration title persist.
+    // Never write tool inputs, session IDs, credentials or transcripts here.
     config::write_private(&path, &serde_json::to_vec(&ticket)?)?;
     Ok(())
 }

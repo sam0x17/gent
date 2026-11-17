@@ -29,6 +29,7 @@ target_dir="$(cargo metadata --no-deps --format-version 1 --locked |
 binary="$target_dir/debug/gent"
 python3 scripts/smoke_mcp.py "$binary"
 python3 scripts/smoke_host_bindings.py "$binary"
+python3 scripts/prove_chat_names.py --gent "$binary"
 python3 scripts/smoke_config_edit.py "$binary"
 python3 scripts/smoke_hooks.py --binary "$binary" \
     --bash "$(command -v bash)" --zsh "$(command -v zsh)" --fish "$(command -v fish)"

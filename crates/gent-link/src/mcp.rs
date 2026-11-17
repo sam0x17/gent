@@ -182,9 +182,9 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_register",
-            "Announce this conversation. The connection determines identity and node. New clusters allow discovery and messaging unless restricted by policy. Reconnecting preserves its current name; use gent_rename to change it.",
+            "Announce this conversation. Omit name to use its host chat title, or a stable fallback when unavailable. Supply name only for a user-selected Gent alias or a known chat title on a host without title metadata. Identity and node come from the connection. Reconnecting preserves its current name; use gent_rename to change it. New clusters allow communication unless restricted.",
             json!({"name":{"type":"string","maxLength":128},"provider":{"type":"string","maxLength":128}}),
-            vec!["name", "provider"],
+            vec!["provider"],
         ),
         (
             "gent_identity",
@@ -421,6 +421,12 @@ impl ServerHandler for GentMcp {
                 CallToolResult::error(vec![ContentBlock::text("unexpected tool argument")]).into(),
             );
         }
+        let needs_name = operation == "register"
+            && call
+                .arguments
+                .as_ref()
+                .is_none_or(|a| !a.contains_key("name"));
+        let mut registration_name = crate::integration::naming::Source::Title(None);
         let mut host_files = None;
         let credential = match &self.credentials {
             Credentials::Fixed(credential) => credential.clone(),
@@ -461,6 +467,10 @@ impl ServerHandler for GentMcp {
                 let resolved = bindings
                     .credential(client, &meta, &call.name, &arguments)
                     .and_then(|credential| {
+                        if needs_name {
+                            registration_name =
+                                bindings.registration_name(&meta, &credential, &arguments)?;
+                        }
                         if matches!(operation, "host_attachments" | "file_import_host") {
                             host_files = Some(bindings.host_files(&meta, &credential)?);
                         }
@@ -598,6 +608,16 @@ impl ServerHandler for GentMcp {
             .into());
         }
         let mut arguments = call.arguments.unwrap_or_default();
+        if needs_name {
+            let provider = arguments
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            arguments.insert(
+                "name".into(),
+                json!(registration_name.resolve(&credential, provider).await),
+            );
+        }
         arguments.insert("op".into(), Value::String(operation.into()));
         let action = match serde_json::from_value::<AgentOp>(Value::Object(arguments)) {
             Ok(action) => action,
