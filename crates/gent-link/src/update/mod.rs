@@ -1,3 +1,4 @@
+mod coordination;
 mod install;
 mod notification;
 mod process;
@@ -80,6 +81,7 @@ pub(crate) async fn execute(home: &Path, command: Command) -> Result<Value> {
         Command::Status => Ok(json!({"enabled":config::load(home)?.updates()?.enabled,
             "check_interval_seconds":300,"running":build_info::current(),
             "installed":install::inspect(&installation.binary).await?,
+            "update_in_progress":installation.try_lock()?.is_none(),
             "update":installation.status()?,"activation_pending":installation.pending()?.is_some(),
             "build_log":installation.directory.join("build.log")})),
         Command::Enable | Command::Disable => unreachable!(),

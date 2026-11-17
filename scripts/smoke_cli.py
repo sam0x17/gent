@@ -2,13 +2,17 @@
 """Check human output, JSON compatibility and terminal-only progress locally."""
 
 import errno
+import fcntl
 import json
 import os
 import pty
+import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -117,8 +121,41 @@ def main():
         no_color = run(["update", "check"], terminal=True, extra={"NO_COLOR": "1"})
         assert "\x1b[36m" not in no_color and "\x1b[1;36m" not in no_color
         assert "\x1b[2K" in no_color
+        with (cargo / ".gent-updates/update.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert json.loads(run(["update", "status", "--json"]))["update_in_progress"]
+            master, slave = pty.openpty()
+            waiter = subprocess.Popen(
+                base + ["update"],
+                stdin=subprocess.DEVNULL,
+                stdout=slave,
+                stderr=slave,
+                env=env,
+            )
+            os.close(slave)
+            observed = bytearray()
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(master, selectors.EVENT_READ)
+                    deadline = time.monotonic() + 10
+                    while b"Waiting for running update" not in observed:
+                        assert waiter.poll() is None, observed
+                        assert time.monotonic() < deadline, observed
+                        if selector.select(timeout=0.1):
+                            observed.extend(os.read(master, 4096))
+                waiter.send_signal(signal.SIGINT)
+                assert waiter.wait(timeout=10) != 0
+                assert json.loads(run(["update", "status", "--json"]))["update_in_progress"]
+            finally:
+                if waiter.poll() is None:
+                    waiter.kill()
+                    waiter.wait()
+                os.close(master)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        assert (cargo / ".gent-updates/update.lock").exists()
+        assert not json.loads(run(["update", "status", "--json"]))["update_in_progress"]
         print(
-            "PASS readable output, JSON/verbose equivalence, dot-block animation, pipes, TERM=dumb, NO_COLOR and HTTPS/SSH discovery"
+            "PASS readable output, JSON/verbose equivalence, progress, pipes, TERM=dumb, NO_COLOR, HTTPS/SSH discovery and cancellable update waiting"
         )
 
 

@@ -14,7 +14,9 @@ pub(super) async fn apply(
     installation: &Installation,
     automatic: bool,
 ) -> Result<Value> {
-    let _lock = installation.lock()?;
+    let Some(_lock) = super::coordination::acquire(installation, automatic).await? else {
+        return Ok(json!({"state":"already_running"}));
+    };
     let mut status = installation.status()?;
     let result = run(home, installation, automatic, &mut status).await;
     if let Err(error) = &result {

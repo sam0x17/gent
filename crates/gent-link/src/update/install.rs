@@ -199,17 +199,22 @@ impl Installation {
         Ok(Some(Self { binary, directory }))
     }
 
-    pub fn lock(&self) -> Result<fs::File> {
+    pub fn try_lock(&self) -> Result<Option<fs::File>> {
         match config::state_lock(&self.directory, "update.lock") {
             Err(error)
                 if error
                     .downcast_ref::<std::io::Error>()
                     .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock) =>
             {
-                anyhow::bail!("another Gent update is running; retry when it finishes")
+                Ok(None)
             }
-            result => result,
+            result => result.map(Some),
         }
+    }
+
+    pub fn lock(&self) -> Result<fs::File> {
+        self.try_lock()?
+            .context("another Gent update is running; retry when it finishes")
     }
 
     pub fn read<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {

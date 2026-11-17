@@ -20,6 +20,8 @@ gent update disable          # stop automatic checks on this node
 gent update enable           # resume automatic checks
 ```
 
+If an update is already running, `gent update` waits for it with a progress indicator, then rechecks the installed release. Ctrl-C during the wait leaves the existing updater running. Scheduled checks skip an update that is already in progress. `gent update status` reports whether an updater currently holds the lock, alongside the saved phase and build-log path; JSON includes `update_in_progress`. A leftover lock file alone does not mean an update is running. The lock is released when its owning process exits; do not delete it to bypass a running updater.
+
 Automatic updates default to enabled. These commands edit the node-local setting in `~/.gent/config.toml`:
 
 ```toml

@@ -160,6 +160,9 @@ fn updates(out: &mut String, value: &Value) {
             if available { "yes" } else { "no" }.into(),
         ));
     }
+    if let Some(active) = value["update_in_progress"].as_bool() {
+        rows.push(("Updater", if active { "running" } else { "idle" }.into()));
+    }
     if let Some(commit) = value["commit"].as_str() {
         rows.push(("Revision", visible(commit)));
     }

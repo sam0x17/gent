@@ -269,6 +269,83 @@ fn update_lock_and_binary_validation_reject_competing_writers_and_unsafe_paths()
 }
 
 #[tokio::test]
+async fn manual_update_waits_for_publication_while_scheduled_checks_skip_it() {
+    let f = Fixture::new();
+    let lock = f.installation.lock().unwrap();
+    f.installation
+        .write(
+            "status.json",
+            &install::Status {
+                phase: "building".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        workflow::apply(f.root.path(), &f.installation, true)
+            .await
+            .unwrap()["state"],
+        "already_running"
+    );
+    assert_eq!(f.installation.status().unwrap().phase, "building");
+    let mut manual = Box::pin(workflow::apply(f.root.path(), &f.installation, false));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut manual)
+            .await
+            .is_err()
+    );
+    assert!(f.installation.pending().unwrap().is_none());
+    f.publish();
+    drop(lock);
+    let result = tokio::time::timeout(Duration::from_secs(5), manual)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["state"], "awaiting_activation");
+    assert_eq!(result["commit"], "b".repeat(40));
+    assert_eq!(fs::read(&f.installation.binary).unwrap(), b"new executable");
+    assert_eq!(
+        fs::read(f.installation.directory.join("previous")).unwrap(),
+        b"old executable"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_waiter_preserves_the_updater_and_invalid_locks_fail_immediately() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let lock = f.installation.lock().unwrap();
+    let mut waiter = Box::pin(workflow::apply(f.root.path(), &f.installation, false));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiter)
+            .await
+            .is_err()
+    );
+    drop(waiter);
+    assert!(f.installation.try_lock().unwrap().is_none());
+    assert!(!f.installation.directory.join("status.json").exists());
+    assert!(f.installation.pending().unwrap().is_none());
+    drop(lock);
+
+    let invalid = Fixture::new();
+    symlink(
+        &invalid.candidate,
+        invalid.installation.directory.join("update.lock"),
+    )
+    .unwrap();
+    for automatic in [false, true] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            workflow::apply(invalid.root.path(), &invalid.installation, automatic),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("private regular file"));
+    }
+}
+
+#[tokio::test]
 async fn subprocess_capture_bounds_output_and_cancels_a_stalled_process() {
     use tokio::process::Command;
     assert!(
