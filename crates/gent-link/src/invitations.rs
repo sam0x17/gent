@@ -43,7 +43,7 @@ pub struct InviteArgs {
     /// Save the private invitation here. Transfer it through a trusted private channel.
     #[arg(long)]
     out: PathBuf,
-    /// Give the new node messaging access without configuration-editing authority.
+    /// Disable the admin rights granted to new nodes by default (messaging only).
     #[arg(long)]
     no_configure: bool,
     /// Explicitly continue an interrupted join for this already-enrolled node ID.

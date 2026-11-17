@@ -7,7 +7,7 @@ use zeroize::Zeroize;
 pub struct AddArgs {
     /// Name assigned to the new node by this invitation.
     name: String,
-    /// Enroll a messaging-only node without cluster configuration rights.
+    /// Disable the admin rights granted to new nodes by default (messaging only).
     #[arg(long)]
     no_configure: bool,
     /// Write the code to a private file instead of displaying it in a terminal.

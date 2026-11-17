@@ -67,7 +67,7 @@ The current build guides missing login and cluster enrollment through `gent daem
 | `gent cluster connect` | Resume service setup or replace an invalid relay credential on an owner or joined node, preserving local identity. Stop the daemon first. |
 | `gent cluster renew` | Renew the signed configuration lease locally on the owner, or request renewal from an authorized joined node. |
 | `gent cluster new [name]` | Create and select a cluster, establishing its initial owner keys and policy locally. |
-| `gent node add NAME` | Issue a code labeled with the cluster and node names, or continue that exact enrolled node. Add `--no-configure` for messaging-only membership. |
+| `gent node add NAME` | Issue a code labeled with the cluster and node names, granting admin rights by default, or continue that exact enrolled node. Add `--no-configure` for messaging-only membership. |
 | `gent cluster join [CODE]` | Join as the assigned node and start the daemon. With no code, resume a saved join or prompt for a code. |
 | `gent cluster invite --out FILE` | Create a private, single-node invitation; expires after 15 minutes. |
 | `gent cluster invitations` | List this owner's invitation status without secrets. |
@@ -77,6 +77,8 @@ The current build guides missing login and cluster enrollment through `gent daem
 Names are display labels. Renaming a node must preserve its stable identity, keys, and policy relationships. Reject ambiguous name lookups with a list of authorized matches and their IDs. Human-readable cluster names and node names remain encrypted in routing storage; a hosted web bridge may see only the labels included in its agent's authorized view.
 
 Each node belongs to one cluster in `~/.gent`, shared by CLI commands and all chats. A second cluster creation or join is refused. `gent node reset` stops managed services, archives old state, removes its managed host entries, and preserves the GitHub session for fresh enrollment. See [re-enrollment](service-setup.md#re-enroll-an-existing-machine).
+
+New nodes are admins by default. The `ADMIN` column in `gent nodes` shows `owner` for the cluster's signing owner, `yes` for other admins, and `no` for restricted nodes. Admins can submit cluster configuration edits; the owner signs those edits and controls enrollment and admin grants. Use `--no-configure` when inviting a restricted node, or `gent node admin revoke NODE_UUID` on the owner to restrict an existing node. Retrying enrollment preserves any explicit restriction. The JSON response keeps the signed `can_configure` delegation flag and adds `is_owner` (`null` if the owner cannot be determined); the owner has authority independently of that flag.
 
 `gent nodes` lists signed membership and reports `local`, `connected`, `degraded`, `disconnected`, or `unknown`, with the last verified round trip and its age. Remote connectivity requires a matching encrypted probe reply within 30 seconds; successful evidence remains recent for 90 seconds unless a newer probe times out. Its `data_link` field records pairing to the current signing key, independently of connectivity. A disconnected node can still have running local agents. Authorized owner CLI queries can list the cluster's nodes; agent-facing queries retain their enumeration permissions. See [node connectivity](node-presence.md) for status reasons, restart behavior and the requirement to upgrade both nodes from pre-presence builds.
 

@@ -70,6 +70,48 @@ fn reply(pair: &Pair, index: usize, nonce: Uuid) -> Result<()> {
 }
 
 #[tokio::test]
+async fn node_inventory_distinguishes_owner_from_default_and_revoked_admin_rights() {
+    let mut pair = Pair::new().await;
+    let signing_owner = pair.stores[0].identity.node.id().to_owned();
+    let joined = pair.stores[1].identity.node.id().to_owned();
+    for allowed in [true, false] {
+        if !allowed {
+            owner(
+                &mut pair,
+                0,
+                OwnerOp::DelegateConfiguration {
+                    node_id: joined.clone(),
+                    allow: false,
+                },
+            )
+            .unwrap();
+            pair.pump();
+        }
+        for index in 0..2 {
+            pair.reopen(index);
+            let nodes = owner(&mut pair, index, OwnerOp::Nodes).unwrap();
+            let nodes = nodes.as_array().unwrap();
+            let writer = nodes
+                .iter()
+                .find(|node| node["id"] == signing_owner)
+                .unwrap();
+            // Older owner memberships omit the delegation flag entirely.
+            assert_eq!(writer["can_configure"], false);
+            assert_eq!(writer["is_owner"], true);
+            let peer = nodes.iter().find(|node| node["id"] == joined).unwrap();
+            assert_eq!(peer["can_configure"], allowed);
+            assert_eq!(peer["is_owner"], false);
+        }
+    }
+    // Missing owner-routing evidence must not make the inventory unavailable.
+    pair.stores[1]
+        .db
+        .execute("DELETE FROM configuration_streams", [])
+        .unwrap();
+    assert_eq!(remote(&mut pair, 1)["is_owner"], Value::Null);
+}
+
+#[tokio::test]
 async fn pairing_and_one_way_traffic_do_not_establish_presence_or_touch_agents() {
     let mut pair = Pair::new().await;
     let agent_times: Vec<i64> = (0..2)

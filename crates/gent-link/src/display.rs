@@ -41,6 +41,8 @@ struct NodeStatus {
     status: String,
     data_link: bool,
     can_configure: bool,
+    #[serde(default)]
+    is_owner: Option<bool>,
 }
 
 // Labels can contain Unicode formatting characters even when configuration
@@ -183,7 +185,14 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
                             "not paired"
                         }
                         .into(),
-                        if node.can_configure { "yes" } else { "no" }.into(),
+                        if node.is_owner == Some(true) {
+                            "owner"
+                        } else if node.can_configure {
+                            "yes"
+                        } else {
+                            "no"
+                        }
+                        .into(),
                         node.id.clone(),
                     ]
                 })

@@ -223,6 +223,11 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn nodes(&self) -> Result<Value> {
+        let owner = if self.identity.is_current_owner(&self.state) {
+            Some(self.identity.node.id().to_owned())
+        } else {
+            self.configuration_writer().ok()
+        };
         let links = self
             .db
             .prepare("SELECT peer,peer_key FROM network_links")?
@@ -270,6 +275,7 @@ impl StoreSession<'_> {
             };
             nodes.push(
                 json!({"id":id,"name":member.name,"can_configure":member.can_configure,
+                "is_owner":owner.as_ref().map(|owner| owner == id),
                 "data_link":paired,"status":status,"revision":self.state.checkpoint().revision,
                 "last_seen":verified,"presence":{"reason":reason,"observed_at":self.timestamp,
                 "probe_started_at":issued,"last_timeout_at":failed,"response_window_seconds":RESPONSE_WINDOW,
