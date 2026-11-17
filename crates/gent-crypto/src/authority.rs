@@ -705,8 +705,6 @@ impl OwnerKey {
         policy: Policy,
         now: u64,
     ) -> Result<VerifiedState> {
-        let mut first_member = first.member(node_name)?;
-        first_member.can_configure = true;
         let state = ClusterState {
             version: 1,
             peer: None,
@@ -720,7 +718,7 @@ impl OwnerKey {
             expires_at: now
                 .checked_add(MAX_STATE_LIFETIME)
                 .context("timestamp overflow")?,
-            nodes: BTreeMap::from([(first.id.clone(), first_member)]),
+            nodes: BTreeMap::from([(first.id.clone(), first.member(node_name)?)]),
             retired_nodes: BTreeSet::new(),
             retired_keys: BTreeSet::new(),
             retired_relay_grants: BTreeSet::new(),
