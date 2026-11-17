@@ -94,6 +94,11 @@ pub(crate) async fn execute(home: &Path, args: Args) -> Result<()> {
     let socket = directory.path().join("host.sock");
     let binary = std::fs::canonicalize(std::env::current_exe()?)?;
     let (executable, arguments) = command(&args.invocation, home, &binary, &socket)?;
+    // Register before spawning so an editor closing during startup cannot
+    // terminate this wrapper before it can clean up its native child.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut child = Command::new(executable)
         .args(arguments)
         .env("CODEX_HOME", &args.config_dir)
@@ -103,33 +108,54 @@ pub(crate) async fn execute(home: &Path, args: Args) -> Result<()> {
         .kill_on_drop(true)
         .spawn()
         .context("cannot start wrapped Codex")?;
-    let result = async {
+    let session = async {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let host = loop {
-            ensure!(child.try_wait()?.is_none(), "wrapped Codex exited before its socket was ready");
-            let connection = tokio::time::timeout_at(deadline, crate::wake::codex::connect_socket(&socket, LIMIT)).await
-                .context("wrapped Codex startup timed out")?;
+            ensure!(
+                child.try_wait()?.is_none(),
+                "wrapped Codex exited before its socket was ready"
+            );
+            let connection = tokio::time::timeout_at(
+                deadline,
+                crate::wake::codex::connect_socket(&socket, LIMIT),
+            )
+            .await
+            .context("wrapped Codex startup timed out")?;
             match connection {
                 Ok(host) => break host,
-                Err(error) if error.chain().any(|e| e.downcast_ref::<std::io::Error>().is_some_and(|e|
-                    matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused))) => {
-                    tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(50))).await
-                        .context("wrapped Codex startup timed out")?;
+                Err(error)
+                    if error.chain().any(|e| {
+                        e.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                            matches!(
+                                e.kind(),
+                                std::io::ErrorKind::NotFound
+                                    | std::io::ErrorKind::ConnectionRefused
+                            )
+                        })
+                    }) =>
+                {
+                    tokio::time::timeout_at(
+                        deadline,
+                        tokio::time::sleep(Duration::from_millis(50)),
+                    )
+                    .await
+                    .context("wrapped Codex startup timed out")?;
                 }
                 Err(error) => return Err(error),
             }
         };
         install::codex_wrapper_target(home, &args.config_dir, &args.installation_id)?;
-        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
         tokio::select! {
             result = transport(BufReader::new(tokio::io::stdin()), tokio::io::stdout(), host) => result,
             result = child.wait() => { result?; Ok(()) },
-            _ = terminate.recv() => Ok(()),
-            _ = hangup.recv() => Ok(()),
-            result = tokio::signal::ctrl_c() => { result?; Ok(()) },
         }
-    }.await;
+    };
+    let result = tokio::select! {
+        result = session => result,
+        _ = terminate.recv() => Ok(()),
+        _ = hangup.recv() => Ok(()),
+        _ = interrupt.recv() => Ok(()),
+    };
     // This host belongs to this IDE window. Closing it never restarts or kills
     // the user's separate Codex background daemon.
     if child.try_wait()?.is_none() {
