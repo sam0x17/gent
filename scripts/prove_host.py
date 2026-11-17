@@ -179,7 +179,7 @@ def main():
                 assert entry['command'] == str(binary)
                 launch = entry['args']
         if args.automatic_binding and args.host == 'claude-code':
-            settings = cli('integration', 'config', args.host)['settings']
+            settings = cli('integration', 'config', args.host, '--no-wake')['settings']
         daemon = start()
         peer = generic.Client(base + ['mcp', 'serve', '--binding', str(state / 'bindings/peer.key')])
         peer_id = peer.call('gent_register', {'name': 'fixture-sender', 'provider': 'generic-test-client'})[0]['agent']['id']
@@ -267,7 +267,7 @@ def main():
             launch = base[1:] + ['mcp', 'serve', '--host', args.host]
             cli('cluster', 'new', 'recovered-host-proof', '--local')
             if args.host == 'claude-code':
-                settings = cli('integration', 'config', args.host)['settings']
+                settings = cli('integration', 'config', args.host, '--no-wake')['settings']
             daemon = start()
             recovered = cli('agent', 'recover', str(archive), '--identity', str(recovery_key),
                             '--from-agent', host_id, '--name', 'recovered-host', '--host', args.host,

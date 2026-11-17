@@ -26,12 +26,14 @@ async fn runtime_checks_refuse_absent_polling_foreign_and_conflicting_installs_w
         false
     );
     assert!(!dir.exists());
-    let options = |wake, socket| install::Args {
+    let options = |wake: bool, socket: Option<PathBuf>| install::Args {
         host: Host::Codex,
         config_dir: Some(dir.clone()),
         wake,
+        no_wake: !wake && socket.is_none(),
         wake_socket: socket,
         vscode: false,
+        no_vscode: false,
         vscode_settings: None,
     };
     install::change(&home, options(false, None), true).unwrap();
@@ -77,8 +79,10 @@ async fn existing_codex_is_only_probed_and_invalid_responses_never_launch_a_repl
                 host: Host::Codex,
                 config_dir: Some(dir.clone()),
                 wake: true,
+                no_wake: false,
                 wake_socket: None,
                 vscode: false,
+                no_vscode: false,
                 vscode_settings: None,
             },
             true,

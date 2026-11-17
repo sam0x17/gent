@@ -1,5 +1,16 @@
 # Inspecting permissions
 
+To start an exchange, register each chat with Gent and choose distinct names. Ask the sending chat: “Use Gent to send laptop-codex on sam-laptop this message: … and ask it to reply through Gent.” It discovers the destination with `gent_agents` and uses its returned ID. The recipient replies with `gent_reply`; acknowledgments alone are not replies.
+
+Fresh clusters have no communication grants. The owner can list registered IDs with `gent agents` and authorize a particular pair in both directions:
+
+```sh
+gent permission allow AGENT_A_UUID AGENT_B_UUID --permission enumerate send receive
+gent permission allow AGENT_B_UUID AGENT_A_UUID --permission enumerate send receive
+```
+
+These grants allow discovery and messaging between that pair. They do not grant administration or authorize arbitrary requested work. Automatic replies additionally require the recipient's [host wake adapter](wake.md) to be active. Wake installation does not change cluster permissions.
+
 The local owner can inspect the effective policy between two registered agents:
 
 ```sh

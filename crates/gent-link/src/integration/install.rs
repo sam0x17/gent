@@ -19,15 +19,21 @@ pub struct Args {
     /// Host config directory (CODEX_HOME or CLAUDE_CONFIG_DIR).
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
-    /// Enable native queued delivery (Codex uses its default app-server socket).
-    #[arg(long, conflicts_with = "wake_socket")]
+    /// Enable native queued delivery (the default; retained for compatibility).
+    #[arg(long, conflicts_with_all = ["wake_socket", "no_wake"])]
     pub wake: bool,
-    /// Opt into queued Codex wake through an existing local app-server socket.
-    #[arg(long)]
+    /// Disable automatic host delivery and use manual inbox checks.
+    #[arg(long, conflicts_with_all = ["wake", "wake_socket", "vscode"])]
+    pub no_wake: bool,
+    /// Use an existing custom Codex app-server socket for queued delivery.
+    #[arg(long, conflicts_with = "no_wake")]
     pub wake_socket: Option<PathBuf>,
     /// Experimental Codex VS Code connection to the selected shared server.
     #[arg(long)]
     pub vscode: bool,
+    /// Remove the managed Codex VS Code route, retaining CLI wake delivery.
+    #[arg(long, conflicts_with = "vscode")]
+    pub no_vscode: bool,
     /// VS Code user settings JSONC (defaults to the stable Code installation).
     #[arg(long, requires = "vscode")]
     pub vscode_settings: Option<PathBuf>,
@@ -574,19 +580,40 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     ensure!(
         install
             || (!args.wake
+                && !args.no_wake
                 && args.wake_socket.is_none()
                 && !args.vscode
+                && !args.no_vscode
                 && args.vscode_settings.is_none()),
         "wake and VS Code options apply only to installation"
     );
     ensure!(
-        !args.vscode || (args.host == Host::Codex && (args.wake || args.wake_socket.is_some())),
-        "--vscode requires Codex with --wake or --wake-socket"
+        !(args.vscode || args.no_vscode) || args.host == Host::Codex,
+        "VS Code routing options require Codex"
     );
     let home = normalize(home)?;
     let layout = Layout::resolve(args.host, args.config_dir)?;
-    let wake_socket = if args.wake && args.host == Host::Codex {
-        Some(layout.wake_socket()?)
+    let saved = layout.read()?.1;
+    saved.owner(&home)?;
+    // A retried installation must preserve the requested route even when its
+    // journal committed before all host files were published.
+    let previous = saved
+        .pending
+        .map(|pending| pending.after)
+        .unwrap_or(saved.installed);
+    let wake_enabled = install && !args.no_wake;
+    let wake_socket = if wake_enabled && args.host == Host::Codex {
+        Some(
+            args.wake_socket
+                .or_else(|| {
+                    if args.wake {
+                        None
+                    } else {
+                        previous.as_ref().and_then(|s| s.wake_socket.clone())
+                    }
+                })
+                .unwrap_or(layout.wake_socket()?),
+        )
     } else {
         args.wake_socket
     };
@@ -599,24 +626,30 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
             claude_wake: None,
             codex_ide: None,
         };
-        if args.vscode {
-            let settings = vscode::settings_path(args.vscode_settings)?;
-            let previous = layout
-                .read()?
-                .1
-                .installed
-                .filter(|s| {
-                    s.home == desired.home
-                        && s.binary == desired.binary
-                        && s.wake_socket == desired.wake_socket
-                })
-                .and_then(|s| s.codex_ide)
-                .filter(|ide| ide.settings == settings);
-            desired.codex_ide =
-                Some(previous.unwrap_or_else(|| vscode::Installation::new(settings)));
+        if wake_enabled && !args.no_vscode {
+            let existing = previous
+                .as_ref()
+                .filter(|s| s.home == desired.home)
+                .and_then(|s| s.codex_ide.as_ref());
+            let settings = if args.vscode {
+                Some(vscode::settings_path(args.vscode_settings)?)
+            } else {
+                existing.map(|ide| ide.settings.clone())
+            };
+            if let Some(settings) = settings {
+                let reusable = existing.filter(|ide| ide.settings == settings).filter(|_| {
+                    previous.as_ref().is_some_and(|s| {
+                        s.binary == desired.binary && s.wake_socket == desired.wake_socket
+                    })
+                });
+                desired.codex_ide = Some(
+                    reusable
+                        .cloned()
+                        .unwrap_or_else(|| vscode::Installation::new(settings)),
+                );
+            }
         }
-        if args.wake && args.host == Host::ClaudeCode {
-            let previous = layout.read()?.1.installed;
+        if wake_enabled && args.host == Host::ClaudeCode {
             let existing = previous
                 .filter(|s| s.home == desired.home && s.binary == desired.binary)
                 .and_then(|s| s.claude_wake)
@@ -637,8 +670,8 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     let mut result = inspect(&layout, &home)?;
     result["action"] = if install { "installed" } else { "uninstalled" }.into();
     result["next"] = "Restart the host's Gent MCP connection or open a new host session to load these user settings.".into();
-    if install && args.vscode {
-        result["next"] = "Start the selected server with gent integration start codex, then reload VS Code and open or explicitly resume a chat. The experimental route uses the extension's development-only executable override; existing embedded chats are not moved automatically.".into();
+    if install {
+        result["next"] = delivery_next(args.host, &result).into();
     }
     Ok(result)
 }
@@ -740,8 +773,33 @@ fn inspect(layout: &Layout, home: &Path) -> Result<Value> {
         result["binary_available"] = json!(spec.binary.is_file());
         result["wake_socket"] = json!(spec.wake_socket);
         result["claude_wake"] = json!(spec.claude_wake.as_ref().map(|w| &w.id));
+        let enabled = spec.wake_socket.is_some() || spec.claude_wake.is_some();
+        result["delivery"] = json!({
+            "mode": if enabled { "wake" } else { "manual" },
+            "state": if !exact || disabled { "blocked" } else if enabled { "configured_unverified" } else { "manual" },
+            "conversation_verified": false,
+            "detail": "Installation does not prove that a conversation is loaded or can receive automatic input."
+        });
+        result["next"] = delivery_next(layout.host, &result).into();
     }
     Ok(result)
+}
+
+fn delivery_next(host: Host, status: &Value) -> &'static str {
+    if status["delivery"]["mode"] == "manual" {
+        return "Automatic delivery is disabled. Ask the chat to check gent_inbox, or reinstall without --no-wake.";
+    }
+    match host {
+        Host::Codex if !status["vscode"].is_null() => {
+            "Start the selected server with gent integration start codex (custom sockets must be started separately), then reload VS Code and open or explicitly resume the original chat. The VS Code route is experimental. Call a Gent tool in that chat and verify delivery before leaving it unattended."
+        }
+        Host::Codex => {
+            "Run gent integration start codex, then open or resume the chat using codex --remote unix:// (custom sockets must be started and selected separately). For VS Code, install with --vscode and reload the editor. An embedded chat is not attached automatically. Check gent integration status codex --live, then verify delivery in the intended chat."
+        }
+        Host::ClaudeCode => {
+            "Restart Claude Code or reload its VS Code extension, then call a Gent tool in the intended chat. Keep it running and allow the required Gent tools. Verify delivery before leaving it unattended; installing the plugin alone does not prove it is loaded."
+        }
+    }
 }
 
 /// Every helper call must still belong to this exact completed installation.

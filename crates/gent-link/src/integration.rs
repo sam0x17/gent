@@ -72,7 +72,7 @@ pub enum Command {
         #[command(subcommand)]
         command: recovery::Command,
     },
-    /// Install the MCP connection and required conversation identity hook.
+    /// Install MCP, conversation identity and automatic incoming-message delivery.
     Install(install::Args),
     /// Remove Gent-managed host entries, retaining conversations and Gent state.
     #[command(alias = "remove")]
@@ -80,11 +80,14 @@ pub enum Command {
     /// Print MCP configuration and any required host hooks; does not edit settings.
     Config {
         host: Host,
-        /// Use Codex's default local app-server socket for queued delivery.
-        #[arg(long, conflicts_with = "wake_socket")]
+        /// Enable queued delivery (the default; retained for compatibility).
+        #[arg(long, conflicts_with_all = ["wake_socket", "no_wake"])]
         wake: bool,
-        /// Codex config directory used to resolve --wake (defaults to CODEX_HOME).
-        #[arg(long, requires = "wake")]
+        /// Print a manual-inbox configuration without a wake adapter.
+        #[arg(long, conflicts_with_all = ["wake", "wake_socket"])]
+        no_wake: bool,
+        /// Codex config directory for its default wake socket (defaults to CODEX_HOME).
+        #[arg(long)]
         config_dir: Option<PathBuf>,
         /// Opt into queued Codex wake through an existing local app-server socket.
         #[arg(long)]
@@ -127,14 +130,19 @@ pub fn execute(home: &Path, command: Command) -> Result<Value> {
         Command::Uninstall(args) => install::change(home, args, false),
         Command::Config {
             host,
-            wake,
+            wake: _,
+            no_wake,
             config_dir,
             wake_socket,
         } => {
-            let socket = if wake {
-                Some(install::default_wake_socket(host, config_dir)?)
-            } else {
-                wake_socket
+            ensure!(
+                host == Host::Codex || no_wake,
+                "Claude automatic delivery includes a managed plugin; use gent integration install claude-code, or --no-wake for a manual-inbox fragment"
+            );
+            let socket = match wake_socket {
+                Some(socket) => Some(socket),
+                None if !no_wake => Some(install::default_wake_socket(host, config_dir)?),
+                None => None,
             };
             configuration(home, host, socket.as_deref())
         }

@@ -35,7 +35,10 @@ def main():
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
                 futures = [pool.submit(cli, 'integration', 'install', *suffix) for _ in range(8)]
                 for future in futures:
-                    assert json.loads(future.result().stdout)['state'] == 'configured'
+                    installed = json.loads(future.result().stdout)
+                    assert installed['state'] == 'configured'
+                    assert installed['delivery']['mode'] == 'wake'
+                    assert not installed['delivery']['conversation_verified']
             env = dict(os.environ, **{env_name: str(directory)})
             status = subprocess.run(base + ['integration', 'status', host], env=env,
                                     capture_output=True, text=True, check=True, timeout=20)
@@ -58,14 +61,15 @@ def main():
                 for command in [
                     ['install', *suffix, '--wake', '--wake-socket', str(root / 'other.sock')],
                     ['uninstall', *suffix, '--wake'],
-                    ['config', host, '--config-dir', str(directory)],
+                    ['config', host, '--wake', '--no-wake'],
                     ['install', 'claude-code', '--config-dir', str(unrelated), '--wake', '--wake-socket', str(root / 'other.sock')],
                 ]:
                     assert cli('integration', *command, check=False).returncode != 0
                     assert path.read_bytes() == original and not unrelated.exists()
                 custom = root / 'custom.sock'
                 assert json.loads(cli('integration', 'install', *suffix, '--wake-socket', str(custom)).stdout)['wake_socket'] == str(custom)
-                assert json.loads(cli('integration', 'install', *suffix).stdout)['wake_socket'] is None
+                assert json.loads(cli('integration', 'install', *suffix).stdout)['wake_socket'] == str(custom)
+                assert json.loads(cli('integration', 'install', *suffix, '--no-wake').stdout)['wake_socket'] is None
                 cli('integration', 'install', *suffix, '--wake')
                 assert json.loads(cli('integration', 'status', *suffix).stdout)['wake_socket'] == str(endpoint)
                 print('PASS: Codex default socket selection, explicit directory precedence, pinned arguments, opt-out and invalid-option preservation', flush=True)
@@ -73,6 +77,7 @@ def main():
                 server_path, settings_path = directory / '.claude.json', directory / 'settings.json'
                 ordinary = json.loads(server_path.read_text())['mcpServers']['gent']
                 identity_settings = json.loads(settings_path.read_text())
+                identity_settings['hooks'].pop('UserPromptSubmit', None)
                 installed = json.loads(cli('integration', 'install', *suffix, '--wake').stdout)
                 assert installed['claude_wake'] and installed['wake_socket'] is None
                 module = directory / 'skills/gent-wake/hooks/register.ts'
@@ -94,7 +99,7 @@ def main():
                 assert json.loads(cli('integration', 'status', *suffix).stdout)['claude_wake'] == installed['claude_wake']
                 assert cli('integration', 'config', host, '--wake', check=False).returncode != 0
                 assert all(p.read_bytes() == data for p, data in before.items())
-                disabled = json.loads(cli('integration', 'install', *suffix).stdout)
+                disabled = json.loads(cli('integration', 'install', *suffix, '--no-wake').stdout)
                 assert disabled['claude_wake'] is None and not module.exists()
                 assert json.loads(server_path.read_text())['mcpServers']['gent'] == ordinary
                 after_opt_out = json.loads(settings_path.read_text())
@@ -102,7 +107,7 @@ def main():
                 assert after_opt_out == identity_settings
                 restored = json.loads(cli('integration', 'install', *suffix, '--wake').stdout)
                 assert restored['claude_wake'] not in (None, installed['claude_wake'])
-                print('PASS: Claude opt-in, installed command guard, idempotence, opt-out and ordinary MCP preservation', flush=True)
+                print('PASS: Claude default delivery, installed command guard, idempotence, opt-out and ordinary MCP preservation', flush=True)
             command = [executable, 'mcp', 'get', 'gent']
             if host == 'codex':
                 command += ['--json']
