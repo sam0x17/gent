@@ -102,6 +102,8 @@ impl Pair {
             temp
         });
         let mut cfg = config::initialize(homes[0].path(), "remote").unwrap();
+        // Retain explicit allowlist coverage alongside blacklist mesh tests.
+        cfg.policy = Policy::default();
         cfg.relay = Some(config::RelayConfig {
             endpoint: endpoint.into(),
             credential_file: "relay.key".into(),

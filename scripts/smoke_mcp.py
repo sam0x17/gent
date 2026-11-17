@@ -59,13 +59,15 @@ def main():
             a, b, outsider = connect("a.key"), connect("b.key"), connect("outsider.key")
             aid = a.call("gent_register", {"name": "a", "provider": "arbitrary-a"})[0]["agent"]["id"]
             bid = b.call("gent_register", {"name": "b", "provider": "arbitrary-b"})[0]["agent"]["id"]
-            outsider.call("gent_register", {"name": "hidden", "provider": "hidden-provider"})
-            assert a.call("gent_agents")[0] == []
+            hid = outsider.call("gent_register", {"name": "hidden", "provider": "hidden-provider"})[0]["agent"]["id"]
+            assert {agent["id"] for agent in a.call("gent_agents")[0]} == {aid, bid, hid}
+            # Explicit restrictions hide the third agent and keep B reply-only.
+            cli("permission", "deny", "*", hid, "--permission", "enumerate")
+            cli("permission", "deny", hid, "*", "--permission", "enumerate")
+            cli("permission", "deny", bid, aid, "--permission", "send")
             attempt = {"recipient": bid, "request_id": a.request_id(), "text": "review", "files": [{"name": "pixel.png", "media_type": "image/png", "data_base64": PNG}]}
-            a.call("gent_send", attempt, error=True)
-            cli("permission", "allow", aid, bid, "--permission", "enumerate", "send")
-            cli("permission", "allow", bid, aid, "--permission", "enumerate", "receive")
-            assert [agent["id"] for agent in a.call("gent_agents")[0]] == [bid]
+            a.call("gent_send", dict(attempt, recipient=hid), error=True)
+            assert {agent["id"] for agent in a.call("gent_agents")[0]} == {aid, bid}
             attachment_request = {"target": bid, "request_id": a.request_id()}
             a.call("gent_relay_attach", attachment_request, error=True)
             grant_id = str(uuid.uuid4())

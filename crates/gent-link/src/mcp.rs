@@ -182,7 +182,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_register",
-            "Announce this conversation. The connection determines identity and node; registration does not grant messaging permissions. Reconnecting preserves its current name; use gent_rename to change it.",
+            "Announce this conversation. The connection determines identity and node. New clusters allow discovery and messaging unless restricted by policy. Reconnecting preserves its current name; use gent_rename to change it.",
             json!({"name":{"type":"string","maxLength":128},"provider":{"type":"string","maxLength":128}}),
             vec!["name", "provider"],
         ),

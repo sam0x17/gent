@@ -504,6 +504,7 @@ fn temporary_permission_block_does_not_let_later_turns_overtake_the_head() {
 #[test]
 fn relay_selection_needs_both_owner_grant_and_ordinary_permissions() {
     let mut f = Fixture::new();
+    f.policy(Policy::default());
     f.grant(1, 3600);
     assert!(matches!(f.agent(0, f.attach(1)), Response::Error(_)));
     assert!(matches!(

@@ -27,6 +27,8 @@ Before consequential host work on a received message, use `gent_work_begin`. Act
 
 ## Permission explanations
 
+New clusters permit discovery, sending and receiving between all registered agents by default. Ordinary communication needs no pair-by-pair permission setup. The owner can restrict individual agents, nodes or groups with deny rules; older clusters can also retain selective grants. Follow the effective policy returned by the tools. Permission changes still require separate owner or delegated authority.
+
 Use `gent_permission_check` with a visible peer's ID to explain current enumeration, unsolicited send/receive and reply-policy gates. Identity comes from this connection. The result includes no private rules and does not grant reply rights or prove delivery; replies still require an accepted unexpired exchange with capacity remaining. Hidden and unknown peers return the same unavailable result. The owner can use `gent permission explain ACTOR_UUID PEER_UUID` locally for matching rules.
 
 ## Delegated permission edits

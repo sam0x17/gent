@@ -70,7 +70,10 @@ fn permit() -> Policy {
 impl Fixture {
     fn new() -> Self {
         let home = temp();
-        config::initialize(home.path(), "runtime").unwrap();
+        let mut cfg = config::initialize(home.path(), "runtime").unwrap();
+        // Lifecycle and administration scenarios start from an explicit allowlist.
+        cfg.policy = Policy::default();
+        config::save(home.path(), &cfg).unwrap();
         let owner_rpc = config::read_private(&home.path().join("owner.key")).unwrap();
         let mut store = Store::open(home.path()).unwrap();
         let keys = std::array::from_fn(|_| config::secret());

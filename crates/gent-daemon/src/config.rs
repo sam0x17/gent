@@ -615,7 +615,7 @@ pub fn fresh(name: &str) -> Result<Config> {
         },
         relay: None,
         service: None,
-        policy: Policy::default(),
+        policy: Policy::cluster_default(),
         extra: BTreeMap::new(),
     })
 }

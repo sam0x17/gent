@@ -428,6 +428,13 @@ async fn agents_exchange_images_receipts_and_relay_turns_across_gateway_and_daem
         a["agent"]["id"].as_str().unwrap(),
         b["agent"]["id"].as_str().unwrap(),
     );
+    owner(
+        &f.home,
+        OwnerOp::SetPolicy {
+            policy: Policy::default(),
+        },
+    )
+    .await;
     let denied=server.rpc(&client,&f.token,"tools/call",json!({"name":"gent_send","arguments":{
         "recipient":b_id,"request_id":request_id(),"text":"denied"},"_meta":{"test/conversation":"a"}})).await;
     assert_eq!(denied["result"]["isError"], true);

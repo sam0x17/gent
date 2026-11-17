@@ -680,7 +680,7 @@ impl OwnerKey {
             (&uuid::Uuid::new_v4().to_string(), name),
             first,
             node_name,
-            Policy::default(),
+            Policy::cluster_default(),
             now,
         )
     }

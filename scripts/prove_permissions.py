@@ -3,13 +3,13 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import time
 import uuid
+from pathlib import Path
 
-from smoke_mcp import Client
+from mcp_client import Client
 
 
 def main():
@@ -23,7 +23,7 @@ def main():
         clients = []
 
         def cli(*args):
-            result = subprocess.run(base + ['--json', *args], capture_output=True, text=True, timeout=15)
+            result = subprocess.run(base + ['--json', *args], check=False, capture_output=True, text=True, timeout=15)
             assert result.returncode == 0, result.stderr
             return json.loads(result.stdout)
 
@@ -34,7 +34,7 @@ def main():
             for _ in range(200):
                 assert daemon.poll() is None, daemon.stderr.read()
                 if (home / 'daemon.sock').exists():
-                    probe = subprocess.run(base + ['daemon', 'status'], capture_output=True, timeout=5)
+                    probe = subprocess.run(base + ['daemon', 'status'], check=False, capture_output=True, timeout=5)
                     if probe.returncode == 0:
                         return
                 time.sleep(0.025)
@@ -74,10 +74,18 @@ def main():
             a, b, hidden = [connect(name) for name in ('a', 'b', 'hidden')]
             aid, bid, hid = [client.call('gent_register', {'name': name, 'provider': 'generic-proof'})[0]['agent']['id']
                              for client, name in ((a, 'a'), (b, 'b'), (hidden, 'hidden'))]
-            assert unavailable(a, bid) == unavailable(a, str(uuid.uuid4()))
-            assert cli('permission', 'explain', aid, bid)['policy']['enumerate'] is False
-            cli('permission', 'allow', aid, bid, '--permission', 'enumerate', 'send')
-            cli('permission', 'allow', bid, aid, '--permission', 'enumerate', 'receive')
+            assert {entry['id'] for entry in a.call('gent_agents')[0]} == {aid, bid, hid}
+            assert check(a, bid)['policy']['send_unsolicited']['allowed'] is True
+            assert check(a, bid)['policy']['receive_unsolicited']['allowed'] is True
+            for sender, recipient, receiver in ((a, bid, b), (b, aid, a)):
+                sent = sender.call('gent_send', {'recipient': recipient, 'request_id': sender.request_id(), 'text': 'no grants needed'})[0]
+                assert any(m['id'] == sent['message_id'] for m in receiver.call('gent_inbox')[0])
+                receiver.call('gent_ack', {'message_id': sent['message_id']})
+            cli('permission', 'deny', '*', hid, '--permission', 'enumerate')
+            cli('permission', 'deny', hid, '*', '--permission', 'enumerate')
+            cli('permission', 'deny', bid, aid, '--permission', 'send')
+            # An allow does not undo a matching explicit restriction.
+            cli('permission', 'allow', bid, aid, '--permission', 'send')
             summary = check(a, bid)
             assert summary['actor'] == aid and summary['peer'] == bid
             assert summary['policy']['send_unsolicited']['allowed'] is True
@@ -91,8 +99,9 @@ def main():
             explained = cli('permission', 'explain', aid, bid)
             assert explained['policy'] == summary['policy']
             assert explained['authority']['fresh'] is True
-            assert explained['traces']['actor_to_peer'][1]['decision'] == 'no_matching_rule'
-            assert [r['index'] for r in explained['matching_rules']] == [0, 1, 2, 3]
+            assert explained['traces']['actor_to_peer'][1]['decision'] == 'allow'
+            assert explained['traces']['peer_to_actor'][2]['decision'] == 'explicit_deny'
+            assert [r['index'] for r in explained['matching_rules']] == [0, 1, 2, 5, 6]
             sent = a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'review'})[0]
             b.call('gent_send', {'recipient': aid, 'request_id': b.request_id(), 'text': 'unsolicited'}, error=True)
             b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': b.request_id(), 'text': 'reviewed'})
@@ -114,10 +123,19 @@ def main():
             assert unavailable(a, bid) == unavailable(a, hid)
             assert cli('permission', 'explain', aid, bid)['policy']['enumerate'] is False
             assert (home / 'owner.key').read_text().strip() not in json.dumps(explained)
+            cli('permission', 'inherit', aid, bid, '--permission', 'enumerate', 'receive')
+            cli('permission', 'inherit', bid, aid, '--permission', 'send')
+            restored = check(a, bid)['policy']
+            assert restored['send_unsolicited']['allowed'] and restored['receive_unsolicited']['allowed']
+            assert unavailable(a, hid) == unavailable(a, str(uuid.uuid4()))
+            stop()
+            start()
+            assert check(a, bid)['policy'] == restored
             print(json.dumps({'status': 'passed', 'proof': 'permissions', 'platform': os.uname().sysname,
-                              'checks': ['default denial', 'hidden-peer isolation', 'bound identity',
+                              'checks': ['default bidirectional communication', 'hidden-peer isolation', 'bound identity',
                                          'owner-only traces', 'one-way initiation and replies',
-                                         'restart persistence', 'immediate deny precedence']}))
+                                         'restart persistence', 'immediate deny precedence',
+                                         'inherit restores defaults without removing other restrictions']}))
         finally:
             for client in clients:
                 client.close()

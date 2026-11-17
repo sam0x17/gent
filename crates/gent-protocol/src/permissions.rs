@@ -58,6 +58,24 @@ pub struct Trace {
     pub matching_rules: Vec<usize>,
 }
 impl Policy {
+    /// New clusters permit ordinary communication and use deny rules to restrict it.
+    /// Explicit wildcard rules also work on older nodes. Keep the empty Default
+    /// policy unchanged so loading an existing signed policy never broadens it.
+    pub fn cluster_default() -> Self {
+        Self {
+            rules: [Permission::Enumerate, Permission::Receive, Permission::Send]
+                .into_iter()
+                .map(|permission| Rule {
+                    actor: Selector::All,
+                    peer: Selector::All,
+                    permission,
+                    effect: Effect::Allow,
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn matching_rules<'a>(
         &'a self,
         actor: &'a Agent,

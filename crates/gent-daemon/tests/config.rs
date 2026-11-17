@@ -9,6 +9,10 @@ fn initialization_is_non_destructive_and_secrets_are_private() {
     let root = private_tempdir();
     let home = root.path().join("state");
     let initial = config::initialize(&home, "trial").unwrap();
+    assert_eq!(
+        initial.policy.rules,
+        gent_protocol::Policy::cluster_default().rules
+    );
     let key = config::read_private(&home.join("owner.key")).unwrap();
     assert!(config::initialize(&home, "replacement").is_err());
     assert_eq!(config::load(&home).unwrap().node.id, initial.node.id);
@@ -30,7 +34,18 @@ fn initialization_is_non_destructive_and_secrets_are_private() {
     config::save(&home, &changed).unwrap();
     let changed = config::load(&home).unwrap();
     assert_eq!(changed.node.id, initial.node.id);
+    assert_eq!(changed.policy.rules, initial.policy.rules);
     assert_eq!(changed.extra["local_preference"].as_str(), Some("preserve"));
+}
+
+#[test]
+fn an_existing_restricted_configuration_is_not_broadened_when_loaded() {
+    let root = private_tempdir();
+    let mut configured = config::initialize(root.path(), "restricted").unwrap();
+    configured.policy = gent_protocol::Policy::default();
+    config::save(root.path(), &configured).unwrap();
+    assert!(config::initialize(root.path(), "restricted").is_err());
+    assert!(config::load(root.path()).unwrap().policy.rules.is_empty());
 }
 
 #[test]

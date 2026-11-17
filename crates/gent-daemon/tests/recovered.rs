@@ -58,7 +58,10 @@ impl Fixture {
             .unwrap();
         config::private_dir(temp.path()).unwrap();
         let home = temp.path().join("node");
-        config::initialize(&home, "recovered").unwrap();
+        let mut cfg = config::initialize(&home, "recovered").unwrap();
+        // Importing historical access must not expand this live allowlist.
+        cfg.policy = Policy::default();
+        config::save(&home, &cfg).unwrap();
         let mut store = Store::open(&home).unwrap();
         let owner = config::read_private(&home.join("owner.key")).unwrap();
         let keys = [config::secret(), config::secret()];

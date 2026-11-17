@@ -13,7 +13,7 @@ use gent_protocol::{
     Selector,
 };
 use rusqlite::Connection;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -175,21 +175,14 @@ fn linked(nodes: &[Node]) -> bool {
             && n.owner(OwnerOp::Agents).as_array().unwrap().len() == nodes.len()
     })
 }
-async fn allow(nodes: &[Node]) {
-    let mut policy = Policy::default();
-    for (a, b, p) in [
-        (1, 2, Permission::Enumerate),
-        (2, 1, Permission::Enumerate),
-        (1, 2, Permission::Send),
-        (2, 1, Permission::Receive),
-    ] {
-        policy.rules.push(Rule {
-            actor: Selector::Agent(nodes[a].agent.clone()),
-            peer: Selector::Agent(nodes[b].agent.clone()),
-            permission: p,
-            effect: Effect::Allow,
-        });
-    }
+async fn restrict_initiation(nodes: &[Node]) {
+    let mut policy = Policy::cluster_default();
+    policy.rules.push(Rule {
+        actor: Selector::Agent(nodes[2].agent.clone()),
+        peer: Selector::Agent(nodes[1].agent.clone()),
+        permission: Permission::Send,
+        effect: Effect::Deny,
+    });
     let revision = nodes[0].owner(OwnerOp::SetPolicy { policy })["revision"]
         .as_u64()
         .unwrap();
@@ -210,9 +203,19 @@ async fn peers_automatically_connect_and_exchange_files_without_the_owner_online
     }
     wait(|| linked(&nodes)).await;
     for node in &nodes {
-        assert_eq!(ok(node.agent(AgentOp::Agents)), json!([]));
+        let visible = ok(node.agent(AgentOp::Agents));
+        assert_eq!(visible.as_array().unwrap().len(), nodes.len());
+        for peer in &nodes {
+            assert!(
+                visible
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|a| a["id"] == peer.agent)
+            );
+        }
     }
-    allow(&nodes).await;
+    restrict_initiation(&nodes).await;
     nodes[0].task.take();
     relay.mode.store(1, std::sync::atomic::Ordering::SeqCst);
     let bytes = vec![0x6d; 1024 * 1024];

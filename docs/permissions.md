@@ -1,15 +1,25 @@
-# Inspecting permissions
+# Permissions
 
 To start an exchange, register each chat with Gent and choose distinct names. Ask the sending chat: “Use Gent to send laptop-codex on sam-laptop this message: … and ask it to reply through Gent.” It discovers the destination with `gent_agents` and uses its returned ID. The recipient replies with `gent_reply`; acknowledgments alone are not replies.
 
-Fresh clusters have no communication grants. The owner can list registered IDs with `gent agents` and authorize a particular pair in both directions:
+New clusters allow every registered agent to discover, send to, and receive from every other agent in the cluster, including agents added later and agents on other nodes. Permissions use a blacklist by default: configure them when you want to restrict an agent. Text, images and explicitly sent files use the same messaging policy.
+
+The owner can list registered IDs with `gent agents`. To block an agent's messaging with all other agents, then later restore its inherited permissions:
 
 ```sh
-gent permission allow AGENT_A_UUID AGENT_B_UUID --permission enumerate send receive
-gent permission allow AGENT_B_UUID AGENT_A_UUID --permission enumerate send receive
+gent permission deny AGENT_UUID '*' --permission send receive
+gent permission inherit AGENT_UUID '*' --permission send receive
 ```
 
-These grants allow discovery and messaging between that pair. They do not grant administration or authorize arbitrary requested work. Automatic replies additionally require the recipient's [host wake adapter](wake.md) to be active. Wake installation does not change cluster permissions.
+Replace `'*'` with a peer UUID to restrict just that relationship. To hide an agent from the directory, use `gent permission deny '*' AGENT_UUID --permission enumerate`. Denies override matching allows regardless of rule order. `inherit` removes only the exact actor/peer/permission overrides; other restrictions remain. Adding an allow does not remove a deny.
+
+New-cluster TOML contains three wildcard allow rules for `enumerate`, `receive`, and `send`. This representation works with older nodes. Existing policies retain their meaning on upgrade, including intentionally restrictive empty policies. To enable blacklist behavior in an existing cluster while preserving its explicit denies, run:
+
+```sh
+gent permission allow '*' '*' --permission enumerate receive send
+```
+
+Rules follow the normal signed configuration synchronization flow. Allowlist setups remain possible by removing the wildcard allows with `gent config edit` and applying the configuration before adding selective grants. Ordinary communication does not confer administration, relay delegation, transcript browsing, or authorization to perform requested work. Automatic replies additionally require the recipient's [host wake adapter](wake.md) to be active. Wake installation does not change cluster policy.
 
 The local owner can inspect the effective policy between two registered agents:
 
@@ -18,7 +28,7 @@ gent permission explain ACTOR_UUID PEER_UUID
 gent --json permission explain ACTOR_UUID PEER_UUID
 ```
 
-Both forms return a JSON report from the running daemon in the selected cluster profile. They use the latest committed signed policy. Unapplied TOML edits and queued configuration proposals do not affect the result. The command changes no permissions.
+Both forms return a JSON report from this node's running daemon. They use the latest committed signed policy. Unapplied TOML edits and queued configuration proposals do not affect the result. The command changes no permissions.
 
 The report identifies the actor and peer, then shows these policy gates:
 
@@ -53,4 +63,4 @@ This tool does not edit policy. [Delegated permission editing](administration.md
 python3 scripts/prove_permissions.py --gent target/debug/gent
 ```
 
-The disposable native proof exercises the CLI and independent MCP processes, including hidden-peer isolation, actor binding, owner-only traces, one-way initiation with replies, daemon restart, and newly applied denies. Rust tests cover all 729 combinations of the six directional allow/deny/absent decisions, selector matching, revocation, expired authority and HTTP gateway conversation binding. These checks require no provider inference or deployed service.
+The disposable native proof exercises communication without pair grants, hidden-peer isolation, actor binding, owner-only traces, one-way initiation with replies, daemon restart, immediate denies and restoration through `inherit`. Rust tests cover new-cluster defaults, unchanged legacy policies, all 729 combinations of the six directional allow/deny/absent decisions, selector matching, revocation, expired authority and HTTP gateway conversation binding. These checks require no provider inference or deployed service.

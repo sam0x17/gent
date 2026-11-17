@@ -180,6 +180,7 @@ Additional command families should follow the same grammar as their functionalit
 | --- | --- |
 | `gent agents` | List agents the caller may discover in the selected cluster. |
 | `gent permission explain ACTOR_UUID PEER_UUID` | Explain current signed policy gates and matching rules under local owner authority. See [permission checks](permissions.md). |
+| `gent permission inherit ACTOR PEER --permission enumerate receive send` | Remove overrides for the exact selectors and permissions, restoring the remaining cluster rules. |
 | `gent group` / `gent group list` / `gent groups` | List owner-visible groups and members. |
 | `gent group new NAME` / `gent group show NAME` / `gent group delete NAME` | Create, inspect, or delete an unreferenced group. |
 | `gent group member add GROUP AGENT_UUID...` / `gent group member remove GROUP AGENT_UUID...` | Change up to 32 members while preserving unrelated membership. |

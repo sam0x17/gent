@@ -412,6 +412,13 @@ enum PermissionCommand {
         #[arg(long,value_enum,num_args=1..,required=true)]
         permission: Vec<PermissionName>,
     },
+    /// Remove exact-selector overrides and inherit the remaining cluster rules.
+    Inherit {
+        actor: String,
+        peer: String,
+        #[arg(long,value_enum,num_args=1..,required=true)]
+        permission: Vec<PermissionName>,
+    },
 }
 
 async fn owner(home: &std::path::Path, action: OwnerOp) -> Result<Value> {
@@ -1010,12 +1017,17 @@ async fn execute(cli: Cli) -> Result<()> {
                     actor,
                     peer,
                     permission,
-                } => (actor, peer, permission, Effect::Allow),
+                } => (actor, peer, permission, Some(Effect::Allow)),
                 PermissionCommand::Deny {
                     actor,
                     peer,
                     permission,
-                } => (actor, peer, permission, Effect::Deny),
+                } => (actor, peer, permission, Some(Effect::Deny)),
+                PermissionCommand::Inherit {
+                    actor,
+                    peer,
+                    permission,
+                } => (actor, peer, permission, None),
             };
             let mut config = config::load(&home)?;
             let actor = selector(actor)?;
@@ -1026,14 +1038,20 @@ async fn execute(cli: Cli) -> Result<()> {
                     PermissionName::Receive => Permission::Receive,
                     PermissionName::Send => Permission::Send,
                 };
-                let rule = Rule {
-                    actor: actor.clone(),
-                    peer: peer.clone(),
-                    permission,
-                    effect,
-                };
-                if !config.policy.rules.contains(&rule) {
-                    config.policy.rules.push(rule);
+                if let Some(effect) = effect {
+                    let rule = Rule {
+                        actor: actor.clone(),
+                        peer: peer.clone(),
+                        permission,
+                        effect,
+                    };
+                    if !config.policy.rules.contains(&rule) {
+                        config.policy.rules.push(rule);
+                    }
+                } else {
+                    config.policy.rules.retain(|rule| {
+                        rule.actor != actor || rule.peer != peer || rule.permission != permission
+                    });
                 }
             }
             configure(

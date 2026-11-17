@@ -20,6 +20,7 @@ fn request(node: &NodeIdentity, state: &VerifiedState, now: u64) -> SignedEnroll
 #[test]
 fn paired_node_proves_possession_and_reconnects_from_secret_storage() {
     let (owner, _, mut state) = fixture();
+    assert_eq!(state.state().policy.rules, Policy::cluster_default().rules);
     let node = NodeIdentity::generate().unwrap();
     let request = request(&node, &state, NOW);
     let approved = request.fingerprint().unwrap();
@@ -27,6 +28,7 @@ fn paired_node_proves_possession_and_reconnects_from_secret_storage() {
     let received = SignedEnrollment::decode(&encoded).unwrap();
     let next = state.enroll(&owner, &received, approved, NOW).unwrap();
     state.apply_chain(&[next], NOW).unwrap();
+    assert_eq!(state.state().policy.rules, Policy::cluster_default().rules);
     let restored = NodeIdentity::from_secret_bytes(node.id(), &node.expose_secret()).unwrap();
     assert_eq!(restored.public_key(), node.public_key());
     assert!(

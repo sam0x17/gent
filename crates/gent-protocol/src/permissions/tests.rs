@@ -11,6 +11,60 @@ fn agent(id: &str, node: &str) -> Agent {
 }
 
 #[test]
+fn new_cluster_permissions_cover_current_and_future_agents_without_administration() {
+    let policy = Policy::cluster_default();
+    let a = agent("existing", "desktop");
+    for b in [agent("local", "desktop"), agent("later", "laptop")] {
+        assert!(policy.visible(&a, &b) && policy.visible(&b, &a));
+        assert!(policy.can_open(&a, &b) && policy.can_open(&b, &a));
+        assert!(policy.can_reply(&a, &b) && policy.can_reply(&b, &a));
+        let mut revoked = b.clone();
+        revoked.revoked = true;
+        assert!(!policy.visible(&a, &revoked));
+        assert!(!policy.can_open(&a, &revoked));
+        assert!(!policy.can_reply(&revoked, &a));
+    }
+    assert!(!policy.relationship(&a, &a).send_unsolicited.allowed);
+    assert!(policy.relay_grants.is_empty());
+    assert!(policy.admin_grants.is_empty());
+    assert!(policy.group_admin_grants.is_empty());
+    // Existing empty policies retain their signed representation and meaning.
+    let empty: Policy = serde_json::from_str(r#"{"rules":[],"groups":{}}"#).unwrap();
+    assert!(!empty.visible(&a, &agent("legacy", "laptop")));
+    assert_eq!(
+        serde_json::to_string(&empty).unwrap(),
+        r#"{"rules":[],"groups":{}}"#
+    );
+}
+
+#[test]
+fn blacklist_restrictions_override_defaults_without_restricting_other_pairs() {
+    let (a, b, c) = (agent("a", "one"), agent("b", "two"), agent("c", "two"));
+    for permission in [Permission::Enumerate, Permission::Send, Permission::Receive] {
+        let mut policy = Policy::cluster_default();
+        let deny = Rule {
+            actor: Selector::Agent(a.id.clone()),
+            peer: Selector::Agent(b.id.clone()),
+            permission,
+            effect: Effect::Deny,
+        };
+        policy.rules.push(deny.clone());
+        policy.rules.push(Rule {
+            effect: Effect::Allow,
+            ..deny
+        });
+        assert!(!policy.can_open(&a, &b));
+        assert!(policy.can_open(&a, &c) && policy.can_open(&c, &b));
+        assert_eq!(policy.visible(&a, &b), permission != Permission::Enumerate);
+        assert_eq!(policy.can_reply(&a, &b), permission == Permission::Send);
+        assert_eq!(policy.can_open(&b, &a), permission == Permission::Send);
+        // Removing just this pair's overrides restores the cluster defaults.
+        policy.rules.truncate(3);
+        assert!(policy.can_open(&a, &b));
+    }
+}
+
+#[test]
 fn every_directional_decision_combination_agrees_with_messaging_semantics() {
     let (a, b) = (agent("a", "one"), agent("b", "two"));
     for mut variant in 0..729 {

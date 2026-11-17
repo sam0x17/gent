@@ -58,7 +58,10 @@ fn send(recipient: &str, request_id: &str) -> AgentOp {
 #[test]
 fn registered_identity_permissions_and_restart_delivery() {
     let temp = private_tempdir();
-    config::initialize(temp.path(), "trial").unwrap();
+    let mut cfg = config::initialize(temp.path(), "trial").unwrap();
+    // Exercise an explicitly restrictive cluster and later selective grants.
+    cfg.policy = Policy::default();
+    config::save(temp.path(), &cfg).unwrap();
     let owner = config::read_private(&temp.path().join("owner.key")).unwrap();
     let (ka, kb, kc) = (config::secret(), config::secret(), config::secret());
     let mut store = Store::open(temp.path()).unwrap();
