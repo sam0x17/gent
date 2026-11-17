@@ -13,6 +13,17 @@ mod host_recovery;
 pub use host_recovery::{HostRecovery, MAX_RECOVERY_AGENTS, RecoveryAgent, RecoveryHost};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Updates {
+    pub enabled: bool,
+}
+impl Default for Updates {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub id: String,
     pub name: String,
@@ -329,6 +340,16 @@ pub fn save(home: &Path, config: &Config) -> Result<()> {
         if let Some(recovery) = previous.host_recovery()? {
             next.set_host_recovery(recovery)?;
         }
+        // Update preferences are node-local and direct TOML edits take effect
+        // without config apply. Never replace them with a stale projection.
+        match previous.extra.get("updates") {
+            Some(updates) => {
+                next.extra.insert("updates".into(), updates.clone());
+            }
+            None => {
+                next.extra.remove("updates");
+            }
+        }
     }
     next.validate()?;
     write_private(&path(home), toml::to_string_pretty(&next)?.as_bytes())
@@ -370,6 +391,20 @@ fn configuration_lock(home: &Path) -> Result<fs::File> {
     }
 }
 impl Config {
+    pub fn updates(&self) -> Result<Updates> {
+        self.extra
+            .get("updates")
+            .cloned()
+            .map(|v| v.try_into().context("invalid update settings"))
+            .transpose()
+            .map(|v| v.unwrap_or_default())
+    }
+
+    pub fn set_updates(&mut self, updates: Updates) -> Result<()> {
+        self.extra
+            .insert("updates".into(), toml::Value::try_from(updates)?);
+        Ok(())
+    }
     pub fn gateway_registry(&self) -> Result<Option<String>> {
         self.extra
             .get("gateway_registry")
@@ -521,6 +556,7 @@ impl Config {
     /// Check routing and identity without rejecting an unapplied shared-policy
     /// edit. Live policy authority comes from the verified daemon database.
     pub fn validate_local(&self) -> Result<()> {
+        self.updates()?;
         ensure!(
             matches!(self.version, 1..=3),
             "unsupported configuration version"

@@ -6,7 +6,6 @@ use gent_daemon::{
     store::invitations::{Action, Invocation},
 };
 use gent_protocol::PairingOp;
-use std::io::IsTerminal;
 
 struct Remote {
     invitation: Option<Invitation>,
@@ -16,7 +15,6 @@ struct Remote {
     service: auth::Service,
     node: Option<NodeIdentity>,
     receipt_error: Option<String>,
-    progress: Option<&'static str>,
 }
 impl Remote {
     async fn invoke(&mut self, request: &Invocation) -> Result<Value> {
@@ -33,10 +31,7 @@ impl Remote {
                 }
             },
         };
-        if self.progress != Some(stage) && std::io::stderr().is_terminal() {
-            eprintln!("{stage}...");
-        }
-        self.progress = Some(stage);
+        let _progress = crate::ui::Progress::start(stage);
         if self.client.is_none() {
             let invitation = self
                 .invitation
@@ -188,7 +183,6 @@ pub async fn join(
         service,
         node: None,
         receipt_error: None,
-        progress: None,
     };
     let mut result = pairing::join(
         &home,

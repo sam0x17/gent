@@ -27,6 +27,7 @@ cargo build -p gent-link --bin gent --locked
 target_dir="$(cargo metadata --no-deps --format-version 1 --locked |
     python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 binary="$target_dir/debug/gent"
+python3 scripts/smoke_cli.py "$binary"
 python3 scripts/smoke_mcp.py "$binary"
 python3 scripts/smoke_host_bindings.py "$binary"
 python3 scripts/prove_chat_names.py --gent "$binary"

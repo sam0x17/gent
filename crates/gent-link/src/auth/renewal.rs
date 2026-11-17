@@ -124,15 +124,19 @@ async fn maintain(home: &Path) {
     }
 }
 
-pub async fn run_daemon(home: &Path) -> Result<()> {
+pub async fn run_daemon(
+    lock: gent_daemon::DaemonLock,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    let home = lock.home().to_owned();
     // Poll the daemon first so a missing configuration or held daemon lock fails
     // before maintenance. Dropping maintain cancels network waits on shutdown.
     tokio::select! {
         biased;
-        result = gent_daemon::run(home) => result,
-        _ = maintain(home) => unreachable!("maintenance continues until daemon shutdown"),
-        _ = crate::node::maintain(home) => unreachable!("node removals continue until daemon shutdown"),
-        _ = crate::integration::recovery::maintain(home) => unreachable!("host recovery continues until daemon shutdown"),
+        result = gent_daemon::run_locked(lock, shutdown) => result,
+        _ = maintain(&home) => unreachable!("maintenance continues until daemon shutdown"),
+        _ = crate::node::maintain(&home) => unreachable!("node removals continue until daemon shutdown"),
+        _ = crate::integration::recovery::maintain(&home) => unreachable!("host recovery continues until daemon shutdown"),
     }
 }
 

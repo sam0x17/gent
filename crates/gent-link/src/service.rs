@@ -246,6 +246,7 @@ pub(crate) async fn diagnose(home: &Path) -> Result<Value> {
 }
 
 pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
+    let _progress = crate::ui::Progress::start("Checking daemon service");
     control(home, Kind::Daemon, action.into()).await
 }
 

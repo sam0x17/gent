@@ -1,78 +1,68 @@
+use crate::{display::visible, ui};
 use serde_json::Value;
 
 pub fn print(value: &Value) {
     if let Some(lines) = value["lines"].as_array() {
         for line in lines {
-            println!("{}", line.as_str().unwrap_or_default());
+            println!("{}", visible(line.as_str().unwrap_or_default()));
         }
         return;
     }
     let kind = value["service"]["kind"].as_str().unwrap_or("daemon");
     let daemon = &value[kind];
     let service = &value["service"];
-    println!(
-        "{}: {}",
-        if kind == "gateway" {
-            "Gateway"
-        } else {
-            "Daemon"
-        },
+    ui::heading(if kind == "gateway" {
+        "Gateway"
+    } else {
+        "Daemon"
+    });
+    ui::field(
+        "Status",
         if daemon["running"] == true {
-            if daemon["managed"] == true {
-                "running (managed service)"
-            } else {
-                "running (outside service)"
-            }
+            "running"
         } else {
             "stopped or unavailable"
-        }
-    );
-    println!(
-        "Service: {} ({}, {})",
-        if service["installed"] == true {
-            "installed"
-        } else {
-            "not installed"
         },
-        service["backend"].as_str().unwrap_or("unknown"),
-        if service["enabled"] == true {
-            "startup enabled"
-        } else {
-            "startup disabled"
-        }
     );
-    println!(
-        "State directory: {}",
-        service["home"].as_str().unwrap_or_default()
+    if let Some(pid) = daemon["pid"].as_u64() {
+        ui::field("Process", &pid.to_string());
+    }
+    ui::field(
+        "Service",
+        &format!(
+            "{} ({})",
+            if service["installed"] == true {
+                "installed"
+            } else {
+                "not installed"
+            },
+            service["backend"].as_str().unwrap_or("unknown")
+        ),
     );
     let startup = &service["startup"];
-    println!(
-        "Startup: {}",
+    ui::field(
+        "Startup",
         match startup["trigger"].as_str() {
             Some("boot") => "at boot, including before login",
-            Some("login") => "with the user's login session",
+            Some("login") => "with your login session",
             Some("disabled") => "disabled",
             _ => "unknown",
-        }
+        },
     );
+    ui::field("State", service["home"].as_str().unwrap_or_default());
+    ui::field("Service file", service["file"].as_str().unwrap_or_default());
     if startup["trigger"] == "login" && service["backend"] == "systemd" {
-        println!("For startup before login and after logout: gent daemon install --linger");
+        println!("\n  For startup before login: gent daemon install --linger");
     }
-    if let Some(error) = startup["error"].as_str() {
-        println!("Startup inspection: {error}");
-    }
-    println!(
-        "Service file: {}",
-        service["file"].as_str().unwrap_or_default()
-    );
-    for key in ["error", "file_error"] {
-        if let Some(error) = service[key].as_str() {
-            println!("{error}");
-        }
-    }
-    if daemon["running"] != true
-        && let Some(error) = daemon["error"].as_str()
+    for error in [
+        &startup["error"],
+        &service["error"],
+        &service["file_error"],
+        &daemon["error"],
+    ]
+    .into_iter()
+    .filter_map(Value::as_str)
     {
-        println!("{error}");
+        println!("\n  {}", visible(error));
     }
 }

@@ -72,9 +72,42 @@ pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value>
 }
 
 pub async fn run(home: &Path) -> Result<()> {
-    recovery::ensure_active(home)?;
-    config::private_dir(home)?;
-    let _lock = config::state_lock(home, "daemon.lock")?;
+    run_until(home, std::future::pending()).await
+}
+
+/// Ownership acquired before update recovery or opening the node database.
+pub struct DaemonLock {
+    home: std::path::PathBuf,
+    _file: fs::File,
+}
+
+impl DaemonLock {
+    pub fn acquire(home: &Path) -> Result<Self> {
+        recovery::ensure_active(home)?;
+        config::private_dir(home)?;
+        Ok(Self {
+            home: home.to_owned(),
+            _file: config::state_lock(home, "daemon.lock")?,
+        })
+    }
+
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+}
+
+/// A cooperative update stops accepting new RPCs, drains accepted requests,
+/// and waits for in-progress database transactions before releasing ownership.
+pub async fn run_until(home: &Path, shutdown: impl std::future::Future<Output = ()>) -> Result<()> {
+    run_locked(DaemonLock::acquire(home)?, shutdown).await
+}
+
+pub async fn run_locked(
+    lock: DaemonLock,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    tokio::pin!(shutdown);
+    let home = lock.home();
     let store = Arc::new(Mutex::new(store::Store::open(home)?));
     let socket = home.join("daemon.sock");
     if socket.exists() {
@@ -95,12 +128,10 @@ pub async fn run(home: &Path) -> Result<()> {
     let sync_task = sync::start(store.clone())?;
     let invitation_task = invitation_transport::owner::start(store.clone());
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    eprintln!(
-        "Gent daemon listening at {} (development build)",
-        socket.display()
-    );
+    eprintln!("Gent daemon listening at {}", socket.display());
     loop {
         tokio::select! {
+            _=&mut shutdown=>break,
             _=tokio::signal::ctrl_c()=>break,
             _=terminate.recv()=>break,
             _=maintenance.tick(), if maintenance_tasks.is_empty()=> {
@@ -128,12 +159,18 @@ pub async fn run(home: &Path) -> Result<()> {
             }
         }
     }
+    drop(listener);
+    fs::remove_file(&socket)?;
     if let Some(task) = sync_task {
         task.abort();
         let _ = task.await;
     }
     invitation_task.stop().await;
-    fs::remove_file(socket)?;
+    // Request handlers already enforce their own deadlines. Dropping them here
+    // could lose the response after a committed send; let accepted RPCs finish.
+    while requests.join_next().await.is_some() {}
+    while maintenance_tasks.join_next().await.is_some() {}
+    access::run(store, "shutdown", |_| Ok(())).await?;
     Ok(())
 }
 

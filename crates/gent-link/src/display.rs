@@ -41,23 +41,11 @@ struct NodeStatus {
     status: String,
     data_link: bool,
     can_configure: bool,
-    revision: u64,
-    #[serde(default)]
-    last_seen: Option<i64>,
-    #[serde(default)]
-    presence: Option<Presence>,
-}
-
-#[derive(Deserialize)]
-struct Presence {
-    reason: String,
-    observed_at: i64,
-    response_window_seconds: u64,
 }
 
 // Labels can contain Unicode formatting characters even when configuration
 // validation rejects control characters. Escape both before terminal output.
-fn visible(value: &str) -> String {
+pub(crate) fn visible(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     for c in value.chars() {
         let formatting = matches!(
@@ -109,139 +97,108 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
         View::Cluster => {
             let value: ClusterStatus =
                 serde_json::from_value(value.clone()).context("invalid cluster status response")?;
-            writeln!(output, "Cluster: {}", visible(&value.cluster.name))?;
-            writeln!(output, "Cluster ID: {}", visible(&value.cluster.id))?;
+            header(&mut output, "Cluster")?;
+            for (label, text) in [
+                ("Cluster", value.cluster.name),
+                ("Cluster ID", value.cluster.id),
+                ("Node", value.node.name),
+                ("Node ID", value.node.id),
+                (
+                    "Type",
+                    if value.cluster.local_only {
+                        "development"
+                    } else {
+                        "service"
+                    }
+                    .into(),
+                ),
+                ("Daemon", format!("responding (PID {})", value.process_id)),
+                (
+                    "Configuration",
+                    format!(
+                        "{} (revision {})",
+                        if value.authority.fresh {
+                            "current"
+                        } else {
+                            "stale"
+                        },
+                        value.authority.revision
+                    ),
+                ),
+                ("Lease expires", date(value.authority.expires_at)),
+                (
+                    "Local config",
+                    if value.config_saved {
+                        "saved"
+                    } else {
+                        "write pending"
+                    }
+                    .into(),
+                ),
+                (
+                    "Remote transport",
+                    if value.remote_ready {
+                        "configured; connectivity not checked"
+                    } else {
+                        "not ready"
+                    }
+                    .into(),
+                ),
+            ] {
+                row(&mut output, label, &text)?;
+            }
             writeln!(
                 output,
-                "Type: {}",
-                if value.cluster.local_only {
-                    "development"
-                } else {
-                    "service"
-                }
-            )?;
-            writeln!(output, "Node: {}", visible(&value.node.name))?;
-            writeln!(output, "Node ID: {}", visible(&value.node.id))?;
-            writeln!(output, "Daemon: responding (PID {})", value.process_id)?;
-            writeln!(
-                output,
-                "Signed configuration: {} (revision {})",
-                if value.authority.fresh {
-                    "current"
-                } else {
-                    "stale"
-                },
-                value.authority.revision
-            )?;
-            writeln!(
-                output,
-                "Configuration lease expires: {}",
-                date(value.authority.expires_at)
-            )?;
-            writeln!(
-                output,
-                "Local configuration: {}",
-                if value.config_saved {
-                    "saved"
-                } else {
-                    "write pending"
-                }
-            )?;
-            writeln!(
-                output,
-                "Remote transport: {}",
-                if value.remote_ready {
-                    "configured; connectivity not checked"
-                } else {
-                    "not ready"
-                }
-            )?;
-            writeln!(
-                output,
-                "\nUse gent doctor to check service, account and relay health."
+                "\n  Use gent doctor to check service, account and relay health."
             )?;
         }
         View::Node => {
             let value: NodeConfig =
                 serde_json::from_value(value.clone()).context("invalid node configuration")?;
-            writeln!(output, "Node: {}", visible(&value.name))?;
-            writeln!(output, "Node ID: {}", visible(&value.id))?;
-            writeln!(output, "Source: local configuration")?;
+            header(&mut output, "Node")?;
+            row(&mut output, "Name", &value.name)?;
+            row(&mut output, "ID", &value.id)?;
+            row(&mut output, "Source", "local configuration")?;
         }
         View::Nodes => {
             let nodes: Vec<NodeStatus> =
                 serde_json::from_value(value.clone()).context("invalid node list response")?;
-            writeln!(output, "Nodes ({})", nodes.len())?;
-            for node in &nodes {
-                writeln!(
-                    output,
-                    "\n{} [{}]",
-                    visible(&node.name),
-                    visible(&node.status)
-                )?;
-                writeln!(output, "  Node ID: {}", visible(&node.id))?;
-                writeln!(
-                    output,
-                    "  Encrypted link: {}",
-                    if node.status == "local" {
-                        "local node"
-                    } else if node.data_link {
-                        "paired"
-                    } else {
-                        "not paired"
-                    }
-                )?;
-                writeln!(
-                    output,
-                    "  Configuration admin: {}",
-                    if node.can_configure { "yes" } else { "no" }
-                )?;
-                writeln!(output, "  Configuration revision: {}", node.revision)?;
-                if node.status != "local" {
-                    let verified = node.last_seen.and_then(|at| u64::try_from(at).ok());
-                    writeln!(
-                        output,
-                        "  Last verified round trip: {}",
-                        verified.map(date).unwrap_or_else(|| "not recorded".into())
-                    )?;
-                    if let Some(presence) = &node.presence {
-                        if let Some(age) = node
-                            .last_seen
-                            .and_then(|at| presence.observed_at.checked_sub(at))
-                            .filter(|age| *age >= 0)
-                        {
-                            writeln!(output, "  Evidence age: {age} seconds")?;
+            writeln!(
+                output,
+                "{}  {}",
+                crate::ui::paint("gent", "1;36"),
+                crate::ui::paint(&format!("Nodes ({})", nodes.len()), "1")
+            )?;
+            let rows = nodes
+                .iter()
+                .map(|node| {
+                    vec![
+                        node.name.clone(),
+                        node.status.clone(),
+                        if node.status == "local" {
+                            "local"
+                        } else if node.data_link {
+                            "paired"
+                        } else {
+                            "not paired"
                         }
-                        let reason = match presence.reason.as_str() {
-                            "not_paired" => "waiting for encrypted pairing".into(),
-                            "stale_authority" => "signed configuration is stale".into(),
-                            "local_node_not_enrolled" => "this node is no longer enrolled".into(),
-                            "relay_not_configured" => "relay is not configured".into(),
-                            "recent_encrypted_round_trip" => "verified encrypted round trip".into(),
-                            "probe_timed_out" => format!(
-                                "latest probe exceeded {} seconds",
-                                presence.response_window_seconds
-                            ),
-                            "no_recent_encrypted_round_trip" => {
-                                "no recent encrypted round trip".into()
-                            }
-                            "awaiting_first_round_trip" => {
-                                "waiting for the first verified round trip".into()
-                            }
-                            other => visible(other),
-                        };
-                        writeln!(output, "  Check: {reason}")?;
-                    } else {
-                        writeln!(output, "  Check: not measured by this daemon")?;
-                    }
-                }
+                        .into(),
+                        if node.can_configure { "yes" } else { "no" }.into(),
+                        node.id.clone(),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            output.push_str(&table(
+                &["NODE", "STATUS", "ENCRYPTED LINK", "ADMIN", "ID"],
+                &rows,
+            ));
+            if nodes.is_empty() {
+                writeln!(output, "  No enrolled nodes.")?;
             }
-            if nodes.iter().any(|node| node.status != "local") {
-                writeln!(
-                    output,
-                    "\nPresence describes recent daemon communication. Agent activity is tracked separately."
-                )?;
-            }
+            writeln!(
+                output,
+                "\n  Status reflects recent daemon communication. Use --verbose for connection evidence."
+            )?;
         }
         View::Agent | View::Agents => {
             let agents: Vec<Agent> = if matches!(view, View::Agent) {
@@ -249,10 +206,30 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
             } else {
                 serde_json::from_value(value.clone()).context("invalid agent list response")?
             };
-            writeln!(output, "Agents ({})", agents.len())?;
-            for value in &agents {
-                writeln!(output)?;
-                agent(&mut output, value)?;
+            writeln!(
+                output,
+                "{}  {}",
+                crate::ui::paint("gent", "1;36"),
+                crate::ui::paint(&format!("Agents ({})", agents.len()), "1")
+            )?;
+            if matches!(view, View::Agent) {
+                for value in &agents {
+                    writeln!(output)?;
+                    agent(&mut output, value)?;
+                }
+            } else {
+                let rows = agents
+                    .iter()
+                    .map(|value| {
+                        vec![
+                            value.name.clone(),
+                            value.provider.clone(),
+                            if value.revoked { "revoked" } else { "active" }.into(),
+                            value.id.clone(),
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                output.push_str(&table(&["AGENT", "PROVIDER", "REGISTRATION", "ID"], &rows));
             }
             if matches!(view, View::Agent)
                 && let Some(generation) = value["registration_generation"].as_u64()
@@ -298,4 +275,59 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
         }
     }
     Ok(output)
+}
+
+fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
+    let rows: Vec<Vec<_>> = rows
+        .iter()
+        .map(|row| row.iter().map(|cell| visible(cell)).collect())
+        .collect();
+    let widths: Vec<_> = headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| {
+            rows.iter()
+                .map(|row| row[index].chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(header.len())
+        })
+        .collect();
+    let mut output = String::new();
+    for (number, row) in std::iter::once(headers.iter().map(|v| v.to_string()).collect::<Vec<_>>())
+        .chain(rows)
+        .enumerate()
+    {
+        output.push_str("  ");
+        for (index, cell) in row.iter().enumerate() {
+            output.push_str(&if number == 0 {
+                crate::ui::paint(cell, "2")
+            } else {
+                cell.clone()
+            });
+            if index + 1 < row.len() {
+                output.push_str(&" ".repeat(widths[index] - cell.chars().count() + 2));
+            }
+        }
+        output.push('\n');
+    }
+    output
+}
+
+fn header(output: &mut String, title: &str) -> std::fmt::Result {
+    writeln!(
+        output,
+        "{}  {}",
+        crate::ui::paint("gent", "1;36"),
+        crate::ui::paint(title, "1")
+    )
+}
+
+fn row(output: &mut String, label: &str, value: &str) -> std::fmt::Result {
+    writeln!(
+        output,
+        "  {}  {}",
+        crate::ui::paint(&format!("{label:<18}"), "2"),
+        visible(value)
+    )
 }

@@ -14,6 +14,8 @@ Web agents may use a Gent-hosted bridge with an explicit warning that Gent and t
 
 An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQLite inbox, permission evaluator, and stdio MCP server. Independent MCP clients can register, exchange text and image bytes, reply, and recover queued work after a restart. Follow the [local proof guide](docs/local-proof.md) to build and try it.
 
+Gent [automatically updates](docs/updates.md) from the GitHub `stable` tag every five minutes, with staged builds, atomic executable replacement and startup rollback. Normal CLI responses are readable; use `--json` for scripts or `--verbose` for full response details.
+
 Run `scripts/check.sh` for [development checks](docs/testing.md), including formatting, strict Clippy, Rust tests and local CLI/MCP smoke checks. The GitHub workflow uses Linux; macOS testing remains deliberate.
 
 The [local work journal](docs/work.md) records an agent's start before consequential host work and preserves uncertain attempts across restarts. `gent work` lists reports; owner-only `gent work reconcile` records reviewed outcomes or permits a subsequent attempt. It does not execute work, independently verify completion or restore old execution authority from an archive.

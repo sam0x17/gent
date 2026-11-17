@@ -110,8 +110,9 @@ impl Report {
         }
     }
     pub(crate) fn print(&self) {
+        crate::ui::heading("Doctor");
         println!(
-            "Gent doctor: {}",
+            "  {}",
             if self.exit_code() == 0 {
                 "available checks passed"
             } else {
@@ -125,7 +126,12 @@ impl Report {
                 Status::Fail => "FAIL",
                 Status::Skip => "SKIP",
             };
-            println!("{status:4} {}: {}", check.id, check.summary);
+            println!(
+                "  {}  {:18}  {}",
+                crate::ui::state(&format!("{status:4}")),
+                check.id,
+                check.summary
+            );
             if let Some(home) = check.evidence["integration_home"].as_str() {
                 println!("     Installed for: {}", home.escape_debug());
             }

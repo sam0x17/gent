@@ -23,6 +23,7 @@ The script stops on failure and runs:
 | Wasm Clippy with all features | Protocol and crypto libraries, independent of the private service repository. |
 | `cargo test --workspace --locked` | Default unit, integration and documentation tests, at optimization level 1 with debug assertions and overflow checks enabled. |
 | Native binary build | The `gent-link` package's `gent` executable. |
+| CLI smoke | Readable results, JSON/verbose equivalence, terminal animation, pipes and color controls. |
 | MCP smoke | Registration, permission isolation, text/images, replies, retries, restart recovery and ordered relay turns. |
 | Host binding smoke | Synthetic Codex/Claude metadata and hooks, distinct conversations, reconnects and revocation. |
 | Config editor smoke | Terminal editing, private drafts, concurrent writes, profile selection and explicit publication. |
@@ -41,3 +42,20 @@ Checkout and dependency-cache actions use commit pins. The job has read-only rep
 This repository has no macOS Actions job. Test on a Mac deliberately over SSH. Any future macOS workflow must use only `workflow_dispatch`, without push, pull-request, schedule or automatic workflow chaining. On the trial Mac, raise the shell's file-descriptor limit with `ulimit -n 4096` before the Rust suite.
 
 The private parent has separate Worker and native-tool workspaces; this client workflow does not check them or fetch the parent. Their formatting, strict Clippy and service tests remain separate checks.
+
+## Automatic update acceptance
+
+Run `python3 scripts/prove_updates.py --cache /absolute/path/to/disposable-cache`
+on Linux or deliberately on a Mac. This builds real Git revisions with Cargo
+in an isolated installation and uses two persistent MCP clients. It checks
+unchanged/disabled versions, build failure, disabling during compilation,
+moving the stable tag during a build, atomic activation, image/message/reply
+continuity, startup rollback, explicit retry and notification eligibility.
+It also changes daemon code between revisions to check dependency rebuilding.
+
+The `test-updates` feature permits only a local `file:///` release repository
+and an isolated installation root. Production builds reject these candidates.
+Notification delivery is recorded in the fixture instead of displaying test
+notifications. The proof never changes the live cluster or the real stable tag.
+The default Rust suite separately verifies accepted-request draining, binary
+replacement, journal recovery, file ownership and bounded subprocesses.

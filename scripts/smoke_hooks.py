@@ -3,7 +3,6 @@
 import argparse
 import concurrent.futures
 import os
-from pathlib import Path
 import pty
 import select
 import shlex
@@ -12,6 +11,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
 
 def zsh_tab_completion(shell, env, cwd):
@@ -57,7 +57,7 @@ def main():
     parser.add_argument('--zsh', default='/bin/zsh')
     parser.add_argument('--fish', default='fish')
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix='gent-shell-', dir='/tmp') as root:
+    with tempfile.TemporaryDirectory(prefix='gent-shell-', dir=os.environ.get('TMPDIR', '/tmp')) as root:
         root = Path(root).resolve()
         directory = root / "bin ' $HOME $(touch PWNED) [*] \\slash"
         directory.mkdir()
@@ -70,7 +70,7 @@ def main():
 
         def cli(*command, check=True, env=None):
             result = subprocess.run([str(binary), '--home', str(state), *command],
-                                    text=True, capture_output=True, env=env, timeout=15)
+                                    text=True, capture_output=True, env=env, timeout=15, check=False)
             assert not check or result.returncode == 0, result.stderr
             return result
 
@@ -114,7 +114,7 @@ def main():
                 command = [shell, '-ic']
                 check = source + '; test "$GENT_HOOK_PROOF" = preserved; or exit 10; command -v gent; '
                 check += "complete -C 'gent node name s' | string match -qr '^set(\\t|$)'; or exit 11; printf 'COMPLETED:set\\n'"
-            result = subprocess.run(command + [check], env=env, cwd=root, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(command + [check], env=env, cwd=root, capture_output=True, text=True, timeout=30, check=False)
             assert result.returncode == 0, result.stderr
             assert str(binary) in result.stdout and 'COMPLETED:set' in result.stdout, (result.stdout, result.stderr)
             if name == 'zsh':

@@ -2,6 +2,7 @@ mod agent;
 mod agent_recovery;
 mod auth;
 mod backup;
+mod build_info;
 mod cluster;
 mod config_editor;
 mod display;
@@ -23,6 +24,8 @@ mod pairing;
 mod permission_admin;
 mod service;
 mod setup;
+mod ui;
+mod update;
 mod wake;
 mod work;
 
@@ -50,6 +53,9 @@ struct Cli {
     /// Machine-readable output.
     #[arg(long, global = true)]
     json: bool,
+    /// Show the complete response as formatted JSON; suppress animation.
+    #[arg(long, short, global = true)]
+    verbose: bool,
     /// Stable UUID for retrying an edit, renewal, or owner-transfer preparation.
     #[arg(long, global = true)]
     request_id: Option<String>,
@@ -58,6 +64,13 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Show the exact build revision used for update comparisons.
+    Version,
+    /// Install the blessed stable release or inspect automatic updates.
+    Update {
+        #[command(subcommand)]
+        command: Option<update::Command>,
+    },
     /// Collect and inspect private recovery evidence; does not replace an owner.
     Recovery {
         #[command(subcommand)]
@@ -481,16 +494,27 @@ async fn main() {
 }
 
 async fn execute(cli: Cli) -> Result<()> {
+    let output_format = ui::Output::for_cli(&cli);
+    ui::configure(output_format.raw());
+    if matches!(cli.command, Some(Command::Version)) {
+        let build = build_info::current();
+        if output_format.raw() {
+            output_format.print(&serde_json::to_value(&build)?)?;
+        } else {
+            println!(
+                "gent {} ({}{})",
+                build.version,
+                build.commit,
+                if build.dirty { ", modified source" } else { "" }
+            );
+        }
+        return Ok(());
+    }
     if let Some(Command::Backup { command }) = cli.command {
+        let progress = ui::Progress::start("Processing encrypted backup");
         let value = backup::execute(command, cli.home.as_deref(), cli.context.as_deref())?;
-        println!(
-            "{}",
-            if cli.json {
-                serde_json::to_string(&value)?
-            } else {
-                serde_json::to_string_pretty(&value)?
-            }
-        );
+        drop(progress);
+        output_format.print(&value)?;
         return Ok(());
     }
     if let Some(Command::Completions { shell }) = cli.command {
@@ -516,26 +540,12 @@ async fn execute(cli: Cli) -> Result<()> {
             "offline recovery inspection does not select a live cluster"
         );
         let value = owner_recovery::inspect(challenge, reports)?;
-        println!(
-            "{}",
-            if cli.json {
-                serde_json::to_string(&value)?
-            } else {
-                serde_json::to_string_pretty(&value)?
-            }
-        );
+        output_format.print(&value)?;
         return Ok(());
     }
     if let Some(Command::Hooks { command }) = cli.command {
         let value = hooks::execute(command.unwrap_or_default())?;
-        println!(
-            "{}",
-            if cli.json {
-                serde_json::to_string(&value)?
-            } else {
-                serde_json::to_string_pretty(&value)?
-            }
-        );
+        output_format.print(&value)?;
         return Ok(());
     }
     let request_id = cli
@@ -565,15 +575,17 @@ async fn execute(cli: Cli) -> Result<()> {
         })
     ) {
         let output = node_home::reset::execute(&root).await?;
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        output_format.print(&output)?;
         return Ok(());
     }
     // Archived state must never redirect a command to live state.
     gent_daemon::recovery::ensure_active(&root)?;
     if let Some(Command::Doctor(options)) = cli.command {
+        let progress = ui::Progress::start("Checking this node");
         let report = doctor::run(&root, cli.context.as_deref(), options).await;
-        if cli.json {
-            println!("{}", serde_json::to_string(&report)?);
+        drop(progress);
+        if output_format.raw() {
+            output_format.print(&serde_json::to_value(&report)?)?;
         } else {
             report.print();
         }
@@ -591,6 +603,11 @@ async fn execute(cli: Cli) -> Result<()> {
     }
     let home = node_home::resolve(&root, cli.context.as_deref())?;
     gent_daemon::recovery::ensure_active(&home)?;
+    if let Some(Command::Update { command }) = cli.command {
+        let value = update::execute(&home, command.unwrap_or(update::Command::Install)).await?;
+        output_format.print(&value)?;
+        return Ok(());
+    }
     if let Some(Command::Integration {
         command: integration::Command::CodexWrapper(args),
     }) = cli.command
@@ -611,8 +628,8 @@ async fn execute(cli: Cli) -> Result<()> {
     if let Some(Command::Auth { command }) = cli.command {
         let status_only = matches!(command, None | Some(auth::Command::Status));
         let output = auth::execute(&home, command.unwrap_or(auth::Command::Status)).await?;
-        if cli.json {
-            println!("{}", serde_json::to_string(&output)?);
+        if output_format.raw() {
+            output_format.print(&output)?;
         } else {
             auth::print(&output);
         }
@@ -624,7 +641,7 @@ async fn execute(cli: Cli) -> Result<()> {
     }
     if let Some(Command::Daemon { command }) = cli.command {
         if matches!(command, Some(DaemonCommand::Run)) {
-            auth::renewal::run_daemon(&home).await?;
+            update::run_daemon(&home).await?;
             return Ok(());
         }
         let status_only = matches!(command, None | Some(DaemonCommand::Status));
@@ -634,8 +651,8 @@ async fn execute(cli: Cli) -> Result<()> {
             }
             action => service::execute(&home, action).await?,
         };
-        if cli.json {
-            println!("{}", serde_json::to_string(&output)?);
+        if output_format.raw() {
+            output_format.print(&output)?;
         } else {
             service::print(&output);
         }
@@ -652,8 +669,8 @@ async fn execute(cli: Cli) -> Result<()> {
         let output = gateway::execute(&home, gateway::Command::Service { command })
             .await?
             .context("missing gateway service result")?;
-        if cli.json {
-            println!("{}", serde_json::to_string(&output)?);
+        if output_format.raw() {
+            output_format.print(&output)?;
         } else {
             service::print(&output);
         }
@@ -668,14 +685,7 @@ async fn execute(cli: Cli) -> Result<()> {
     }) = cli.command
     {
         let output = node::remove(&home, node).await?;
-        println!(
-            "{}",
-            if cli.json {
-                serde_json::to_string(&output)?
-            } else {
-                serde_json::to_string_pretty(&output)?
-            }
-        );
+        output_format.print(&output)?;
         if output["service_status"] == "pending" {
             std::process::exit(3);
         }
@@ -709,7 +719,21 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Providers { .. }) => Some(display::View::Providers),
         _ => None,
     };
+    let progress = match &cli.command {
+        Some(Command::Nodes) => Some(ui::Progress::start("Checking node connections")),
+        Some(Command::Integration {
+            command:
+                integration::Command::Install(_)
+                | integration::Command::Uninstall(_)
+                | integration::Command::Status { .. },
+        }) => Some(ui::Progress::start("Configuring host integration")),
+        Some(Command::Config {
+            command: Some(ConfigCommand::Apply),
+        }) => Some(ui::Progress::start("Publishing cluster configuration")),
+        _ => None,
+    };
     let output = match cli.command {
+        Some(Command::Version | Command::Update { .. }) => unreachable!(),
         Some(Command::Node {
             command: Some(NodeCommand::Reset),
         }) => unreachable!(),
@@ -914,10 +938,10 @@ async fn execute(cli: Cli) -> Result<()> {
             command: Some(NodeCommand::Name { command: None }),
         }) => {
             let name = config::load(&home)?.node.name;
-            if cli.json {
+            if output_format.raw() {
                 json!(name)
             } else {
-                println!("{name}");
+                println!("{}", display::visible(&name));
                 return Ok(());
             }
         }
@@ -926,7 +950,7 @@ async fn execute(cli: Cli) -> Result<()> {
             command: Some(ConfigCommand::Path),
         }) => {
             let path = std::path::absolute(config::path(&home))?;
-            if cli.json {
+            if output_format.raw() {
                 json!(path)
             } else {
                 println!("{}", path.display());
@@ -1064,8 +1088,9 @@ async fn execute(cli: Cli) -> Result<()> {
             .await?
         }
     };
-    if cli.json {
-        println!("{}", serde_json::to_string(&output)?);
+    drop(progress);
+    if output_format.raw() {
+        output_format.print(&output)?;
     } else if let Some(view) = display {
         print!("{}", display::render(view, &output)?);
     } else if owner_transfer_output {
@@ -1091,7 +1116,7 @@ async fn execute(cli: Cli) -> Result<()> {
     } else if transport_output {
         files::print_transport(&output);
     } else {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        output_format.print(&output)?;
     }
     Ok(())
 }
