@@ -1,5 +1,7 @@
 # Security component proofs
 
+The owner-based authority described here is the current implementation. The accepted replacement is [peer administration with service-ordered encrypted configuration](peer-authority.md): every unrestricted node has equal authority, and the latest committed cluster sequence wins. That protocol and migration are not yet implemented; the existing owner checks remain in force.
+
 `gent-crypto` verifies owner-approved node identities and signed configuration history. The live daemon uses that authority for RPC permission checks and owner configuration changes. `gent-daemon::encrypted` supplies MLS messaging and authenticated directional streams, including configuration recovery after authority expires. An optional background dispatcher synchronizes encrypted configuration through a development relay, updating the live database and its policy. Node pairing is available through private-file invitations or authenticated SSH. The same dispatcher carries encrypted agent registrations, messages, files, and recipient receipts between directly paired nodes.
 
 [Node connectivity](node-presence.md) uses encrypted challenge/reply events on those streams. Only a timely reply to the persisted outstanding challenge refreshes reachability. This owner diagnostic grants no authority, exposes no agent inventory, and never wakes a host. The central relay still observes traffic timing and size. Older pre-release readers stall on the new event until upgraded; authenticated buffered records remain available for recovery.
