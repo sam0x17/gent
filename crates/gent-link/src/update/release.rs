@@ -98,6 +98,7 @@ pub(super) async fn stage(
     release: &Release,
     root: &Path,
     cache: &Path,
+    installed: &str,
     log: &Path,
 ) -> Result<PathBuf> {
     let commit = &release.commit;
@@ -105,6 +106,7 @@ pub(super) async fn stage(
         crate::build_info::valid_commit(commit),
         "invalid update revision"
     );
+    let target = super::cache::prepare(cache, installed).await?;
     let executable = cargo()?;
     let mut command = Command::new(&executable);
     command
@@ -120,9 +122,10 @@ pub(super) async fn stage(
         ])
         .arg(root)
         .arg("gent-link")
-        // Path-dependency fingerprints can be reused across Git checkouts by
-        // Cargo. Isolate complete releases, not only the final executable.
-        .env("CARGO_TARGET_DIR", cache.join(commit))
+        .env("CARGO_TARGET_DIR", &target)
+        // Keep intermediates beside artifacts so cache invalidation also works
+        // when the user's Cargo configuration redirects build.build-dir.
+        .env("CARGO_BUILD_BUILD_DIR", &target)
         .env("CARGO_NET_GIT_FETCH_WITH_CLI", "true");
     if std::env::var_os("CARGO_BUILD_JOBS").is_none() {
         command.env("CARGO_BUILD_JOBS", "2");

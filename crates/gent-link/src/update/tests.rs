@@ -463,3 +463,82 @@ async fn cache_cleanup_keeps_rollback_and_unrelated_paths_without_following_link
     assert!(root.path().join("d".repeat(40)).is_symlink());
     assert_eq!(fs::read(other.path().join("keep")).unwrap(), b"untouched");
 }
+
+#[tokio::test]
+async fn shared_cache_adopts_dependencies_and_invalidates_workspace_code_on_every_attempt() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let installed = "a".repeat(40);
+    let legacy = root.path().join(&installed);
+    for profile in ["release", "aarch64-apple-darwin/release"] {
+        let fingerprints = legacy.join(profile).join(".fingerprint");
+        for package in ["gent-link-aaa", "gent-daemon-bbb", "serde-ccc"] {
+            fs::create_dir_all(fingerprints.join(package)).unwrap();
+            fs::write(fingerprints.join(package).join("artifact"), b"cached").unwrap();
+        }
+        for package in ["gent-daemon", "serde"] {
+            let artifact = legacy
+                .join(profile)
+                .join("build")
+                .join(package)
+                .join("abc/out");
+            fs::create_dir_all(&artifact).unwrap();
+            fs::write(artifact.join("cached"), b"cached").unwrap();
+        }
+    }
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("keep"), b"untouched").unwrap();
+    symlink(
+        outside.path(),
+        legacy.join("release/.fingerprint/gent-crypto-ddd"),
+    )
+    .unwrap();
+    let shared = cache::prepare(root.path(), &installed).await.unwrap();
+    assert!(!legacy.exists());
+    for profile in ["release", "aarch64-apple-darwin/release"] {
+        let fingerprints = shared.join(profile).join(".fingerprint");
+        assert!(!fingerprints.join("gent-link-aaa").exists());
+        assert!(!fingerprints.join("gent-daemon-bbb").exists());
+        assert_eq!(
+            fs::read(fingerprints.join("serde-ccc/artifact")).unwrap(),
+            b"cached"
+        );
+        fs::create_dir(fingerprints.join("gent-link-aaa")).unwrap();
+        assert!(!shared.join(profile).join("build/gent-daemon").exists());
+        assert_eq!(
+            fs::read(shared.join(profile).join("build/serde/abc/out/cached")).unwrap(),
+            b"cached"
+        );
+    }
+    assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"untouched");
+    assert_eq!(
+        cache::prepare(root.path(), &"b".repeat(40)).await.unwrap(),
+        shared
+    );
+    assert!(!shared.join("release/.fingerprint/gent-link-aaa").exists());
+    release::prune(root.path(), &[]).await.unwrap();
+    assert!(
+        shared
+            .join("release/.fingerprint/serde-ccc/artifact")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn shared_cache_rejects_redirected_fingerprints() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("shared/release")).unwrap();
+    fs::write(outside.path().join("gent-keep"), b"untouched").unwrap();
+    symlink(
+        outside.path(),
+        root.path().join("shared/release/.fingerprint"),
+    )
+    .unwrap();
+    assert!(cache::prepare(root.path(), &"a".repeat(40)).await.is_err());
+    assert_eq!(
+        fs::read(outside.path().join("gent-keep")).unwrap(),
+        b"untouched"
+    );
+}

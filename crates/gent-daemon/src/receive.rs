@@ -41,9 +41,7 @@ pub async fn receive_file(
         "file exceeds 32 MiB"
     );
     tokio::time::timeout(Duration::from_secs(15), async {
-        let socket = UnixStream::connect(home.join("daemon.sock"))
-            .await
-            .context("daemon unavailable")?;
+        let socket = connection::connect(home, true).await?;
         let mut socket = BufReader::new(socket);
         let request = Request::Agent {
             credential,

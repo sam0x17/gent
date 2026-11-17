@@ -1,3 +1,4 @@
+mod cache;
 mod coordination;
 mod install;
 mod notification;

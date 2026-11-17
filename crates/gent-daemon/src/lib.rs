@@ -2,6 +2,7 @@
 mod access;
 pub mod config;
 pub mod configuration_log;
+mod connection;
 pub mod encrypted;
 pub mod file_objects;
 pub mod file_transport;
@@ -47,9 +48,16 @@ pub async fn request(home: &Path, request: Request) -> Result<serde_json::Value>
         Duration::from_secs(15)
     };
     let operation = async {
-        let mut socket = UnixStream::connect(home.join("daemon.sock"))
-            .await
-            .context("daemon unavailable; run gent daemon start or gent daemon run")?;
+        // Status is a liveness probe used by service management and must report
+        // a stopped daemon immediately. Ordinary calls bridge a brief restart.
+        let probe = matches!(
+            &request,
+            Request::Owner {
+                action: gent_protocol::OwnerOp::Status,
+                ..
+            }
+        );
+        let mut socket = connection::connect(home, !probe).await?;
         let mut data = serde_json::to_vec(&request)?;
         data.push(b'\n');
         ensure!(data.len() <= MAX_FRAME_BYTES, "request too large");

@@ -24,9 +24,13 @@ def main():
         "--source", type=Path, default=Path(__file__).resolve().parent.parent
     )
     parser.add_argument("--cache", type=Path, required=True)
+    parser.add_argument(
+        "--seed-cache", type=Path,
+        help="Copy an existing release target to speed up the fixture's initial build",
+    )
     args = parser.parse_args()
     os.umask(0o077)
-    with tempfile.TemporaryDirectory(prefix="gent-upd-", dir="/tmp") as directory:
+    with tempfile.TemporaryDirectory(prefix="gent-upd-") as directory:
         root = Path(directory).resolve()
         repo, install, home = root / "repo", root / "cargo", root / "node"
         repo.mkdir()
@@ -111,7 +115,7 @@ def main():
                 check=check,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=600 if argv[:2] == ("update", "install") else 60,
             )
 
         def status():
@@ -159,6 +163,17 @@ def main():
         clients = []
         try:
             with (root / "initial-build.log").open("w") as log:
+                if args.seed_cache:
+                    shutil.copytree(args.seed_cache.resolve(), args.cache.resolve() / a)
+                    subprocess.run(
+                        [
+                            "cargo", "clean", "--manifest-path", str(repo / "Cargo.toml"),
+                            "--locked", "--release", "-p", "gent-link", "-p", "gent-daemon",
+                            "-p", "gent-crypto", "-p", "gent-protocol",
+                        ],
+                        env=env, stdout=log, stderr=log, check=True, timeout=120,
+                    )
+                initial_started = time.monotonic()
                 result = subprocess.run(
                     [
                         "cargo",
@@ -183,8 +198,24 @@ def main():
                 assert result.returncode == 0, (root / "initial-build.log").read_text()[
                     -6000:
                 ]
+                print(
+                    f"Initial fixture build: {time.monotonic() - initial_started:.1f}s",
+                    flush=True,
+                )
             assert revision() == a
             assert json.loads(cli("version").stdout)["dirty"] is False
+
+            def dependency_artifacts(target):
+                return {
+                    str(path.relative_to(target)): (
+                        path.stat().st_size, path.stat().st_mtime_ns
+                    )
+                    for path in (target / "release").rglob("*.rlib")
+                    if not path.name.startswith("libgent_")
+                }
+
+            dependencies = dependency_artifacts(args.cache.resolve() / a)
+            assert dependencies, "initial release did not populate the dependency cache"
             cli("cluster", "new", "update-proof", "--local")
             cli("update", "disable")
             with (root / "daemon.log").open("w") as log:
@@ -259,14 +290,24 @@ def main():
             sent = sender.call("gent_send", attempt)[0]
             tag(b)
             wait(lambda: phase("building"), "successful build B")
-            during = sender.call(
-                "gent_send",
-                {
-                    "recipient": identity,
-                    "request_id": sender.request_id(),
-                    "text": "sent while compiling",
-                },
-            )[0]
+            during = []
+            build_deadline = time.monotonic() + 600
+            while phase("building"):
+                assert time.monotonic() < build_deadline, "build did not finish"
+                if len(during) < 16:
+                    during.append(
+                        sender.call(
+                            "gent_send",
+                            {
+                                "recipient": identity,
+                                "request_id": sender.request_id(),
+                                "text": "sent while compiling",
+                            },
+                        )[0]
+                    )
+                assert receiver.call("gent_identity")[0]["agent"]["id"] == identity
+                assert receiver.call("gent_inbox")[0]
+                time.sleep(0.25)
             wait(
                 lambda: (
                     revision() == b
@@ -280,13 +321,25 @@ def main():
                 "Gent updater proof B daemon listening"
                 in (root / "daemon.log").read_text()
             )
+            assert not (args.cache.resolve() / a).exists(), "legacy cache was not adopted"
+            assert dependency_artifacts(args.cache.resolve() / "shared") == dependencies, (
+                "third-party dependencies were rebuilt between revisions"
+            )
+            for line in (updates / "build.log").read_text().splitlines():
+                if "Finished `release`" in line:
+                    print(f"Cached update: {line.strip()}", flush=True)
+            print(
+                "PASS shared dependency cache, legacy adoption and changed daemon code",
+                flush=True,
+            )
             wait(
                 lambda: notifications() == [b], "successful automatic notification", 10
             )
+            # The continuity sample fits in one inbox page.
             inbox = receiver.call("gent_inbox")[0]
-            assert {m["id"] for m in inbox} == {
-                sent["message_id"],
-                during["message_id"],
+            assert during, "no messages sent during compilation"
+            assert {m["id"] for m in inbox} == {sent["message_id"]} | {
+                message["message_id"] for message in during
             }
             image = next(m for m in inbox if m["id"] == sent["message_id"])
             assert image["files"][0]["data_base64"] == PNG

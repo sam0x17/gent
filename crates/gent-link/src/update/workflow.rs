@@ -76,6 +76,7 @@ async fn run(
         &release,
         stage.path(),
         &installation.directory.join("target"),
+        &installed.commit,
         &installation.directory.join("build.log"),
     )
     .await?;
