@@ -585,6 +585,13 @@ async fn execute(cli: Cli) -> Result<()> {
     let home = node_home::resolve(&root, cli.context.as_deref())?;
     gent_daemon::recovery::ensure_active(&home)?;
     if let Some(Command::Integration {
+        command: integration::Command::CodexWrapper(args),
+    }) = cli.command
+    {
+        integration::vscode::wrapped::execute(&home, args).await?;
+        std::process::exit(0);
+    }
+    if let Some(Command::Integration {
         command: integration::Command::CodexIde(args),
     }) = cli.command
     {

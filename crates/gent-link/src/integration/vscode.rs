@@ -1,6 +1,6 @@
-//! Framing transport for the IDE's development-only executable override.
+//! IDE framing transport, with a shared-server route and a provider wrapper.
 //! The IDE sends every protocol request, including initialization and approvals.
-//! Gent does not reconnect, start hosts, alter fields or replay partial messages.
+//! The transport never alters fields, reconnects or replays partial messages.
 use super::{install, shell_arg};
 use anyhow::{Context, Result, ensure};
 use futures_util::{SinkExt, StreamExt};
@@ -12,6 +12,8 @@ use std::{
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
+
+pub(crate) mod wrapped;
 
 const LIMIT: usize = 8 * 1024 * 1024;
 // Recognize the tested extension invocation. The already-running native server
@@ -41,6 +43,8 @@ pub(super) struct Installation {
     pub version: u8,
     pub id: String,
     pub settings: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_switcher: Option<PathBuf>,
 }
 impl Installation {
     pub fn new(settings: PathBuf) -> Self {
@@ -48,12 +52,48 @@ impl Installation {
             version: 1,
             id: uuid::Uuid::new_v4().to_string(),
             settings,
+            provider_switcher: None,
         }
+    }
+    pub fn select(settings: PathBuf) -> Result<Self> {
+        let snapshot = crate::managed_file::Snapshot::read(&settings)?;
+        let doc = install::document::VscodeDocument::parse(snapshot.text.as_deref())?;
+        let mut selected = Self::new(settings);
+        if let Some(path) = doc
+            .entry
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .map(Path::new)
+            .filter(|path| path.ends_with("durosoft.ai-provider-switcher/codex/codex-shim"))
+        {
+            ensure!(
+                path.is_absolute(),
+                "AI Provider Switcher shim must be an absolute path"
+            );
+            let marker =
+                crate::managed_file::Snapshot::read(&path.with_file_name("app-server-wrapper-v1"))?;
+            ensure!(
+                marker.text.as_deref() == Some("ai-provider-switcher/app-server-wrapper/v1\n"),
+                "AI Provider Switcher owns chatgpt.cliExecutable; install its app-server-wrapper compatible version and reload VS Code before retrying Gent installation"
+            );
+            selected.version = 2;
+            selected.provider_switcher = Some(path.into());
+        }
+        snapshot.verify()?;
+        Ok(selected)
     }
     pub fn validate(&self) -> Result<()> {
         let id = uuid::Uuid::parse_str(&self.id)?;
         ensure!(
-            self.version == 1 && !id.is_nil() && id.to_string() == self.id,
+            ((self.version == 1 && self.provider_switcher.is_none())
+                || (self.version == 2
+                    && self
+                        .provider_switcher
+                        .as_ref()
+                        .is_some_and(|p| p.is_absolute()
+                            && p.ends_with("durosoft.ai-provider-switcher/codex/codex-shim"))))
+                && !id.is_nil()
+                && id.to_string() == self.id,
             "unsupported Codex IDE installation"
         );
         ensure!(
@@ -66,6 +106,16 @@ impl Installation {
                     .any(char::is_control),
             "invalid VS Code settings path"
         );
+        if let Some(path) = &self.provider_switcher {
+            ensure!(
+                !path
+                    .to_str()
+                    .context("provider shim path must be UTF-8")?
+                    .chars()
+                    .any(char::is_control),
+                "invalid provider shim path"
+            );
+        }
         Ok(())
     }
     pub fn launcher(&self, home: &Path, binary: &Path, directory: &Path) -> Result<String> {
@@ -75,7 +125,11 @@ impl Installation {
             "--home",
             home.to_str().context("invalid Gent home")?,
             "integration",
-            "codex-ide",
+            if self.provider_switcher.is_some() {
+                "codex-wrapper"
+            } else {
+                "codex-ide"
+            },
             "--config-dir",
             directory.to_str().context("invalid Codex directory")?,
             "--installation-id",

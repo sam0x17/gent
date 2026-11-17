@@ -1,6 +1,6 @@
 //! User-scope host installation. Only generated Gent fragments enter the journal.
 mod claude_runtime;
-mod document;
+pub(super) mod document;
 use crate::managed_file as files;
 pub(super) use claude_runtime::{ClaudeRuntime, claude_runtime_pinned, claude_runtime_target};
 
@@ -137,6 +137,14 @@ pub(super) fn codex_runtime_target(
 }
 
 pub(super) fn codex_ide_target(home: &Path, directory: &Path, id: &str) -> Result<PathBuf> {
+    codex_route_target(home, directory, id, false)
+}
+
+pub(super) fn codex_wrapper_target(home: &Path, directory: &Path, id: &str) -> Result<()> {
+    codex_route_target(home, directory, id, true).map(|_| ())
+}
+
+fn codex_route_target(home: &Path, directory: &Path, id: &str, wrapper: bool) -> Result<PathBuf> {
     let (directory, socket) = codex_runtime_target(home, Some(directory.into()), false)?;
     let effective = Layout::resolve(Host::Codex, None)?;
     ensure!(
@@ -157,6 +165,10 @@ pub(super) fn codex_ide_target(home: &Path, directory: &Path, id: &str) -> Resul
     ensure!(
         ide.id == id,
         "Codex IDE launcher belongs to an old installation"
+    );
+    ensure!(
+        ide.provider_switcher.is_some() == wrapper,
+        "Codex transport mode changed; reload the editor"
     );
     snapshot.verify()?;
     Ok(socket)
@@ -201,10 +213,49 @@ impl Layout {
             let target = installations[1]
                 .filter(|i| &i.settings == path)
                 .map(|_| &generated);
-            matches_entry(doc.entry.as_ref(), source, target, recovery, path)?;
+            let source_ide = installations[0].filter(|i| &i.settings == path);
+            let target_ide = installations[1].filter(|i| &i.settings == path);
+            let source_provider = source_ide.and_then(|i| i.provider_switcher.as_ref());
+            let target_provider = target_ide.and_then(|i| i.provider_switcher.as_ref());
+            let source_cli = source_provider
+                .or_else(|| {
+                    if source_ide.is_none() {
+                        target_provider
+                    } else {
+                        None
+                    }
+                })
+                .map(|p| json!(p));
+            let target_cli = target_provider
+                .or_else(|| {
+                    if target_ide.is_none() {
+                        source_provider
+                    } else {
+                        None
+                    }
+                })
+                .map(|p| json!(p));
+            let source_cli = source_cli.as_ref().or(source);
+            let target_cli = target_cli.as_ref().or(target);
+            matches_entry(doc.entry.as_ref(), source_cli, target_cli, recovery, path)?;
+            let uses_wrapper = source_provider.is_some() || target_provider.is_some();
+            if uses_wrapper {
+                matches_entry(
+                    doc.wrapper.as_ref(),
+                    source_provider.map(|_| &generated),
+                    target_provider.map(|_| &generated),
+                    recovery,
+                    path,
+                )?;
+            }
+            let mut text = doc.set(target_cli)?;
+            if uses_wrapper {
+                text = document::VscodeDocument::parse(Some(&text))?
+                    .set_wrapper(target_provider.map(|_| &generated))?;
+            }
             edits.push(Edit {
                 snapshot,
-                text: Some(doc.set(target)?),
+                text: Some(text),
                 executable: false,
             });
         }
@@ -642,11 +693,10 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
                         s.binary == desired.binary && s.wake_socket == desired.wake_socket
                     })
                 });
-                desired.codex_ide = Some(
-                    reusable
-                        .cloned()
-                        .unwrap_or_else(|| vscode::Installation::new(settings)),
-                );
+                desired.codex_ide = Some(match reusable {
+                    Some(ide) => ide.clone(),
+                    None => vscode::Installation::select(settings)?,
+                });
             }
         }
         if wake_enabled && args.host == Host::ClaudeCode {
@@ -733,10 +783,17 @@ fn inspect(layout: &Layout, home: &Path) -> Result<Value> {
         let settings = Snapshot::read(&ide.settings)?;
         let document = document::VscodeDocument::parse(settings.text.as_deref())?;
         let launcher = Snapshot::read(&layout.ide_launcher())?;
-        exact &= document.entry == Some(json!(layout.ide_launcher()))
+        let configured = if let Some(provider) = &ide.provider_switcher {
+            document.entry == Some(json!(provider))
+                && document.wrapper == Some(json!(layout.ide_launcher()))
+        } else {
+            document.entry == Some(json!(layout.ide_launcher()))
+        };
+        exact &= configured
             && launcher.text == Some(ide.launcher(&spec.home, &spec.binary, &layout.directory)?)
             && launcher.executable();
-        result["vscode"] = json!({"experimental":true,"settings":ide.settings,"launcher":layout.ide_launcher(),"installation_id":ide.id});
+        result["vscode"] = json!({"experimental":true,"settings":ide.settings,"launcher":layout.ide_launcher(),"installation_id":ide.id,
+            "transport": if ide.provider_switcher.is_some() { "provider_switcher" } else { "shared_server" }});
     }
     if state
         .installed
@@ -790,6 +847,9 @@ fn delivery_next(host: Host, status: &Value) -> &'static str {
         return "Automatic delivery is disabled. Ask the chat to check gent_inbox, or reinstall without --no-wake.";
     }
     match host {
+        Host::Codex if status["vscode"]["transport"] == "provider_switcher" => {
+            "Run AI Provider Switcher: Refresh Models, then reload VS Code and reopen the original chat. The switcher retains model routing and launches Gent's per-window transport. No separate background server is needed. Call a Gent tool and verify a message/reply before relying on unattended delivery."
+        }
         Host::Codex if !status["vscode"].is_null() => {
             "Start the selected server with gent integration start codex (custom sockets must be started separately), then reload VS Code and open or explicitly resume the original chat. The VS Code route is experimental. Call a Gent tool in that chat and verify delivery before leaving it unattended."
         }

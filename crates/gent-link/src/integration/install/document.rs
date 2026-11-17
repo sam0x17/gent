@@ -93,8 +93,9 @@ fn input(value: &Value) -> CstInputValue {
 
 /// VS Code permits comments and trailing commas, but not arbitrary JSON5.
 /// Keep unrelated settings/comments out of Gent's installation record.
-pub(super) struct VscodeDocument {
+pub(in crate::integration) struct VscodeDocument {
     pub entry: Option<Value>,
+    pub wrapper: Option<Value>,
     root: CstRootNode,
     original: String,
 }
@@ -109,17 +110,19 @@ impl VscodeDocument {
         let ast = jsonc_parser::parse_to_ast(text, &Default::default(), &options)
             .map_err(|_| anyhow::anyhow!("invalid JSONC in VS Code settings"))?;
         let mut entry = None;
+        let mut wrapper = None;
         if let Some(value) = ast.value {
             unique(&value)?;
             let object = value
                 .as_object()
                 .context("VS Code settings must be a JSON object")?;
-            if let Some(property) = object
-                .properties
-                .iter()
-                .find(|p| p.name.as_str() == "chatgpt.cliExecutable")
-            {
-                entry = Some(match &property.value {
+            for property in &object.properties {
+                let target = match property.name.as_str() {
+                    "chatgpt.cliExecutable" => &mut entry,
+                    "aiProviderSwitcher.codex.appServerWrapper" => &mut wrapper,
+                    _ => continue,
+                };
+                *target = Some(match &property.value {
                     ast::Value::StringLit(s) => Value::String(s.value.to_string()),
                     ast::Value::NullKeyword(_) => Value::Null,
                     _ => anyhow::bail!("invalid Codex executable override in VS Code settings"),
@@ -130,26 +133,38 @@ impl VscodeDocument {
             .map_err(|_| anyhow::anyhow!("invalid JSONC in VS Code settings"))?;
         Ok(Self {
             entry,
+            wrapper,
             root,
             original: text.into(),
         })
     }
     pub fn set(self, entry: Option<&Value>) -> Result<String> {
-        if self.entry.as_ref() == entry {
+        self.set_property("chatgpt.cliExecutable", entry)
+    }
+    pub fn set_wrapper(self, entry: Option<&Value>) -> Result<String> {
+        self.set_property("aiProviderSwitcher.codex.appServerWrapper", entry)
+    }
+    fn set_property(self, key: &str, entry: Option<&Value>) -> Result<String> {
+        let previous = if key == "chatgpt.cliExecutable" {
+            &self.entry
+        } else {
+            &self.wrapper
+        };
+        if previous.as_ref() == entry {
             return Ok(self.original);
         }
         let object = self
             .root
             .object_value_or_create()
             .context("VS Code settings must be a JSON object")?;
-        if let Some(old) = object.get("chatgpt.cliExecutable") {
+        if let Some(old) = object.get(key) {
             if let Some(entry) = entry {
                 old.set_value(input(entry));
             } else {
                 old.remove();
             }
         } else if let Some(entry) = entry {
-            object.append("chatgpt.cliExecutable", input(entry));
+            object.append(key, input(entry));
         }
         Ok(self.root.to_string())
     }

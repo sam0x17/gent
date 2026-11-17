@@ -111,12 +111,16 @@ pub enum Command {
     /// Installed VS Code transport. The extension owns all input and approvals.
     #[command(hide = true)]
     CodexIde(vscode::Args),
+    /// Transport wrapper launched behind AI Provider Switcher's model adapter.
+    #[command(hide = true)]
+    CodexWrapper(vscode::Args),
 }
 
 pub fn execute(home: &Path, command: Command) -> Result<Value> {
     match command {
         Command::ClaudeWake { .. }
         | Command::CodexIde(_)
+        | Command::CodexWrapper(_)
         | Command::ClaudeWakeGuard { .. }
         | Command::Start(_)
         | Command::Recovery { .. }

@@ -147,7 +147,25 @@ gent integration install codex --vscode
 gent integration start codex
 ```
 
-Reload VS Code, then open or explicitly resume a conversation. Installation preserves unrelated settings and JSON comments, refuses existing executable overrides, and records enough information to recover an interrupted update. It installs a small private shell launcher that invokes Gent's Rust transport. `--vscode-settings PATH` selects another VS Code user-settings file; the default is stable Code's user configuration on Linux or macOS. For the default socket with a custom `--config-dir`, start both the server and VS Code with that `CODEX_HOME`. The editor's home must match the managed launcher. An explicit `--wake-socket PATH` can select a separately configured foreground server.
+Reload VS Code, then open or explicitly resume a conversation. Installation preserves unrelated settings and JSON comments, refuses unknown executable overrides, and records enough information to recover an interrupted update. It installs a small private shell launcher that invokes Gent's Rust transport. `--vscode-settings PATH` selects another VS Code user-settings file; the default is stable Code's user configuration on Linux or macOS. For the default socket with a custom `--config-dir`, start both the server and VS Code with that `CODEX_HOME`. The editor's home must match the managed launcher. An explicit `--wake-socket PATH` can select a separately configured foreground server.
+
+### AI Provider Switcher
+
+AI Provider Switcher manages `chatgpt.cliExecutable`. With its app-server-wrapper compatible version (0.2.1), Gent preserves that setting and uses `aiProviderSwitcher.codex.appServerWrapper` instead. Upgrade the switcher, run **AI Provider Switcher: Refresh Models**, then run:
+
+```sh
+gent integration install codex --vscode
+```
+
+Run **AI Provider Switcher: Refresh Models** again so it picks up the wrapper, then reload the window and reopen the original chat. Ask it to call `gent_identity` or check its Gent inbox to attach its existing agent to this window. Each window starts its own native Codex server with a private socket. This route needs no `gent integration start codex` command. Keep the editor and receiving computer running for unattended delivery.
+
+The switcher retains provider credentials, model choices and routing. Gent preserves its native invocation and overrides only Gent's MCP command/arguments and the app-server transport. It does not save provider settings in its installation journal. Closing the window stops the native process it started. Reopening a chat requires a Gent tool call to attach its saved identity to the new socket; no new registration or enrollment is needed. Automatic recovery of a closed editor window is not supported.
+
+`gent integration status codex --live` reports this route as `per_window`, with connectivity unverified. Probing the separate CLI socket cannot establish editor connectivity. Verify an actual message and reply in the intended chat; use `gent wake` to inspect delivery attempts. The ordinary CLI integration retains its separately configured socket.
+
+The installer requires the switcher's capability marker and refuses older or unknown executable overrides with an upgrade diagnostic. It can recover interrupted wrapper installation and removal. Uninstall removes Gent's wrapper setting and launcher while preserving the switcher's CLI setting and provider configuration.
+
+### Shared-server route validation
 
 Linux VS Code 1.146.0, extension 26.1111.21308 and packaged Codex 0.167.2 pass registration and three automatic inbox/acknowledgment turns, including editor/Gent restart and delivery after a held busy request. Clicking the actual Stop button leaves queued and new messages paused without starting another model request during the observation. Protocol and installer process checks pass on Linux and macOS, including forwarding approval requests unchanged, waiting for the client's response, rejecting stale installations and exiting on server disconnect. The Mac checks do not establish Mac GUI behavior.
 

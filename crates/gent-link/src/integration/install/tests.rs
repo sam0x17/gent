@@ -1,5 +1,6 @@
 use super::*;
 mod defaults;
+mod provider_switcher;
 mod retirement;
 use std::{
     fs,

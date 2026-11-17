@@ -52,6 +52,11 @@ pub(crate) async fn status(
         "--host-binary applies to live Claude inspection; Codex uses its installed socket"
     );
     let mut status = install::status(home, Some(host), directory.clone())?;
+    if status["vscode"]["transport"] == "provider_switcher" {
+        status["runtime"] = json!({"connected":null,"scope":"per_window",
+            "detail":"Each VS Code window owns its native server. The CLI socket does not measure editor connectivity. Call a Gent tool in the intended chat and verify delivery with gent wake."});
+        return Ok(status);
+    }
     let result = async {
         let (_, socket) = install::codex_runtime_target(home, directory, false)?;
         probe(&socket).await
