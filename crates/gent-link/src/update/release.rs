@@ -137,7 +137,7 @@ pub(super) async fn stage(
     #[cfg(feature = "test-updates")]
     command.args(["--features", "test-updates"]);
     super::process::build(&mut command, log).await?;
-    Ok(root.join("bin/gent"))
+    super::install::snapshot_artifact(&root.join("bin/gent"))
 }
 
 /// Retain the current release and its rollback cache. Only SHA-named directories

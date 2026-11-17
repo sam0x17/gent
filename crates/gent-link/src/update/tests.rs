@@ -104,6 +104,39 @@ fn update_preferences_are_local_and_survive_stale_signed_config_projections() {
 }
 
 #[test]
+fn cargo_hard_links_are_detached_before_verification_and_publication() {
+    use std::os::unix::fs::{MetadataExt, symlink};
+    let f = Fixture::new();
+    let cached = f.root.path().join("cached-artifact");
+    fs::hard_link(&f.candidate, &cached).unwrap();
+    assert!(install::hash(&f.candidate).is_err());
+    let snapshot = install::snapshot_artifact(&f.candidate).unwrap();
+    assert_eq!(fs::metadata(&snapshot).unwrap().nlink(), 1);
+    let expected = install::hash(&snapshot).unwrap();
+    fs::write(&cached, b"later build rewrote the cache").unwrap();
+    assert_eq!(install::hash(&snapshot).unwrap(), expected);
+    f.installation
+        .publish(
+            f.root.path(),
+            build('a'),
+            build('b'),
+            &snapshot,
+            &install::hash(&f.installation.binary).unwrap(),
+            false,
+        )
+        .unwrap();
+    assert_eq!(fs::read(&f.installation.binary).unwrap(), b"new executable");
+    fs::remove_file(&f.candidate).unwrap();
+    symlink(&cached, &f.candidate).unwrap();
+    assert!(install::snapshot_artifact(&f.candidate).is_err());
+    fs::remove_file(&f.candidate).unwrap();
+    fs::write(&f.candidate, b"unsafe artifact").unwrap();
+    fs::set_permissions(&f.candidate, fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(install::snapshot_artifact(&f.candidate).is_err());
+    assert_eq!(install::hash(&snapshot).unwrap(), expected);
+}
+
+#[test]
 fn publication_is_atomic_retains_open_executables_and_rolls_back_verified_bytes() {
     use std::io::Read;
     let f = Fixture::new();

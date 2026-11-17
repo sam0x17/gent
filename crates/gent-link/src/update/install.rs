@@ -42,16 +42,55 @@ pub(super) struct Pending {
     pub automatic: bool,
 }
 
-fn owned(path: &Path) -> Result<fs::Metadata> {
+fn artifact(path: &Path) -> Result<fs::Metadata> {
     let meta = fs::symlink_metadata(path)?;
     ensure!(
         meta.is_file()
-            && meta.nlink() == 1
             && meta.uid() == rustix::process::geteuid().as_raw()
             && meta.mode() & 0o002 == 0,
         "update file must be owned, regular and not world-writable"
     );
     Ok(meta)
+}
+
+fn owned(path: &Path) -> Result<fs::Metadata> {
+    let meta = artifact(path)?;
+    ensure!(meta.nlink() == 1, "update file must not be hard-linked");
+    Ok(meta)
+}
+
+/// Cargo may hard-link its installation to cached build artifacts. Detach the
+/// candidate before execution or hashing; published files must remain unlinked.
+pub(super) fn snapshot_artifact(path: &Path) -> Result<PathBuf> {
+    let before = artifact(path)?;
+    let mut source = fs::File::open(path)?;
+    let opened = source.metadata()?;
+    ensure!(
+        before.dev() == opened.dev() && before.ino() == opened.ino(),
+        "Cargo artifact changed while opening"
+    );
+    let parent = path.parent().context("missing Cargo staging directory")?;
+    let mut snapshot = tempfile::NamedTempFile::new_in(parent)?;
+    let copied = std::io::copy(
+        &mut source.by_ref().take(512 * 1024 * 1024 + 1),
+        snapshot.as_file_mut(),
+    )?;
+    let after = source.metadata()?;
+    ensure!(
+        copied <= 512 * 1024 * 1024
+            && copied == before.len()
+            && before.len() == after.len()
+            && before.mtime() == after.mtime()
+            && before.mtime_nsec() == after.mtime_nsec(),
+        "Cargo artifact changed or exceeds its size limit"
+    );
+    snapshot
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o755))?;
+    snapshot.as_file().sync_all()?;
+    let candidate = parent.join("gent-verified");
+    snapshot.persist(&candidate).map_err(|e| e.error)?;
+    Ok(candidate)
 }
 
 pub(super) fn hash(path: &Path) -> Result<String> {
