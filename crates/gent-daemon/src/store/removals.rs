@@ -135,11 +135,11 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn remove_node(&mut self, node: &str) -> Result<Value> {
-        self.identity.signing_owner(self.db)?;
+        self.identity.require_administrator(self.db)?;
         identifier(node)?;
         ensure!(
             node != self.identity.node.id(),
-            "cannot remove the owner node; owner transfer is not implemented"
+            "cannot remove this node from itself; use another enrolled node"
         );
         let exists: bool = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM node_removals WHERE node=?1)",
@@ -148,6 +148,18 @@ impl StoreSession<'_> {
         )?;
         if exists {
             return self.removal(node);
+        }
+        if self.state.state().peer.is_some() {
+            let id = gent_crypto::scoped_id(
+                b"gent/remove-node/v1\0",
+                &[self.state.anchor().cluster_id.as_bytes(), node.as_bytes()],
+            );
+            return self.submit_configuration(
+                &id.to_string(),
+                ConfigurationEdit::RemoveNode {
+                    node_id: node.into(),
+                },
+            );
         }
         let member = self
             .state
@@ -256,7 +268,7 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn node_removals(&self, after: Option<&str>, pending_only: bool) -> Result<Value> {
-        self.identity.signing_owner(self.db)?;
+        self.identity.require_administrator(self.db)?;
         if let Some(id) = after {
             identifier(id)?;
         }
@@ -284,7 +296,7 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn confirm_node_removal(&self, node: &str, revision: u64) -> Result<Value> {
-        self.identity.signing_owner(self.db)?;
+        self.identity.require_administrator(self.db)?;
         identifier(node)?;
         let previous = self.removal(node)?;
         ensure!(

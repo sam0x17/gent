@@ -21,7 +21,7 @@ impl Remote {
         let stage = match &request.action {
             Action::Finish => "Confirming enrollment",
             Action::Pair { action } => match action {
-                PairingOp::Snapshot => "Contacting the cluster owner",
+                PairingOp::Snapshot => "Contacting the inviting node",
                 PairingOp::Enroll { .. } => "Enrolling this node",
                 PairingOp::History { .. } | PairingOp::Configuration { .. } => {
                     "Synchronizing cluster configuration"
@@ -61,12 +61,32 @@ impl Remote {
             )?;
             self.client = Some(client);
         }
-        let result = self
-            .client
-            .as_mut()
-            .expect("channel opened")
-            .invoke(request)
-            .await?;
+        // Peer enrollment is finalized by the ordered configuration service.
+        // Keep the original invocation in the journal until that commit is
+        // visible; a pending reply is not a snapshot or a completed operation.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        let result = loop {
+            let result = self
+                .client
+                .as_mut()
+                .expect("channel opened")
+                .invoke(request)
+                .await?;
+            if !matches!(
+                request.action,
+                Action::Pair {
+                    action: PairingOp::Enroll { .. }
+                }
+            ) || result["state"] != "pending"
+            {
+                break result;
+            }
+            ensure!(
+                tokio::time::Instant::now() < deadline,
+                "configuration enrollment is pending; retry gent cluster join"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        };
         if matches!(
             request.action,
             Action::Pair {

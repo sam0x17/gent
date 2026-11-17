@@ -17,6 +17,7 @@ use std::{
 use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 8] = b"GENTKEY1";
+const PEER_MAGIC: &[u8; 8] = b"GENTKEY3";
 const MAX_KEY_FILE: usize = gent_crypto::MAX_STATE_BYTES + 4096;
 pub(crate) const KEY_FILE: &str = "identity.key";
 
@@ -33,6 +34,8 @@ pub(crate) struct Identity {
     pub owner: Option<OwnerKey>,
     pub initial: VerifiedState,
     home: PathBuf,
+    peer_fenced: bool,
+    pub(crate) legacy_service_checked: bool,
 }
 
 pub(crate) enum SigningOwner<'a> {
@@ -124,6 +127,15 @@ impl Identity {
             bytes.len() > 40 && bytes.len() <= MAX_KEY_FILE,
             "invalid signing key file"
         );
+        let peer_fenced = &bytes[..8] == PEER_MAGIC;
+        if peer_fenced {
+            let variant = bytes.remove(8);
+            ensure!(
+                matches!(variant, b'1' | b'2'),
+                "invalid peer identity format"
+            );
+            bytes[..8].copy_from_slice(if variant == b'1' { MAGIC } else { b"GENTKEY2" });
+        }
         let (node, owner, initial) = if &bytes[..8] == MAGIC {
             ensure!(bytes.len() > 72, "invalid signing key file");
             let bootstrap: Bootstrap = serde_json::from_slice(&bytes[72..])?;
@@ -174,12 +186,17 @@ impl Identity {
             owner,
             initial,
             home: home.into(),
+            peer_fenced,
+            legacy_service_checked: true,
         };
         identity.state(db)?;
         Ok(identity)
     }
 
     pub fn is_current_owner(&self, state: &VerifiedState) -> bool {
+        if state.state().peer.is_some() {
+            return false;
+        }
         if let Some(successor) = state
             .state()
             .owner_transitions
@@ -208,7 +225,49 @@ impl Identity {
     }
 
     pub fn signing_owner(&self, db: &Connection) -> Result<SigningOwner<'_>> {
+        ensure!(
+            !self.peer_fenced,
+            "configuration migration has fenced legacy signing"
+        );
+        ensure!(
+            self.legacy_service_checked,
+            "checking the cluster authority; legacy changes wait for relay reconciliation"
+        );
+        self.migration_owner(db)
+    }
+
+    pub(crate) fn legacy_signing_fenced(&self) -> bool {
+        self.peer_fenced
+    }
+
+    pub(crate) fn can_administer(&self, state: &VerifiedState) -> bool {
+        if state.state().peer.is_some() {
+            state
+                .state()
+                .nodes
+                .get(self.node.id())
+                .is_some_and(|n| n.can_configure && n.signing_key == self.node.public_key())
+        } else {
+            self.is_current_owner(state) && !self.peer_fenced
+        }
+    }
+
+    pub(crate) fn require_administrator(&self, db: &Connection) -> Result<()> {
+        ensure!(
+            self.can_administer(&self.state(db)?),
+            "this node cannot administer the cluster"
+        );
+        Ok(())
+    }
+
+    /// This key can only prepare the one transition; it cannot be used by
+    /// ordinary mutation paths after the identity file has been fenced.
+    pub(super) fn migration_owner(&self, db: &Connection) -> Result<SigningOwner<'_>> {
         let state = self.state(db)?;
+        ensure!(
+            state.state().peer.is_none(),
+            "legacy owner authority is retired"
+        );
         ensure!(
             self.is_current_owner(&state),
             "local owner signing key is retired or belongs to another node"
@@ -227,6 +286,50 @@ impl Identity {
         Ok(SigningOwner::Successor(Box::new(
             crate::store::handoff::active_key(&self.home, db, &state, &self.node)?,
         )))
+    }
+
+    /// Persist this before committing a migration journal. Older executables
+    /// reject GENTKEY3, including a binary restored by updater rollback. A
+    /// crash before the journal commit leaves legacy signing fenced; the new
+    /// executable can reconstruct the transition from its pinned old state.
+    pub(super) fn fence_peer_authority(&mut self) -> Result<()> {
+        let path = self.home.join(KEY_FILE);
+        let metadata = fs::symlink_metadata(&path)?;
+        ensure!(
+            metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.permissions().mode() & 0o077 == 0,
+            "identity must remain a private regular file"
+        );
+        let mut old = Zeroizing::new(Vec::new());
+        fs::File::open(&path)?
+            .take(MAX_KEY_FILE as u64 + 1)
+            .read_to_end(&mut old)?;
+        ensure!(
+            old.len() <= MAX_KEY_FILE,
+            "identity file exceeds its size limit"
+        );
+        if old.len() > 41 && &old[..8] == PEER_MAGIC {
+            ensure!(
+                matches!(old[8], b'1' | b'2'),
+                "invalid peer identity format"
+            );
+            self.peer_fenced = true;
+            fs::File::open(&self.home)?.sync_all()?;
+            return Ok(());
+        }
+        ensure!(
+            old.len() > 40 && matches!(&old[..8], b"GENTKEY1" | b"GENTKEY2"),
+            "identity changed during migration"
+        );
+        let mut fenced = Zeroizing::new(Vec::with_capacity(old.len() + 1));
+        fenced.extend_from_slice(PEER_MAGIC);
+        fenced.push(old[7]);
+        fenced.extend_from_slice(&old[8..]);
+        // Mark the process first too: a directory-sync error can follow a
+        // successful rename and must not reopen the old signing path.
+        self.peer_fenced = true;
+        config::write_private(&path, &fenced)
     }
 
     pub fn state(&self, db: &Connection) -> Result<VerifiedState> {
@@ -309,6 +412,20 @@ pub(crate) fn install_joined(
     node: &NodeIdentity,
     state: &VerifiedState,
 ) -> Result<()> {
+    install_joined_checkpoint(home, node, state, None, b"[]")
+}
+
+pub(crate) fn install_joined_checkpoint(
+    home: &Path,
+    node: &NodeIdentity,
+    state: &VerifiedState,
+    commit: Option<&gent_protocol::configuration_log::Commit>,
+    decisions: &[u8],
+) -> Result<()> {
+    ensure!(
+        state.state().peer.is_some() == commit.is_some(),
+        "peer enrollment requires its committed checkpoint"
+    );
     state.authorize_node(node.id(), &node.public_key(), crate::store::now() as u64)?;
     config::private_dir(home)?;
     ensure!(
@@ -319,7 +436,11 @@ pub(crate) fn install_joined(
     let staging = tempfile::tempdir_in(parent)?;
     fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700))?;
     let mut bytes = Zeroizing::new(Vec::new());
-    bytes.extend_from_slice(b"GENTKEY2");
+    bytes.extend_from_slice(if commit.is_some() {
+        b"GENTKEY32"
+    } else {
+        b"GENTKEY2".as_slice()
+    });
     bytes.extend_from_slice(node.expose_secret().as_ref());
     serde_json::to_writer(
         &mut *bytes,
@@ -353,6 +474,10 @@ pub(crate) fn install_joined(
             extra: Default::default(),
         },
     )?;
+    if let Some(commit) = commit {
+        let db = encrypted::open_database(staging.path(), "state.sqlite3")?;
+        crate::store::peer_configuration::install_checkpoint(&db, node, state, commit, decisions)?;
+    }
     drop(crate::store::Store::open(staging.path())?);
     // Renaming over the empty destination publishes the whole initialized node.
     // A concurrent writer making the destination nonempty causes rename to fail.

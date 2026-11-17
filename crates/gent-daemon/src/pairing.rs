@@ -50,6 +50,10 @@ pub struct Snapshot {
     pub relay: Option<RelayAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceRelay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<gent_protocol::configuration_log::Commit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_decisions: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,6 +317,7 @@ fn read_private_bytes(path: &Path, limit: usize) -> Result<Zeroizing<Vec<u8>>> {
 }
 
 async fn catch_up(
+    home: &Path,
     endpoint: &mut OrderedEndpoint<'_>,
     peer: &mut impl Peer,
     target: Option<&Checkpoint>,
@@ -321,6 +326,8 @@ async fn catch_up(
     #[serde(deny_unknown_fields)]
     struct History {
         record: Option<String>,
+        #[serde(default)]
+        commit: Option<gent_protocol::configuration_log::Commit>,
     }
     // One bounded record per request; checkpoints survive interruptions.
     for _ in 0..4096 {
@@ -342,6 +349,11 @@ async fn catch_up(
             })
             .await?;
         let history: History = serde_json::from_value(value)?;
+        if let Some(commit) = history.commit {
+            ensure!(history.record.is_none(), "ambiguous pairing history");
+            Store::open(home)?.accept_configuration_commit(&commit)?;
+            continue;
+        }
         let Some(record) = history.record else {
             ensure!(target.is_none(), "missing pairing history");
             return Ok(());
@@ -388,7 +400,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
                 endpoint.authority_state()?.anchor() == state.anchor(),
                 "pairing authority changed"
             );
-            catch_up(&mut endpoint, peer, None).await?;
+            catch_up(&home, &mut endpoint, peer, None).await?;
             drop(endpoint);
             connect_data(&home, &node, &snapshot.writer, peer).await?;
         }
@@ -483,12 +495,21 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
             now() as u64,
         )?,
     };
-    let enrolled: Snapshot = serde_json::from_value(
-        peer.call(PairingOp::Enroll {
-            request: STANDARD.encode(request.encode()?),
-        })
-        .await?,
-    )?;
+    let action = PairingOp::Enroll {
+        request: STANDARD.encode(request.encode()?),
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    let enrolled: Snapshot = loop {
+        let value = peer.call(action.clone()).await?;
+        if value["state"] != "pending" {
+            break serde_json::from_value(value)?;
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "configuration enrollment is still pending; retry the same join code"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    };
     state = enrolled.verify(options.cluster)?;
     pending.pin(&state)?;
     pending.pin_service(&enrolled.service)?;
@@ -504,7 +525,22 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
     // Both snapshots arrive through an independently authenticated owner channel. This is
     // bootstrap authority only; an installed runtime advances through history.
     if !config::path(&pending.runtime).exists() {
-        Store::install_joined(&pending.runtime, &pending.node, &state)?;
+        crate::runtime::install_joined_checkpoint(
+            &pending.runtime,
+            &pending.node,
+            &state,
+            enrolled.configuration.as_ref(),
+            &if enrolled.configuration.is_some() {
+                STANDARD.decode(
+                    enrolled
+                        .configuration_decisions
+                        .as_ref()
+                        .context("configuration retry history is missing from enrollment")?,
+                )?
+            } else {
+                b"[]".to_vec()
+            },
+        )?;
     }
     pending.save_replacement()?;
     let mut endpoint = OrderedEndpoint::open_runtime(&pending.runtime, &pending.node)?;
@@ -512,7 +548,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
         endpoint.authority_state()?.anchor() == state.anchor(),
         "installed pairing authority differs"
     );
-    for attempt in 0..3 {
+    for attempt in 0..if state.state().peer.is_some() { 0 } else { 3 } {
         let invite_path = pending
             .dir
             .join(format!("invitation-{}.json", pending.seed.stream_request));
@@ -529,7 +565,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
             let package = if package_path.exists() {
                 read_private_bytes(&package_path, 24 * 1024)?.to_vec()
             } else {
-                catch_up(&mut endpoint, peer, None).await?;
+                catch_up(&pending.runtime, &mut endpoint, peer, None).await?;
                 let package = endpoint.key_package(pending.seed.package_request, now() as u64)?;
                 config::write_private(&package_path, &package)?;
                 package
@@ -556,13 +592,19 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
             .iter()
             .any(|s| s.group == invitation.packet.group())
         {
-            catch_up(&mut endpoint, peer, None).await?;
+            catch_up(&pending.runtime, &mut endpoint, peer, None).await?;
             endpoint.join_configuration(&invitation, now() as u64)?;
             break;
         }
         let current = endpoint.authority_state()?;
         if current.checkpoint().revision <= invitation.grant.grant.base.revision {
-            catch_up(&mut endpoint, peer, Some(&invitation.grant.grant.base)).await?;
+            catch_up(
+                &pending.runtime,
+                &mut endpoint,
+                peer,
+                Some(&invitation.grant.grant.base),
+            )
+            .await?;
             if endpoint
                 .authority_state()?
                 .require_fresh(now() as u64)
@@ -578,7 +620,7 @@ pub async fn join(home: &Path, options: Options<'_>, peer: &mut impl Peer) -> Re
         pending.reset_stream()?;
         endpoint = OrderedEndpoint::open_runtime(&pending.runtime, &pending.node)?;
     }
-    catch_up(&mut endpoint, peer, None).await?;
+    catch_up(&pending.runtime, &mut endpoint, peer, None).await?;
     drop(endpoint);
     connect_data(&pending.runtime, &pending.node, &enrolled.writer, peer).await?;
     drop(Store::open(&pending.runtime)?); // Project the latest verified policy.
@@ -683,7 +725,7 @@ async fn connect_data(
         })
         .await?,
     )?;
-    catch_up(&mut endpoint, peer, None).await?;
+    catch_up(home, &mut endpoint, peer, None).await?;
     let incoming = Packet::decode(&STANDARD.decode(invitation.packet)?)?;
     endpoint.join(&incoming, writer, &[node.id(), writer], now() as u64)?;
     let reverse_id =

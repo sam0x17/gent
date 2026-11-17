@@ -62,7 +62,7 @@ fn native_request(spec: &Spec) -> String {
 
 impl StoreSession<'_> {
     fn invitation_writer(&self) -> Result<String> {
-        if self.identity.is_current_owner(&self.state) {
+        if self.identity.can_administer(&self.state) {
             Ok(self.identity.node.id().into())
         } else {
             self.configuration_writer()
@@ -220,7 +220,7 @@ impl Store {
         )?;
         if !self
             .identity
-            .is_current_owner(&self.identity.state(&self.db)?)
+            .can_administer(&self.identity.state(&self.db)?)
         {
             return Ok(());
         }

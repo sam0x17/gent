@@ -21,6 +21,7 @@ mod node_home;
 mod owner_recovery;
 mod owner_transfer;
 mod pairing;
+mod peer_configuration;
 mod permission_admin;
 mod service;
 mod setup;
@@ -256,7 +257,10 @@ enum RelayCommand {
 }
 #[derive(Subcommand)]
 enum ClusterCommand {
+    /// Enable equal node administration and ordered encrypted configuration.
+    Upgrade,
     /// Prepare, commit, inspect or resume a signing-owner transfer.
+    #[command(hide = true)]
     Owner {
         #[command(subcommand)]
         command: Option<owner_transfer::Command>,
@@ -354,7 +358,7 @@ enum NodeCommand {
     Reset,
     /// Issue a one-time invitation that assigns this name to the joining node.
     Add(enrollment::AddArgs),
-    /// Remove another node from signed membership and revoke its service access (owner only).
+    /// Remove another node from membership and revoke its service access.
     Remove { node: String },
     /// List durable removal progress. Confirmation refers to service access, not peer sync.
     Removals {
@@ -363,7 +367,7 @@ enum NodeCommand {
         #[arg(long)]
         pending: bool,
     },
-    /// Grant or revoke configuration management on an enrolled node (owner only).
+    /// Grant or revoke cluster administration on an enrolled node.
     Admin {
         #[command(subcommand)]
         command: NodeAdminCommand,
@@ -751,6 +755,9 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Cluster {
             command: Some(ClusterCommand::Renew),
         }) => configure(&home, &request_id, ConfigurationEdit::Renew).await?,
+        Some(Command::Cluster {
+            command: Some(ClusterCommand::Upgrade),
+        }) => peer_configuration::upgrade(&home).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Owner { command }),
         }) => owner_transfer::execute(&home, &request_id, command).await?,

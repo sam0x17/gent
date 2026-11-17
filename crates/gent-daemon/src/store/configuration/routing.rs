@@ -51,6 +51,13 @@ fn remember(db: &Connection, origin: &str, id: &str, epoch: u32, writer: &str) -
 }
 
 pub(in crate::store) fn cancel_requests(db: &Connection, origin: &str, id: &str) -> Result<()> {
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='peer_configuration_routes')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        db.execute("UPDATE network_events SET cancelled=1 WHERE id IN (SELECT event FROM peer_configuration_routes WHERE origin=?1 AND id=?2)", params![origin,id])?;
+    }
     let request = Uuid::parse_str(id)?;
     let mut events = vec![event_id(false, 0, origin, request, "")];
     let mut query =
@@ -120,6 +127,43 @@ impl StoreSession<'_> {
         writer: &str,
         edit: ConfigurationEdit,
     ) -> Result<()> {
+        if self.state.state().peer.is_some() {
+            for (target, member) in &self.state.state().nodes {
+                if !member.can_configure || target == origin {
+                    continue;
+                }
+                let linked: bool = self.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM network_links WHERE peer=?1 AND peer_key=?2)",
+                    params![target, member.signing_key.as_slice()],
+                    |r| r.get(0),
+                )?;
+                if !linked {
+                    continue;
+                }
+                let event = scoped_id(
+                    b"gent/peer-configuration-request/v1\0",
+                    &[origin.as_bytes(), request.as_bytes(), target.as_bytes()],
+                );
+                let known: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM peer_configuration_routes WHERE origin=?1 AND id=?2 AND writer=?3)",params![origin,request.to_string(),target],|r|r.get(0))?;
+                if known {
+                    continue;
+                }
+                self.queue(
+                    target,
+                    event,
+                    Event::ConfigurationRequest {
+                        request_id: request,
+                        edit: Box::new(edit.clone()),
+                    },
+                    None,
+                )?;
+                self.db.execute(
+                    "INSERT INTO peer_configuration_routes VALUES(?1,?2,?3,?4)",
+                    params![origin, request.to_string(), target, event.to_string()],
+                )?;
+            }
+            return Ok(());
+        }
         remember(
             self.db,
             origin,
@@ -139,6 +183,20 @@ impl StoreSession<'_> {
     }
 
     fn reroute_configuration(&mut self) -> Result<bool> {
+        if self.state.state().peer.is_some() {
+            let before = self.db.total_changes();
+            if !self.identity.can_administer(&self.state) {
+                let origin = self.identity.node.id();
+                let ids = self.db.prepare("SELECT e.id FROM configuration_edits e JOIN configuration_pending p USING(origin,id) WHERE origin=?1 AND result IS NULL ORDER BY e.rowid LIMIT 64")?.query_map([origin],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                for id in ids {
+                    let edit = pending::load(self.db, origin, &id)?;
+                    if administration::edit_identity(&edit).is_some() {
+                        self.queue_configuration(origin, Uuid::parse_str(&id)?, "", edit)?;
+                    }
+                }
+            }
+            return Ok(self.db.total_changes() != before);
+        }
         if self.state.owner_epoch() == 0 {
             return Ok(false);
         }
@@ -220,7 +278,7 @@ impl StoreSession<'_> {
 }
 
 impl Store {
-    pub(in crate::store) fn reconcile_configuration(&mut self) -> Result<()> {
+    pub(crate) fn reconcile_configuration(&mut self) -> Result<()> {
         let tx = rusqlite::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let state = self.identity.state(&tx)?;
         let changed = self.network_session(&tx, state).reroute_configuration()?;

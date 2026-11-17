@@ -29,6 +29,8 @@ struct ClusterStatus {
 
 #[derive(Deserialize)]
 struct Authority {
+    #[serde(default)]
+    mode: String,
     revision: u64,
     expires_at: u64,
     fresh: bool,
@@ -118,11 +120,16 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
                 (
                     "Configuration",
                     format!(
-                        "{} (revision {})",
+                        "{} ({} {})",
                         if value.authority.fresh {
                             "current"
                         } else {
                             "stale"
+                        },
+                        if value.authority.mode == "peers" {
+                            "sequence"
+                        } else {
+                            "revision"
                         },
                         value.authority.revision
                     ),

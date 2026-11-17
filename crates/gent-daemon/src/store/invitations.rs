@@ -1,6 +1,42 @@
 //! Owner-local admission journal. Service approval never substitutes for this
 //! state. The only peer-facing entry points accept authenticated Noise traffic.
 use super::*;
+
+pub(super) fn validate_queued_enrollment(
+    db: &Connection,
+    state: &VerifiedState,
+    identity: &Identity,
+    id: &str,
+    request: &gent_crypto::SignedEnrollment,
+    can_configure: bool,
+    timestamp: u64,
+) -> Result<()> {
+    let row = record(db, id)?;
+    row.offer.verify_current(state, timestamp)?;
+    let claim = row.claim.as_ref().context("invitation claim is missing")?;
+    ensure!(
+        row.phase == "claimed"
+            && row.offer.offer.issuer_id == identity.node.id()
+            && row.offer.offer.issuer_key == identity.node.public_key()
+            && row.offer.offer.can_configure == can_configure
+            && row.offer.offer.replaces == request.request.replaces
+            && claim.id == request.request.node_id
+            && claim.key == request.request.member.signing_key
+            && claim.name == request.request.member.name,
+        "enrollment invitation is no longer authorized"
+    );
+    if matches!(&row.offer.offer.purpose, Purpose::NamedNode { .. }) {
+        ensure!(
+            state
+                .state()
+                .nodes
+                .iter()
+                .all(|(id, n)| id == &claim.id || n.name != claim.name),
+            "node name is already enrolled"
+        );
+    }
+    Ok(())
+}
 use gent_crypto::invitation::{
     ClaimedNode, Options, OwnerInvitation, Purpose, ServiceBinding, SignedOffer,
     channel::{Channel, Hello, PendingClaim},
@@ -273,7 +309,7 @@ impl Store {
         if self.config.service.is_none()
             || !self
                 .identity
-                .is_current_owner(&self.identity.state(&self.db)?)
+                .can_administer(&self.identity.state(&self.db)?)
         {
             return Ok(Vec::new());
         }
@@ -341,7 +377,7 @@ impl Store {
 
     fn invitation_owner(&self, credential: &str) -> Result<()> {
         ensure!(hash(credential) == self.owner_hash, "unauthorized");
-        self.identity.signing_owner(&self.db)?;
+        self.identity.require_administrator(&self.db)?;
         Ok(())
     }
     fn invitation_service(&self) -> Result<ServiceBinding> {
@@ -370,7 +406,7 @@ impl Store {
         Ok(service)
     }
     fn invitation_authority(&self, record: &Record, timestamp: u64) -> Result<VerifiedState> {
-        self.identity.signing_owner(&self.db)?;
+        self.identity.require_administrator(&self.db)?;
         let state = self.identity.state(&self.db)?;
         record.offer.verify_current(&state, timestamp)?;
         ensure!(
@@ -577,18 +613,23 @@ impl Store {
                 < MAX_INVITATIONS,
             "invitation capacity reached; wait for existing offers to expire"
         );
-        let owner = OwnerInvitation::issue(
-            &*self.identity.signing_owner(&self.db)?,
-            &state,
-            &self.identity.node,
-            Options {
-                service,
-                purpose,
-                can_configure,
-                replaces,
-            },
-            timestamp,
-        )?;
+        let options = Options {
+            service,
+            purpose,
+            can_configure,
+            replaces,
+        };
+        let owner = if state.state().peer.is_some() {
+            OwnerInvitation::issue_peer(&state, &self.identity.node, options, timestamp)?
+        } else {
+            OwnerInvitation::issue(
+                &*self.identity.signing_owner(&self.db)?,
+                &state,
+                &self.identity.node,
+                options,
+                timestamp,
+            )?
+        };
         let offer = owner.invitation().offer();
         let private = owner.encode()?;
         tx.execute("INSERT INTO invitations(id,create_request,intent,offer,secret,phase,expires) VALUES(?1,?2,?3,?4,?5,'draft',?6)", params![offer.offer.id,request,intent.as_slice(),offer.encode()?,private.as_slice(),offer.offer.expires_at])?;

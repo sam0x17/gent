@@ -448,6 +448,18 @@ fn one_request_id() -> u32 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConfigurationEdit {
+    EnrollNode {
+        request: String,
+        can_configure: bool,
+        invitation: Option<String>,
+    },
+    RemoveNode {
+        node_id: String,
+    },
+    DelegateNode {
+        node_id: String,
+        allow: bool,
+    },
     CreateGroup {
         name: String,
     },
@@ -526,6 +538,7 @@ pub enum ConfigurationEdit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOp {
+    PreparePeerConfiguration,
     Groups {
         name: Option<String>,
     },

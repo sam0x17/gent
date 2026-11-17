@@ -223,7 +223,9 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn nodes(&self) -> Result<Value> {
-        let owner = if self.identity.is_current_owner(&self.state) {
+        let owner = if self.state.state().peer.is_some() {
+            None
+        } else if self.identity.is_current_owner(&self.state) {
             Some(self.identity.node.id().to_owned())
         } else {
             self.configuration_writer().ok()

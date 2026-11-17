@@ -28,6 +28,14 @@ fn agent_usage(db: &Connection, administrator: &str) -> Result<(u64, u64, u64, u
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Summary {
+    EnrollNode,
+    RemoveNode {
+        node_id: String,
+    },
+    DelegateNode {
+        node_id: String,
+        allow: bool,
+    },
     CreateGroup {
         name: String,
     },
@@ -83,6 +91,14 @@ enum Summary {
 impl From<&ConfigurationEdit> for Summary {
     fn from(edit: &ConfigurationEdit) -> Self {
         match edit {
+            ConfigurationEdit::EnrollNode { .. } => Self::EnrollNode,
+            ConfigurationEdit::RemoveNode { node_id } => Self::RemoveNode {
+                node_id: node_id.clone(),
+            },
+            ConfigurationEdit::DelegateNode { node_id, allow } => Self::DelegateNode {
+                node_id: node_id.clone(),
+                allow: *allow,
+            },
             ConfigurationEdit::CreateGroup { name } => Self::CreateGroup { name: name.clone() },
             ConfigurationEdit::DeleteGroup { name } => Self::DeleteGroup { name: name.clone() },
             ConfigurationEdit::GroupMembers {
@@ -209,7 +225,7 @@ pub(super) fn result_size(result: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn rejection_reason(mut reason: String) -> String {
+pub(in crate::store) fn rejection_reason(mut reason: String) -> String {
     if reason.len() > MAX_REASON_BYTES {
         let mut end = MAX_REASON_BYTES;
         while !reason.is_char_boundary(end) {
@@ -220,7 +236,7 @@ pub(super) fn rejection_reason(mut reason: String) -> String {
     reason
 }
 
-pub(super) fn insert(
+pub(in crate::store) fn insert(
     db: &Connection,
     origin: &str,
     id: &str,

@@ -298,6 +298,24 @@ impl Service {
         );
         Ok(relay.into())
     }
+    pub async fn initialize_configuration(
+        &self,
+        bootstrap: &gent_protocol::configuration_log::Bootstrap,
+    ) -> Result<()> {
+        let (status, value) = response(
+            self.request(
+                Method::POST,
+                &format!("v1/clusters/{}/configuration", bootstrap.cluster),
+            )?
+            .bearer_auth(&self.saved.token)
+            .json(bootstrap),
+        )
+        .await?;
+        let saved: gent_protocol::configuration_log::Bootstrap =
+            serde_json::from_value(success(status, value)?)?;
+        ensure!(saved == *bootstrap, "configuration bootstrap changed");
+        Ok(())
+    }
     pub async fn reserve_cluster(&self, id: &str) -> Result<()> {
         let (status, value) = response(
             self.request(Method::PUT, &format!("v1/clusters/{id}"))?

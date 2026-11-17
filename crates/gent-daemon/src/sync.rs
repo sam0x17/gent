@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Notify, task::JoinHandle, time::Instant};
+mod bootstrap;
 mod files;
 pub(crate) mod health;
 mod notifications;
@@ -54,6 +55,7 @@ impl Relay {
         let mut value = header::HeaderValue::from_str(&format!("Bearer {}", credential.as_str()))?;
         value.set_sensitive(true);
         let mut headers = header::HeaderMap::new();
+        headers.insert("X-Gent-Authority", header::HeaderValue::from_static("3"));
         headers.insert(header::AUTHORIZATION, value.clone());
         let client = Client::builder()
             .default_headers(headers)
@@ -290,9 +292,10 @@ struct Retry {
 /// file. The task needs no MCP turn and never publishes plaintext pairing metadata.
 pub fn start(store: SharedStore) -> Result<Option<JoinHandle<()>>> {
     let (settings, wakeup, health) = {
-        let guard = store
+        let mut guard = store
             .lock()
             .map_err(|_| anyhow::anyhow!("store lock poisoned"))?;
+        guard.begin_configuration_discovery();
         (
             guard.relay_settings(),
             guard.sync_wakeup.clone(),
@@ -321,9 +324,13 @@ async fn run(
     let mut transferred = BTreeMap::<Vec<u8>, u64>::new();
     let mut cursor = 0usize;
     let mut previous_error = None;
+    let configuration = crate::configuration_log::ConfigurationRelay::from_relay(relay.clone());
     loop {
+        let configuration_result = configuration.sync_once(store.clone()).await;
+        let bootstrap_result = bootstrap::sync(store.clone(), &relay).await;
         let result = local(store.clone(), |store| {
             let mesh = store.mesh_tick();
+            store.reconcile_configuration()?;
             let preparation = store.owner_preparation_tick();
             let transfer = store.owner_transfer_tick();
             let presence = store.presence_tick();
@@ -339,9 +346,13 @@ async fn run(
             Ok((store.sync_streams()?, pending))
         })
         .await;
-        let mut progressed = false;
+        let mut progressed = configuration_result.as_ref().copied().unwrap_or(false)
+            || bootstrap_result.as_ref().copied().unwrap_or(false);
         let mut mesh_pending = false;
-        let mut error = None;
+        let mut error = configuration_result
+            .err()
+            .or_else(|| bootstrap_result.err())
+            .map(|error| error.to_string());
         let (mut successes, mut failures, mut local_error) = (0, 0, false);
         match result {
             Ok((streams, pending)) => {

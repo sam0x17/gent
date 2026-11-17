@@ -2,6 +2,8 @@
 use super::*;
 use gent_protocol::configuration_log::{Commit, Head, Header};
 #[cfg(feature = "invitation")]
+pub mod direct;
+#[cfg(feature = "invitation")]
 pub mod envelope;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -12,12 +14,50 @@ pub struct Authority {
     /// The one transition record is signed by the previously pinned owner.
     /// Every subsequent record is signed by an authorized member node.
     pub migration: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<Request>,
+}
+
+/// Logical request identity, encrypted with configuration. Delegated requests
+/// keep this identity when a different administrator publishes their result.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Request {
+    pub origin: String,
+    pub id: String,
+    pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<String>,
+}
+
+impl Request {
+    fn validate(&self) -> Result<()> {
+        id(&self.origin)?;
+        id(&self.id)?;
+        ensure!(
+            self.rejection.as_ref().is_none_or(|r| r.len() <= 1024),
+            "configuration rejection exceeds limit"
+        );
+        ensure!(
+            self.fingerprint.len() == 64
+                && self
+                    .fingerprint
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "invalid logical configuration request"
+        );
+        Ok(())
+    }
 }
 
 impl Authority {
     pub(super) fn validate(&self, state: &ClusterState) -> Result<()> {
         ensure!(self.header.valid(), "invalid peer ordering header");
         public_key(&self.signer)?;
+        if let Some(request) = &self.request {
+            ensure!(!self.migration, "migration cannot decide a new edit");
+            request.validate()?;
+        }
         ensure!(
             self.header.cluster == state.cluster_id
                 && self.header.previous.sequence + 1 == state.revision,
@@ -54,6 +94,7 @@ impl ConfigurationSigner for OwnerKey {
 pub struct NodeSigner<'a> {
     node: &'a NodeIdentity,
     header: Header,
+    request: Option<Request>,
 }
 
 impl<'a> NodeSigner<'a> {
@@ -62,7 +103,17 @@ impl<'a> NodeSigner<'a> {
             header.valid() && header.origin == node.id(),
             "wrong proposal identity"
         );
-        Ok(Self { node, header })
+        Ok(Self {
+            node,
+            header,
+            request: None,
+        })
+    }
+
+    pub fn with_request(mut self, request: Request) -> Result<Self> {
+        request.validate()?;
+        self.request = Some(request);
+        Ok(self)
     }
 }
 
@@ -94,6 +145,7 @@ impl ConfigurationSigner for NodeSigner<'_> {
             header: self.header.clone(),
             signer: self.node.public_key(),
             migration: false,
+            request: self.request.clone(),
         });
         state.validate()?;
         let signature = self
@@ -135,15 +187,19 @@ impl VerifiedState {
             .get(node.id())
             .context("migration node unavailable")?;
         ensure!(
-            member.signing_key == node.public_key() && member.can_configure,
-            "migration node must already have configuration access"
+            member.signing_key == node.public_key(),
+            "migration node key mismatch"
         );
         let mut state = self.renew(owner, now)?.state;
+        // The legacy signing owner always had effective configuration access,
+        // even in older encodings that left its delegated-access flag false.
+        state.nodes.get_mut(node.id()).unwrap().can_configure = true;
         state.version = 3;
         state.peer = Some(Authority {
             header,
             signer: node.public_key(),
             migration: true,
+            request: None,
         });
         state.validate()?;
         let signature = owner
@@ -205,7 +261,7 @@ pub(super) fn verify_step(previous: &VerifiedState, update: &SignedState) -> Res
                 .get(&peer.header.origin)
                 .context("peer signer is not enrolled")?;
             ensure!(
-                member.signing_key == peer.signer && member.can_configure,
+                member.signing_key == peer.signer && (peer.migration || member.can_configure),
                 "peer signer is not authorized by prior state"
             );
             if peer.migration {
@@ -216,6 +272,11 @@ pub(super) fn verify_step(previous: &VerifiedState, update: &SignedState) -> Res
                 expected.previous = update.state.previous;
                 expected.issued_at = update.state.issued_at;
                 expected.expires_at = update.state.expires_at;
+                expected
+                    .nodes
+                    .get_mut(&peer.header.origin)
+                    .unwrap()
+                    .can_configure = true;
                 ensure!(
                     encode(&expected, MAX_STATE_BYTES)? == encode(&update.state, MAX_STATE_BYTES)?,
                     "migration cannot change membership or policy"

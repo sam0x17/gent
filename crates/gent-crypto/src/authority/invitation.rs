@@ -167,7 +167,10 @@ impl SignedOffer {
     }
     fn verify_signature(&self) -> Result<()> {
         let offer = &self.offer;
-        ensure!(offer.version == 1, "unsupported invitation version");
+        ensure!(
+            matches!(offer.version, 1 | 2),
+            "unsupported invitation version"
+        );
         id(&offer.id)?;
         ensure!(
             gent_protocol::service::invitations::issued_at(&offer.id) == Some(offer.issued_at),
@@ -219,7 +222,11 @@ impl SignedOffer {
         }
         lifetime(offer.issued_at, offer.expires_at, OFFER_LIFETIME)?;
         verify(
-            &owner,
+            if offer.version == 1 {
+                &owner
+            } else {
+                &offer.issuer_key
+            },
             OFFER_DOMAIN,
             offer,
             &self.signature,
@@ -236,6 +243,17 @@ impl SignedOffer {
 
     pub fn verify_current(&self, state: &VerifiedState, now: u64) -> Result<()> {
         self.verify(state.anchor(), now)?;
+        if self.offer.version == 2 || state.state().peer.is_some() {
+            ensure!(
+                state.state().peer.is_some()
+                    && state
+                        .state()
+                        .nodes
+                        .get(&self.offer.issuer_id)
+                        .is_some_and(|n| n.can_configure),
+                "invitation issuer cannot administer this cluster"
+            );
+        }
         ensure!(
             self.offer.owner_transitions == state.state().owner_transitions,
             "invitation is from another owner epoch"
@@ -318,6 +336,39 @@ impl OwnerInvitation {
             owner.public_key() == state.state().owner_key,
             "wrong invitation owner"
         );
+        ensure!(
+            state.state().peer.is_none(),
+            "legacy invitation signing is fenced"
+        );
+        Self::issue_with(&owner.0, 1, state, issuer, options, now)
+    }
+
+    pub fn issue_peer(
+        state: &VerifiedState,
+        issuer: &NodeIdentity,
+        options: Options,
+        now: u64,
+    ) -> Result<Self> {
+        ensure!(
+            state.state().peer.is_some()
+                && state
+                    .state()
+                    .nodes
+                    .get(issuer.id())
+                    .is_some_and(|n| n.can_configure),
+            "node cannot issue invitations"
+        );
+        Self::issue_with(&issuer.key, 2, state, issuer, options, now)
+    }
+
+    fn issue_with(
+        key: &SigningKey,
+        version: u8,
+        state: &VerifiedState,
+        issuer: &NodeIdentity,
+        options: Options,
+        now: u64,
+    ) -> Result<Self> {
         state.authorize_node(issuer.id(), &issuer.public_key(), now)?;
         if let Some(node) = options.purpose.continuation() {
             state.authorize_node(&node.id, &node.key, now)?;
@@ -353,7 +404,7 @@ impl OwnerInvitation {
         let routing = random_secret()?;
         let psk = random_secret()?;
         let offer = Offer {
-            version: 1,
+            version,
             id: Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, now, 0)).to_string(),
             anchor: state.anchor().clone(),
             owner_transitions: state.state().owner_transitions.clone(),
@@ -370,8 +421,7 @@ impl OwnerInvitation {
                 .checked_add(OFFER_LIFETIME)
                 .context("invitation timestamp overflow")?,
         };
-        let signature = owner
-            .0
+        let signature = key
             .sign(&signing_input(OFFER_DOMAIN, &offer, MAX_OFFER_BYTES)?)
             .to_bytes()
             .to_vec();

@@ -11,7 +11,7 @@ impl Store {
     /// must transport requests and responses over an authenticated private channel.
     pub(super) fn pair(&mut self, cluster: &str, action: PairingOp) -> Result<Value> {
         ensure!(cluster == self.config.cluster.id, "wrong pairing cluster");
-        self.identity.signing_owner(&self.db)?;
+        self.identity.require_administrator(&self.db)?;
         self.maintain()?;
         self.pair_authorized(action, true, now() as u64)
     }
@@ -23,6 +23,16 @@ impl Store {
         action: PairingOp,
         can_configure: bool,
         timestamp: u64,
+    ) -> Result<Value> {
+        self.pair_with_invitation(action, can_configure, timestamp, None)
+    }
+
+    pub(super) fn pair_with_invitation(
+        &mut self,
+        action: PairingOp,
+        can_configure: bool,
+        timestamp: u64,
+        invitation: Option<&str>,
     ) -> Result<Value> {
         match action {
             PairingOp::Data {
@@ -88,6 +98,10 @@ impl Store {
             PairingOp::Enroll { request } => {
                 ensure!(request.len() <= 8192, "enrollment request too large");
                 let request = SignedEnrollment::decode(&STANDARD.decode(request)?)?;
+                let state = self.identity.state(&self.db)?;
+                if state.state().peer.is_some() {
+                    return self.queue_peer_enrollment(&request, can_configure, invitation);
+                }
                 // The owner-authenticated caller or restricted invitation
                 // dispatcher approves this exact identity. A fingerprint supplied
                 // by the relay is never sufficient authority.
@@ -167,6 +181,14 @@ impl Store {
                         == digest,
                     "pairing history fork"
                 );
+                if state.state().peer.is_some() {
+                    let commit = self.configuration_record(revision + 1)?;
+                    ensure!(
+                        commit.is_some() || revision == state.checkpoint().revision,
+                        "pairing configuration history gap"
+                    );
+                    return Ok(json!({"record":null, "commit":commit}));
+                }
                 let next: Option<Vec<u8>> = self
                     .db
                     .query_row(
@@ -184,7 +206,7 @@ impl Store {
         }
     }
 
-    fn pairing_snapshot(&self, state: &VerifiedState) -> Result<Value> {
+    pub(super) fn pairing_snapshot(&self, state: &VerifiedState) -> Result<Value> {
         state.authorize_node(
             self.identity.node.id(),
             &self.identity.node.public_key(),
@@ -232,6 +254,19 @@ impl Store {
             writer: self.identity.node.id().into(),
             relay,
             service,
+            configuration_decisions: if state.state().peer.is_some() {
+                Some(STANDARD.encode(self.configuration_decisions()?))
+            } else {
+                None
+            },
+            configuration: if state.state().peer.is_some() {
+                Some(
+                    self.configuration_record(state.checkpoint().revision)?
+                        .context("missing committed configuration")?,
+                )
+            } else {
+                None
+            },
         })?)
     }
 }

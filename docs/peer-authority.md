@@ -1,14 +1,16 @@
 # Peer administration and ordered configuration
 
-Accepted architecture, November 17, 2026. This replaces the planned permanent node-owner role. It is not implemented by the current release, which still uses one signing owner and delegated configuration proposals. That runtime must be migrated before these guarantees apply.
+Peer administration replaces the permanent node-owner role. Any unrestricted enrolled node can change configuration, enroll peers and remove members. The latest service-committed sequence determines the current configuration.
 
-The protocol and cryptographic primitives now exist in `gent-protocol::configuration_log`, `gent-crypto::configuration_log`, and `gent-crypto::peer`. They are not connected to the running daemon. No existing cluster switches authority modes merely by installing this source revision.
+The daemon persists proposals before publication, synchronizes the encrypted log, rechecks permissions after conflicts and recovers committed results after a restart. Existing clusters switch with `gent cluster upgrade`, run once on the existing signing node after updating all nodes. Retrying that command resumes an interrupted transition. New single-node service clusters upgrade when `gent daemon install` completes setup. Local development clusters retain their local signing path.
 
 The ordering protocol rotates an Ed25519 write capability with every accepted commit. The service sees its verification key, opaque operation identifiers, ciphertext, and sequence metadata. Each record uses a fresh ChaCha20-Poly1305 key; Noise N wraps that key separately for each member. Only nodes with configuration access receive the next capability, and every wrapper has the same size. The node signature binds the ordering header and complete configuration. Receivers check the signer against the preceding state, so possession of a capability alone cannot override node restrictions.
 
 Recipient X25519 keys use ed25519-dalek's documented conversion from the existing node identity. This avoids replacing enrolled node identities, but does not provide forward secrecy against later compromise of a recipient's static identity key. The service never receives those private keys.
 
-The version-3 migration record preserves membership, policy, and retirement history and is signed by the pinned legacy owner. Later records require an authorized node signature. Legacy history APIs reject version-3 records; applying one requires the ordered-commit API and a pinned log head. Durable runtime fencing, operation persistence/rebasing, enrollment and mesh integration, and updater rollback protection remain required before activating this in a live cluster.
+The version-3 migration record preserves membership, policy, retirement history and committed request results and is signed by the pinned legacy owner. Later records require an authorized node signature. Legacy history APIs reject version-3 records; applying one requires the ordered-commit API and a pinned log head. Before provisioning, the daemon durably changes its identity-file format so old binaries, including updater rollback candidates, cannot reopen legacy signing. The relay also rejects the old client protocol after provisioning. Update every node before migration; an offline updated node catches up on reconnect.
+
+Use `gent cluster` to inspect the accepted sequence and `gent nodes` to inspect administration access. There is no owner label in a migrated cluster. Existing explicit restrictions survive migration; newly invited nodes receive full access unless the invitation restricts them. Configuration writes require the relay to be reachable. A pending result is durable queued work, not a committed change.
 
 ## Equal node authority
 
@@ -80,4 +82,4 @@ The account owner's billing/account role and the local user's RPC credential are
 - Interrupt migration before and after commitment. Verify either the original authority remains valid or every upgraded node follows the new authority, with no simultaneous writers under incompatible rules.
 - Preserve agent permissions, messaging, files, wake adapters and chat identities across migration. Verify that losing a member only makes that member's hosted agents unavailable.
 
-These are release gates for enabling peer administration in existing clusters. The current owner-based behavior remains accurately documented until the replacement passes them.
+These checks cover migration and release validation. They do not establish that every external host or mobile connector can wake an idle agent; host adapters retain their separate acceptance requirements.

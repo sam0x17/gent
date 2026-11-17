@@ -160,6 +160,7 @@ impl Mailbox {
         // Never include HTTP bodies, response headers, bearer values or URLs in
         // errors. The relay is untrusted and can reflect arbitrary input.
         let response = request
+            .header("X-Gent-Authority", "3")
             .header(header::AUTHORIZATION, self.authorization.clone())
             .send()
             .await

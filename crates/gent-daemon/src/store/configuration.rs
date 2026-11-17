@@ -13,6 +13,27 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
 }
 fn validate(edit: &ConfigurationEdit) -> Result<()> {
     match edit {
+        ConfigurationEdit::EnrollNode {
+            request,
+            invitation,
+            ..
+        } => {
+            ensure!(request.len() <= 8192, "enrollment request too large");
+            gent_crypto::SignedEnrollment::decode(&STANDARD.decode(request)?)?.fingerprint()?;
+            ensure!(
+                invitation
+                    .as_deref()
+                    .is_none_or(gent_protocol::configuration_log::valid_id),
+                "invalid enrollment invitation"
+            );
+        }
+        ConfigurationEdit::RemoveNode { node_id }
+        | ConfigurationEdit::DelegateNode { node_id, .. } => {
+            ensure!(
+                gent_protocol::configuration_log::valid_id(node_id),
+                "invalid node identity"
+            );
+        }
         ConfigurationEdit::CreateGroup { name } | ConfigurationEdit::DeleteGroup { name } => {
             config::label(name)?
         }
@@ -155,11 +176,21 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
     );
     Ok(())
 }
-fn fingerprint(edit: &ConfigurationEdit) -> Result<String> {
+pub(super) fn fingerprint(edit: &ConfigurationEdit) -> Result<String> {
     Ok(hash(&serde_json::to_string(edit)?))
 }
 impl StoreSession<'_> {
     pub(super) fn configuration_writer(&self) -> Result<String> {
+        if self.state.state().peer.is_some() {
+            return self
+                .state
+                .state()
+                .nodes
+                .iter()
+                .find(|(_, n)| n.can_configure)
+                .map(|(id, _)| id.clone())
+                .context("no configuration administrator");
+        }
         if let Some(successor) = self
             .state
             .state()
@@ -251,7 +282,26 @@ impl StoreSession<'_> {
                 "cannot change active identities while daemon runs"
             );
         }
-        if self.identity.is_current_owner(&self.state) {
+        if self.state.state().peer.is_some() && self.identity.can_administer(&self.state) {
+            ensure!(
+                self.state
+                    .state()
+                    .nodes
+                    .get(&origin)
+                    .is_some_and(|n| n.can_configure),
+                "this node cannot administer configuration"
+            );
+            storage::insert(
+                self.db,
+                &origin,
+                id,
+                &origin,
+                &fingerprint(&edit)?,
+                &edit,
+                None,
+            )?;
+            pending::retain(self.db, &origin, id, &edit)?;
+        } else if self.identity.is_current_owner(&self.state) {
             if handoff::frozen(self.db, &self.state)? {
                 // The source cannot decide new work after issuing a handoff.
                 // Keep its own edits durably, like other origins, without
@@ -298,6 +348,14 @@ impl StoreSession<'_> {
     }
     fn revision_for_edit(&self, origin: &str, edit: &ConfigurationEdit) -> Result<SignedState> {
         let owner = &*self.identity.signing_owner(self.db)?;
+        self.revision_for_edit_with(origin, edit, owner)
+    }
+    pub(in crate::store) fn revision_for_edit_with(
+        &self,
+        origin: &str,
+        edit: &ConfigurationEdit,
+        owner: &dyn gent_crypto::peer::ConfigurationSigner,
+    ) -> Result<SignedState> {
         validate(edit)?;
         if origin != self.identity.node.id() && administration::edit_identity(edit).is_none() {
             self.state.require_fresh(self.timestamp as u64)?;
@@ -312,6 +370,44 @@ impl StoreSession<'_> {
         }
         let timestamp = self.timestamp as u64;
         match edit {
+            ConfigurationEdit::EnrollNode {
+                request,
+                can_configure,
+                invitation,
+            } => {
+                let request = gent_crypto::SignedEnrollment::decode(&STANDARD.decode(request)?)?;
+                if let Some(id) = invitation {
+                    invitations::validate_queued_enrollment(
+                        self.db,
+                        &self.state,
+                        self.identity,
+                        id,
+                        &request,
+                        *can_configure,
+                        timestamp,
+                    )?;
+                }
+                let fingerprint = request.fingerprint()?;
+                if request.request.replaces.is_some() {
+                    self.state
+                        .replace_node(owner, &request, fingerprint, *can_configure, timestamp)
+                } else if *can_configure {
+                    self.state
+                        .enroll_configurator(owner, &request, fingerprint, timestamp)
+                } else {
+                    self.state.enroll(owner, &request, fingerprint, timestamp)
+                }
+            }
+            ConfigurationEdit::RemoveNode { node_id } => {
+                ensure!(
+                    node_id != self.identity.node.id(),
+                    "cannot remove this node from itself; use another enrolled node"
+                );
+                self.state.revoke_node(owner, node_id, timestamp)
+            }
+            ConfigurationEdit::DelegateNode { node_id, allow } => self
+                .state
+                .delegate_configuration(owner, node_id, *allow, timestamp),
             ConfigurationEdit::CreateGroup { name } => {
                 let mut policy = self.config.policy.clone();
                 ensure!(!policy.groups.contains_key(name), "group already exists");
@@ -493,7 +589,10 @@ impl StoreSession<'_> {
     ) -> Result<()> {
         ensure!(!request.is_nil(), "invalid configuration request identity");
         let id = request.to_string();
-        if !self.identity.is_current_owner(&self.state) && self.identity.was_owner(&self.state) {
+        if self.state.state().peer.is_none()
+            && !self.identity.is_current_owner(&self.state)
+            && self.identity.was_owner(&self.state)
+        {
             return self.retain_retired_request(origin, request, &edit);
         }
         if let Some((administrator, request_id)) = administration::edit_identity(&edit) {
@@ -508,6 +607,12 @@ impl StoreSession<'_> {
                 administration::request_id(administrator, request_id)? == request,
                 "invalid agent configuration request identity"
             );
+        }
+        if self.state.state().peer.is_some() {
+            if !self.identity.can_administer(&self.state) {
+                return Ok(());
+            }
+            return self.accept_peer_request(origin, &id, &edit);
         }
         let fingerprint = fingerprint(&edit)?;
         let saved: Option<(String, Option<Vec<u8>>, String)> = self
@@ -606,6 +711,9 @@ impl StoreSession<'_> {
         result: EditResult,
         decided_by: Option<&str>,
     ) -> Result<()> {
+        if self.state.state().peer.is_some() {
+            return Ok(());
+        }
         let (writer, expected, previous): (String, String, Option<Vec<u8>>) = self.db.query_row(
             "SELECT writer,fingerprint,result FROM configuration_edits WHERE origin=?1 AND id=?2",
             params![self.identity.node.id(), request.to_string()],

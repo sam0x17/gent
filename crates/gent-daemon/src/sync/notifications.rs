@@ -76,6 +76,9 @@ async fn listen(relay: &Relay, wakeup: &Notify, connected: &AtomicBool) -> Resul
     let mut request = url.as_str().into_client_request()?;
     request
         .headers_mut()
+        .insert("X-Gent-Authority", "3".parse()?);
+    request
+        .headers_mut()
         .insert("Authorization", relay.authorization.clone());
     let config = WebSocketConfig::default()
         .read_buffer_size(4096)

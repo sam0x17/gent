@@ -66,7 +66,12 @@ impl Store {
                     )
                     .to_string();
                 }
-                self.pair_authorized(action, row.offer.offer.can_configure, timestamp)?
+                self.pair_with_invitation(
+                    action,
+                    row.offer.offer.can_configure,
+                    timestamp,
+                    Some(id),
+                )?
             }
         };
         // The privileged operation may have committed on a separate connection.
@@ -78,6 +83,9 @@ impl Store {
             current.offer == row.offer && current.claim == row.claim && current.phase == row.phase,
             "invitation changed during operation"
         );
+        if operation == "enroll" && result["state"] == "pending" {
+            return Ok(result);
+        }
         let group = match operation {
             "configuration" | "data" => {
                 let packet = Packet::decode(
@@ -309,6 +317,9 @@ impl Store {
             |r| r.get(0),
         )?;
         ensure!(linked, "invitation data links are incomplete");
+        if state.state().peer.is_some() {
+            return Ok(());
+        }
         let mut query = self.db.prepare(
             "SELECT grant FROM configuration_streams WHERE json_extract(grant,'$.grant.reader')=?1",
         )?;

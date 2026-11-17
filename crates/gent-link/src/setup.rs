@@ -405,6 +405,16 @@ pub async fn install(
         },
     )
     .await?;
+    if config::load(&home)?.service.is_some() {
+        let status = crate::owner(&home, gent_protocol::OwnerOp::Status).await?;
+        let nodes = crate::owner(&home, gent_protocol::OwnerOp::Nodes).await?;
+        if status["authority"]["mode"] == "legacy" && nodes.as_array().is_some_and(|n| n.len() == 1)
+        {
+            crate::peer_configuration::upgrade(&home).await.context(
+                "daemon is installed; finish configuration migration with gent cluster upgrade",
+            )?;
+        }
+    }
     if options.linger {
         service::enable_linger()
             .await

@@ -31,6 +31,7 @@ mod mesh;
 mod network;
 pub mod node_invites;
 mod pairing;
+pub(crate) mod peer_configuration;
 mod permissions;
 mod presence;
 mod recovered;
@@ -100,7 +101,8 @@ impl Store {
     /// change the configuration writer without changing account ownership or
     /// removing either node's relay access.
     pub fn require_service_setup_role(&self, originally_owner: bool) -> Result<()> {
-        if self.identity.state(&self.db)?.owner_epoch() > 0 {
+        let state = self.identity.state(&self.db)?;
+        if state.owner_epoch() > 0 || state.state().peer.is_some() {
             self.require_provisioning_member()
         } else if originally_owner {
             self.require_provisioning_owner()
@@ -127,6 +129,7 @@ impl Store {
           CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
         network::schema(&db)?;
         configuration::schema(&db)?;
+        peer_configuration::schema(&db)?;
         mesh::schema(&db)?;
         relay::schema(&db)?;
         files::schema(&mut db)?;
@@ -167,6 +170,7 @@ impl Store {
         }
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let identity = Identity::load_or_create(home, &config, &tx, now() as u64)?;
+        peer_configuration::check_state(&tx, &identity.state(&tx)?)?;
         configuration::pending::recover(&tx, identity.node.id())?;
         if let Some(record) = replacement {
             record.verify_node(&identity.node)?;
@@ -240,6 +244,15 @@ impl Store {
     fn execute_step(&mut self, request: Request, export_step: files::ExportStep) -> Result<Value> {
         if let Request::Owner { credential, .. } = &request {
             ensure!(hash(credential) == self.owner_hash, "unauthorized");
+        }
+        if let Request::Owner {
+            credential,
+            action: OwnerOp::PreparePeerConfiguration,
+        } = &request
+        {
+            return Ok(serde_json::to_value(
+                self.prepare_configuration_log(credential)?,
+            )?);
         }
         if matches!(
             &request,
@@ -379,7 +392,9 @@ impl Store {
             "local node is no longer enrolled"
         );
         crate::file_objects::Objects::new(&tx, timestamp)?.reap()?;
-        let renew = self.identity.is_current_owner(&state)
+        let renew = !self.identity.legacy_signing_fenced()
+            && self.identity.legacy_service_checked
+            && self.identity.is_current_owner(&state)
             && !handoff::frozen(&tx, &state)?
             && state.state().expires_at.saturating_sub(timestamp) <= 6 * 60 * 60;
         if renew {
@@ -411,6 +426,9 @@ impl Store {
             .map(|relay| (relay, self.home.clone()))
     }
     pub(crate) fn sync_streams(&self) -> Result<Vec<crate::sync::Stream>> {
+        if self.identity.state(&self.db)?.state().peer.is_some() {
+            return self.data_streams();
+        }
         let mut streams: Vec<_> =
             encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?
                 .configuration_streams(now() as u64)?
@@ -646,11 +664,14 @@ impl StoreSession<'_> {
                 import_id,
                 expected_revision,
             } => self.recovered_remove(&import_id, expected_revision),
-            OwnerOp::Pair { .. } | OwnerOp::Invitation { .. } | OwnerOp::Diagnose => {
+            OwnerOp::Pair { .. }
+            | OwnerOp::Invitation { .. }
+            | OwnerOp::Diagnose
+            | OwnerOp::PreparePeerConfiguration => {
                 anyhow::bail!("pairing must use its owner-authenticated entry point")
             }
             OwnerOp::Status => Ok(
-                json!({"process_id":std::process::id(),"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,"authority":{"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
+                json!({"process_id":std::process::id(),"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,"authority":{"mode":if self.state.state().peer.is_some(){"peers"}else{"legacy"},"sequence":self.state.checkpoint().revision,"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
             OwnerOp::Groups { name } => match name {
                 Some(name) => Ok(
@@ -744,6 +765,12 @@ impl StoreSession<'_> {
                 None => self.configuration_requests(),
             },
             OwnerOp::DelegateConfiguration { node_id, allow } => {
+                if self.state.state().peer.is_some() {
+                    return self.submit_configuration(
+                        &uuid::Uuid::new_v4().to_string(),
+                        ConfigurationEdit::DelegateNode { node_id, allow },
+                    );
+                }
                 let update = self.state.delegate_configuration(
                     &*self.identity.signing_owner(self.db)?,
                     &node_id,

@@ -16,8 +16,7 @@ async fn reconcile(home: &Path, removal: &Value) -> Result<Value> {
     let cfg = config::load(home)?;
     let installed = cluster::installation(home)?.context("service setup journal is missing")?;
     ensure!(
-        installed.owner
-            && !installed.pending
+        !installed.pending
             && cfg.service.as_ref() == Some(&pin)
             && removal["cluster_id"] == cfg.cluster.id,
         "node removal is pinned to its original cluster, owner, service and account"
@@ -28,7 +27,7 @@ async fn reconcile(home: &Path, removal: &Value) -> Result<Value> {
     let revision = removal["revision"]
         .as_u64()
         .context("missing removal revision")?;
-    ensure!(node != cfg.node.id, "cannot revoke the owner node");
+    ensure!(node != cfg.node.id, "cannot revoke this node from itself");
     let service = auth::Service::open_pinned(home, Some(&pin)).await?;
     service.revoke_node(&cfg.cluster.id, node).await?;
     owner(
@@ -45,14 +44,41 @@ pub async fn remove(home: &Path, node: String) -> Result<Value> {
     // Read-only check before membership mutation. No account access is needed
     // to commit a removal while offline.
     cluster::installation(home)?;
-    let removal = owner(home, OwnerOp::RemoveNode { node_id: node }).await?;
+    let mut removal = owner(
+        home,
+        OwnerOp::RemoveNode {
+            node_id: node.clone(),
+        },
+    )
+    .await?;
+    if removal["state"] == "queued" {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while removal["state"] == "queued" && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            removal = owner(
+                home,
+                OwnerOp::RemoveNode {
+                    node_id: node.clone(),
+                },
+            )
+            .await?;
+        }
+        if removal["state"] == "queued" {
+            return Ok(removal);
+        }
+    }
+    ensure!(
+        removal["state"] != "rejected",
+        "node removal rejected: {}",
+        removal["reason"]
+    );
     match reconcile(home, &removal).await {
         Ok(value) => Ok(value),
         Err(error) => {
             let mut result = removal;
             result["service_error"] = json!(error.to_string());
             result["retry"] =
-                json!("gent node remove NODE_ID; the owner daemon also retries while running");
+                json!("gent node remove NODE_ID; authorized node daemons also retry while running");
             Ok(result)
         }
     }
@@ -70,7 +96,7 @@ pub async fn maintain(home: &Path) {
             if cfg.service.is_none() {
                 return Ok(());
             }
-            if !cluster::installation(home)?.is_some_and(|i| i.owner && !i.pending) {
+            if !cluster::installation(home)?.is_some_and(|i| !i.pending) {
                 return Ok(());
             }
             let page = owner(

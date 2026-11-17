@@ -43,7 +43,7 @@ pub(super) fn status(db: &Connection) -> Result<Value> {
 
 /// Caller holds the request/result transaction. Exact retries may repair a
 /// legacy missing body, but cannot replace a different retained proposal.
-pub(super) fn retain(
+pub(in crate::store) fn retain(
     db: &Connection,
     origin: &str,
     id: &str,
@@ -102,7 +102,7 @@ pub(in crate::store) fn load(db: &Connection, origin: &str, id: &str) -> Result<
     Ok(edit)
 }
 
-pub(super) fn release(db: &Connection, origin: &str, id: &str) -> Result<()> {
+pub(in crate::store) fn release(db: &Connection, origin: &str, id: &str) -> Result<()> {
     ensure!(
         db.query_row(
             "SELECT result IS NOT NULL FROM configuration_edits WHERE origin=?1 AND id=?2",

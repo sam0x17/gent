@@ -27,6 +27,20 @@ struct Envelope {
     ciphertext: String,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Content {
+    state: SignedState,
+    migration: Option<Migration>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Migration {
+    pub salt: [u8; 32],
+    pub archive: String,
+}
+
 fn context(header: &Header) -> Result<Vec<u8>> {
     let mut bytes = DOMAIN.to_vec();
     bytes.extend(serde_jcs::to_vec(header)?);
@@ -36,6 +50,31 @@ fn context(header: &Header) -> Result<Vec<u8>> {
 /// Encrypt a prepared signed candidate. Publication must still pass the
 /// service's CAS; this does not advance a local authority checkpoint.
 pub fn seal(state: &SignedState, next: &WriteCapability) -> Result<Vec<u8>> {
+    seal_content(state, next, None)
+}
+
+/// The owner-signed ordering header commits to the complete encrypted archive.
+pub fn seal_migration(
+    state: &SignedState,
+    next: &WriteCapability,
+    salt: [u8; 32],
+    archive: &[u8],
+) -> Result<Vec<u8>> {
+    seal_content(
+        state,
+        next,
+        Some(Migration {
+            salt,
+            archive: STANDARD.encode(archive),
+        }),
+    )
+}
+
+fn seal_content(
+    state: &SignedState,
+    next: &WriteCapability,
+    migration: Option<Migration>,
+) -> Result<Vec<u8>> {
     let peer = state
         .state
         .peer
@@ -51,7 +90,15 @@ pub fn seal(state: &SignedState, next: &WriteCapability) -> Result<Vec<u8>> {
     getrandom::fill(key.as_mut())?;
     let mut nonce = [0; 12];
     getrandom::fill(&mut nonce)?;
-    let plaintext = Zeroizing::new(state.encode()?);
+    check_migration(state, migration.as_ref())?;
+    let plaintext = Zeroizing::new(serde_json::to_vec(&Content {
+        state: state.clone(),
+        migration,
+    })?);
+    ensure!(
+        plaintext.len() <= MAX_CIPHERTEXT_BYTES / 2,
+        "configuration archive exceeds encrypted record capacity"
+    );
     let ciphertext = ChaCha20Poly1305::new((&*key).into())
         .encrypt(
             (&nonce).into(),
@@ -106,6 +153,34 @@ pub struct OpenedCommit {
     pub state: VerifiedState,
     pub head: Head,
     pub capability: Option<WriteCapability>,
+    pub migration: Option<Migration>,
+}
+
+/// Authenticated encryption alone is not membership authority. The caller must
+/// verify the signed state against its pinned history before using these fields.
+pub struct DecryptedCommit {
+    pub state: SignedState,
+    pub capability: Option<WriteCapability>,
+    pub migration: Option<Migration>,
+}
+
+fn check_migration(state: &SignedState, migration: Option<&Migration>) -> Result<()> {
+    if let Some(migration) = migration {
+        let peer = state
+            .state
+            .peer
+            .as_ref()
+            .context("missing peer authority")?;
+        ensure!(
+            peer.migration
+                && crate::configuration_log::intent(
+                    &migration.salt,
+                    &STANDARD.decode(&migration.archive)?
+                ) == peer.header.intent,
+            "migration archive does not match its signed commitment"
+        );
+    }
+    Ok(())
 }
 
 pub fn open(
@@ -118,6 +193,18 @@ pub fn open(
         &commit.header.previous == head && commit.header.cluster == previous.anchor().cluster_id,
         "wrong configuration log checkpoint"
     );
+    let opened = decrypt(node, commit)?;
+    let mut state = previous.clone();
+    let head = state.advance_committed(opened.state, commit, head)?;
+    Ok(OpenedCommit {
+        state,
+        head,
+        capability: opened.capability,
+        migration: opened.migration,
+    })
+}
+
+pub fn decrypt(node: &NodeIdentity, commit: &Commit) -> Result<DecryptedCommit> {
     crate::configuration_log::verify(commit)?;
     let bytes = STANDARD.decode(&commit.ciphertext)?;
     ensure!(
@@ -150,7 +237,7 @@ pub fn open(
     );
     let ciphertext = STANDARD.decode(&envelope.ciphertext)?;
     ensure!(
-        ciphertext.len() <= MAX_STATE_BYTES + 16,
+        ciphertext.len() <= MAX_CIPHERTEXT_BYTES / 2 + 16,
         "encrypted state too large"
     );
     let plaintext = Zeroizing::new(
@@ -164,7 +251,18 @@ pub fn open(
             )
             .map_err(|_| anyhow::anyhow!("configuration authentication failed"))?,
     );
-    let signed = SignedState::decode(&plaintext)?;
+    let content: Content = serde_json::from_slice(&plaintext)?;
+    let signed = content.state;
+    signed.encode()?;
+    ensure!(
+        signed
+            .state
+            .peer
+            .as_ref()
+            .is_some_and(|p| p.header == commit.header),
+        "encrypted state header mismatch"
+    );
+    check_migration(&signed, content.migration.as_ref())?;
     let member = signed
         .state
         .nodes
@@ -193,11 +291,9 @@ pub fn open(
         );
         None
     };
-    let mut state = previous.clone();
-    let head = state.advance_committed(signed, commit, head)?;
-    Ok(OpenedCommit {
-        state,
-        head,
+    Ok(DecryptedCommit {
+        state: signed,
         capability,
+        migration: content.migration,
     })
 }

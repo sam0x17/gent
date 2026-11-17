@@ -9,13 +9,15 @@ use gent_crypto::{scoped_id, stream::Packet};
 use uuid::Uuid;
 
 const BATCH: usize = 8;
+mod direct;
 pub(super) mod storage;
 
 #[cfg(test)]
 mod tests;
 
 pub(super) fn schema(db: &Connection) -> Result<()> {
-    storage::schema(db)
+    storage::schema(db)?;
+    direct::schema(db)
 }
 
 fn link_id(state: &VerifiedState, a: &str, b: &str) -> Result<Uuid> {
@@ -93,6 +95,9 @@ impl MeshEnvelope {
 impl StoreSession<'_> {
     pub(super) fn import_mesh(&self, sender: &str, envelope: MeshEnvelope) -> Result<()> {
         envelope.validate_size()?;
+        if self.state.state().peer.is_some() {
+            return Ok(());
+        }
         if self.identity.is_current_owner(&self.state) {
             ensure!(
                 envelope.origin == sender && envelope.target != self.identity.node.id(),
@@ -114,6 +119,9 @@ impl StoreSession<'_> {
         storage::admit(self.db, &envelope)
     }
     fn queue_mesh(&self, route: &str, envelope: MeshEnvelope) -> Result<()> {
+        if self.state.state().peer.is_some() {
+            return self.queue_direct_mesh(envelope);
+        }
         let id = scoped_id(
             b"gent/mesh-hop/v1\0",
             &[envelope.id().as_bytes(), route.as_bytes()],
@@ -136,7 +144,9 @@ impl Store {
             &self.identity.node.public_key(),
             now() as u64,
         )?;
-        let writer = if self.identity.is_current_owner(&state) {
+        let writer = if state.state().peer.is_some() {
+            Some(String::new())
+        } else if self.identity.is_current_owner(&state) {
             None
         } else {
             // Configuration-only fixtures and interrupted enrollment may not yet
@@ -156,7 +166,7 @@ impl Store {
                 [writer],
                 |r| r.get(0),
             )?;
-            if !ready {
+            if !ready && state.state().peer.is_none() {
                 return Ok(false);
             }
             let mut candidates = Vec::new();
@@ -166,7 +176,11 @@ impl Store {
                 .keys()
                 .filter(|p| *p != self.identity.node.id() && *p != writer)
             {
-                let known: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM network_links WHERE peer=?1) OR EXISTS(SELECT 1 FROM mesh_peers WHERE peer=?1)", [peer], |r| r.get(0))?;
+                let known: bool = if state.state().peer.is_some() {
+                    self.db.query_row("SELECT EXISTS(SELECT 1 FROM network_links WHERE peer=?1) OR EXISTS(SELECT 1 FROM mesh_direct_outbox WHERE peer=?1)", [peer], |r| r.get(0))?
+                } else {
+                    self.db.query_row("SELECT EXISTS(SELECT 1 FROM network_links WHERE peer=?1) OR EXISTS(SELECT 1 FROM mesh_peers WHERE peer=?1)", [peer], |r| r.get(0))?
+                };
                 if !known {
                     candidates.push(peer.clone());
                 }
@@ -231,7 +245,7 @@ impl Store {
         );
         let key = current.state().nodes[peer].signing_key;
         tx.execute(
-            "INSERT INTO mesh_peers(peer,peer_key,link) VALUES(?1,?2,?3)",
+            "INSERT INTO mesh_peers(peer,peer_key,link) VALUES(?1,?2,?3) ON CONFLICT(peer) DO NOTHING",
             params![peer, key.as_slice(), link.to_string()],
         )?;
         self.network_session(&tx, current).queue_mesh(
@@ -258,6 +272,16 @@ impl Store {
         if !envelope.current(&state)? {
             let tx = self.db.unchecked_transaction()?;
             storage::finish(&tx, id, Some("peer revoked or key replaced"))?;
+            tx.commit()?;
+            return Ok(());
+        }
+        if state.state().peer.is_some() && envelope.target != self.identity.node.id() {
+            let tx = self.db.unchecked_transaction()?;
+            storage::finish(
+                &tx,
+                id,
+                Some("legacy forwarding replaced by direct bootstrap"),
+            )?;
             tx.commit()?;
             return Ok(());
         }
@@ -297,7 +321,11 @@ impl Store {
                 let tx = self.db.unchecked_transaction()?;
                 let session = self.network_session(&tx, self.identity.state(&tx)?);
                 ensure!(envelope.current(&session.state)?, "mesh authority changed");
-                let writer = session.configuration_writer()?;
+                let writer = if state.state().peer.is_some() {
+                    String::new()
+                } else {
+                    session.configuration_writer()?
+                };
                 session.queue_mesh(
                     &writer,
                     MeshEnvelope {
