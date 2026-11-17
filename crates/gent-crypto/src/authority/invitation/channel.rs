@@ -1,8 +1,8 @@
 //! Stateful Noise transport. Reconnection requires a new handshake. Do not
 //! persist a session or rewind its counters; retry durable application IDs.
 use super::*;
+use crate::authority::noise as resolver;
 use snow::{Builder, HandshakeState, TransportState};
-mod resolver;
 
 pub const PATTERN: &str = "Noise_NKpsk0_25519_ChaChaPoly_SHA256";
 pub const SESSION_LIFETIME: u64 = 5 * 60;

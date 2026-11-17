@@ -7,6 +7,9 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 mod agents;
+#[cfg(feature = "invitation")]
+mod noise;
+pub mod peer;
 pub use agents::*;
 #[cfg(feature = "invitation")]
 pub mod invitation;
@@ -66,6 +69,8 @@ pub struct NodeMember {
 #[serde(deny_unknown_fields)]
 pub struct ClusterState {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<peer::Authority>,
     pub cluster_id: String,
     pub name: String,
     pub owner_key: PublicKey,
@@ -469,17 +474,22 @@ pub fn validate_policy(policy: &Policy) -> Result<()> {
 impl ClusterState {
     fn validate(&self) -> Result<()> {
         ensure!(
-            (self.version == 1 && self.owner_transitions.is_empty())
-                || (self.version == 2 && !self.owner_transitions.is_empty()),
+            (self.version == 1 && self.owner_transitions.is_empty() && self.peer.is_none())
+                || (self.version == 2 && !self.owner_transitions.is_empty() && self.peer.is_none())
+                || (self.version == 3 && self.peer.is_some()),
             "unsupported state version"
         );
         id(&self.cluster_id)?;
         label(&self.name)?;
         public_key(&self.owner_key)?;
+        if let Some(authority) = &self.peer {
+            authority.validate(self)?;
+        }
         if let Some(successor) = self
             .owner_transitions
             .last()
             .and_then(|t| t.transition.successor.as_ref())
+            .filter(|_| self.peer.is_none())
         {
             ensure!(
                 self.nodes
@@ -695,8 +705,11 @@ impl OwnerKey {
         policy: Policy,
         now: u64,
     ) -> Result<VerifiedState> {
+        let mut first_member = first.member(node_name)?;
+        first_member.can_configure = true;
         let state = ClusterState {
             version: 1,
+            peer: None,
             cluster_id: cluster.0.into(),
             name: cluster.1.into(),
             owner_key: self.public_key(),
@@ -707,7 +720,7 @@ impl OwnerKey {
             expires_at: now
                 .checked_add(MAX_STATE_LIFETIME)
                 .context("timestamp overflow")?,
-            nodes: BTreeMap::from([(first.id.clone(), first.member(node_name)?)]),
+            nodes: BTreeMap::from([(first.id.clone(), first_member)]),
             retired_nodes: BTreeSet::new(),
             retired_keys: BTreeSet::new(),
             retired_relay_grants: BTreeSet::new(),
@@ -725,6 +738,10 @@ impl OwnerKey {
 
     fn sign(&self, state: ClusterState) -> Result<SignedState> {
         state.validate()?;
+        ensure!(
+            state.peer.is_none(),
+            "legacy signing is fenced by peer authority"
+        );
         ensure!(
             state.owner_key == self.public_key(),
             "wrong owner authority"
@@ -958,8 +975,11 @@ impl SignedState {
                 );
             }
         }
+        let signer = self.state.peer.as_ref().map_or(owner, |peer| {
+            if peer.migration { owner } else { peer.signer }
+        });
         verify(
-            &owner,
+            &signer,
             STATE_DOMAIN,
             &self.state,
             &self.signature,
@@ -1047,6 +1067,10 @@ impl VerifiedState {
     /// Validate a full contiguous update chain before changing any in-memory authority.
     /// Historical intermediate records may be expired; the final record must be fresh.
     pub fn apply_chain(&mut self, updates: &[SignedState], now: u64) -> Result<()> {
+        ensure!(
+            updates.iter().all(|s| s.state.peer.is_none()),
+            "peer authority requires the committed configuration log"
+        );
         let next = self.verify_chain(updates)?;
         next.require_fresh(now)?;
         *self = next;
@@ -1056,6 +1080,10 @@ impl VerifiedState {
     /// Advance verified history in bounded batches while offline or catching up.
     /// This may leave expired state; authorize_node still requires fresh authority.
     pub fn advance_history(&mut self, updates: &[SignedState]) -> Result<()> {
+        ensure!(
+            updates.iter().all(|s| s.state.peer.is_none()),
+            "peer authority requires the committed configuration log"
+        );
         *self = self.verify_chain(updates)?;
         Ok(())
     }
@@ -1075,6 +1103,7 @@ impl VerifiedState {
             );
             let checkpoint = update.verify(&self.anchor)?;
             let previous = next.state();
+            peer::verify_step(&next, update)?;
             succession::verify_step(&next, update)?;
             ensure!(
                 checkpoint.revision == next.checkpoint.revision + 1
@@ -1152,14 +1181,10 @@ impl VerifiedState {
 
     fn revise(
         &self,
-        owner: &OwnerKey,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
         now: u64,
         edit: impl FnOnce(&mut ClusterState) -> Result<()>,
     ) -> Result<SignedState> {
-        ensure!(
-            owner.public_key() == self.state().owner_key,
-            "wrong owner authority"
-        );
         ensure!(
             now >= self.state().issued_at,
             "revision time moved backwards"
@@ -1199,15 +1224,24 @@ impl VerifiedState {
                 }
             }
         }
-        owner.sign(state)
+        owner.sign_revision(self, state)
     }
 
     /// Renewal may repair an expired configuration using endpoint-held owner authority.
-    pub fn renew(&self, owner: &OwnerKey, now: u64) -> Result<SignedState> {
+    pub fn renew(
+        &self,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
+        now: u64,
+    ) -> Result<SignedState> {
         self.revise(owner, now, |_| Ok(()))
     }
 
-    pub fn set_policy(&self, owner: &OwnerKey, policy: Policy, now: u64) -> Result<SignedState> {
+    pub fn set_policy(
+        &self,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
+        policy: Policy,
+        now: u64,
+    ) -> Result<SignedState> {
         self.revise(owner, now, |state| {
             state.policy = policy;
             Ok(())
@@ -1217,7 +1251,7 @@ impl VerifiedState {
     /// Apply an owner-authorized TOML edit as one ordered cluster revision.
     pub fn configure(
         &self,
-        owner: &OwnerKey,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
         name: &str,
         node: (&str, &str),
         policy: Policy,
@@ -1235,7 +1269,7 @@ impl VerifiedState {
     /// echoing a fingerprint supplied by the relay does not authenticate enrollment.
     pub fn enroll(
         &self,
-        owner: &OwnerKey,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
         request: &SignedEnrollment,
         approved_fingerprint: Digest,
         now: u64,
@@ -1246,7 +1280,7 @@ impl VerifiedState {
     /// Explicit owner approval for a machine used to manage cluster configuration.
     pub fn enroll_configurator(
         &self,
-        owner: &OwnerKey,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
         request: &SignedEnrollment,
         approved: Digest,
         now: u64,
@@ -1256,7 +1290,7 @@ impl VerifiedState {
 
     pub fn delegate_configuration(
         &self,
-        owner: &OwnerKey,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
         node: &str,
         allow: bool,
         now: u64,
@@ -1273,7 +1307,7 @@ impl VerifiedState {
 
     pub fn rotate_node_key(
         &self,
-        owner: &OwnerKey,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
         request: &SignedEnrollment,
         approved_fingerprint: Digest,
         now: u64,
@@ -1283,7 +1317,7 @@ impl VerifiedState {
 
     fn accept_request(
         &self,
-        owner: &OwnerKey,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
         signed: &SignedEnrollment,
         approved: Digest,
         now: u64,
@@ -1328,7 +1362,12 @@ impl VerifiedState {
         })
     }
 
-    pub fn revoke_node(&self, owner: &OwnerKey, node_id: &str, now: u64) -> Result<SignedState> {
+    pub fn revoke_node(
+        &self,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
+        node_id: &str,
+        now: u64,
+    ) -> Result<SignedState> {
         self.revise(owner, now, |state| {
             let member = state.nodes.remove(node_id).context("node unavailable")?;
             state.retired_nodes.insert(node_id.into());
@@ -1341,7 +1380,7 @@ impl VerifiedState {
     /// Endpoint code separately refuses replacing the active signing owner.
     pub fn replace_node(
         &self,
-        owner: &OwnerKey,
+        owner: &(impl peer::ConfigurationSigner + ?Sized),
         signed: &SignedEnrollment,
         approved: Digest,
         can_configure: bool,

@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub mod administration;
+pub mod configuration_log;
 pub mod file_objects;
 pub mod history;
 pub mod owner_transfer;

@@ -2,6 +2,14 @@
 
 Accepted architecture, November 17, 2026. This replaces the planned permanent node-owner role. It is not implemented by the current release, which still uses one signing owner and delegated configuration proposals. That runtime must be migrated before these guarantees apply.
 
+The protocol and cryptographic primitives now exist in `gent-protocol::configuration_log`, `gent-crypto::configuration_log`, and `gent-crypto::peer`. They are not connected to the running daemon. No existing cluster switches authority modes merely by installing this source revision.
+
+The ordering protocol rotates an Ed25519 write capability with every accepted commit. The service sees its verification key, opaque operation identifiers, ciphertext, and sequence metadata. Each record uses a fresh ChaCha20-Poly1305 key; Noise N wraps that key separately for each member. Only nodes with configuration access receive the next capability, and every wrapper has the same size. The node signature binds the ordering header and complete configuration. Receivers check the signer against the preceding state, so possession of a capability alone cannot override node restrictions.
+
+Recipient X25519 keys use ed25519-dalek's documented conversion from the existing node identity. This avoids replacing enrolled node identities, but does not provide forward secrecy against later compromise of a recipient's static identity key. The service never receives those private keys.
+
+The version-3 migration record preserves membership, policy, and retirement history and is signed by the pinned legacy owner. Later records require an authorized node signature. Legacy history APIs reject version-3 records; applying one requires the ordered-commit API and a pinned log head. Durable runtime fencing, operation persistence/rebasing, enrollment and mesh integration, and updater rollback protection remain required before activating this in a live cluster.
+
 ## Equal node authority
 
 Every newly enrolled node has full cluster administration by default. The node that creates a cluster has no permanent extra privilege. Any unrestricted node can change shared configuration, enroll another node, manage permissions and remove a node. Explicit restrictions can remove these capabilities. There is one node administration model, with no separate owner tier.

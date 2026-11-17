@@ -49,6 +49,16 @@ impl std::ops::Deref for SigningOwner<'_> {
     }
 }
 
+impl gent_crypto::peer::ConfigurationSigner for SigningOwner<'_> {
+    fn sign_revision(
+        &self,
+        previous: &VerifiedState,
+        state: gent_crypto::ClusterState,
+    ) -> Result<SignedState> {
+        (**self).sign_revision(previous, state)
+    }
+}
+
 impl Identity {
     /// Called under the database's immediate transaction, including first boot.
     /// An interrupted bootstrap retries the same immutable keys and genesis.
