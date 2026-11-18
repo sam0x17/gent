@@ -34,7 +34,7 @@ fn fixture() -> (WakeRecord, Value) {
 }
 
 #[test]
-fn direct_capture_requires_exact_input_identity_and_single_user_turn() {
+fn direct_capture_requires_exact_input_identity_even_with_steered_turns() {
     let (record, turn) = fixture();
     assert!(matched(&turn, &record).unwrap());
     for field in ["text", "client", "mixed", "file"] {
@@ -95,4 +95,21 @@ fn final_capture_excludes_preambles_partial_output_and_unsupported_host_results(
             .unwrap()
             .contains("without a text response")
     );
+}
+
+#[test]
+fn steered_input_is_observed_but_mixed_work_is_not_automatically_forwarded() {
+    let (record, mut turn) = fixture();
+    assert!(isolated(&turn));
+    turn["items"].as_array_mut().unwrap().insert(
+        0,
+        json!({
+            "type":"userMessage", "clientId":uuid::Uuid::new_v4().to_string(),
+            "content":[{"type":"text","text":"Unrelated private work"}]
+        }),
+    );
+    assert!(matched(&turn, &record).unwrap());
+    assert!(!isolated(&turn));
+    turn["items"][1]["clientId"] = json!(uuid::Uuid::new_v4().to_string());
+    assert!(!matched(&turn, &record).unwrap());
 }

@@ -463,7 +463,7 @@ fn concurrent_claimants_get_one_permission_and_failed_commits_grant_none() {
 #[test]
 fn claim_budgets_preserve_pending_messages_and_survive_restart() {
     let mut f = Fixture::new();
-    for index in 0..12 {
+    for index in 0..14 {
         let message = f.send();
         let claim = Fixture::claim(&message);
         if index > 0 {
@@ -472,18 +472,33 @@ fn claim_budgets_preserve_pending_messages_and_survive_restart() {
         }
         ok(f.agent(1, claim));
     }
+    let first = ok(f.owner(OwnerOp::WakeList {
+        after_message_id: None,
+    }))["entries"][0]
+        .clone();
+    let mut db = f.db();
+    let tx = db.transaction().unwrap();
+    for _ in 14..720 {
+        let mut record = first.clone();
+        record["message_id"] = Uuid::now_v7().to_string().into();
+        record["attempt_id"] = Uuid::new_v4().to_string().into();
+        tx.execute("INSERT INTO wake_dispatches(message_id,agent,attempt_id,claimed_at,payload) VALUES(?1,?2,?3,?4,?5)",params![
+            record["message_id"].as_str().unwrap(),record["agent"].as_str().unwrap(),record["attempt_id"].as_str().unwrap(),
+            record["claimed_at"].as_i64().unwrap(),record.to_string()]).unwrap();
+    }
+    tx.commit().unwrap();
     let message = f.send();
     f.advance(5);
     f.store = Store::open(f.home.path()).unwrap();
     assert!(error(f.agent(1, Fixture::claim(&message))).contains("budget"));
-    assert_eq!(f.count(), 12);
+    assert_eq!(f.count(), 720);
     assert_eq!(
         ok(f.agent(1, AgentOp::WakePending))["pending"][0]["message_id"],
         message
     );
     f.advance(3600);
     ok(f.agent(1, Fixture::claim(&message)));
-    assert_eq!(f.count(), 13);
+    assert_eq!(f.count(), 721);
 }
 
 #[test]
@@ -553,7 +568,7 @@ fn node_budget_counts_other_agents_and_expired_messages_never_get_claims() {
     let mut db = f.db();
     let tx = db.transaction().unwrap();
     // Populate other agents' retained claims through real accounting columns.
-    for _ in 1..120 {
+    for _ in 1..7200 {
         let mut record = first["record"].clone();
         record["message_id"] = Uuid::now_v7().to_string().into();
         record["attempt_id"] = Uuid::new_v4().to_string().into();
@@ -566,7 +581,7 @@ fn node_budget_counts_other_agents_and_expired_messages_never_get_claims() {
     let next = f.send();
     f.advance(5);
     assert!(error(f.agent(1, Fixture::claim(&next))).contains("budget"));
-    assert_eq!(f.count(), 120);
+    assert_eq!(f.count(), 7200);
     assert_eq!(
         ok(f.agent(1, AgentOp::WakePending))["pending"][0]["message_id"],
         next

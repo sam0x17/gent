@@ -9,9 +9,9 @@ fn matched(turn: &Value, record: &WakeRecord) -> Result<bool> {
         .context("missing native turn items")?;
     let users: Vec<_> = items
         .iter()
-        .filter(|i| i["type"] == "userMessage")
+        .filter(|i| i["type"] == "userMessage" && i["clientId"] == record.attempt_id)
         .collect();
-    if users.len() != 1 || users[0]["clientId"] != record.attempt_id {
+    if users.len() != 1 {
         return Ok(false);
     }
     let content = users[0]["content"]
@@ -158,7 +158,14 @@ pub(super) async fn collect(
                         },
                     )
                     .await?;
-                    if *automatic_reply && let Some(text) = answer(turn)? {
+                    // A steered turn may contain unrelated user work or more
+                    // than one relay request. Observe its intake, but require
+                    // an explicit relay response instead of forwarding a mixed
+                    // final answer to every sender.
+                    if *automatic_reply
+                        && isolated(turn)
+                        && let Some(text) = answer(turn)?
+                    {
                         agent(
                             home,
                             credential,
@@ -194,6 +201,16 @@ pub(super) async fn collect(
     }
     ensure!(!failed, "one or more native replies could not be collected");
     Ok(())
+}
+
+fn isolated(turn: &Value) -> bool {
+    turn["items"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .filter(|item| item["type"] == "userMessage")
+            .count()
+            == 1
+    })
 }
 
 #[cfg(test)]

@@ -44,7 +44,8 @@ impl StoreSession<'_> {
         let generation = self.registration_generation(&agent)?;
         Ok(json!({"agent":agent,"registration_generation":generation,
             "cluster_id":self.config.cluster.id,"node_name":self.config.node.name,
-            "delivery":"polling","remote_ready":self.remote_ready()?}))
+            "delivery":"host_dependent","inbox_delivery":self.inbox_delivery(id)?,
+            "remote_ready":self.remote_ready()?}))
     }
 
     pub(super) fn rename_agent(&self, id: &str, name: &str, expected: u64) -> Result<()> {

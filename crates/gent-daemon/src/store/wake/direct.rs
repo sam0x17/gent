@@ -3,7 +3,7 @@
 use super::*;
 use gent_protocol::wake::{DirectWake, WakeDelivery};
 
-const _: () = assert!(AGENT_HOURLY_LIMIT * (EXCHANGE_TTL_SECONDS as u64 / 3600 + 2) < 512);
+const MAX_PENDING: usize = 512;
 
 impl StoreSession<'_> {
     fn direct_record(
@@ -59,6 +59,23 @@ impl StoreSession<'_> {
             ensure!(
                 self.work_status(who, message)?["record"].is_null(),
                 "message has recorded work; reconcile before native delivery"
+            );
+        }
+        // Bound recovery independently of hourly throughput. Completed intake
+        // frees capacity; an uncertain submission is never discarded to admit work.
+        if self.wake_record(message)?.is_none() {
+            let pending: usize = self.db.query_row(
+                "SELECT COUNT(*) FROM wake_dispatches w JOIN messages m ON m.id=w.message_id
+                 WHERE w.agent=?1 AND json_extract(w.payload,'$.direct.finished')=0
+                 AND json_extract(m.payload,'$.expires_at')>?2
+                 AND (json_extract(m.payload,'$.relay.kind')='request'
+                      OR json_extract(w.payload,'$.inbox_seen_at') IS NULL)",
+                params![who.id, self.timestamp],
+                |r| r.get(0),
+            )?;
+            ensure!(
+                pending < MAX_PENDING,
+                "too many unresolved native deliveries; leave messages pending"
             );
         }
         let mut result = self.wake_claim(who, message, attempt, host)?;
@@ -123,11 +140,19 @@ impl StoreSession<'_> {
                     .relay
                     .as_ref()
                     .is_some_and(|r| r.kind == RelayMessageKind::Request);
+                // A manual inbox read already delivered an ordinary message.
+                // Keep its dispatch evidence, but do not repeatedly scan native
+                // history for a queued input the chat has already handled.
+                if !automatic_reply && record.inbox_seen_at.is_some() {
+                    continue;
+                }
                 pending.push(json!({"record":record,"automatic_reply":automatic_reply}));
-                // 24-hour expiry and 12 claims/hour bound live records below
-                // this metadata-only page. Uncertain old entries cannot starve
-                // recovery of a newer answer, and no message bodies are copied.
-                ensure!(pending.len() <= 512, "too many live direct dispatches");
+                // Claim admission bounds this metadata-only page. No message
+                // bodies are copied and uncertain evidence remains retained.
+                ensure!(
+                    pending.len() <= MAX_PENDING,
+                    "too many live direct dispatches"
+                );
             }
         }
         Ok(json!({"pending":pending}))

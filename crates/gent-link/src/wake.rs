@@ -35,5 +35,25 @@ pub async fn execute(home: &Path, command: Option<Command>) -> Result<Value> {
             message_id: message,
         },
     };
-    crate::owner(home, action).await
+    let mut value = crate::owner(home, action).await?;
+    fn describe(record: &mut Value) {
+        if record.get("message_id").is_none() {
+            return;
+        }
+        record["delivery_status"] = if !record["inbox_seen_at"].is_null() {
+            "seen"
+        } else if record["state"] == "submitted" {
+            "submitted_not_seen"
+        } else {
+            "submission_uncertain"
+        }
+        .into();
+    }
+    describe(&mut value);
+    if let Some(entries) = value["entries"].as_array_mut() {
+        for entry in entries {
+            describe(entry);
+        }
+    }
+    Ok(value)
 }

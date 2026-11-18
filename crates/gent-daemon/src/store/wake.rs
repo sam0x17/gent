@@ -8,8 +8,8 @@ pub(super) mod retention;
 
 const MAX_RECORDS: u64 = 16_384;
 const RECORD_BYTES: usize = 2048;
-const AGENT_HOURLY_LIMIT: u64 = 12;
-const NODE_HOURLY_LIMIT: u64 = 120;
+const AGENT_HOURLY_LIMIT: u64 = 720;
+const NODE_HOURLY_LIMIT: u64 = 7200;
 const MIN_INTERVAL: i64 = 5;
 
 pub(super) fn schema(db: &Connection) -> Result<()> {
@@ -329,6 +329,36 @@ impl StoreSession<'_> {
         ))
     }
 
+    pub(super) fn inbox_delivery(&self, agent: &str) -> Result<Value> {
+        let (waiting, submitted, uncertain): (u64, u64, u64) = self.db.query_row(
+            "SELECT COUNT(CASE WHEN w.message_id IS NULL THEN 1 END),
+                COUNT(CASE WHEN json_extract(w.payload,'$.state')='submitted'
+                    AND json_extract(w.payload,'$.inbox_seen_at') IS NULL THEN 1 END),
+                COUNT(CASE WHEN json_extract(w.payload,'$.state')='uncertain' THEN 1 END)
+             FROM messages m LEFT JOIN wake_dispatches w ON w.message_id=m.id
+             WHERE m.recipient=?1 AND m.acknowledged=0 AND json_extract(m.payload,'$.expires_at')>?2",
+            params![agent, self.timestamp], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let latest: Option<String> = self.db.query_row(
+            "SELECT message_id FROM wake_dispatches WHERE agent=?1 ORDER BY claimed_at DESC,rowid DESC LIMIT 1",
+            [agent], |r| r.get(0)).optional()?;
+        let latest = latest
+            .map(|id| {
+                let record = self
+                    .wake_record(&id)?
+                    .context("wake dispatch disappeared")?;
+                let status = delivery_status(&record);
+                let mut value = json!(record);
+                value["delivery_status"] = json!(status);
+                Ok::<_, anyhow::Error>(value)
+            })
+            .transpose()?;
+        Ok(
+            json!({"waiting_for_host":waiting,"submitted_not_seen":submitted,
+            "uncertain":uncertain,"latest":latest,
+            "scope":"Dispatch evidence, not live host availability. Submission does not prove the chat has seen or acted on the message."}),
+        )
+    }
+
     pub(super) fn wake_list(&self, after: Option<&str>) -> Result<Value> {
         if let Some(after) = after {
             id(after)?;
@@ -345,5 +375,15 @@ impl StoreSession<'_> {
         Ok(
             json!({"entries":entries,"has_more":ids.len()>50,"next_after":ids.iter().take(50).next_back(),"limits":limits()}),
         )
+    }
+}
+
+fn delivery_status(record: &WakeRecord) -> &'static str {
+    if record.inbox_seen_at.is_some() {
+        "seen"
+    } else if record.state == WakeState::Submitted {
+        "submitted_not_seen"
+    } else {
+        "submission_uncertain"
     }
 }

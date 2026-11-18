@@ -178,7 +178,7 @@ async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) ->
     }
     let delivery: gent_protocol::wake::WakeDelivery =
         serde_json::from_value(checked["delivery"].clone())?;
-    let submission = host.enqueue(thread, &attempt, &delivery.prompt()).await?;
+    let submission = host.submit(thread, &attempt, &delivery.prompt()).await?;
     agent(
         home,
         credential,
@@ -352,22 +352,20 @@ impl Host {
             && matches!(metadata["status"]["type"].as_str(), Some("idle" | "active")))
     }
 
-    async fn enqueue(&mut self, thread: &str, attempt: &str, prompt: &str) -> Result<String> {
+    async fn submit(&mut self, thread: &str, attempt: &str, prompt: &str) -> Result<String> {
+        // Ordinary native input starts an idle turn or appends to an active
+        // one. Do not park it in the next-turn queue, interrupt work, or change
+        // the host's model, permission, or execution settings.
         let result = self
             .rpc(
-                "thread/queue/add",
+                "turn/start",
                 json!({"threadId":thread,"clientUserMessageId":attempt,
             "input":[{"type":"text","text":prompt}]}),
             )
             .await?;
-        let submission = &result["queuedSubmission"];
-        ensure!(
-            submission["clientUserMessageId"] == attempt,
-            "Codex returned another submission"
-        );
-        let id = submission["id"]
+        let id = result["turn"]["id"]
             .as_str()
-            .context("missing host submission ID")?;
+            .context("missing host turn ID")?;
         let parsed = uuid::Uuid::parse_str(id)?;
         ensure!(
             !parsed.is_nil() && parsed.to_string() == id,

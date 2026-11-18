@@ -334,3 +334,49 @@ fn rename_keeps_original_input_hash_for_native_recovery() {
     ok(f.agent(1, d.observe()));
     ok(f.agent(1, d.complete("same request")));
 }
+
+#[test]
+fn manual_inbox_intake_stops_native_history_scans_without_reauthorizing_submission() {
+    let mut f = Fixture::new();
+    let d = Direct {
+        message: f.send(),
+        attempt: Uuid::new_v4().to_string(),
+        target: WakeTarget::Codex {
+            thread_id: Uuid::now_v7().to_string(),
+        },
+        turn: Uuid::now_v7().to_string(),
+    };
+    let identity = ok(f.agent(1, AgentOp::Identity));
+    assert_eq!(identity["inbox_delivery"]["waiting_for_host"], 1);
+    let claim = ok(f.agent(1, d.claim()));
+    assert_eq!(
+        ok(f.agent(1, d.pending()))["pending"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        ok(f.agent(1, AgentOp::Identity))["inbox_delivery"]["latest"]["delivery_status"],
+        "submission_uncertain"
+    );
+    ok(f.agent(1, Fixture::submitted(&d.message, &claim)));
+    assert_eq!(
+        ok(f.agent(1, AgentOp::Identity))["inbox_delivery"]["latest"]["delivery_status"],
+        "submitted_not_seen"
+    );
+    ok(f.agent(1, AgentOp::Inbox));
+    assert_eq!(
+        ok(f.agent(1, AgentOp::Identity))["inbox_delivery"]["latest"]["delivery_status"],
+        "seen"
+    );
+    assert!(
+        ok(f.agent(1, d.pending()))["pending"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    f.store = Store::open(f.home.path()).unwrap();
+    assert_eq!(ok(f.agent(1, d.claim()))["may_submit"], false);
+    assert!(f.show(&d.message)["direct"]["turn_id"].is_null());
+}

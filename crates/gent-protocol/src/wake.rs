@@ -62,7 +62,7 @@ impl WakeDelivery {
         let name = serde_json::to_string(&self.sender.name).expect("string serialization");
         let header = match self.message.relay.as_ref().map(|r| r.kind) {
             Some(RelayMessageKind::Request) => format!(
-                "User relay via Gent ({name}). Answer normally; your final response is returned automatically."
+                "User relay via Gent ({name}). Answer normally; your final response is returned automatically. If this arrives during other work, use gent_relay_next and gent_relay_respond to answer this request separately."
             ),
             Some(
                 RelayMessageKind::Progress

@@ -71,7 +71,7 @@ fn wake_attachments_survive_restart_without_stealing_live_binding_locks() {
 }
 
 #[test]
-fn wake_opt_in_is_endpoint_scoped_and_polling_reconnect_disables_it() {
+fn wake_is_endpoint_scoped_and_survives_a_polling_reconnect() {
     let (home, mut bindings, registry) = fixture();
     let thread = uuid::Uuid::now_v7().to_string();
     let credential = bind(&mut bindings, &thread);
@@ -86,7 +86,10 @@ fn wake_opt_in_is_endpoint_scoped_and_polling_reconnect_disables_it() {
     drop(bindings);
     let mut polling = Bindings::new(home.path(), Host::Codex).unwrap();
     assert_eq!(bind(&mut polling, &thread), credential);
-    assert!(registry.credential(&thread).unwrap().is_none());
+    assert_eq!(
+        registry.credential(&thread).unwrap().as_deref(),
+        Some(credential.as_str())
+    );
     polling
         .enable_wake(home.path(), &home.path().join("another.sock"))
         .unwrap();

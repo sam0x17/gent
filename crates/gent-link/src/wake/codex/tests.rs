@@ -37,7 +37,7 @@ impl Fixture {
                     "thread/read" => {
                         json!({"thread":{"id":thread,"status":{"type":status},"canAcceptDirectInput":direct}})
                     }
-                    "thread/queue/add" => response.clone(),
+                    "turn/start" => response.clone(),
                     "thread/loaded/list" => response.clone(),
                     method => panic!("forbidden host operation: {method}"),
                 };
@@ -118,42 +118,38 @@ async fn only_exact_loaded_direct_input_threads_are_eligible() {
 }
 
 #[tokio::test]
-async fn queue_submission_preserves_target_and_validates_host_response() {
+async fn ordinary_input_preserves_target_and_never_interrupts_or_changes_settings() {
     let thread = uuid::Uuid::now_v7().to_string();
     let attempt = uuid::Uuid::new_v4().to_string();
-    let submission = uuid::Uuid::now_v7().to_string();
-    for (client, id, valid) in [
-        (attempt.clone(), submission.clone(), true),
-        (uuid::Uuid::new_v4().to_string(), submission.clone(), false),
-        (attempt.clone(), "not-an-id".into(), false),
-        (attempt.clone(), uuid::Uuid::nil().to_string(), false),
-    ] {
-        let f = Fixture::new(
-            thread.clone(),
-            "active",
-            true,
-            json!({"queuedSubmission":{"clientUserMessageId":client,"id":id}}),
-        );
-        let mut host = Host::connect(&f.path).await.unwrap();
-        let result = host
-            .enqueue(&thread, &attempt, "exact forwarded text\n")
-            .await;
-        assert_eq!(result.is_ok(), valid);
-        let requests = f.requests.lock().unwrap();
-        let queued = requests
-            .iter()
-            .filter(|r| r["method"] == "thread/queue/add")
-            .collect::<Vec<_>>();
-        assert_eq!(queued.len(), 1);
-        assert_eq!(
-            queued[0]["params"],
-            json!({"threadId":thread,"clientUserMessageId":attempt,
-            "input":[{"type":"text","text":"exact forwarded text\n"}]})
-        );
-        assert!(requests.iter().all(|r| matches!(
-            r["method"].as_str(),
-            Some("initialize" | "initialized" | "thread/queue/add")
-        )));
+    for status in ["active", "idle"] {
+        for (id, valid) in [
+            (uuid::Uuid::now_v7().to_string(), true),
+            ("not-an-id".into(), false),
+            (uuid::Uuid::nil().to_string(), false),
+        ] {
+            let f = Fixture::new(thread.clone(), status, true, json!({"turn":{"id":id}}));
+            let mut host = Host::connect(&f.path).await.unwrap();
+            assert!(host.accepts(&thread).await.unwrap());
+            let result = host
+                .submit(&thread, &attempt, "exact forwarded text\n")
+                .await;
+            assert_eq!(result.is_ok(), valid);
+            let requests = f.requests.lock().unwrap();
+            let submitted: Vec<_> = requests
+                .iter()
+                .filter(|r| r["method"] == "turn/start")
+                .collect();
+            assert_eq!(submitted.len(), 1);
+            assert_eq!(
+                submitted[0]["params"],
+                json!({"threadId":thread,"clientUserMessageId":attempt,
+                "input":[{"type":"text","text":"exact forwarded text\n"}]})
+            );
+            assert!(requests.iter().all(|r| matches!(
+                r["method"].as_str(),
+                Some("initialize" | "initialized" | "thread/read" | "turn/start")
+            )));
+        }
     }
 }
 
