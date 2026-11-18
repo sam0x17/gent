@@ -4,6 +4,7 @@ mod claude_binding;
 pub(crate) mod claude_wake;
 pub(crate) mod codex_files;
 pub(crate) mod discovery;
+mod executable;
 mod install;
 pub(crate) mod naming;
 pub(crate) use install::{refresh, retire};

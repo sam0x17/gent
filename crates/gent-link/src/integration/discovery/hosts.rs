@@ -14,57 +14,53 @@ pub(super) struct Inventory {
     pub socket: Option<PathBuf>,
     pub binary: PathBuf,
     pub truncated: bool,
+    pub page: Option<Page>,
 }
 
-fn binary(name: &str) -> Result<PathBuf> {
-    for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
-        let path = dir.join(name);
-        if path.is_file() {
-            return Ok(std::path::absolute(path)?);
-        }
-    }
-    anyhow::bail!("{name} executable unavailable to the Gent daemon")
+#[derive(Default, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Cursor {
+    archived: bool,
+    cursor: Option<String>,
 }
 
-pub(super) async fn codex(home: &Path) -> Result<Inventory> {
+pub(super) struct Page {
+    pub next: Option<Cursor>,
+}
+
+fn position(previous: Option<&Value>) -> Result<Cursor> {
+    let cursor: Cursor = previous
+        .and_then(|state| state.get("next_page"))
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    ensure!(
+        cursor
+            .cursor
+            .as_ref()
+            .is_none_or(|value| !value.is_empty() && value.len() <= 512),
+        "invalid saved Codex inventory cursor"
+    );
+    Ok(cursor)
+}
+
+pub(super) async fn codex(home: &Path, previous: Option<&Value>) -> Result<Inventory> {
     let (directory, socket) = super::super::install::codex_runtime_target(home, None, false)?;
+    let binary = super::super::executable::resolve(Host::Codex)?;
     let can_recover =
         super::super::install::codex_runtime_target(home, Some(directory.clone()), true).is_ok();
     let mut host = crate::wake::codex::Host::connect_with_limit(&socket, 4 * 1024 * 1024).await?;
-    let mut chats = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut truncated = false;
-    for archived in [false, true] {
-        let mut cursor = None;
-        let mut cursors = std::collections::BTreeSet::new();
-        loop {
-            let result = host.rpc("thread/list", json!({"limit":100,"cursor":cursor,"archived":archived,"modelProviders":[],"sortKey":"updated_at"})).await?;
-            let (page, next) = codex_page(&result)?;
-            for mut chat in page {
-                chat.recoverable = can_recover;
-                if seen.insert(chat.id.clone()) {
-                    if chats.len() == storage::LIMIT {
-                        truncated = true;
-                        break;
-                    }
-                    chats.push(chat);
-                }
-            }
-            if truncated {
-                break;
-            }
-            let Some(next) = next else {
-                break;
-            };
-            ensure!(
-                cursors.insert(next.clone()),
-                "Codex repeated its inventory cursor"
-            );
-            cursor = Some(next);
-        }
-        if truncated {
-            break;
-        }
+    let cursor = position(previous)?;
+    // One page per pass. Publish this page before asking the host for another,
+    // so a slow or unavailable later page cannot erase already indexed chats.
+    let result = host.rpc_with_timeout("thread/list",
+        json!({"limit":32,"cursor":cursor.cursor,"archived":cursor.archived,"modelProviders":[],"sortKey":"updated_at"}),
+        Duration::from_secs(30)).await?;
+    let (mut chats, next) = codex_page(&result)?;
+    let page = advance(cursor, next)?;
+    for chat in &mut chats {
+        chat.recoverable = can_recover;
     }
     ensure!(
         super::super::install::codex_runtime_target(home, Some(directory.clone()), false)?
@@ -75,8 +71,29 @@ pub(super) async fn codex(home: &Path) -> Result<Inventory> {
         chats,
         directory,
         socket: Some(socket),
-        binary: binary("codex")?,
-        truncated,
+        binary,
+        truncated: false,
+        page: Some(page),
+    })
+}
+
+fn advance(current: Cursor, next: Option<String>) -> Result<Page> {
+    ensure!(
+        next.is_none() || next != current.cursor,
+        "Codex repeated its inventory cursor"
+    );
+    Ok(Page {
+        next: match next {
+            Some(cursor) => Some(Cursor {
+                archived: current.archived,
+                cursor: Some(cursor),
+            }),
+            None if !current.archived => Some(Cursor {
+                archived: true,
+                cursor: None,
+            }),
+            None => None,
+        },
     })
 }
 
@@ -84,7 +101,7 @@ fn codex_page(value: &Value) -> Result<(Vec<Chat>, Option<String>)> {
     let rows = value["data"]
         .as_array()
         .context("invalid Codex inventory")?;
-    ensure!(rows.len() <= 100, "Codex inventory page exceeds its limit");
+    ensure!(rows.len() <= 32, "Codex inventory page exceeds its limit");
     let mut ids = std::collections::BTreeSet::new();
     let mut result = Vec::new();
     for row in rows {
@@ -109,7 +126,7 @@ fn codex_page(value: &Value) -> Result<(Vec<Chat>, Option<String>)> {
 }
 
 pub(super) async fn claude(home: &Path) -> Result<Inventory> {
-    let binary = binary("claude")?;
+    let binary = super::super::executable::resolve(Host::ClaudeCode)?;
     let (directory, mut chats) = super::super::runtime::claude_discovery(home, &binary).await?;
     let truncated = super::claude::history(&directory, &mut chats)?;
     Ok(Inventory {
@@ -118,12 +135,41 @@ pub(super) async fn claude(home: &Path) -> Result<Inventory> {
         socket: None,
         binary,
         truncated,
+        page: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pagination_resumes_failed_pages_and_finishes_archived_history() {
+        let first = advance(position(None).unwrap(), Some("page-2".into())).unwrap();
+        let mut saved = json!({"status":"scanning","count":32,"next_page":first.next});
+        super::super::record_failure(&mut saved, "host temporarily unavailable");
+        let resumed = position(Some(&saved)).unwrap();
+        assert_eq!(resumed.cursor.as_deref(), Some("page-2"));
+        assert_eq!(saved["count"], 32);
+        assert!(!resumed.archived);
+        assert!(advance(resumed.clone(), Some("page-2".into())).is_err());
+        let archived = advance(resumed, None).unwrap().next.unwrap();
+        assert!(archived.archived);
+        assert!(archived.cursor.is_none());
+        let archived_next = advance(archived, Some("archived-page-2".into()))
+            .unwrap()
+            .next
+            .unwrap();
+        assert!(archived_next.archived);
+        assert!(advance(archived_next, None).unwrap().next.is_none());
+        for _ in 0..2 {
+            super::super::record_failure(&mut saved, "expired cursor");
+        }
+        assert!(position(Some(&saved)).unwrap().cursor.is_none());
+        assert_eq!(saved["count"], 32);
+        assert!(position(Some(&json!({"next_page":{"archived":false,"cursor":""}}))).is_err());
+    }
+
     #[test]
     fn titles_are_optional_and_never_guessed_from_preview_or_used_as_identity() {
         let one = uuid::Uuid::new_v4().to_string();

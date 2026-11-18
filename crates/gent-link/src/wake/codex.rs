@@ -289,9 +289,18 @@ impl Host {
     }
 
     pub(crate) async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.rpc_with_timeout(method, params, RPC_TIMEOUT).await
+    }
+
+    pub(crate) async fn rpc_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         self.sequence += 1;
         let id = self.sequence;
-        tokio::time::timeout(RPC_TIMEOUT, async {
+        tokio::time::timeout(timeout, async {
             self.socket
                 .send(Message::Text(
                     json!({"id":id,"method":method,"params":params})
@@ -322,7 +331,12 @@ impl Host {
             anyhow::bail!("too many Codex notifications")
         })
         .await
-        .context("Codex RPC timed out")?
+        .with_context(|| {
+            format!(
+                "Codex {method} timed out after {} seconds",
+                timeout.as_secs()
+            )
+        })?
     }
 
     async fn accepts(&mut self, thread: &str) -> Result<bool> {

@@ -25,6 +25,31 @@ async fn fixture() -> (tempfile::TempDir, PathBuf, config::Config, Daemon) {
 }
 
 #[tokio::test]
+async fn repeated_enable_and_refresh_during_scan_preserve_saved_results() {
+    let (_temp, home, cfg, _daemon) = fixture().await;
+    configure(&home, true).unwrap();
+    assert_eq!(status(&home).unwrap()["scan"], "pending");
+    let (saved, mut catalog) = storage::read(&home, &cfg).unwrap();
+    catalog.checked = Some(super::super::now().unwrap());
+    catalog.hosts.insert("codex".into(), json!({"status":"scanning","count":32,"next_page":{"archived":false,"cursor":"second-page"}}));
+    storage::save(&saved, &catalog).unwrap();
+    let lock = scan_lock(&home).unwrap().unwrap();
+    let recovery = super::super::recovery::discovery_lock(&home).unwrap();
+    let enabled = execute(&home, Command::Enable).await.unwrap();
+    assert!(enabled["enabled"].as_bool().unwrap());
+    assert_eq!(enabled["scan"], "running");
+    assert_eq!(
+        enabled["hosts"]["codex"]["next_page"]["cursor"],
+        "second-page"
+    );
+    let refreshed = execute(&home, Command::Refresh).await.unwrap();
+    assert_eq!(enabled, refreshed);
+    drop(recovery);
+    drop(lock);
+    assert_eq!(status(&home).unwrap()["scan"], "idle");
+}
+
+#[tokio::test]
 async fn opt_in_registration_preserves_native_bindings_duplicates_and_pending_delivery() {
     let (_temp, home, cfg, _daemon) = fixture().await;
     let socket = home.join("codex.sock");
@@ -34,6 +59,7 @@ async fn opt_in_registration_preserves_native_bindings_duplicates_and_pending_de
         socket: Some(socket.clone()),
         binary: "/bin/false".into(),
         truncated: false,
+        page: None,
     };
     let one = hosts::Chat {
         id: uuid::Uuid::new_v4().to_string(),

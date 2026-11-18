@@ -28,12 +28,28 @@ The same preference can be edited in `~/.gent/config.toml`:
 enabled = true
 ```
 
+`enable` starts a scan immediately. If the daemon already has a scan running,
+the command shows its saved results and marks the scan as in progress. Status
+also shows the age of the last check, so an empty first scan is distinguishable
+from a completed inventory.
+
+Managed daemons often have a smaller `PATH` than an interactive shell. Gent also
+checks standard user installation directories, Codex's standalone package, and
+Homebrew locations for native executables. It does not source shell startup
+files. You do not need to reinstall the daemon to pick up these locations.
+
 This setting belongs to the local node and survives synchronized cluster
 configuration changes. The daemon normally checks inventory once a minute;
 initial large inventories are registered in batches. Up to 4,096 native chats
 can be indexed. Indexing reads native metadata and explicit titles, without
 running model turns or publishing transcript bodies. Names follow ordinary
 encrypted agent registration and cluster visibility rules.
+
+Codex history is read in pages of 32 chats, including archived history. Each
+page is saved before the next is requested; a failed read retains earlier chats
+and retries its cursor. After three failures Gent restarts the read-only scan
+in case the host expired its cursor. Inventory reads may wait up to 30 seconds;
+message submissions retain their existing timeout and uncertainty rules.
 
 Each native session ID maps to one Gent identity. Later MCP calls in that chat
 reuse it. Identical titles produce separate entries, including on the same

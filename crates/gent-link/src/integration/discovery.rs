@@ -55,8 +55,11 @@ async fn agent(home: &Path, key: &str, action: AgentOp) -> Result<Value> {
 }
 
 pub(crate) fn configure(home: &Path, value: bool) -> Result<()> {
-    let _lock = super::recovery::discovery_lock(home)?;
     let cfg = config::load(home)?;
+    if cfg.extra.contains_key("discovery") && cfg.discovery()?.enabled == value {
+        return Ok(());
+    }
+    let _lock = super::recovery::discovery_lock(home)?;
     if value {
         super::recovery::initialize_discovery(home, &cfg)?;
     }
@@ -67,9 +70,16 @@ pub(crate) fn configure(home: &Path, value: bool) -> Result<()> {
 
 pub(crate) async fn execute(home: &Path, command: Command) -> Result<Value> {
     match command {
-        Command::Enable => configure(home, true)?,
+        Command::Enable => {
+            configure(home, true)?;
+            let _progress = crate::ui::Progress::start("Discovering native chats");
+            refresh(home).await?;
+        }
         Command::Disable => configure(home, false)?,
-        Command::Refresh => refresh(home).await?,
+        Command::Refresh => {
+            let _progress = crate::ui::Progress::start("Refreshing native chats");
+            refresh(home).await?;
+        }
         Command::Status => {}
     }
     status(home)
@@ -78,8 +88,19 @@ pub(crate) async fn execute(home: &Path, command: Command) -> Result<Value> {
 fn status(home: &Path) -> Result<Value> {
     let cfg = config::load(home)?;
     let (_, catalog) = storage::read(home, &cfg)?;
+    let enabled = cfg.discovery()?.enabled;
+    let scanning = home.join("chat-discovery.lock").exists() && scan_lock(home)?.is_none();
+    let scan = if !enabled {
+        "disabled"
+    } else if scanning {
+        "running"
+    } else if catalog.checked.is_none() {
+        "pending"
+    } else {
+        "idle"
+    };
     Ok(
-        json!({"chat_discovery":true,"enabled":cfg.discovery()?.enabled,"checked_at":catalog.checked,
+        json!({"chat_discovery":true,"enabled":enabled,"checked_at":catalog.checked,"scan":scan,
         "hosts":catalog.hosts,"agents":catalog.entries.values().map(|entry| json!({
             "id":entry.agent,"name":entry.name,"host":entry.host,"native_id":entry.native,
             "automatic_recovery":entry.recovery.is_some()
@@ -101,6 +122,24 @@ pub(crate) fn print(value: &Value) {
     if let Some(agents) = value["agents"].as_array() {
         crate::ui::field("Indexed chats", &agents.len().to_string());
     }
+    crate::ui::field(
+        "Scan",
+        match value["scan"].as_str() {
+            Some("running") => "in progress; showing saved results",
+            Some("pending") => "waiting for first scan",
+            Some("disabled") => "disabled",
+            _ => "idle; showing last results",
+        },
+    );
+    if let Some(checked) = value["checked_at"].as_u64() {
+        crate::ui::field(
+            "Last check",
+            &format!(
+                "{}s ago",
+                super::now().unwrap_or(checked).saturating_sub(checked)
+            ),
+        );
+    }
     if let Some(hosts) = value["hosts"].as_object() {
         for (host, state) in hosts {
             crate::ui::field(host, state["status"].as_str().unwrap_or("unknown"));
@@ -111,7 +150,7 @@ pub(crate) fn print(value: &Value) {
     }
     if value["enabled"] == true {
         println!(
-            "  The daemon indexes supported native chats automatically. Names sync to the cluster."
+            "  Indexed names sync to the cluster. Unavailable hosts are retried automatically."
         );
     } else {
         println!("  Enable with gent node discovery enable.");
@@ -181,8 +220,26 @@ async fn register(
     })
 }
 
+fn scan_lock(home: &Path) -> Result<Option<std::fs::File>> {
+    match config::state_lock(home, "chat-discovery.lock") {
+        Ok(lock) => Ok(Some(lock)),
+        Err(error)
+            if error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+            }) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn refresh(home: &Path) -> Result<()> {
-    let _lock = config::state_lock(home, "chat-discovery.lock")?;
+    let Some(_lock) = scan_lock(home)? else {
+        return Ok(());
+    };
     let cfg = config::load(home)?;
     enabled(home, &cfg)?;
     {
@@ -191,9 +248,9 @@ async fn refresh(home: &Path) -> Result<()> {
     }
     let (saved, mut catalog) = storage::read(home, &cfg)?;
     for host in [Host::Codex, Host::ClaudeCode] {
-        let result = tokio::time::timeout(Duration::from_secs(30), async {
+        let result = tokio::time::timeout(Duration::from_secs(45), async {
             match host {
-                Host::Codex => hosts::codex(home).await,
+                Host::Codex => hosts::codex(home, catalog.hosts.get(host.name())).await,
                 Host::ClaudeCode => hosts::claude(home).await,
             }
         })
@@ -248,18 +305,47 @@ async fn refresh(home: &Path) -> Result<()> {
                     }
                 }
                 let truncated = inventory.truncated || indexed + failures < inventory.chats.len();
-                catalog.hosts.insert(host.name().into(), json!({"status":if failures == 0 && !truncated { "indexed" } else { "partial" },"count":indexed,"failed":failures,"truncated":truncated,"cursor":next,"error":error,
+                let more = inventory
+                    .page
+                    .as_ref()
+                    .is_some_and(|page| page.next.is_some());
+                let count = catalog
+                    .entries
+                    .values()
+                    .filter(|entry| entry.host == host)
+                    .count();
+                catalog.hosts.insert(host.name().into(), json!({"status":if failures > 0 || truncated { "partial" } else if more { "scanning" } else { "indexed" },"count":count,"failed":failures,"truncated":truncated,"cursor":next,"error":error,
+                    "next_page":inventory.page.and_then(|page| page.next),
                     "scope":if host == Host::Codex { "native interactive history, including archived chats; wake requires a supported shared server" } else { "local session titles and native background agents; closed interactive sessions require manual reopening" }}));
             }
             Err(error) => {
-                catalog.hosts.insert(
-                    host.name().into(),
-                    json!({"status":"unavailable","error":error.to_string()}),
-                );
+                let previous = catalog
+                    .hosts
+                    .entry(host.name().into())
+                    .or_insert_with(|| json!({}));
+                record_failure(previous, &error.to_string());
             }
         }
     }
     enabled(home, &cfg)?;
     catalog.checked = Some(super::now()?);
     storage::save(&saved, &catalog)
+}
+
+fn record_failure(previous: &mut Value, error: &str) {
+    // Preserve the continuation across a failed read. After three failures,
+    // restart the read-only scan in case the host expired its cursor.
+    if !previous.is_object() {
+        *previous = json!({});
+    }
+    let failures = previous["consecutive_failures"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(1);
+    previous["status"] = json!("unavailable");
+    previous["error"] = json!(error);
+    previous["consecutive_failures"] = json!(failures);
+    if failures >= 3 {
+        previous["next_page"] = Value::Null;
+    }
 }

@@ -45,7 +45,7 @@ pub(crate) async fn maintain(home: &Path) {
             if catalog
                 .hosts
                 .values()
-                .any(|state| state["status"] == "partial")
+                .any(|state| state["status"] == "partial" || state["status"] == "scanning")
             {
                 next_scan = next_scan.min(tokio::time::Instant::now() + Duration::from_secs(5));
             }
