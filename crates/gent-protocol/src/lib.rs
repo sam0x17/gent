@@ -384,6 +384,33 @@ pub enum AgentOp {
         attempt_id: String,
         submission_id: String,
     },
+    /// Native adapter APIs, deliberately absent from model-callable MCP tools.
+    WakeDirectClaim {
+        message_id: String,
+        attempt_id: String,
+        target: wake::WakeTarget,
+    },
+    WakeDirectPending {
+        target: wake::WakeTarget,
+    },
+    WakeDirectRead {
+        message_id: String,
+        attempt_id: String,
+        target: wake::WakeTarget,
+    },
+    WakeDirectObserve {
+        message_id: String,
+        attempt_id: String,
+        target: wake::WakeTarget,
+        turn_id: String,
+    },
+    WakeDirectComplete {
+        message_id: String,
+        attempt_id: String,
+        target: wake::WakeTarget,
+        turn_id: String,
+        text: String,
+    },
     WorkStatus {
         message_id: String,
     },

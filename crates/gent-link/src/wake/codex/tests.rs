@@ -135,7 +135,9 @@ async fn queue_submission_preserves_target_and_validates_host_response() {
             json!({"queuedSubmission":{"clientUserMessageId":client,"id":id}}),
         );
         let mut host = Host::connect(&f.path).await.unwrap();
-        let result = host.enqueue(&thread, &attempt).await;
+        let result = host
+            .enqueue(&thread, &attempt, "exact forwarded text\n")
+            .await;
         assert_eq!(result.is_ok(), valid);
         let requests = f.requests.lock().unwrap();
         let queued = requests
@@ -146,7 +148,7 @@ async fn queue_submission_preserves_target_and_validates_host_response() {
         assert_eq!(
             queued[0]["params"],
             json!({"threadId":thread,"clientUserMessageId":attempt,
-            "input":[{"type":"text","text":PROMPT}]})
+            "input":[{"type":"text","text":"exact forwarded text\n"}]})
         );
         assert!(requests.iter().all(|r| matches!(
             r["method"].as_str(),

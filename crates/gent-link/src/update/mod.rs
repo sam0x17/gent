@@ -1,6 +1,7 @@
 mod cache;
 mod coordination;
 mod install;
+mod integrations;
 mod notification;
 mod priority;
 mod process;
@@ -118,18 +119,21 @@ async fn monitor(home: &Path, installation: &Installation) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    loop {
+    let notification = loop {
         match installation.healthy(home, &build_info::current()) {
             Ok(Some(build)) => {
-                notification::installed(&build).await;
-                break;
+                break Some(build);
             }
-            Ok(None) => break,
+            Ok(None) => break None,
             Err(error) => {
                 eprintln!("Gent update readiness pending: {error}");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
+    };
+    integrations::refresh(home, installation).await;
+    if let Some(build) = notification {
+        notification::installed(&build).await;
     }
     let interval = CHECK_INTERVAL;
     #[cfg(feature = "test-updates")]
@@ -145,6 +149,7 @@ async fn monitor(home: &Path, installation: &Installation) {
     loop {
         tokio::select! {
             _ = checks.tick() => {
+                integrations::refresh(home, installation).await;
                 match config::load(home).and_then(|cfg| cfg.updates()) {
                     Ok(settings) if settings.enabled => {
                         if let Err(error) = apply(home, installation, true).await {

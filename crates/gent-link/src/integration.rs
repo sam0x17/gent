@@ -5,7 +5,7 @@ pub(crate) mod claude_wake;
 pub(crate) mod codex_files;
 mod install;
 pub(crate) mod naming;
-pub(crate) use install::retire;
+pub(crate) use install::{refresh, retire};
 pub(crate) mod recovery;
 pub(crate) mod runtime;
 pub(crate) mod vscode;
@@ -53,6 +53,8 @@ impl Host {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Refresh installed Gent fragments, preserving paths, opt-outs and host settings.
+    Refresh,
     /// Inspect user-scope installation without changing settings.
     Status {
         host: Option<Host>,
@@ -119,6 +121,7 @@ pub enum Command {
 
 pub fn execute(home: &Path, command: Command) -> Result<Value> {
     match command {
+        Command::Refresh => refresh::refresh(home),
         Command::ClaudeWake { .. }
         | Command::CodexIde(_)
         | Command::CodexWrapper(_)

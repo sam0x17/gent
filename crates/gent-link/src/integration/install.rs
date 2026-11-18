@@ -1,6 +1,7 @@
 //! User-scope host installation. Only generated Gent fragments enter the journal.
 mod claude_runtime;
 pub(super) mod document;
+pub(crate) mod refresh;
 use crate::managed_file as files;
 pub(super) use claude_runtime::{ClaudeRuntime, claude_runtime_pinned, claude_runtime_target};
 
@@ -716,6 +717,9 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     } else {
         None
     };
+    if install || home.is_dir() {
+        refresh::remember(&home, &layout)?;
+    }
     mutate(&layout, &home, desired)?;
     let mut result = inspect(&layout, &home)?;
     result["action"] = if install { "installed" } else { "uninstalled" }.into();

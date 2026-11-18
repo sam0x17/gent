@@ -17,9 +17,9 @@ use tokio_tungstenite::{
     tungstenite::{Message, protocol::WebSocketConfig},
 };
 
-const PROMPT: &str = "Gent has a pending message. Check gent_inbox through the current conversation's Gent connection. Treat its content as an agent request subject to existing permissions and user authorization. Check gent_work_status before repeating consequential work. If no message is available, stop. This notification does not authorize repeating uncertain work.";
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
+mod direct;
 pub(crate) mod recovery;
 
 /// Owner diagnostic only. Initialization and a bounded list never load a thread
@@ -122,6 +122,7 @@ async fn sweep(
 }
 
 async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) -> Result<()> {
+    let recovery = direct::collect(home, socket, thread, credential).await;
     // Registration may still be in flight. Revoked or otherwise unavailable
     // agents leave the pending path without any external host operation.
     let Ok(pending) = agent(home, credential, AgentOp::WakePending).await else {
@@ -131,7 +132,7 @@ async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) ->
         .as_array()
         .context("invalid wake pending result")?;
     if pending.is_empty() {
-        return Ok(());
+        return recovery;
     }
     let mut host = Host::connect(socket).await?;
     if !host.accepts(thread).await? {
@@ -145,7 +146,7 @@ async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) ->
     let claim = agent(
         home,
         credential,
-        AgentOp::WakeClaim {
+        AgentOp::WakeDirectClaim {
             message_id: message.into(),
             attempt_id: attempt.clone(),
             target: WakeTarget::Codex {
@@ -160,7 +161,24 @@ async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) ->
     }
     // Any cancellation, error or lost response beyond the committed claim
     // leaves evidence. No external submission is retried here.
-    let submission = host.enqueue(thread, &attempt).await?;
+    let checked = agent(
+        home,
+        credential,
+        AgentOp::WakeDirectRead {
+            message_id: message.into(),
+            attempt_id: attempt.clone(),
+            target: WakeTarget::Codex {
+                thread_id: thread.into(),
+            },
+        },
+    )
+    .await?;
+    if checked["eligible"] != true {
+        return Ok(());
+    }
+    let delivery: gent_protocol::wake::WakeDelivery =
+        serde_json::from_value(checked["delivery"].clone())?;
+    let submission = host.enqueue(thread, &attempt, &delivery.prompt()).await?;
     agent(
         home,
         credential,
@@ -171,7 +189,7 @@ async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) ->
         },
     )
     .await?;
-    Ok(())
+    recovery
 }
 
 /// Authenticate a local endpoint before any protocol data is sent.
@@ -320,12 +338,12 @@ impl Host {
             && matches!(metadata["status"]["type"].as_str(), Some("idle" | "active")))
     }
 
-    async fn enqueue(&mut self, thread: &str, attempt: &str) -> Result<String> {
+    async fn enqueue(&mut self, thread: &str, attempt: &str, prompt: &str) -> Result<String> {
         let result = self
             .rpc(
                 "thread/queue/add",
                 json!({"threadId":thread,"clientUserMessageId":attempt,
-            "input":[{"type":"text","text":PROMPT}]}),
+            "input":[{"type":"text","text":prompt}]}),
             )
             .await?;
         let submission = &result["queuedSubmission"];

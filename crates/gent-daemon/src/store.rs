@@ -869,6 +869,11 @@ impl StoreSession<'_> {
                 | AgentOp::WakeClaim { .. }
                 | AgentOp::WakeCheck { .. }
                 | AgentOp::WakeSubmitted { .. }
+                | AgentOp::WakeDirectClaim { .. }
+                | AgentOp::WakeDirectPending { .. }
+                | AgentOp::WakeDirectRead { .. }
+                | AgentOp::WakeDirectObserve { .. }
+                | AgentOp::WakeDirectComplete { .. }
         ) {
             self.db.execute(
                 "UPDATE agents SET last_seen=?1 WHERE id=?2",
@@ -933,6 +938,32 @@ impl StoreSession<'_> {
             } => self.permission_rule_apply(&who, &request_id, changes),
             AgentOp::RequestIds { count } => self.request_ids(count),
             AgentOp::WorkStatus { message_id } => self.work_status(&who, &message_id),
+            AgentOp::WakeDirectClaim {
+                message_id,
+                attempt_id,
+                target,
+            } => self.wake_direct_claim(&who, &message_id, &attempt_id, target),
+            AgentOp::WakeDirectPending { target } => self.wake_direct_pending(&who, &target),
+            AgentOp::WakeDirectRead {
+                message_id,
+                attempt_id,
+                target,
+            } => self.wake_direct_read(&who, &message_id, &attempt_id, &target),
+            AgentOp::WakeDirectObserve {
+                message_id,
+                attempt_id,
+                target,
+                turn_id,
+            } => self.wake_direct_observe(&who, &message_id, &attempt_id, &target, &turn_id),
+            AgentOp::WakeDirectComplete {
+                message_id,
+                attempt_id,
+                target,
+                turn_id,
+                text,
+            } => {
+                self.wake_direct_complete(&who, &message_id, &attempt_id, &target, (&turn_id, text))
+            }
             AgentOp::WakePending => self.wake_pending(&who),
             AgentOp::WakeClaim {
                 message_id,
@@ -1099,22 +1130,7 @@ impl StoreSession<'_> {
                 }
                 Ok(json!(inbox))
             }
-            AgentOp::Ack { message_id } => {
-                let message = self.message(&message_id)?;
-                ensure!(
-                    message.recipient == who.id && self.deliverable(&message)?,
-                    UNAVAILABLE
-                );
-                self.db.execute(
-                    "UPDATE messages SET acknowledged=1 WHERE id=?1",
-                    [&message_id],
-                )?;
-                let sender = self.get_agent(&message.sender)?;
-                if sender.node_id != self.identity.node.id() {
-                    self.receipt(&sender.node_id, &message_id, true, message.expires_at)?;
-                }
-                Ok(json!({"acknowledged":true}))
-            }
+            AgentOp::Ack { message_id } => self.acknowledge(&who, &message_id),
             AgentOp::MessageStatus { message_id } => {
                 let message = self.message(&message_id)?;
                 ensure!(
@@ -1139,6 +1155,23 @@ impl StoreSession<'_> {
                 Ok(json!({"message_id":message.id,"state":state}))
             }
         }
+    }
+
+    fn acknowledge(&self, who: &Agent, message_id: &str) -> Result<Value> {
+        let message = self.message(message_id)?;
+        ensure!(
+            message.recipient == who.id && self.deliverable(&message)?,
+            UNAVAILABLE
+        );
+        self.db.execute(
+            "UPDATE messages SET acknowledged=1 WHERE id=?1",
+            [message_id],
+        )?;
+        let sender = self.get_agent(&message.sender)?;
+        if sender.node_id != self.identity.node.id() {
+            self.receipt(&sender.node_id, message_id, true, message.expires_at)?;
+        }
+        Ok(json!({"acknowledged":true}))
     }
 
     fn message(&self, message_id: &str) -> Result<Message> {

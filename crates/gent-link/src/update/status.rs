@@ -41,5 +41,6 @@ pub(super) async fn report(home: &Path, installation: &Installation) -> Result<V
         "activation_home":pending.as_ref().map(|p| &p.home),
         "activation_starting":pending.as_ref().map(|p| p.starting),
         "build_log":installation.directory.join("build.log"),
+        "integrations":crate::integration::refresh::status(home).unwrap_or_else(|e| json!({"state":"needs_attention","error":e.to_string()})),
     }))
 }

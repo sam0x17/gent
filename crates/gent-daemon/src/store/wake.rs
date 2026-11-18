@@ -3,6 +3,7 @@
 use super::*;
 use gent_protocol::wake::{WakeRecord, WakeState, WakeTarget};
 
+mod direct;
 pub(super) mod retention;
 
 const MAX_RECORDS: u64 = 16_384;
@@ -85,6 +86,31 @@ fn record(db: &Connection, message_id: &str) -> Result<Option<WakeRecord>> {
         id(&record.agent)?;
         id(&record.attempt_id)?;
         target(&record.target)?;
+        if let Some(direct) = &record.direct {
+            id(&direct.reply_request_id)?;
+            ensure!(
+                direct.input_hash.len() == 64
+                    && direct.input_hash.bytes().all(|b| b.is_ascii_hexdigit()),
+                "invalid direct input hash"
+            );
+            if let Some(turn) = &direct.turn_id {
+                id(turn)?;
+            }
+            if let Some(message) = &direct.response_message_id {
+                id(message)?;
+            }
+            ensure!(
+                direct
+                    .response_hash
+                    .as_ref()
+                    .is_none_or(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())),
+                "invalid direct response hash"
+            );
+            ensure!(
+                !direct.finished || direct.turn_id.is_some(),
+                "direct completion has no native turn"
+            );
+        }
         if let Some(submission) = &record.submission_id {
             id(submission)?;
         }
@@ -212,6 +238,7 @@ impl StoreSession<'_> {
             "wake budget exhausted; leave messages pending"
         );
         let record = WakeRecord {
+            direct: None,
             message_id: message_id.into(),
             agent: who.id.clone(),
             attempt_id: attempt_id.into(),

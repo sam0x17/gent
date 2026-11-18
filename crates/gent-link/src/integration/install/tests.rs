@@ -7,7 +7,7 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
 };
 
-fn fixture(host: Host) -> (tempfile::TempDir, Layout, Spec) {
+pub(super) fn fixture(host: Host) -> (tempfile::TempDir, Layout, Spec) {
     let temp = tempfile::tempdir().unwrap();
     let root = fs::canonicalize(temp.path()).unwrap();
     let dir = root.join("host");
@@ -27,11 +27,11 @@ fn fixture(host: Host) -> (tempfile::TempDir, Layout, Spec) {
     };
     (temp, layout, spec)
 }
-fn put(path: &Path, text: &str) {
+pub(super) fn put(path: &Path, text: &str) {
     fs::write(path, text).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
-fn get(path: &Path) -> String {
+pub(super) fn get(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
 

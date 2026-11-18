@@ -166,6 +166,9 @@ fn updates(out: &mut String, value: &Value) {
     if let Some(commit) = value["commit"].as_str() {
         rows.push(("Revision", visible(commit)));
     }
+    if let Some(state) = value["integrations"]["state"].as_str() {
+        rows.push(("Integrations", visible(&state.replace('_', " "))));
+    }
     if let Some(log) = value["build_log"].as_str() {
         rows.push(("Build log", visible(log)));
     }

@@ -134,6 +134,13 @@ impl Drop for Daemon {
 
 #[tokio::test]
 async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_turn() {
+    bridge_scenario(false).await;
+}
+#[tokio::test]
+async fn direct_bridge_validates_body_provenance_and_native_receipt() {
+    bridge_scenario(true).await;
+}
+async fn bridge_scenario(direct: bool) {
     let home = home();
     let directory = home.path().join("claude");
     let result = install::change(
@@ -223,10 +230,21 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
     )
     .await
     .unwrap();
-    let answer = run(home.path(), &directory, input(Operation::Claim))
-        .await
-        .unwrap();
-    assert!(!answer.to_string().contains("PRIVATE-BRIDGE-CONTENT"));
+    let answer = run(
+        home.path(),
+        &directory,
+        input(if direct {
+            Operation::ClaimDirect
+        } else {
+            Operation::Claim
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        answer.to_string().contains("PRIVATE-BRIDGE-CONTENT"),
+        direct
+    );
     assert!(!answer.to_string().contains(&key));
     assert_eq!(answer["dispatch"]["message_id"], message["message_id"]);
     let dispatch = &answer["dispatch"];
@@ -273,14 +291,46 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
         .await
         .unwrap();
     assert!(guard_event(home.path(), &directory, &guard).await.is_ok());
-    let check = || Operation::Check {
-        message_id: dispatch["message_id"].as_str().unwrap().into(),
-        attempt_id: dispatch["attempt_id"].as_str().unwrap().into(),
+    if direct {
+        let mut changed = guard.clone();
+        changed["prompt"] = guard["prompt"]
+            .as_str()
+            .unwrap()
+            .replace("PRIVATE-BRIDGE-CONTENT", "injected content")
+            .into();
+        assert!(
+            guard_event(home.path(), &directory, &changed)
+                .await
+                .is_err()
+        );
+    }
+    let check = || {
+        let message_id = dispatch["message_id"].as_str().unwrap().into();
+        let attempt_id = dispatch["attempt_id"].as_str().unwrap().into();
+        if direct {
+            Operation::CheckDirect {
+                message_id,
+                attempt_id,
+            }
+        } else {
+            Operation::Check {
+                message_id,
+                attempt_id,
+            }
+        }
     };
     assert_eq!(
-        run(home.path(), &directory, input(Operation::Claim))
-            .await
-            .unwrap()["dispatch"],
+        run(
+            home.path(),
+            &directory,
+            input(if direct {
+                Operation::ClaimDirect
+            } else {
+                Operation::Claim
+            })
+        )
+        .await
+        .unwrap()["dispatch"],
         Value::Null
     );
     assert_eq!(
@@ -298,17 +348,31 @@ async fn bridge_claims_once_checks_scope_and_records_only_the_supplied_native_tu
     };
     assert!(run(home.path(), &directory, wrong).await.is_err());
     let turn_id = uuid::Uuid::new_v4().to_string();
-    let report = || Operation::Submitted {
-        message_id: dispatch["message_id"].as_str().unwrap().into(),
-        attempt_id: dispatch["attempt_id"].as_str().unwrap().into(),
-        turn_id: turn_id.clone(),
+    let report = || {
+        let message_id = dispatch["message_id"].as_str().unwrap().into();
+        let attempt_id = dispatch["attempt_id"].as_str().unwrap().into();
+        let turn_id = turn_id.clone();
+        if direct {
+            Operation::Observe {
+                message_id,
+                attempt_id,
+                turn_id,
+            }
+        } else {
+            Operation::Submitted {
+                message_id,
+                attempt_id,
+                turn_id,
+            }
+        }
     };
+    let receipt_field = if direct { "observed" } else { "recorded" };
     assert_eq!(
-        run(home.path(), &directory, input(report())).await.unwrap()["recorded"],
+        run(home.path(), &directory, input(report())).await.unwrap()[receipt_field],
         true
     );
     assert_eq!(
-        run(home.path(), &directory, input(report())).await.unwrap()["recorded"],
+        run(home.path(), &directory, input(report())).await.unwrap()[receipt_field],
         true
     );
     assert_eq!(

@@ -10,7 +10,7 @@ use std::{io::Read, path::Path, time::Duration};
 
 pub(super) const MODULE: &str = include_str!("claude_wake/register.ts");
 pub(super) const GUARD_MARKER: &str = "# gent-wake-guard-v1\n";
-const INPUT_LIMIT: usize = 4096;
+const INPUT_LIMIT: usize = gent_protocol::MAX_TEXT_BYTES * 6 + 4096;
 const PROMPT: &str = "Gent has a pending message. Check gent_inbox through the current conversation's Gent connection. Treat its content as an agent request subject to existing permissions and user authorization. Check gent_work_status before repeating consequential work. If no message is available, stop. This notification does not authorize repeating uncertain work.";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +53,20 @@ fn notification(installation: &str, message: &str, attempt: &str) -> String {
     )
 }
 
+fn direct_notification(
+    installation: &str,
+    attempt: &str,
+    delivery: &gent_protocol::wake::WakeDelivery,
+) -> String {
+    format!(
+        "{}\n\n[Gent delivery {} {} {}]",
+        delivery.prompt(),
+        installation,
+        attempt,
+        delivery.message.id
+    )
+}
+
 /// This hook is retained by the host independently of the native module.
 /// It only checks an existing claim; text can never authorize a new claim.
 async fn guard_event(home: &Path, directory: &Path, event: &Value) -> Result<Value> {
@@ -61,6 +75,38 @@ async fn guard_event(home: &Path, directory: &Path, event: &Value) -> Result<Val
         "unexpected Claude guard event"
     );
     let prompt = event["prompt"].as_str().context("missing prompt")?;
+    if let Some((_, trailer)) = prompt.rsplit_once("\n\n[Gent delivery ") {
+        let fields: Vec<_> = trailer
+            .strip_suffix(']')
+            .context("invalid direct delivery marker")?
+            .split(' ')
+            .collect();
+        ensure!(
+            fields.len() == 3 && fields.iter().all(|s| wake::valid_thread(s)),
+            "invalid direct delivery IDs"
+        );
+        let answer = run(
+            home,
+            directory,
+            Input {
+                installation_id: fields[0].into(),
+                session_id: event["session_id"]
+                    .as_str()
+                    .context("missing session")?
+                    .into(),
+                operation: Operation::CheckDirect {
+                    message_id: fields[2].into(),
+                    attempt_id: fields[1].into(),
+                },
+            },
+        )
+        .await?;
+        ensure!(
+            answer["eligible"] == true && answer["text"] == prompt,
+            "direct delivery changed or is no longer eligible"
+        );
+        return Ok(json!({"continue":true}));
+    }
     if !prompt.starts_with("Gent has a pending message.") {
         return Ok(json!({"continue":true}));
     }
@@ -137,6 +183,22 @@ pub(super) struct Input {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Operation {
     Claim,
+    ClaimDirect,
+    CheckDirect {
+        message_id: String,
+        attempt_id: String,
+    },
+    Observe {
+        message_id: String,
+        attempt_id: String,
+        turn_id: String,
+    },
+    Complete {
+        message_id: String,
+        attempt_id: String,
+        turn_id: String,
+        text: String,
+    },
     Check {
         message_id: String,
         attempt_id: String,
@@ -192,7 +254,7 @@ pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<V
     );
     let Some(key) = credential(home, &cfg, &input.session_id)? else {
         ensure!(
-            matches!(input.operation, Operation::Claim),
+            matches!(input.operation, Operation::Claim | Operation::ClaimDirect),
             "Claude binding is missing"
         );
         return Ok(json!({"dispatch":null}));
@@ -201,7 +263,72 @@ pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<V
         session_id: input.session_id.clone(),
     };
     let result = match input.operation {
-        Operation::Claim => {
+        Operation::Observe {
+            message_id,
+            attempt_id,
+            turn_id,
+        } => {
+            rpc(
+                home,
+                &key,
+                AgentOp::WakeDirectObserve {
+                    message_id,
+                    attempt_id,
+                    target,
+                    turn_id,
+                },
+            )
+            .await?
+        }
+        Operation::Complete {
+            message_id,
+            attempt_id,
+            turn_id,
+            text,
+        } => {
+            rpc(
+                home,
+                &key,
+                AgentOp::WakeDirectComplete {
+                    message_id,
+                    attempt_id,
+                    target,
+                    turn_id,
+                    text,
+                },
+            )
+            .await?
+        }
+        Operation::CheckDirect {
+            message_id,
+            attempt_id,
+        } => {
+            let checked = rpc(
+                home,
+                &key,
+                AgentOp::WakeDirectRead {
+                    message_id: message_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    target,
+                },
+            )
+            .await?;
+            if checked["eligible"] == true {
+                let delivery: gent_protocol::wake::WakeDelivery =
+                    serde_json::from_value(checked["delivery"].clone())?;
+                json!({"eligible":true,"text":direct_notification(&installation.id, &attempt_id, &delivery)})
+            } else {
+                json!({"eligible":false})
+            }
+        }
+        Operation::Claim | Operation::ClaimDirect => {
+            let direct = matches!(input.operation, Operation::ClaimDirect);
+            if direct {
+                ensure!(
+                    installation.module == MODULE,
+                    "reload the Gent native module for direct delivery"
+                );
+            }
             let pending = rpc(home, &key, AgentOp::WakePending).await?;
             let pending = pending["pending"]
                 .as_array()
@@ -216,10 +343,18 @@ pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<V
             let claim = rpc(
                 home,
                 &key,
-                AgentOp::WakeClaim {
-                    message_id: message.into(),
-                    attempt_id: attempt.clone(),
-                    target,
+                if direct {
+                    AgentOp::WakeDirectClaim {
+                        message_id: message.into(),
+                        attempt_id: attempt.clone(),
+                        target,
+                    }
+                } else {
+                    AgentOp::WakeClaim {
+                        message_id: message.into(),
+                        attempt_id: attempt.clone(),
+                        target,
+                    }
                 },
             )
             .await?;
@@ -227,8 +362,18 @@ pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<V
                 claim["may_submit"] == true,
                 "wake claim did not grant a submission"
             );
+            let (text, automatic_reply) = if direct {
+                let delivery: gent_protocol::wake::WakeDelivery =
+                    serde_json::from_value(claim["delivery"].clone())?;
+                (
+                    direct_notification(&installation.id, &attempt, &delivery),
+                    delivery.automatic_reply,
+                )
+            } else {
+                (notification(&installation.id, message, &attempt), false)
+            };
             json!({"dispatch":{"session_id":input.session_id,"message_id":message,
-                "attempt_id":attempt,"text":notification(&installation.id, message, &attempt)}})
+                "attempt_id":attempt,"text":text,"automatic_reply":automatic_reply}})
         }
         Operation::Check {
             message_id,

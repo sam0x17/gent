@@ -210,7 +210,7 @@ impl StoreSession<'_> {
         Ok(())
     }
 
-    fn relay_root(&self, id: &str) -> Result<Message> {
+    pub(super) fn relay_root(&self, id: &str) -> Result<Message> {
         let root = self.message(id)?;
         ensure!(
             root.relay.as_ref().is_some_and(
@@ -221,7 +221,7 @@ impl StoreSession<'_> {
         Ok(root)
     }
 
-    fn relay_turn_flags(
+    pub(super) fn relay_turn_flags(
         &self,
         id: &str,
     ) -> Result<(Option<String>, Option<String>, Option<String>)> {

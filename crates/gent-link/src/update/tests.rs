@@ -600,3 +600,74 @@ async fn shared_cache_rejects_redirected_fingerprints() {
         b"untouched"
     );
 }
+
+#[tokio::test]
+async fn activated_revision_refreshes_managed_integrations_but_superseded_daemon_does_not() {
+    use crate::integration::{self, Command as IntegrationCommand, Host};
+    let f = Fixture::new();
+    let home = f.root.path().join("node");
+    config::initialize(&home, "refresh-test").unwrap();
+    let directory = f.root.path().join("claude");
+    // Exercise the real CLI parser so custom installations enter the registry.
+    use clap::Parser;
+    let cli = crate::Cli::try_parse_from([
+        "gent",
+        "integration",
+        "install",
+        "claude-code",
+        "--config-dir",
+        directory.to_str().unwrap(),
+    ])
+    .unwrap();
+    let Some(crate::Command::Integration { command }) = cli.command else {
+        panic!("integration command");
+    };
+    integration::execute(&home, command).unwrap();
+    let record = directory.join(".gent-claude-code.json");
+    let module = directory.join("skills/gent-wake/hooks/register.ts");
+    let mut state: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let current_module = state["installed"]["claude_wake"]["module"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    state["installed"]["claude_wake"]["module"] = json!("export function register(on) {}\n");
+    config::write_private(&record, serde_json::to_string(&state).unwrap().as_bytes()).unwrap();
+    let old_module = fs::read_to_string(&module)
+        .unwrap()
+        .replace(&current_module, "export function register(on) {}\n");
+    config::write_private(&module, old_module.as_bytes()).unwrap();
+    let executable = |build: &Build| {
+        let text = serde_json::to_string(build).unwrap();
+        fs::write(
+            &f.installation.binary,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                text.replace('\'', "'\"'\"'")
+            ),
+        )
+        .unwrap();
+    };
+    executable(&build('f'));
+    integrations::refresh(&home, &f.installation).await;
+    assert_eq!(fs::read_to_string(&module).unwrap(), old_module);
+    executable(&build_info::current());
+    integrations::refresh(&home, &f.installation).await;
+    assert!(
+        fs::read_to_string(&module)
+            .unwrap()
+            .contains("claim_direct")
+    );
+    let status = integration::refresh::status(&home).unwrap();
+    assert_eq!(status["blocked"], 0);
+    let installed = integration::execute(
+        &home,
+        IntegrationCommand::Status {
+            host: Some(Host::ClaudeCode),
+            config_dir: Some(directory),
+            live: false,
+            host_binary: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(installed["state"], "configured");
+}
