@@ -48,6 +48,7 @@ pub(super) fn render(output: &mut String, value: &Value) -> Result<()> {
     let mut groups: Vec<_> = groups.into_iter().collect();
     groups.sort_by_cached_key(|(id, group)| (group.name.to_lowercase(), id.clone()));
     header(output, &format!("Chats ({count})"))?;
+    super::sync::summary(output, &value["sync"])?;
     for (id, mut group) in groups {
         writeln!(
             output,

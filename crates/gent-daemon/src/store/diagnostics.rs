@@ -32,6 +32,8 @@ impl Store {
             "relay": {"configured": self.config.relay.is_some(), "health": self.sync_health.snapshot()}
         });
         tx.commit()?;
+        let mut value = value;
+        value["sync"] = self.synchronization_status()?;
         Ok(value)
     }
 }

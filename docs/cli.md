@@ -283,3 +283,16 @@ All support `--json` and use local owner authority. Authenticated receiver check
 `gent chat recover ARCHIVE --identity KEY --from-chat OLD_UUID --name NAME` prepares a fresh chat and assigns that history. Choose `--binding NEW_PATH`, `--host codex|claude-code --conversation HOST_ID`, or `--gateway-client CLIENT_UUID --conversation HOST_ID`. Claude children also use `--subagent`; gateway hosts with a user policy require `--subject HOST_USER_ID`. The destination must be unused, and `--from-import` works here too. Reconnect the host to the replacement node after recovery. See [conversation recovery](recovery.md#recover-a-conversation-binding) for retry behavior and gateway authentication requirements.
 
 Restored-node activation remains unimplemented. The CLI refuses state marked `recovery-required.json` before contacting a daemon. Archived node state cannot redirect commands to a live directory. Removing the marker does not make old encryption state safe to resume.
+
+## Synchronization progress
+
+`gent sync` (or `gent sync status`) reports this daemon's encrypted transport
+progress, queued outgoing records, packet counters and recent contact. `gent ls`
+and cluster status include a compact summary. Use `--json` for the full snapshot;
+`gent ls --json` retains its existing chat array.
+
+States distinguish startup, peer connection setup, catch-up, retries, expired
+cluster authority and idle transport. Counters reset when the daemon starts.
+Idle means no known local transport backlog, not a complete cluster directory:
+offline nodes and native host discovery may still have additional chats. Removed
+nodes do not contribute to the outgoing queue count.

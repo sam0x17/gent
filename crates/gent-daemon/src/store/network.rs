@@ -6,6 +6,7 @@ use crate::{
 use gent_crypto::{SignedLegacyAgentBinding, scoped_id};
 use uuid::Uuid;
 
+mod queue;
 pub(super) mod retention;
 #[cfg(test)]
 mod tests;
@@ -35,10 +36,22 @@ fn active_peer(state: &VerifiedState, peer: &str, key: &[u8], timestamp: i64) ->
 /// Recheck the selected queue position in the encryption transaction. A stale
 /// selection must not allocate another ID after a completed request was pruned.
 fn check_cursor(db: &Connection, group: &[u8], fragment: (Uuid, usize, bool)) -> Result<()> {
-    let current: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM network_events e
+    let peer: String = db.query_row(
+        "SELECT peer FROM network_links WHERE outgoing=?1",
+        [group],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        queue::next_id(db, &peer)?.as_deref() == Some(fragment.0.to_string().as_str()),
+        "outgoing fragment selection changed before encryption"
+    );
+    let current: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM network_events e
         JOIN network_links l ON l.peer=e.peer WHERE l.outgoing=?1 AND e.id=?2
-        AND e.offset=?3 AND e.cancelled=?4 AND e.rowid=(SELECT MIN(rowid) FROM network_events WHERE peer=e.peer))",
-        params![group,fragment.0.to_string(),fragment.1,fragment.2], |r| r.get(0))?;
+        AND e.offset=?3 AND e.cancelled=?4)",
+        params![group, fragment.0.to_string(), fragment.1, fragment.2],
+        |r| r.get(0),
+    )?;
     ensure!(
         current,
         "outgoing fragment cursor changed before encryption"
@@ -754,7 +767,10 @@ impl Store {
     }
     pub(crate) fn data_prepare(&mut self, group: &[u8]) -> Result<()> {
         let peer = self.data_peer(&self.db, group, true)?;
-        let Some((id,body,offset,mut cancelled,subject,control)) = self.db.query_row("SELECT id,body,offset,cancelled,subject,traffic<>'data' FROM network_events WHERE peer=?1 ORDER BY rowid LIMIT 1", [&peer], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,usize>(2)?,r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,bool>(5)?))).optional()? else { return Ok(()); };
+        let Some(selected) = queue::next_id(&self.db, &peer)? else {
+            return Ok(());
+        };
+        let (id,body,offset,mut cancelled,subject,control) = self.db.query_row("SELECT id,body,offset,cancelled,subject,traffic<>'data' FROM network_events WHERE id=?1", [&selected], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,usize>(2)?,r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,bool>(5)?)))?;
         let id = Uuid::parse_str(&id)?;
         let state = self.identity.state(&self.db)?;
         if let Some(subject) = &subject {

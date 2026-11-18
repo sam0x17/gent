@@ -1,6 +1,7 @@
 //! Human views of existing responses. Rendering performs no I/O or RPC calls;
 //! JSON callers retain the original response and its complete field set.
 mod agents;
+mod sync;
 
 use anyhow::{Context, Result};
 use gent_daemon::config::{ClusterConfig, NodeConfig};
@@ -17,6 +18,7 @@ pub(crate) enum View {
     Agent,
     Agents,
     Resolution,
+    Sync,
     Providers,
 }
 
@@ -28,6 +30,8 @@ struct ClusterStatus {
     remote_ready: bool,
     authority: Authority,
     config_saved: bool,
+    #[serde(default)]
+    sync: Value,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +163,7 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
             ] {
                 row(&mut output, label, &text)?;
             }
+            sync::summary(&mut output, &value.sync)?;
             writeln!(
                 output,
                 "\n  Use gent doctor to check service, account and relay health."
@@ -220,6 +225,7 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
             )?;
         }
         View::Agents => agents::render(&mut output, value)?,
+        View::Sync => sync::render(&mut output, value)?,
         View::Resolution => agents::resolution(&mut output, value)?,
         View::Agent => {
             let details: Agent =

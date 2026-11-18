@@ -14,6 +14,8 @@ mod node_invite_tests;
 mod owner_handoff_tests;
 #[path = "presence_tests.rs"]
 mod presence_tests;
+#[path = "queue_tests.rs"]
+mod queue_tests;
 #[path = "registration_tests.rs"]
 mod registration_tests;
 #[path = "retention_tests.rs"]

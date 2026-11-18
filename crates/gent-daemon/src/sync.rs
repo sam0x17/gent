@@ -17,6 +17,7 @@ mod bootstrap;
 mod files;
 pub(crate) mod health;
 mod notifications;
+mod transfer;
 
 const MAX_FRAME: usize = 1024 * 1024;
 type SharedStore = Arc<Mutex<Store>>;
@@ -211,78 +212,6 @@ async fn local<T: Send + 'static>(
     crate::access::run(store, "encrypted sync", operation).await
 }
 
-async fn transfer(store: SharedStore, relay: Relay, entry: Stream) -> Result<Option<u64>> {
-    let group = entry.group;
-    if entry.outgoing {
-        let received = relay.checkpoint(&group).await?;
-        let g = group.clone();
-        let confirmed = local(store.clone(), move |store| {
-            store.transport_confirm(&g, entry.configuration, received.as_ref())
-        })
-        .await?;
-        if let Some(receipt) = confirmed {
-            // This also restores the confirmed prefix after relay storage loss.
-            // Do this before preparing new data so a full queue can recover.
-            relay.put_checkpoint(&receipt, true).await?;
-        }
-        let g = group.clone();
-        local(store.clone(), move |store| {
-            if entry.configuration {
-                store.sync_prepare(&g)
-            } else {
-                store.data_prepare(&g)
-            }
-        })
-        .await?;
-        // Relay position is an untrusted availability hint. Bounds and pinned
-        // recipient authorization are checked again before reading the outbox.
-        let next = relay.position(&group).await?;
-        let packet = local(store, move |store| {
-            if entry.configuration {
-                store.sync_outgoing(&group, next)
-            } else {
-                store.data_outgoing(&group, next)
-            }
-        })
-        .await?;
-        if let Some(packet) = packet {
-            relay.put(&packet).await?;
-            return Ok(Some(next));
-        }
-    } else {
-        let g = group.clone();
-        let next = local(store.clone(), move |store| {
-            if entry.configuration {
-                store.sync_next(&g)
-            } else {
-                store.data_next(&g)
-            }
-        })
-        .await?;
-        let g = group.clone();
-        let receipt = local(store.clone(), move |store| {
-            store.transport_receipt(&g, entry.configuration)
-        })
-        .await?;
-        relay.put_checkpoint(&receipt, false).await?;
-        if let Some(packet) = relay.get(&group, next).await? {
-            let g = group.clone();
-            let receipt = local(store, move |store| {
-                if entry.configuration {
-                    store.sync_receive(&packet)?;
-                } else {
-                    store.data_receive(&packet)?;
-                }
-                store.transport_receipt(&g, entry.configuration)
-            })
-            .await?;
-            relay.put_checkpoint(&receipt, false).await?;
-            return Ok(Some(next));
-        }
-    }
-    Ok(None)
-}
-
 struct Retry {
     at: Instant,
     delay: Duration,
@@ -353,6 +282,7 @@ async fn run(
             .err()
             .or_else(|| bootstrap_result.err())
             .map(|error| error.to_string());
+        let control_error = error.is_some();
         let (mut successes, mut failures, mut local_error) = (0, 0, false);
         match result {
             Ok((streams, pending)) => {
@@ -368,6 +298,7 @@ async fn run(
                 }
                 retries.retain(|group, _| streams.iter().any(|s| &s.group == group));
                 transferred.retain(|group, _| streams.iter().any(|s| &s.group == group));
+                health.retain(&streams, mesh_pending);
                 let begin = cursor.min(streams.len());
                 let end = (begin + 32).min(streams.len());
                 let selected: Vec<_> = streams[begin..end]
@@ -381,7 +312,8 @@ async fn run(
                         let group = entry.group.clone();
                         let store = store.clone();
                         let relay = relay.clone();
-                        async move { (group, transfer(store, relay, entry).await) }
+                        let health = health.clone();
+                        async move { (group, transfer::run(store, relay, entry, health).await) }
                     })
                     .buffer_unordered(4);
                 while let Some((group, result)) = work.next().await {
@@ -425,6 +357,7 @@ async fn run(
             failures,
             retries.len(),
             local_error,
+            control_error,
         );
         if let Some(error) = &error {
             if previous_error.as_ref() != Some(error) {

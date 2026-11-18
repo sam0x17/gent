@@ -368,3 +368,41 @@ async fn mesh_jobs_retry_storage_failures_and_restart_without_duplicate_streams(
         counts
     );
 }
+
+#[tokio::test]
+async fn a_new_node_drains_directory_backlog_and_reports_transport_progress() {
+    let relay = relay::RelayServer::start().await;
+    let mut nodes = cluster(&relay).await;
+    for i in 0..40 {
+        ok(nodes[0].store.lock().unwrap().handle(Request::Agent {
+            credential: config::secret(),
+            action: AgentOp::Register {
+                name: format!("history-{i}"),
+                provider: "test".into(),
+            },
+        }));
+    }
+    for node in &mut nodes {
+        node.start();
+    }
+    wait(|| {
+        nodes
+            .iter()
+            .all(|node| node.owner(OwnerOp::Agents).as_array().unwrap().len() == 43)
+    })
+    .await;
+    let status = nodes[1].owner(OwnerOp::Status);
+    assert!(status["sync"]["packets_received"].as_u64().unwrap() >= 40);
+    assert!(status["sync"]["last_progress_at"].as_i64().is_some());
+    assert!(
+        status["sync"]["scope"]
+            .as_str()
+            .unwrap()
+            .contains("not a complete cluster directory")
+    );
+    nodes[1].restart();
+    assert_eq!(
+        nodes[1].owner(OwnerOp::Agents).as_array().unwrap().len(),
+        43
+    );
+}

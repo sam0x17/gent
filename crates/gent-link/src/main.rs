@@ -105,6 +105,11 @@ enum Command {
     },
     /// Diagnose local setup without repairing state or running a model.
     Doctor(doctor::Options),
+    /// Show current relay synchronization progress and queued records.
+    Sync {
+        #[command(subcommand)]
+        command: Option<SyncCommand>,
+    },
     /// Sign in to Gent's service, inspect the account session, or sign out.
     Auth {
         #[command(subcommand)]
@@ -211,6 +216,10 @@ enum Command {
         #[command(subcommand)]
         command: Option<RelayCommand>,
     },
+}
+#[derive(Subcommand)]
+enum SyncCommand {
+    Status,
 }
 #[derive(Subcommand)]
 enum AgentsCommand {
@@ -779,6 +788,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }) => Some(display::View::Cluster),
         Some(Command::Node { command: None }) => Some(display::View::Node),
         Some(Command::Nodes) => Some(display::View::Nodes),
+        Some(Command::Sync { .. }) => Some(display::View::Sync),
         Some(Command::Agents { command: None }) => Some(display::View::Agents),
         Some(Command::Resolve { .. }) => Some(display::View::Resolution),
         Some(Command::Agent {
@@ -938,9 +948,17 @@ async fn execute(cli: Cli) -> Result<()> {
                 agents
             } else {
                 let nodes = owner(&home, OwnerOp::Nodes).await?;
-                json!({"agents":agents,"nodes":nodes})
+                let status = owner(&home, OwnerOp::Status).await?;
+                json!({"agents":agents,"nodes":nodes,"sync":status["sync"]})
             }
         }
+        Some(Command::Sync { .. }) => owner(&home, OwnerOp::Status)
+            .await?
+            .get("sync")
+            .cloned()
+            .context(
+                "this daemon does not report sync progress; update Gent and restart its daemon",
+            )?,
         Some(Command::Nodes) => owner(&home, OwnerOp::Nodes).await?,
         Some(Command::Files { command }) => {
             let action = match command.unwrap_or(FilesCommand::Status) {

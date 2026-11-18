@@ -109,6 +109,7 @@ impl Output {
             Some(C::Auth { .. }) => "Account",
             Some(C::Node { .. }) => "Node",
             Some(C::Nodes) => "Nodes",
+            Some(C::Sync { .. }) => "Sync",
             Some(C::Agent { .. }) => "Chat",
             Some(C::Agents { .. } | C::Resolve { .. }) => "Chats",
             Some(C::Integration { .. } | C::Integrations) => "Integrations",

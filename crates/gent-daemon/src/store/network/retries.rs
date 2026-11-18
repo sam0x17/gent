@@ -264,6 +264,9 @@ async fn version_six_pending_deterministic_fragment_reuses_legacy_ciphertext_and
         .execute_batch("DROP TABLE transport_requests; PRAGMA user_version=6;")
         .unwrap();
     pair.reopen(0);
+    // A newly queued heartbeat must not replace the already encrypted legacy
+    // first fragment, even though its saved offset is still zero.
+    pair.stores[0].presence_tick().unwrap();
     pair.stores[0].data_prepare(&group).unwrap();
     assert_eq!(
         pair.endpoint(0).status(&group, now() as u64).unwrap().head,

@@ -43,6 +43,7 @@ pub(crate) mod removals;
 mod requests;
 #[cfg(test)]
 mod storage_tests;
+mod synchronization;
 mod wake;
 mod work;
 
@@ -331,6 +332,13 @@ impl Store {
             timestamp,
         };
         let owner_request = matches!(&request, Request::Owner { .. });
+        let status_request = matches!(
+            &request,
+            Request::Owner {
+                action: OwnerOp::Status,
+                ..
+            }
+        );
         let mut value = match request {
             Request::Owner { action, .. } => session.owner(action)?,
             Request::Agent { credential, action } => {
@@ -343,6 +351,9 @@ impl Store {
             }
         };
         tx.commit()?;
+        if status_request {
+            value["sync"] = self.synchronization_status()?;
+        }
         if read_only {
             return Ok(value);
         }
