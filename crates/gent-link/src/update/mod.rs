@@ -2,6 +2,7 @@ mod cache;
 mod coordination;
 mod install;
 mod notification;
+mod priority;
 mod process;
 mod release;
 mod workflow;

@@ -39,6 +39,8 @@ Cargo builds each exact revision using a persistent dependency cache and a separ
 
 Gent validates the candidate's package, commit, target and update protocol, then rechecks the stable tag and the existing executable. A changed tag, a changed installation or an invalid candidate cancels publication.
 
+Builds use a lower CPU priority through the system `nice` utility when available. Linux also requests idle I/O through `ionice`, and macOS uses `taskpolicy` background scheduling, when those system utilities are present. These priorities apply to Cargo and its children, not the daemon. They reduce competition with messaging and other foreground work, but cannot eliminate delays caused by unrelated disk load. The default remains two build jobs unless `CARGO_BUILD_JOBS` is set.
+
 Gent saves the previous binary, writes a durable activation record, and replaces the executable with a rename on the same filesystem. The daemon stops accepting new connections, finishes accepted requests and database work, then executes the new binary with the same PID. Inbox and transport queues remain in SQLite; remote nodes can retain messages during the short reconnect window. Ordinary local requests and file uploads wait up to ten seconds for a missing or refused socket before sending any request bytes. Status probes report a stopped daemon immediately. Requests whose outcomes are uncertain after transmission still need an explicit retry with the original request ID; Gent does not blindly replay them. An update cannot promise uninterrupted access to every RPC.
 
 Existing chat hosts and MCP processes stay open. Already-running MCP processes keep their loaded code until they reconnect; Gent does not silently restart the chat host or submit a model turn.

@@ -108,7 +108,7 @@ pub(super) async fn stage(
     );
     let target = super::cache::prepare(cache, installed).await?;
     let executable = cargo()?;
-    let mut command = Command::new(&executable);
+    let mut command = super::priority::command(&executable);
     command
         .args([
             "install",
