@@ -97,6 +97,7 @@ def main():
     try:
         text, seen = run("fresh", ["setup", "--local", "guided-proof"], replies, 0)
         assert all(p in seen for p in prompts)
+        assert all(p + " [Y/n]" in text for p in seen)
         assert text.index("Gent daemon is running.") < text.index(prompts[0])
         assert cli("daemon", "status")["daemon"]["running"]
         identity = (home / "identity.key").read_bytes()
@@ -145,7 +146,7 @@ def main():
         run("resume", ["setup"], replies, 0)
         assert not tomllib.loads((home / "config.toml").read_text())["discovery"]["enabled"]
         discovery = "Make all supported chats on this system discoverable by Gent?"
-        for name, reply, default, enabled in [("enable", b"y\n", "[y/N]", True),
+        for name, reply, default, enabled in [("enable", b"\n", "[Y/n]", True),
                                                ("keep", b"\n", "[Y/n]", True),
                                                ("disable", b"n\n", "[Y/n]", False)]:
             answers = dict(replies)

@@ -16,7 +16,7 @@ signs in with GitHub, and installs and starts the per-user daemon before asking
 about integrations. `gent daemon install` runs the same wizard.
 
 Every interactive run offers these choices, including when completing an
-already enrolled node:
+already enrolled node. Every yes/no setup question defaults to Yes:
 
 - Codex CLI, with automatic incoming-message delivery on new installs.
 - Codex in VS Code, as a separate opt-in to the experimental editor route.
@@ -30,8 +30,8 @@ Declining an integration leaves any existing installation unchanged. After
 installation, reload open hosts or VS Code windows and connect the intended chat.
 Claude Code sessions remain under the host's control.
 
-The wizard asks about native chat discovery on each interactive run, using the
-saved preference as the default (off on a fresh node).
+The wizard asks about native chat discovery on each interactive run, defaulting
+to Yes. Answer No to keep it disabled or disable a previously enabled setting.
 It offers Linux startup before login if linger is not already enabled. Optional
 step failures leave the daemon running, allow the remaining choices, and report
 retry commands. Exit status 3 and `setup_complete: false` identify partial setup;
@@ -83,7 +83,7 @@ This prints a one-time code and the complete command for the new machine:
 gent cluster join CODE
 ```
 
-The code supplies both the cluster and the signed node name. There is no approval command to run afterward. Joining checks the existing GitHub login, offers device login if needed in a terminal, enrolls the node, and installs and starts its daemon. It then offers the same integration, shell and discovery questions as `gent setup`. You can also run `gent setup` later to finish configuration.
+The code supplies both the cluster and the signed node name. The `Invitation code` line and join command show the same complete prefixed code; `Invitation ID` is the separate identifier used to manage the invitation. There is no approval command to run afterward. Joining checks the existing GitHub login, offers device login if needed in a terminal, enrolls the node, and installs and starts its daemon. It then offers the same integration, shell and discovery questions as `gent setup`. You can also run `gent setup` later to finish configuration.
 
 Gent carries the invitation and enrollment over its HTTPS services; direct access between machines is unnecessary. An authorized joined node forwards issuance to the signing owner over its established encrypted connection. The signing owner must remain online during issuance and enrollment. Messaging-only nodes cannot issue codes. `gent node add laptop --no-configure` creates a messaging-only invitation.
 

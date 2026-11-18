@@ -3,6 +3,9 @@ use serde_json::Value;
 use std::fmt::Write;
 
 fn label(key: &str) -> String {
+    if key == "invitation" {
+        return "Invitation ID".into();
+    }
     let text = key
         .split('_')
         .map(|word| match word {

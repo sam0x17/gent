@@ -163,7 +163,8 @@ pub async fn add(home: &Path, args: AddArgs) -> Result<Value> {
         storage::code_file(&managed_file::normalize(path)?, &code)?;
     } else {
         eprintln!(
-            "Run on the new machine:\n  gent cluster join {}\nThis private code enrolls one node as {} and expires in 15 minutes.",
+            "Invitation code: {}\n\nRun on the new machine:\n  gent cluster join {}\nThis private code enrolls one node as {} and expires in 15 minutes.",
+            code.expose().as_str(),
             code.expose().as_str(),
             args.name
         );

@@ -10,14 +10,13 @@ pub(crate) fn discovery(
     preference: Option<bool>,
     interactive: bool,
 ) -> Result<()> {
-    let cfg = config::load(home)?;
     let preference = if preference.is_none() && interactive {
         eprintln!(
             "Gent can publish supported native chat names to your cluster and wake them for incoming messages. Host approvals still apply."
         );
         Some(ask(
             "Make all supported chats on this system discoverable by Gent?",
-            cfg.discovery()?.enabled,
+            true,
         )?)
     } else {
         preference
@@ -59,7 +58,7 @@ async fn integrations(home: &Path, result: &mut Value) -> Result<()> {
     );
     for (host, vscode, label, default) in [
         (Host::Codex, false, "Codex CLI", true),
-        (Host::Codex, true, "Codex in VS Code", false),
+        (Host::Codex, true, "Codex in VS Code", true),
         (
             Host::ClaudeCode,
             false,

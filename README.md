@@ -16,10 +16,10 @@ An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQL
 
 Gent [automatically updates](docs/updates.md) from the GitHub `stable` tag every five minutes, with staged builds, atomic executable replacement and startup rollback. Normal CLI responses are readable; use `--json` for scripts or `--verbose` for full response details.
 
-For a new machine with Cargo and repository access:
+For a new machine with Cargo:
 
 ```sh
-cargo install --git ssh://git@github.com/sam0x17/gent.git --tag stable --locked gent-link && gent setup
+cargo install --git https://github.com/sam0x17/gent.git --tag stable --locked gent-link && gent setup
 ```
 
 The [setup wizard](docs/service-setup.md) handles GitHub login, cluster creation
