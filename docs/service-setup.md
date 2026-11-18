@@ -30,7 +30,8 @@ Declining an integration leaves any existing installation unchanged. After
 installation, reload open hosts or VS Code windows and connect the intended chat.
 Claude Code sessions remain under the host's control.
 
-The wizard asks about native chat discovery when no preference has been saved.
+The wizard asks about native chat discovery on each interactive run, using the
+saved preference as the default (off on a fresh node).
 It offers Linux startup before login if linger is not already enabled. Optional
 step failures leave the daemon running, allow the remaining choices, and report
 retry commands. Exit status 3 and `setup_complete: false` identify partial setup;

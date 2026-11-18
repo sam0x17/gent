@@ -144,7 +144,17 @@ def main():
         assert (home / "identity.key").read_bytes() == identity
         run("resume", ["setup"], replies, 0)
         assert not tomllib.loads((home / "config.toml").read_text())["discovery"]["enabled"]
-        print("PASS: guided prompts, daemon readiness, every integration, partial failure/retry, shell hooks, cancellation, identity retention and noninteractive setup", flush=True)
+        discovery = "Make all supported chats on this system discoverable by Gent?"
+        for name, reply, default, enabled in [("enable", b"y\n", "[y/N]", True),
+                                               ("keep", b"\n", "[Y/n]", True),
+                                               ("disable", b"n\n", "[Y/n]", False)]:
+            answers = dict(replies)
+            answers[discovery] = reply
+            text, seen = run("discovery-" + name, ["setup"], answers, 0)
+            assert discovery in seen and discovery + " " + default in text
+            assert tomllib.loads((home / "config.toml").read_text())["discovery"]["enabled"] == enabled
+            assert (home / "identity.key").read_bytes() == identity
+        print("PASS: guided prompts, daemon readiness, every integration, partial failure/retry, shell hooks, cancellation, revisiting discovery, identity retention and noninteractive setup", flush=True)
     finally:
         if native:
             subprocess.run([str(args.codex.resolve()), "app-server", "daemon", "stop"],

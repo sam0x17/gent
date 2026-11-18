@@ -11,14 +11,13 @@ pub(crate) fn discovery(
     interactive: bool,
 ) -> Result<()> {
     let cfg = config::load(home)?;
-    let preference = if preference.is_none() && !cfg.extra.contains_key("discovery") && interactive
-    {
+    let preference = if preference.is_none() && interactive {
         eprintln!(
             "Gent can publish supported native chat names to your cluster and wake them for incoming messages. Host approvals still apply."
         );
         Some(ask(
             "Make all supported chats on this system discoverable by Gent?",
-            false,
+            cfg.discovery()?.enabled,
         )?)
     } else {
         preference
