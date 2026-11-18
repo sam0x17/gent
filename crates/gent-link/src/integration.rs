@@ -177,6 +177,37 @@ pub fn execute(home: &Path, command: Command) -> Result<Value> {
     }
 }
 
+/// Reuse the ordinary installer and its ownership journal during guided setup.
+pub(crate) fn setup_install(home: &Path, host: Host, vscode: bool) -> Result<Value> {
+    install::change(
+        home,
+        install::Args {
+            host,
+            config_dir: None,
+            wake: false,
+            no_wake: false,
+            wake_socket: None,
+            vscode,
+            no_vscode: false,
+            vscode_settings: None,
+        },
+        true,
+    )
+}
+
+pub(crate) async fn setup_start_codex(home: &Path) -> Result<Value> {
+    runtime::start(
+        home,
+        runtime::Args {
+            host: Host::Codex,
+            session_id: None,
+            config_dir: None,
+            host_binary: Some(executable::resolve(Host::Codex)?),
+        },
+    )
+    .await
+}
+
 fn configuration(home: &Path, host: Host, wake_socket: Option<&Path>) -> Result<Value> {
     let home = fs::canonicalize(home).context("initialize this Gent node first")?;
     config::load(&home)?;

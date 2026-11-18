@@ -49,27 +49,14 @@ pub(crate) fn pending(home: &Path) -> Result<Option<(PathBuf, String)>> {
 
 pub async fn join(home: &Path, args: crate::pairing::JoinArgs) -> Result<Value> {
     let preference = args.discover_chats;
+    let interactive = crate::setup::interactive(crate::ui::human() && !args.no_input);
+    let finish = !args.no_daemon && (args.code_route()? || interactive);
     let mut result = join_inner(home, args).await?;
-    let cfg = config::load(home)?;
-    let preference = if preference.is_some() || cfg.extra.contains_key("discovery") {
-        preference
-    } else if crate::ui::human() && io::stdin().is_terminal() && io::stderr().is_terminal() {
-        eprintln!(
-            "Gent can publish supported native chat names to your cluster and wake those chats for incoming messages. Host approvals still apply."
-        );
-        let answer = prompt(
-            "Do you want all chats on this system to be automatically discoverable by Gent? [y/N] ",
-        )?;
-        Some(matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes"))
+    if finish {
+        crate::setup::after_join(home, &mut result, interactive, preference).await?;
     } else {
-        None
-    };
-    if let Some(enabled) = preference {
-        crate::integration::discovery::configure(home, enabled).context(
-            "node enrolled; set chat discovery with gent node discovery enable or disable",
-        )?;
+        crate::setup::discovery(home, &mut result, preference, interactive)?;
     }
-    result["chat_discovery_enabled"] = json!(config::load(home)?.discovery()?.enabled);
     Ok(result)
 }
 
@@ -96,7 +83,13 @@ async fn join_inner(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<V
                     .text
                     .context("code file is missing")?,
             ),
-            (None, None) => prompt("Node invitation code: ")?,
+            (None, None) => {
+                ensure!(
+                    crate::setup::interactive(crate::ui::human() && !args.no_input),
+                    "provide a node invitation code or --code-file for noninteractive joining"
+                );
+                prompt("Node invitation code: ")?
+            }
             _ => anyhow::bail!("supply either a code or --code-file"),
         };
         Some(Code::parse(raw.trim())?)
@@ -119,7 +112,7 @@ async fn join_inner(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<V
     }
     // The code authenticates encrypted bootstrap data; it never selects an origin.
     storage::directory(home)?;
-    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+    if crate::setup::interactive(crate::ui::human() && !args.no_input) {
         auth::execute(
             home,
             auth::Command::Login {
@@ -216,7 +209,6 @@ async fn join_inner(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<V
         }
     }
     args.name.clone_from(name);
-    let install = !args.no_daemon;
     let mut result = crate::node_home::provision::join(
         home,
         args.with_invitation(file, offer.anchor.cluster_id.clone()),
@@ -224,18 +216,6 @@ async fn join_inner(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<V
     .await.with_context(|| format!(
         "join for node {name} is saved; retry with gent cluster join; if the invitation expires, run gent node add {name} on an existing node and join with the fresh code"
     ))?;
-    if install {
-        let status = crate::service::execute(
-            home,
-            crate::DaemonCommand::Install {
-                local: None,
-                setup: crate::setup::Options::default(),
-            },
-        )
-        .await
-        .context("node enrolled; finish starting its daemon with gent daemon install")?;
-        result["daemon"] = status["daemon"].clone();
-    }
     storage::private(&journal)?.remove()?;
     result["pairing"] = json!("code_verified");
     result["next"] = json!(

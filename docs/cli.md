@@ -51,10 +51,10 @@ Interactive commands can guide missing setup steps. For automation, support expl
 With Rust and Cargo installed, the shortest intended setup is:
 
 ```sh
-cargo install gent-link && gent daemon install
+cargo install gent-link && gent setup
 ```
 
-`gent daemon install` sets up and starts the service and guides any missing GitHub login and cluster enrollment. Start with macOS launchd and Linux systemd user services. Report login/startup requirements, and diagnose systems without a supported service manager. Offer shell-hook installation as part of that interactive setup. Each step is also available independently:
+`gent setup` (also `gent daemon install`) sets up and starts the service, guides any missing GitHub login and cluster enrollment, then asks about each host integration, shell completions and chat discovery. Start with macOS launchd and Linux systemd user services. Report login/startup requirements, and diagnose systems without a supported service manager. Offer shell-hook installation as part of that interactive setup. Each step is also available independently:
 
 ```sh
 gent auth login

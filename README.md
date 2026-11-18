@@ -16,6 +16,18 @@ An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQL
 
 Gent [automatically updates](docs/updates.md) from the GitHub `stable` tag every five minutes, with staged builds, atomic executable replacement and startup rollback. Normal CLI responses are readable; use `--json` for scripts or `--verbose` for full response details.
 
+For a new machine with Cargo and repository access:
+
+```sh
+cargo install --git ssh://git@github.com/sam0x17/gent.git --tag stable --locked gent-link && gent setup
+```
+
+The [setup wizard](docs/service-setup.md) handles GitHub login, cluster creation
+or joining, and daemon startup. It then asks separately about Codex CLI, Codex
+in VS Code, Claude Code, shell completions, and native chat discovery. An
+interactive `gent cluster join CODE` runs the same follow-up questions after
+enrollment. Rerun `gent setup` to finish skipped or interrupted steps.
+
 Opt into [automatic native chat discovery](docs/discovery.md) with `gent node discovery enable`. Supported chats become visible without first calling a Gent tool, using their native titles and stable session IDs. New-node enrollment asks about this setting. Existing nodes remain unchanged until enabled.
 
 Run `scripts/check.sh` for [development checks](docs/testing.md), including formatting, strict Clippy, Rust tests and local CLI/MCP smoke checks. The GitHub workflow uses Linux; macOS testing remains deliberate.

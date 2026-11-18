@@ -1,8 +1,10 @@
 //! Compose existing recoverable commands into the daemon installer. Enrollment
 //! and login keep their own journals, locks and trust checks.
+mod finish;
 use crate::{DaemonCommand, auth, cluster, hooks, invitations, managed_file, service};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
+pub(crate) use finish::{after_join, discovery};
 use gent_daemon::config;
 use serde_json::{Value, json};
 use std::{
@@ -49,6 +51,9 @@ pub struct Options {
     /// Startup file for --hooks, preserving unrelated content.
     #[arg(long, requires = "hooks")]
     rc_file: Option<PathBuf>,
+    /// Set native chat discovery explicitly; otherwise ask during interactive setup.
+    #[arg(long, action = clap::ArgAction::Set)]
+    discover_chats: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -91,6 +96,39 @@ fn answer(reader: &mut impl BufRead, writer: &mut impl Write, prompt: &str) -> R
 fn prompt(interactive: bool, text: &str, missing: &str) -> Result<String> {
     ensure!(interactive, "{missing}");
     answer(&mut io::stdin().lock(), &mut io::stderr().lock(), text)
+}
+
+pub(crate) fn interactive(human: bool) -> bool {
+    human && io::stdin().is_terminal() && io::stderr().is_terminal()
+}
+
+fn confirm(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    text: &str,
+    default: bool,
+) -> Result<bool> {
+    loop {
+        let suffix = if default { "[Y/n]" } else { "[y/N]" };
+        match answer(reader, writer, &format!("{text} {suffix}: "))?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => writeln!(writer, "Please answer y or n.")?,
+        }
+    }
+}
+
+fn ask(text: &str, default: bool) -> Result<bool> {
+    confirm(
+        &mut io::stdin().lock(),
+        &mut io::stderr().lock(),
+        text,
+        default,
+    )
 }
 
 fn present(path: &Path) -> Result<bool> {
@@ -309,28 +347,12 @@ pub async fn install(
 ) -> Result<Value> {
     let home = managed_file::normalize(home)?;
     service::validate_linger(options.linger)?;
-    let interactive =
-        human && !options.no_input && io::stdin().is_terminal() && io::stderr().is_terminal();
+    let interactive = interactive(human && !options.no_input);
     if let Some(origin) = &options.service {
         auth::origin(origin)?;
     }
     service::preflight(&home).await?;
     let plan = plan(&home, local, &mut options, interactive)?;
-    if interactive
-        && !matches!(plan, Plan::Existing)
-        && !options.hooks
-        && let Ok(shell) = hooks::Shell::detected(std::env::var_os("SHELL").as_deref())
-    {
-        let choice = prompt(true, "Install shell PATH and completions? [y/N]: ", "")?;
-        match choice.to_ascii_lowercase().as_str() {
-            "y" | "yes" => {
-                options.hooks = true;
-                options.shell = Some(shell);
-            }
-            "" | "n" | "no" => {}
-            _ => bail!("answer y or n; rerun gent daemon install"),
-        }
-    }
     if options.hooks && options.shell.is_none() {
         options.shell = Some(hooks::Shell::detected(
             std::env::var_os("SHELL").as_deref(),
@@ -374,7 +396,7 @@ pub async fn install(
                 crate::enrollment::join(&home, {
                     let mut args = crate::pairing::JoinArgs::code(Some(code));
                     args.no_daemon = true;
-                    args.discover_chats = (!interactive).then_some(false);
+                    args.no_input = true;
                     args
                 })
                 .await?,
@@ -398,14 +420,17 @@ pub async fn install(
             None
         }
     };
-    let mut result = service::execute(
-        &home,
-        DaemonCommand::Install {
-            local,
-            setup: Options::default(),
-        },
-    )
-    .await?;
+    let mut result = {
+        let _progress = crate::ui::Progress::start("Installing and starting Gent daemon");
+        service::execute(
+            &home,
+            DaemonCommand::Install {
+                local,
+                setup: Options::default(),
+            },
+        )
+        .await?
+    };
     if config::load(&home)?.service.is_some() {
         let status = crate::owner(&home, gent_protocol::OwnerOp::Status).await?;
         let nodes = crate::owner(&home, gent_protocol::OwnerOp::Nodes).await?;
@@ -425,17 +450,9 @@ pub async fn install(
     if let Some(enrollment) = enrollment {
         result["enrollment"] = enrollment;
     }
-    if options.hooks {
-        result["hooks"] = hooks::execute(hooks::Command::Install(hooks::Options {
-            shell: options.shell, rc_file: options.rc_file,
-        })).context("daemon is installed; shell setup failed; retry gent hooks install with the same shell/path")?;
-    }
-    result["next"] = json!(
-        "Connect your chats with gent integration install codex and gent integration install claude-code."
-    );
-    if human {
-        eprintln!("{}", result["next"].as_str().unwrap());
-    }
+    finish::run(&home, &mut result, interactive, options)
+        .await
+        .context("daemon is installed; rerun gent setup to finish setup")?;
     Ok(result)
 }
 

@@ -44,7 +44,7 @@ use std::{io::Write, path::PathBuf};
     name = "gent",
     version,
     about = "Permissioned communication between chats",
-    after_help = "Guided setup: gent daemon install\nScripted setup: gent auth login && gent daemon install --new demo --no-input\nLocal development: gent daemon install --local demo\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
+    after_help = "Guided setup: gent setup\nScripted setup: gent auth login && gent setup --new demo --no-input\nLocal development: gent setup --local demo\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
 )]
 struct Cli {
     /// Isolated state directory for development (default: ~/.gent).
@@ -67,6 +67,14 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Guided cluster enrollment, daemon startup and host integration setup.
+    Setup {
+        /// Initialize a local development cluster without signing in.
+        #[arg(long, num_args=0..=1, default_missing_value="default")]
+        local: Option<String>,
+        #[command(flatten)]
+        setup: setup::Options,
+    },
     /// Show the exact build revision used for update comparisons.
     Version,
     /// Install the blessed stable release or inspect automatic updates.
@@ -648,6 +656,19 @@ async fn execute(cli: Cli) -> Result<()> {
     }
     let home = node_home::resolve(&root, cli.context.as_deref())?;
     gent_daemon::recovery::ensure_active(&home)?;
+    if let Some(Command::Setup { local, setup }) = cli.command {
+        let output =
+            node_home::provision::install(&home, local, setup, !output_format.raw()).await?;
+        if output_format.raw() {
+            output_format.print(&output)?;
+        } else {
+            service::print(&output);
+        }
+        if output["setup_complete"] == false {
+            std::process::exit(3);
+        }
+        return Ok(());
+    }
     if let Some(Command::Update { command }) = cli.command {
         let value = update::execute(&home, command.unwrap_or(update::Command::Install)).await?;
         output_format.print(&value)?;
@@ -692,7 +713,7 @@ async fn execute(cli: Cli) -> Result<()> {
         let status_only = matches!(command, None | Some(DaemonCommand::Status));
         let output = match command.unwrap_or(DaemonCommand::Status) {
             DaemonCommand::Install { local, setup } => {
-                node_home::provision::install(&home, local, setup, !cli.json).await?
+                node_home::provision::install(&home, local, setup, !output_format.raw()).await?
             }
             action => service::execute(&home, action).await?,
         };
@@ -701,7 +722,8 @@ async fn execute(cli: Cli) -> Result<()> {
         } else {
             service::print(&output);
         }
-        if status_only && output["daemon"]["running"] != true {
+        if (status_only && output["daemon"]["running"] != true) || output["setup_complete"] == false
+        {
             std::process::exit(3);
         }
         return Ok(());
@@ -779,7 +801,7 @@ async fn execute(cli: Cli) -> Result<()> {
         _ => None,
     };
     let output = match cli.command {
-        Some(Command::Version | Command::Update { .. }) => unreachable!(),
+        Some(Command::Version | Command::Update { .. } | Command::Setup { .. }) => unreachable!(),
         Some(Command::Node {
             command: Some(NodeCommand::Reset),
         }) => unreachable!(),
@@ -1212,6 +1234,9 @@ async fn execute(cli: Cli) -> Result<()> {
         files::print_transport(&output);
     } else {
         output_format.print(&output)?;
+    }
+    if output["setup_complete"] == false {
+        std::process::exit(3);
     }
     Ok(())
 }

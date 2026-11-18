@@ -117,6 +117,79 @@ fn terminal_input_is_bounded_and_closed_input_cancels() {
 }
 
 #[test]
+fn confirmation_reprompts_invalid_input_and_never_accepts_eof() {
+    let mut output = Vec::new();
+    assert!(
+        confirm(
+            &mut Cursor::new("maybe\nyes\n"),
+            &mut output,
+            "Install?",
+            false
+        )
+        .unwrap()
+    );
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("Please answer y or n.")
+    );
+    assert!(!confirm(&mut Cursor::new("\n"), &mut Vec::new(), "Discover?", false).unwrap());
+    assert!(confirm(&mut Cursor::new("\n"), &mut Vec::new(), "Install?", true).unwrap());
+    assert!(confirm(&mut Cursor::new(""), &mut Vec::new(), "Install?", true).is_err());
+}
+
+#[test]
+fn setup_alias_has_identical_enrollment_and_noninteractive_flags() {
+    for prefix in [vec!["gent", "setup"], vec!["gent", "daemon", "install"]] {
+        let cli = crate::Cli::try_parse_from(prefix.into_iter().chain([
+            "--new",
+            "personal",
+            "--no-input",
+            "--discover-chats",
+            "false",
+        ]))
+        .unwrap();
+        let setup = match cli.command.unwrap() {
+            crate::Command::Setup { setup, .. }
+            | crate::Command::Daemon {
+                command: Some(DaemonCommand::Install { setup, .. }),
+            } => setup,
+            _ => panic!("setup expected"),
+        };
+        assert!(setup.no_input);
+        assert_eq!(setup.discover_chats, Some(false));
+        assert_eq!(setup.new_cluster.as_deref(), Some("personal"));
+    }
+}
+
+#[tokio::test]
+async fn unattended_finish_preserves_integrations_and_discovery_preferences() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("node");
+    config::initialize(&home, "proof").unwrap();
+    let mut output = json!({});
+    finish::run(&home, &mut output, false, Options::default())
+        .await
+        .unwrap();
+    assert_eq!(output["setup_complete"], true);
+    assert!(!config::load(&home).unwrap().extra.contains_key("discovery"));
+    assert_eq!(output["setup_steps"].as_array().unwrap().len(), 1);
+    finish::run(
+        &home,
+        &mut output,
+        false,
+        Options {
+            discover_chats: Some(false),
+            ..Options::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(config::load(&home).unwrap().extra.contains_key("discovery"));
+    assert!(!config::load(&home).unwrap().discovery().unwrap().enabled);
+}
+
+#[test]
 fn fresh_planning_does_not_create_state_or_replace_orphans() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("node");

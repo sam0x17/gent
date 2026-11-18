@@ -4,13 +4,39 @@ The source build can provision an owner and join additional nodes through a priv
 
 The [invitation enrollment guide](invitation-enrollment.md) documents the implemented commands, protected file transfer, expiry and interrupted-join recovery.
 
-For a configured service, run the guided installer in a terminal:
+Run the guided installer in a terminal:
 
 ```sh
-gent daemon install
+gent setup
 ```
 
-On an unconfigured node it asks whether to create a cluster, join with a node invitation code, or use an invitation file. It collects the missing information, signs in with GitHub, and starts the per-user service. It offers shell PATH and completion setup for Zsh, Bash or Fish. Each step remains available independently:
+On an unconfigured node it asks whether to create a cluster, join with a node
+invitation code, or use an invitation file. It collects the missing information,
+signs in with GitHub, and installs and starts the per-user daemon before asking
+about integrations. `gent daemon install` runs the same wizard.
+
+Every interactive run offers these choices, including when completing an
+already enrolled node:
+
+- Codex CLI, with automatic incoming-message delivery on new installs.
+- Codex in VS Code, as a separate opt-in to the experimental editor route.
+- Claude Code, covering its CLI and VS Code extension.
+- Shell PATH and completions for the detected Zsh, Bash or Fish shell.
+
+Selecting Codex also starts or reuses its background server when that route
+needs one. A provider-switcher editor route starts its own per-window server.
+Existing custom sockets, delivery opt-outs and unrelated settings are preserved.
+Declining an integration leaves any existing installation unchanged. After
+installation, reload open hosts or VS Code windows and connect the intended chat.
+Claude Code sessions remain under the host's control.
+
+The wizard asks about native chat discovery when no preference has been saved.
+It offers Linux startup before login if linger is not already enabled. Optional
+step failures leave the daemon running, allow the remaining choices, and report
+retry commands. Exit status 3 and `setup_complete: false` identify partial setup;
+rerun `gent setup` to retry. Closing input also preserves completed work.
+
+Each step remains available independently:
 
 ```sh
 gent auth login
@@ -30,11 +56,11 @@ gent daemon install --invite-file /private/path/laptop.gent-invite --name laptop
 
 `--headless` allows device login; `--no-browser` prints the browser login URL and waits for its callback instead of opening a browser. `--service ORIGIN` selects an alternate account service. The installer never selects that origin from a newly supplied invitation. Existing setup pins the account service and relay; changing `--service` cannot move it.
 
-JSON output and non-terminal input never trigger setup questions. Sign in separately, then pass `--new NAME` or `--invite-file FILE --name NODE` with `--no-input` for scripts. `--no-input` also prevents starting login. An explicit `--headless` or `--no-browser` may initiate the existing bounded login flow without a terminal. Add `--hooks --shell zsh` (or `bash`/`fish`) to install shell support explicitly; `--rc-file PATH` chooses a startup file. Shell setup preserves unrelated content. A shell failure after enrollment reports that the daemon is already installed and gives the separate retry command.
+JSON output, `--verbose`, `--no-input` and non-terminal input never trigger setup questions. Sign in separately, then pass `--new NAME` or `--invite-file FILE --name NODE` with `--no-input` for scripts. `--no-input` also prevents starting login. An explicit `--headless` or `--no-browser` may initiate the existing bounded login flow without a terminal. Add `--hooks --shell zsh` (or `bash`/`fish`) to install shell support explicitly; `--rc-file PATH` chooses a startup file. Shell setup preserves unrelated content. Use `--discover-chats true` or `--discover-chats false` to set discovery explicitly. A shell failure after enrollment leaves the daemon running and reports its retry command.
 
 The installer checks service-manager availability and service ownership before enrollment. Cancellation or missing choices leave a fresh state directory uncreated. Completed installs preserve node identity and can be repeated while the managed daemon runs, without an account request or a daemon restart when the service definition is unchanged. Interrupted first-node creation resumes with bare `gent daemon install`; interrupted code enrollment resumes with `gent cluster join`; private-file enrollment needs the original file/name, or an explicit `--continue` with a valid replacement. Pending SSH joins must resume through the original `gent cluster join --via ...` command. Stop the daemon before a retry that needs enrollment or credential repair. The running daemon renews active sessions before expiry; expired credentials still require the reconnect procedure below.
 
-After installation, connect hosts with `gent integration install codex` and `gent integration install claude-code`. The daemon installer prints these commands; host settings use their separate installers.
+The guided questions reuse the same installers as `gent integration install codex` and `gent integration install claude-code`, including their ownership checks and retry journals.
 
 Use `gent auth login --service https://YOUR_ACCOUNT_ORIGIN` for an alternate deployment. The account service advertises its relay through authenticated `GET /v1/transport/config`. Account credentials go only to the saved login origin. The CLI accepts HTTPS origins, with HTTP restricted to explicit loopback fixtures; an HTTPS account service cannot select an HTTP relay. The initial relay address is pinned locally. A later discovery response cannot silently move an existing node to another relay.
 
@@ -56,12 +82,7 @@ This prints a one-time code and the complete command for the new machine:
 gent cluster join CODE
 ```
 
-The code supplies both the cluster and the signed node name. There is no approval command to run afterward. Joining checks the existing GitHub login, offers device login if needed in a terminal, enrolls the node, and installs and starts its daemon. Then connect whichever hosts you use:
-
-```sh
-gent integration install codex
-gent integration install claude-code
-```
+The code supplies both the cluster and the signed node name. There is no approval command to run afterward. Joining checks the existing GitHub login, offers device login if needed in a terminal, enrolls the node, and installs and starts its daemon. It then offers the same integration, shell and discovery questions as `gent setup`. You can also run `gent setup` later to finish configuration.
 
 Gent carries the invitation and enrollment over its HTTPS services; direct access between machines is unnecessary. An authorized joined node forwards issuance to the signing owner over its established encrypted connection. The signing owner must remain online during issuance and enrollment. Messaging-only nodes cannot issue codes. `gent node add laptop --no-configure` creates a messaging-only invitation.
 
@@ -69,7 +90,7 @@ Codes look like `gent2-personal.laptop.SECRET`: the cluster and node names are v
 
 If a join is interrupted, run `gent cluster join` again. It resumes the saved invitation, key and stream setup. Once the code expires, run `gent node add NAME` on an existing node and pass the fresh code to `gent cluster join CODE` on the joining machine. If membership was already committed, the owner binds the continuation to that exact node key. A second machine cannot take its place by reusing its name. Keep `~/.gent` and `~/.gent.joining`; a timeout does not require `gent node reset`.
 
-For scripts, use `gent node add NAME --code-out PRIVATE_FILE` and `gent cluster join --code-file PRIVATE_FILE`. With no pending join, `gent cluster join` prompts for a code instead of putting it in shell history. JSON output omits the code. `--no-daemon` limits joining to enrollment when a separate manager controls the daemon. Private retry state lives under `auth/enrollment/`.
+For scripts, use `gent node add NAME --code-out PRIVATE_FILE` and `gent cluster join --code-file PRIVATE_FILE`. With no pending join, `gent cluster join` prompts for a code instead of putting it in shell history. JSON output omits the code. Add `--no-input` to prohibit login and all setup prompts while using an existing account session. `--no-daemon` limits joining to enrollment when a separate manager controls the daemon. Private retry state lives under `auth/enrollment/`.
 
 ## Re-enroll an existing machine
 
