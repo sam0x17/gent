@@ -9,7 +9,7 @@ cargo install --git ssh://git@github.com/sam0x17/gent.git --tag stable --locked 
 gent daemon restart
 ```
 
-Git, Cargo, a native compiler and noninteractive access to the GitHub repository must be available to the daemon. Gent first tries HTTPS with the configured Git credential helper, then SSH. Both routes use the same repository and exact commit. A login shell's temporary SSH chat may be unavailable to a background service; saved HTTPS credentials also work. An authentication or build failure leaves the installed binary running and is reported by `gent update status`.
+Git, Cargo, a native compiler and noninteractive access to the GitHub repository must be available to the daemon. Gent first tries HTTPS with the configured Git credential helper, then SSH. Both routes use the same repository and exact commit. A login shell's temporary SSH agent may be unavailable to a background service; saved HTTPS credentials also work. An authentication or build failure leaves the installed binary running and is reported by `gent update status`.
 
 ```sh
 gent version                 # exact build revision

@@ -67,7 +67,7 @@ pub struct Spec {
 impl Spec {
     pub fn new(platform: Platform, home: PathBuf, binary: PathBuf) -> Result<Self> {
         let spec = Self {
-            version: 1,
+            version: 3,
             platform,
             home,
             binary,
@@ -101,7 +101,7 @@ impl Spec {
     }
     fn validate(&self) -> Result<()> {
         ensure!(
-            (self.version == 1 && self.gateway.is_none())
+            (matches!(self.version, 1 | 3) && self.gateway.is_none())
                 || (self.version == 2 && self.gateway.is_some()),
             "unsupported Gent service format"
         );
@@ -146,6 +146,8 @@ impl Spec {
             .collect::<String>();
         let description = if self.gateway.is_some() {
             "remote MCP gateway"
+        } else if self.version == 1 {
+            "agent communication daemon"
         } else {
             "chat communication daemon"
         };
@@ -297,8 +299,19 @@ pub fn read(
         spec.platform == platform && spec.home == home && spec.kind() == kind,
         "service file belongs to another Gent state directory"
     );
+    let expected = spec.render()?;
+    // Release 9164631 changed the description without changing the spec version.
+    // Recognize only that exact generated variant; all other edits still fail.
+    let transitional = spec.version == 1
+        && spec.platform == Platform::Systemd
+        && spec.kind() == Kind::Daemon
+        && expected.replacen(
+            "\nDescription=Gent agent communication daemon\n",
+            "\nDescription=Gent chat communication daemon\n",
+            1,
+        ) == text;
     ensure!(
-        spec.render()? == text,
+        expected == text || transitional,
         "Gent service file was edited; preserve those edits or restore the managed file before retrying"
     );
     Ok(Some(spec))
@@ -322,6 +335,46 @@ pub fn write(path: &Path, spec: &Spec) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_daemon_descriptions_remain_owned_but_arbitrary_edits_do_not() {
+        let root = tempfile::tempdir().unwrap();
+        let uid = fs::metadata(root.path()).unwrap().uid();
+        let path = root.path().join("service");
+        for platform in [Platform::Systemd, Platform::Launchd] {
+            let current =
+                Spec::new(platform, root.path().join("node"), "/bin/gent".into()).unwrap();
+            let mut legacy = current.clone();
+            legacy.version = 1;
+            write(&path, &legacy).unwrap();
+            let original = fs::read_to_string(&path).unwrap();
+            for text in [
+                original.clone(),
+                original.replace(
+                    "\nDescription=Gent agent communication daemon\n",
+                    "\nDescription=Gent chat communication daemon\n",
+                ),
+            ] {
+                fs::write(&path, &text).unwrap();
+                let previous = read(&path, platform, &legacy.home, uid, Kind::Daemon)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(previous.version, 1);
+                assert_ne!(previous.render().unwrap(), current.render().unwrap());
+                let edited = text + "# user edit\n";
+                fs::write(&path, &edited).unwrap();
+                assert!(read(&path, platform, &legacy.home, uid, Kind::Daemon).is_err());
+                assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+            }
+            write(&path, &current).unwrap();
+            assert_eq!(
+                read(&path, platform, &current.home, uid, Kind::Daemon)
+                    .unwrap()
+                    .unwrap()
+                    .version,
+                3
+            );
+        }
+    }
     #[test]
     fn expansion_cannot_write_an_unreadable_service_or_replace_a_working_one() {
         let root = tempfile::tempdir().unwrap();
@@ -356,7 +409,7 @@ mod tests {
         for platform in [Platform::Systemd, Platform::Launchd] {
             let daemon = Spec::new(platform, root.path().join("node"), "/bin/gent".into()).unwrap();
             let encoded = serde_json::to_value(&daemon).unwrap();
-            assert_eq!(encoded["version"], 1);
+            assert_eq!(encoded["version"], 3);
             assert!(encoded.get("gateway").is_none());
             let gateway = Spec::gateway(
                 platform,

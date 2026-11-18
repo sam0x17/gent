@@ -365,7 +365,7 @@ gent --home ~/.gent-peer cluster join CLUSTER_UUID --via sam@owner-host --name l
 gent --home ~/.gent-peer daemon run
 ```
 
-Gent uses SSH's existing host-key trust with `StrictHostKeyChecking=yes`, noninteractive authentication, and no chat forwarding. It never accepts an unknown host key automatically. The remote login must be able to invoke Gent and read the owner's local RPC credential. Use `--remote-gent /absolute/path/to/gent` and `--remote-home /absolute/private/state` when the defaults do not match the owner machine.
+Gent uses SSH's existing host-key trust with `StrictHostKeyChecking=yes`, noninteractive authentication, and no SSH agent forwarding. It never accepts an unknown host key automatically. The remote login must be able to invoke Gent and read the owner's local RPC credential. Use `--remote-gent /absolute/path/to/gent` and `--remote-home /absolute/private/state` when the defaults do not match the owner machine.
 
 The joining node generates and retains its own signing key. The owner approves its signed enrollment request through the authenticated SSH channel, then both sides establish an MLS configuration stream and two directional data streams. Bootstrap metadata, the stream grant, key package, and development relay credential travel inside SSH. The owner's signing key and local RPC credential never leave that machine. This enrolls a trusted daemon with full cluster-configuration access; chat messaging still follows its separate permission policy.
 
