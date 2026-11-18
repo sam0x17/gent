@@ -43,7 +43,7 @@ Each messaging gate has `allowed` and `blocked_by` fields. `sender` and `recipie
 
 Owner reports include `authority` (revision, expiry, freshness), revocation flags, directional `traces`, and the matching rules. Trace decisions distinguish `allow`, `explicit_deny`, `no_matching_rule`, and `revoked`. Rule indices are zero-based positions in that signed revision. All matching rules are listed, including allows that follow a matching deny. Deny wins regardless of order. Group membership lists and unrelated rules are omitted.
 
-An owner may inspect expired authority; `authority.fresh: false` means that snapshot cannot authorize agent operations. A report is not a reservation, reply grant, connectivity check or delivery guarantee. Sending still checks current authority, exchange participants, expiry, quotas and any relay grant. A reply needs a received message from an accepted, unexpired exchange with capacity remaining. Relay messages use `gent_relay_respond`.
+An owner may inspect expired authority; `authority.fresh: false` means that snapshot cannot authorize agent operations. A report is not a reservation, reply grant, connectivity check or delivery guarantee. Sending still checks current authority, exchange participants, expiry and quotas. Legacy relay turns also retain their original grant restrictions. A reply needs a received message from an accepted, unexpired exchange with capacity remaining. Relay messages use `gent_relay_respond`.
 
 ## Agent checks
 

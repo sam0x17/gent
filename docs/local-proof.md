@@ -18,7 +18,7 @@ cargo test --workspace --locked
 python3 scripts/smoke_mcp.py target/debug/gent
 ```
 
-The smoke test starts a daemon and three independent MCP clients in a temporary directory. It checks registration, hidden peers, default communication and explicit restrictions, image bytes and MCP image content blocks, scoped replies, duplicate suppression, restart recovery, and revocation. It also checks relay grants, ordered turns, progress, cancellation, and final responses with images through the public tools. It makes no model calls and removes its test state afterward. These checks passed on Linux x86_64 and macOS arm64. The SSH pairing proof additionally passes those relay turns across the two physical machines through the local Worker, including both daemon restarts.
+The smoke test starts a daemon and three independent MCP clients in a temporary directory. It checks registration, hidden peers, default communication and explicit restrictions, image bytes and MCP image content blocks, scoped replies, duplicate suppression, restart recovery, and revocation. It also checks relay without grants, ordered turns, progress, cancellation, and final responses with images through the public tools. It makes no model calls and removes its test state afterward. These checks passed on Linux x86_64 and macOS arm64. The SSH pairing proof additionally passes those relay turns across the two physical machines through the local Worker, including both daemon restarts.
 
 The [delegated administration proof](administration.md#verification) runs with `python3 scripts/prove_administration.py --gent target/debug/gent`. It covers exact pairs, separately enabled node rules, and group membership through real CLI/MCP processes, including deny/allow/inherit, private retries, restarts and owner audit. `scripts/prove_pairing.py --agent-administration` runs these flows across the two machines with the joined node's general administration right removed.
 
@@ -164,22 +164,15 @@ The host invokes `gent_register` with a display `name` and arbitrary `provider` 
 
 ## Persistent relay selection
 
-The owner can grant one intermediary agent access to select one target:
+Relay is available wherever ordinary messaging permissions allow it. New clusters allow communication by default; restrict agents with the same permission rules used for normal messages. No relay grant or cluster configuration change is required. Inspect saved selections with `gent relay` or `gent relay attachments`.
 
-```sh
-gent relay grant INTERMEDIARY_UUID TARGET_UUID --ttl-seconds 86400
-gent relay grants
-gent relay attachments
-gent relay revoke GRANT_UUID
-```
+The intermediary calls `gent_relay_attach` with `target` and a new UUIDv7 `request_id` from `gent_request_ids`. Selection persists across daemon and MCP restarts until detached or replaced. Selecting a different target detaches the previous attachment atomically. Retrying an older selection returns its saved state and does not reactivate it. Detach names an attachment ID, so delayed control calls cannot detach a later selection. Status hides target details if enumeration is revoked. The CLI shows the newest 100 local records.
 
-Both agents must already be registered and known to the signing owner. Grants last one day by default, with a seven-day maximum. They supplement enumeration/send/receive policy; they do not grant those permissions. Authorized joined nodes submit these edits through the existing configuration proposal path. `gent config requests` shows acceptance or rejection. Use the global `--request-id UUID` for an exact CLI retry; that UUID is also the grant ID.
-
-The intermediary calls `gent_relay_attach` with `target` and a new UUIDv7 `request_id` from `gent_request_ids`. Selection persists across daemon and MCP restarts. Selecting a different target detaches the previous attachment atomically. Retrying an older selection returns its saved state and does not reactivate it. Detach names an attachment ID, so delayed control calls cannot detach a later selection. Revoked grant IDs stay retired; a new grant requires a new attachment. Status hides target details if enumeration is revoked. `gent relay attachments` is an owner view of the newest 100 local records.
+Upgrade both nodes before sending grant-free relay turns. Existing selections created by an older daemon retain their grant and expiry; select the target again with a new request ID to use ordinary permissions. Existing turns preserve their original restrictions and retry identity.
 
 Attaching sends nothing. Tool results report `supports_turns: true`. `gent_relay_send` forwards text and files under a stable request ID and returns a `turn_id`. Status checks never resubmit work. `gent_relay_turns` recovers saved turn IDs, including those from detached or replaced attachments. Its pages contain 50 entries; use `next_after` as `after_turn_id` to continue. `gent_relay_turn_status` returns responses with a bounded page size; continue with `after_message_id` when `has_more` is true. Both IDs and replies retain the original target after a switch.
 
-The target receives turns in its daemon's durable arrival order, shared by all intermediaries. `gent_relay_next` keeps returning the first unfinished turn even after acknowledgment. The ordinary inbox also omits later relay turns. `gent_relay_respond` reports `progress`, `complete`, or `cancelled`; only a final outcome advances the queue. Each turn permits 16 target responses, reserving the final slot for completion. A temporary permission block pauses the head. Expired turns and permanently revoked grants leave the queue; already running host work is not forcibly stopped.
+The target receives turns in its daemon's durable arrival order, shared by all intermediaries. `gent_relay_next` keeps returning the first unfinished turn even after acknowledgment. The ordinary inbox also omits later relay turns. `gent_relay_respond` reports `progress`, `complete`, or `cancelled`; only a final outcome advances the queue. Each turn permits 16 target responses, reserving the final slot for completion. A temporary permission block pauses the head. Expired turns and permanently revoked legacy grants leave the queue; already running host work is not forcibly stopped.
 
 `gent_relay_cancel` requests cancellation without detaching or marking work complete. The target must handle it and report its outcome. Cancellation can cross an already completed response in flight without changing that outcome. Detach, a tool timeout, or a restart does not cancel pending work. After uncertain host execution, reconcile with the host's actual work state before replaying consequential actions. Gent persists message delivery and protocol state; it does not guarantee exactly-once host execution.
 

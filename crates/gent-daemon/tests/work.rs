@@ -127,15 +127,6 @@ impl Fixture {
         self.store = Store::open(self.home.path()).unwrap();
     }
     fn turn(&mut self) -> String {
-        ok(self.owner(OwnerOp::Configure {
-            request_id: Uuid::new_v4().to_string(),
-            edit: ConfigurationEdit::GrantRelay {
-                grant_id: Uuid::new_v4().to_string(),
-                intermediary: self.agents[0].clone(),
-                target: self.agents[1].clone(),
-                lifetime_seconds: 3600,
-            },
-        }));
         let attach = ok(self.agent(
             0,
             AgentOp::RelayAttach {

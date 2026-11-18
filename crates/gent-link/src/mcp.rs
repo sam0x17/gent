@@ -302,7 +302,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_relay_attach",
-            "Persist a target agent ID using an active owner relay grant and messaging permissions. Use a UUIDv7 request_id from gent_request_ids; an identical retry preserves the original attachment. This selects a target without sending a message.",
+            "Persist a target agent ID using ordinary messaging permissions; no separate grant is required. Selection lasts until detached. Use a UUIDv7 request_id from gent_request_ids; an identical retry preserves the original attachment. This selects a target without sending a message.",
             json!({"target":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"}}),
             vec!["target", "request_id"],
         ),

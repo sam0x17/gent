@@ -264,7 +264,10 @@ fn export_database(path: &Path, manifest: &format::Manifest, output: &Path) -> R
             id(reply)?;
         }
         if let Some(relay) = &message.relay {
-            for value in [&relay.attachment_id, &relay.grant_id, &relay.turn_id] {
+            for value in [&relay.attachment_id, &relay.turn_id]
+                .into_iter()
+                .chain(relay.grant_id.iter())
+            {
                 id(value)?;
             }
         }

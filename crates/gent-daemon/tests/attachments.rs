@@ -345,18 +345,8 @@ fn message_failure_rolls_back_new_objects_bindings_and_exchange() {
     assert_eq!(f.inbox(1).len(), 1);
 }
 #[test]
-fn relay_turn_files_obey_grant_revocation_and_scoped_replies() {
+fn relay_turn_files_obey_permission_denial_and_scoped_replies() {
     let mut f = Fixture::new();
-    let grant = Uuid::new_v4().to_string();
-    f.owner(OwnerOp::Configure {
-        request_id: Uuid::new_v4().to_string(),
-        edit: ConfigurationEdit::GrantRelay {
-            grant_id: grant.clone(),
-            intermediary: f.agents[0].clone(),
-            target: f.agents[1].clone(),
-            lifetime_seconds: 3600,
-        },
-    });
     let attached = ok(f.call(
         0,
         AgentOp::RelayAttach {
@@ -407,9 +397,16 @@ fn relay_turn_files_obey_grant_revocation_and_scoped_replies() {
     let outgoing = f.inbox(0).remove(0).attachments.remove(0).id;
     assert_ne!(incoming, outgoing);
     assert_eq!(f.export(0, &outgoing), b"turn attachment");
+    let mut policy = config::load(f.home.path()).unwrap().policy;
+    policy.rules.push(Rule {
+        actor: Selector::Agent(f.agents[0].clone()),
+        peer: Selector::Agent(f.agents[1].clone()),
+        permission: Permission::Send,
+        effect: Effect::Deny,
+    });
     f.owner(OwnerOp::Configure {
         request_id: Uuid::new_v4().to_string(),
-        edit: ConfigurationEdit::RevokeRelay { grant_id: grant },
+        edit: ConfigurationEdit::Policy { policy },
     });
     assert_eq!(
         error(f.call(1, AgentOp::FileStatus { file_id: incoming })),

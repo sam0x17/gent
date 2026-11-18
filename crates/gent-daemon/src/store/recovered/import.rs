@@ -417,7 +417,10 @@ impl StoreSession<'_> {
                 identity(reply)?;
             }
             if let Some(relay) = &message.relay {
-                for field in [&relay.attachment_id, &relay.grant_id, &relay.turn_id] {
+                for field in [&relay.attachment_id, &relay.turn_id]
+                    .into_iter()
+                    .chain(relay.grant_id.iter())
+                {
                     identity(field)?;
                 }
             }

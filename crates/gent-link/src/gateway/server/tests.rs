@@ -447,16 +447,6 @@ async fn agents_exchange_images_receipts_and_relay_turns_across_gateway_and_daem
             effect: Effect::Allow,
         });
     }
-    let now = crate::auth::now().unwrap();
-    policy.relay_grants.insert(
-        uuid::Uuid::new_v4().to_string(),
-        gent_protocol::RelayGrant {
-            intermediary: a_id.into(),
-            target: b_id.into(),
-            issued_at: now,
-            expires_at: now + 3600,
-        },
-    );
     owner(&f.home, OwnerOp::SetPolicy { policy }).await;
     let png = json!({"name":"preview.png","media_type":"image/png",
         "data_base64":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1cAAAAASUVORK5CYII="});

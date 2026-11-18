@@ -183,7 +183,7 @@ enum Command {
         #[command(subcommand)]
         command: PermissionCommand,
     },
-    /// Manage time-limited relay grants and inspect stored local attachments.
+    /// Inspect saved relay selections. Relay uses ordinary messaging permissions.
     Relay {
         #[command(subcommand)]
         command: Option<RelayCommand>,
@@ -240,18 +240,19 @@ enum TransportCommand {
 }
 #[derive(Subcommand)]
 enum RelayCommand {
+    #[command(hide = true)]
     Grants,
-    /// Authorize one intermediary to select one target; messaging permissions still apply.
+    /// Legacy compatibility only; new relay selections need no grant.
+    #[command(hide = true)]
     Grant {
         intermediary: String,
         target: String,
         #[arg(long, default_value_t=86400, value_parser=clap::value_parser!(u64).range(1..=gent_protocol::MAX_RELAY_GRANT_LIFETIME))]
         ttl_seconds: u64,
     },
-    /// Permanently retire a grant ID. Reauthorization uses a new grant.
-    Revoke {
-        grant: String,
-    },
+    /// Retire a legacy grant without affecting new permission-based selections.
+    #[command(hide = true)]
+    Revoke { grant: String },
     /// List up to 100 recent attachments stored on this node.
     Attachments,
 }
@@ -1003,7 +1004,7 @@ async fn execute(cli: Cli) -> Result<()> {
             .await?
         }
         Some(Command::Config { command: None }) => json!(config::load(&home)?),
-        Some(Command::Relay { command }) => match command.unwrap_or(RelayCommand::Grants) {
+        Some(Command::Relay { command }) => match command.unwrap_or(RelayCommand::Attachments) {
             RelayCommand::Grants => owner(&home, OwnerOp::RelayGrants).await?,
             RelayCommand::Attachments => owner(&home, OwnerOp::RelayAttachments).await?,
             RelayCommand::Grant {

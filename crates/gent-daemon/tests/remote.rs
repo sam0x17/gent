@@ -397,7 +397,7 @@ fn request_status(pair: &Pair, node: usize, id: &str) -> Value {
 }
 
 #[tokio::test]
-async fn relay_grant_proposals_sync_and_revoke_persistent_cross_node_selection() {
+async fn legacy_grant_proposals_sync_without_restricting_new_cross_node_selection() {
     use gent_protocol::ConfigurationEdit;
     let relay = relay::RelayServer::start().await;
     let mut pair = Pair::new(&relay).await;
@@ -460,7 +460,7 @@ async fn relay_grant_proposals_sync_and_revoke_persistent_cross_node_selection()
     );
     pair.wait(|| request_status(&pair, 1, &revoke)["state"] == "applied")
         .await;
-    assert_eq!(ok(pair.agent(0, attach))["state"], "revoked");
+    assert_eq!(ok(pair.agent(0, attach))["state"], "attached");
     for node in 0..2 {
         let grants = pair.owner(node, OwnerOp::RelayGrants);
         assert_eq!(grants["grants"], json!({}));

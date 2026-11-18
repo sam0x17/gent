@@ -1243,12 +1243,12 @@ impl StoreSession<'_> {
         } else {
             ensure!(self.config.policy.can_open(sender, &recipient), UNAVAILABLE);
             let mut expiry = timestamp + EXCHANGE_TTL_SECONDS;
-            if let Some(relay) = &relay {
+            if let Some(grant_id) = relay.as_ref().and_then(|relay| relay.grant_id.as_ref()) {
                 let grant = self
                     .config
                     .policy
                     .relay_grants
-                    .get(&relay.grant_id)
+                    .get(grant_id)
                     .context(UNAVAILABLE)?;
                 expiry = expiry.min(grant.expires_at as i64);
             }

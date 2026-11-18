@@ -23,7 +23,6 @@ struct Fixture {
 }
 impl Fixture {
     fn start_turn(&mut self, target: usize) -> (String, AgentOp, String) {
-        self.grant(target, 3600);
         let attached = ok(self.agent(0, self.attach(target)));
         let id = attached["attachment"]["id"].as_str().unwrap().to_owned();
         let send = AgentOp::RelaySend {
@@ -118,6 +117,17 @@ impl Fixture {
         assert_eq!(self.edit(edit)["state"], "applied");
         id
     }
+    // Recreate a persisted attachment from the old daemon, including its signed bound.
+    fn legacy_attachment(&mut self, action: AgentOp, grant: &str) -> Value {
+        let attached = ok(self.agent(0, action));
+        let expiry = self.current_policy().relay_grants[grant].expires_at;
+        self.db().execute(
+            "UPDATE relay_attachments SET payload=json_set(payload,'$.grant_id',?1,'$.expires_at',?2) WHERE id=?3",
+            rusqlite::params![grant, expiry, attached["attachment"]["id"].as_str().unwrap()],
+        ).unwrap();
+        self.store = Store::open(self.home.path()).unwrap();
+        self.status(None)
+    }
     fn policy(&mut self, policy: Policy) {
         self.owner(OwnerOp::SetPolicy { policy });
     }
@@ -158,7 +168,6 @@ impl Fixture {
 #[test]
 fn turns_preserve_content_attribution_and_pending_work_through_switch_and_restart() {
     let mut f = Fixture::new();
-    f.allow();
     let (attachment, send, turn) = f.start_turn(1);
     let next = ok(f.agent(1, AgentOp::RelayNext));
     assert_eq!(next["request"]["id"], turn);
@@ -200,7 +209,6 @@ fn turns_preserve_content_attribution_and_pending_work_through_switch_and_restar
         f.agent(2, Fixture::respond(&turn, RelayResponseKind::Complete)),
         Response::Error(_)
     ));
-    f.grant(2, 3600);
     let other = ok(f.agent(0, f.attach(2)));
     f.store = Store::open(f.home.path()).unwrap();
     assert_eq!(ok(f.agent(0, send.clone()))["duplicate"], true);
@@ -237,17 +245,7 @@ fn turns_preserve_content_attribution_and_pending_work_through_switch_and_restar
 #[test]
 fn multiple_intermediaries_share_one_durable_target_queue_and_cancellation_is_explicit() {
     let mut f = Fixture::new();
-    f.allow();
     let (attachment, _, first) = f.start_turn(1);
-    assert_eq!(
-        f.edit(ConfigurationEdit::GrantRelay {
-            grant_id: Uuid::new_v4().to_string(),
-            intermediary: f.agents[2].clone(),
-            target: f.agents[1].clone(),
-            lifetime_seconds: 3600
-        })["state"],
-        "applied"
-    );
     let attach = ok(f.agent(2, f.attach(1)));
     let second = ok(f.agent(
         2,
@@ -301,8 +299,6 @@ fn multiple_intermediaries_share_one_durable_target_queue_and_cancellation_is_ex
 #[test]
 fn relay_turn_and_final_reply_commit_atomically_with_retry_records() {
     let mut f = Fixture::new();
-    f.allow();
-    f.grant(1, 3600);
     let attached = ok(f.agent(0, f.attach(1)));
     let send = AgentOp::RelaySend {
         file_ids: vec![],
@@ -336,7 +332,6 @@ fn relay_turn_and_final_reply_commit_atomically_with_retry_records() {
 fn response_pages_preserve_files_and_revocation_hides_stored_content() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let mut f = Fixture::new();
-    f.allow();
     let (_, _, turn) = f.start_turn(1);
     let data = STANDARD.encode(vec![0xa5; MAX_FILE_BYTES]);
     for index in 0..3 {
@@ -369,15 +364,31 @@ fn response_pages_preserve_files_and_revocation_hides_stored_content() {
     ));
     assert_eq!(next["responses"].as_array().unwrap().len(), 1);
     assert_eq!(next["has_more"], false);
-    let grant = page["relay"]["grant_id"].as_str().unwrap();
-    f.edit(ConfigurationEdit::RevokeRelay {
-        grant_id: grant.into(),
+    let saved = f.current_policy();
+    let mut restricted = saved.clone();
+    restricted.rules.push(Rule {
+        actor: Selector::Agent(f.agents[0].clone()),
+        peer: Selector::Agent(f.agents[1].clone()),
+        permission: Permission::Receive,
+        effect: Effect::Deny,
     });
-    assert_eq!(f.turn(&turn)["state"], "revoked");
+    f.policy(restricted);
+    // Status must not leak response text/files when only receiving is denied.
+    assert_eq!(f.turn(&turn)["responses"], json!([]));
+    let mut restricted = saved.clone();
+    restricted.rules.push(Rule {
+        actor: Selector::Agent(f.agents[0].clone()),
+        peer: Selector::Agent(f.agents[1].clone()),
+        permission: Permission::Send,
+        effect: Effect::Deny,
+    });
+    f.policy(restricted);
+    assert_eq!(f.turn(&turn)["state"], "blocked");
     assert_eq!(f.turn(&turn)["responses"], json!([]));
     assert_eq!(ok(f.agent(1, AgentOp::RelayNext)), Value::Null);
-    f.grant(1, 3600);
-    assert_eq!(ok(f.agent(1, AgentOp::RelayNext)), Value::Null);
+    f.policy(saved);
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext))["request"]["id"], turn);
+    assert_eq!(f.turn(&turn)["responses"].as_array().unwrap().len(), 2);
     let mut policy = f.current_policy();
     policy.rules.clear();
     f.policy(policy);
@@ -387,7 +398,6 @@ fn response_pages_preserve_files_and_revocation_hides_stored_content() {
 #[test]
 fn relay_history_recovers_turn_ids_and_response_budget_reserves_completion() {
     let mut f = Fixture::new();
-    f.allow();
     let (attachment, _, first) = f.start_turn(1);
     for _ in 0..50 {
         ok(f.agent(
@@ -460,17 +470,7 @@ fn relay_history_recovers_turn_ids_and_response_budget_reserves_completion() {
 #[test]
 fn temporary_permission_block_does_not_let_later_turns_overtake_the_head() {
     let mut f = Fixture::new();
-    f.allow();
     let (_, _, first) = f.start_turn(1);
-    assert_eq!(
-        f.edit(ConfigurationEdit::GrantRelay {
-            grant_id: Uuid::new_v4().to_string(),
-            intermediary: f.agents[2].clone(),
-            target: f.agents[1].clone(),
-            lifetime_seconds: 3600
-        })["state"],
-        "applied"
-    );
     let attachment = ok(f.agent(2, f.attach(1)))["attachment"]["id"]
         .as_str()
         .unwrap()
@@ -502,10 +502,9 @@ fn temporary_permission_block_does_not_let_later_turns_overtake_the_head() {
 }
 
 #[test]
-fn relay_selection_needs_both_owner_grant_and_ordinary_permissions() {
+fn relay_selection_is_open_by_default_and_obeys_explicit_restrictions() {
     let mut f = Fixture::new();
     f.policy(Policy::default());
-    f.grant(1, 3600);
     assert!(matches!(f.agent(0, f.attach(1)), Response::Error(_)));
     assert!(matches!(
         f.agent(
@@ -521,7 +520,7 @@ fn relay_selection_needs_both_owner_grant_and_ordinary_permissions() {
         Response::Error(_)
     ));
     f.allow();
-    assert!(matches!(f.agent(0, f.attach(2)), Response::Error(_)));
+    assert_eq!(ok(f.agent(0, f.attach(2)))["state"], "attached");
     for (actor, peer, permission) in [
         (0, 1, Permission::Enumerate),
         (1, 0, Permission::Enumerate),
@@ -543,15 +542,15 @@ fn relay_selection_needs_both_owner_grant_and_ordinary_permissions() {
     assert_eq!(attached["state"], "attached");
     assert_eq!(attached["attachment"]["security_mode"], "local_daemon");
     assert_eq!(attached["supports_turns"], true);
+    assert!(attached["attachment"].get("grant_id").is_none());
+    assert!(attached["attachment"].get("expires_at").is_none());
+    assert!(f.current_policy().relay_grants.is_empty());
     assert_eq!(ok(f.agent(1, AgentOp::Inbox)), json!([]));
 }
 
 #[test]
 fn retries_switches_and_explicit_detach_survive_restart_without_changing_target() {
     let mut f = Fixture::new();
-    f.allow();
-    f.grant(1, 3600);
-    f.grant(2, 3600);
     let first = f.attach(1);
     let a = ok(f.agent(0, first.clone()));
     let id = a["attachment"]["id"].as_str().unwrap();
@@ -584,8 +583,6 @@ fn retries_switches_and_explicit_detach_survive_restart_without_changing_target(
 #[test]
 fn attachments_are_isolated_and_hidden_targets_disappear_from_status() {
     let mut f = Fixture::new();
-    f.allow();
-    f.grant(1, 3600);
     let a = ok(f.agent(0, f.attach(1)));
     let id = a["attachment"]["id"].as_str().unwrap();
     for action in [
@@ -632,12 +629,11 @@ fn attachments_are_isolated_and_hidden_targets_disappear_from_status() {
 }
 
 #[test]
-fn revoked_grants_cannot_revive_an_attachment_even_after_a_new_grant() {
+fn legacy_grant_revocation_stays_effective_but_new_selections_need_no_grant() {
     let mut f = Fixture::new();
-    f.allow();
     let grant = f.grant(1, 3600);
     let action = f.attach(1);
-    let a = ok(f.agent(0, action.clone()));
+    let a = f.legacy_attachment(action.clone(), &grant);
     assert_eq!(
         f.edit(ConfigurationEdit::RevokeRelay {
             grant_id: grant.clone()
@@ -645,7 +641,6 @@ fn revoked_grants_cannot_revive_an_attachment_even_after_a_new_grant() {
         "applied"
     );
     assert_eq!(f.status(None)["state"], "revoked");
-    f.grant(1, 3600);
     assert_eq!(ok(f.agent(0, action))["state"], "revoked");
     let b = ok(f.agent(0, f.attach(1)));
     assert_eq!(b["state"], "attached");
@@ -664,9 +659,6 @@ fn revoked_grants_cannot_revive_an_attachment_even_after_a_new_grant() {
 #[test]
 fn failed_switch_rolls_back_previous_selection_and_retry_record() {
     let mut f = Fixture::new();
-    f.allow();
-    f.grant(1, 3600);
-    f.grant(2, 3600);
     let a = ok(f.agent(0, f.attach(1)));
     let switch = f.attach(2);
     f.db().execute_batch("CREATE TRIGGER fail_relay_insert BEFORE INSERT ON relay_attachments BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
@@ -681,14 +673,13 @@ fn failed_switch_rolls_back_previous_selection_and_retry_record() {
 }
 
 #[test]
-fn expired_grant_blocks_new_selection_and_expires_persisted_selection() {
+fn legacy_expiry_is_preserved_without_limiting_new_selections() {
     let mut f = Fixture::new();
-    f.allow();
     // Keep ample time to attach even on slow CI. Wait only until the signed
     // boundary; no production API accepts a caller-controlled clock.
-    f.grant(1, 2);
+    let grant = f.grant(1, 2);
     let action = f.attach(1);
-    let a = ok(f.agent(0, action.clone()));
+    let a = f.legacy_attachment(action.clone(), &grant);
     let expiry = a["attachment"]["expires_at"].as_i64().unwrap();
     let sent = ok(f.agent(
         0,
@@ -706,11 +697,49 @@ fn expired_grant_blocks_new_selection_and_expires_persisted_selection() {
     }
     assert_eq!(f.status(None)["state"], "expired");
     assert_eq!(ok(f.agent(0, action))["state"], "expired");
-    assert!(matches!(f.agent(0, f.attach(1)), Response::Error(_)));
+    assert_eq!(ok(f.agent(0, f.attach(1)))["state"], "attached");
     assert_eq!(f.turn(turn)["state"], "expired");
     assert_eq!(ok(f.agent(1, AgentOp::RelayNext)), Value::Null);
     assert!(matches!(
         f.agent(1, Fixture::respond(turn, RelayResponseKind::Complete)),
         Response::Error(_)
     ));
+}
+
+#[test]
+fn legacy_turn_retries_survive_restart_and_revocation_does_not_revive_work() {
+    let mut f = Fixture::new();
+    let grant = f.grant(1, 3600);
+    let action = f.attach(1);
+    let attachment = f.legacy_attachment(action, &grant);
+    let send = AgentOp::RelaySend {
+        attachment_id: attachment["attachment"]["id"].as_str().unwrap().into(),
+        request_id: Uuid::now_v7().to_string(),
+        text: "existing turn".into(),
+        files: vec![],
+        file_ids: vec![],
+    };
+    let turn = ok(f.agent(0, send.clone()))["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = ok(f.agent(1, AgentOp::RelayNext));
+    assert_eq!(root["request"]["relay"]["grant_id"], grant);
+    let wire = serde_json::to_string(&root["request"]).unwrap();
+    let message: Message = serde_json::from_str(&wire).unwrap();
+    assert_eq!(json!(message), root["request"]);
+    ok(f.agent(1, Fixture::respond(&turn, RelayResponseKind::Progress)));
+    f.store = Store::open(f.home.path()).unwrap();
+    assert_eq!(ok(f.agent(0, send))["duplicate"], true);
+    f.edit(ConfigurationEdit::RevokeRelay { grant_id: grant });
+    assert_eq!(f.turn(&turn)["state"], "revoked");
+    assert_eq!(f.turn(&turn)["responses"], json!([]));
+    assert_eq!(ok(f.agent(1, AgentOp::RelayNext)), Value::Null);
+    // Selecting again must neither reauthorize nor replay an old accepted turn.
+    let (_, _, new_turn) = f.start_turn(1);
+    assert_eq!(
+        ok(f.agent(1, AgentOp::RelayNext))["request"]["id"],
+        new_turn
+    );
+    assert_eq!(f.turn(&turn)["state"], "revoked");
 }

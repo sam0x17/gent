@@ -188,18 +188,8 @@ fn accepted_legacy_ids_retry_during_migration_then_stay_rejected_after_pruning()
 }
 
 #[test]
-fn expired_relay_turns_and_selections_retire_without_reactivating_old_requests() {
+fn relay_selection_survives_turn_expiry_and_retires_only_after_detach() {
     let mut f = Fixture::new();
-    let grant = Uuid::new_v4().to_string();
-    f.owner(OwnerOp::Configure {
-        request_id: Uuid::new_v4().to_string(),
-        edit: ConfigurationEdit::GrantRelay {
-            grant_id: grant,
-            intermediary: f.agents[0].clone(),
-            target: f.agents[1].clone(),
-            lifetime_seconds: 3600,
-        },
-    });
     let attach = AgentOp::RelayAttach {
         target: f.agents[1].clone(),
         request_id: next(&mut f, 0),
@@ -225,7 +215,15 @@ fn expired_relay_turns_and_selections_retire_without_reactivating_old_requests()
     advance(&mut f, now() + 9 * 86400);
     let result = clean(&mut f, false);
     assert_eq!(result["messages_removed"], 2);
-    assert_eq!(result["relay_attachments_removed"], 1);
+    assert_eq!(result["relay_attachments_removed"], 0);
+    assert_eq!(ok(f.call(0, attach.clone()))["state"], "attached");
+    ok(f.call(
+        0,
+        AgentOp::RelayDetach {
+            attachment_id: attached["attachment"]["id"].as_str().unwrap().into(),
+        },
+    ));
+    assert_eq!(clean(&mut f, false)["relay_attachments_removed"], 1);
     assert!(error(f.call(0, attach)).contains("request_id expired"));
     assert_eq!(
         f.db()

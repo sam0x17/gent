@@ -11,9 +11,6 @@ import uuid
 
 def exercise_relay(aid, bid, local, remote, owner, local_state, remote_state,
                    offline, restart, files, wait_for):
-    grant = owner('relay', 'grant', aid, bid, '--ttl-seconds', '3600')
-    assert grant['state'] == 'applied'
-    wait_for(lambda: local_state()['config']['applied_revision'] == grant['revision'], 'relay grant sync')
     source_marker = 'USER_' + uuid.uuid4().hex
     progress_marker = 'PROGRESS_' + uuid.uuid4().hex
     final_marker = 'FINAL_' + uuid.uuid4().hex
@@ -54,7 +51,7 @@ def exercise_relay(aid, bid, local, remote, owner, local_state, remote_state,
 
     initial = local('relay-forward',
         'Call gent_identity. I want this conversation to act as a relay to visual-reviewer. '
-        'Discover that agent, attach using the owner grant already provided, and forward exactly one user turn below. '
+        'Discover that agent, attach using the existing messaging permissions, and forward exactly one user turn below. '
         'The JSON text value is the exact message, including whitespace, and files contains actual user-provided bytes. '
         'Copy those values unchanged. Check the turn once; the target is currently idle, so report pending and stop. '
         'USER_TURN_JSON: ' + json.dumps({'text': user_text, 'files': files}, ensure_ascii=False))
@@ -156,7 +153,7 @@ def exercise_relay(aid, bid, local, remote, owner, local_state, remote_state,
     wait_for(lambda: all(m['acknowledged'] for m in remote_state()['messages'] if m['id'] in [progress_id, final_id, cancelled_id]), 'reply acknowledgments')
     assert {m['id'] for m in local_state()['messages']} == {m['id'] for m in remote_state()['messages']} == ids
     return {'result': 'passed', 'scenario': 'relay-turns', 'intermediary_agent': aid, 'target_agent': bid,
-            'attachment_id': attachment['id'], 'grant_id': grant['grant_id'], 'turn_ids': [first, second],
+            'attachment_id': attachment['id'], 'turn_ids': [first, second],
             'message_ids': sorted(ids), 'source_marker': source_marker,
             'progress_text': progress_message['text'], 'final_text': final_message['text'],
             'cancelled_text': cancellation['text']}

@@ -1,5 +1,5 @@
-//! Persistent selection and ordered relay turns. No relay grant asserts that a
-//! human authored agent-provided text or authorizes host execution.
+//! Persistent selection and ordered relay turns under ordinary message policy.
+//! Relay context does not assert human authorship or authorize host execution.
 use super::*;
 use uuid::Uuid;
 
@@ -36,25 +36,37 @@ impl StoreSession<'_> {
         let Some(relay) = &message.relay else {
             return Ok(true);
         };
-        let Some(grant) = self.config.policy.relay_grants.get(&relay.grant_id) else {
-            return Ok(false);
-        };
         let (intermediary, target) = match relay.kind {
             RelayMessageKind::Request | RelayMessageKind::Cancel => {
                 (&message.sender, &message.recipient)
             }
             _ => (&message.recipient, &message.sender),
         };
-        Ok(grant.intermediary == *intermediary
-            && grant.target == *target
-            && grant.issued_at <= message.created_at as u64
-            && grant.issued_at <= self.timestamp as u64
-            && grant.expires_at > self.timestamp as u64
-            && message.expires_at as u64 <= grant.expires_at
-            && self
-                .config
-                .policy
-                .can_open(&self.get_agent(intermediary)?, &self.get_agent(target)?))
+        if let Some(id) = &relay.grant_id {
+            let Some(grant) = self.config.policy.relay_grants.get(id) else {
+                return Ok(false);
+            };
+            if grant.intermediary != *intermediary
+                || grant.target != *target
+                || grant.issued_at > message.created_at as u64
+                || grant.issued_at > self.timestamp as u64
+                || grant.expires_at <= self.timestamp as u64
+                || message.expires_at as u64 > grant.expires_at
+            {
+                return Ok(false);
+            }
+        }
+        Ok(self
+            .config
+            .policy
+            .can_open(&self.get_agent(intermediary)?, &self.get_agent(target)?))
+    }
+
+    fn legacy_relay_revoked(&self, relay: &RelayMessage) -> bool {
+        relay
+            .grant_id
+            .as_ref()
+            .is_some_and(|id| !self.config.policy.relay_grants.contains_key(id))
     }
 
     /// Validate both local and authenticated remote envelopes. Generic replies
@@ -69,7 +81,10 @@ impl StoreSession<'_> {
             }
             return Ok(());
         };
-        for id in [&relay.attachment_id, &relay.grant_id, &relay.turn_id] {
+        for id in [&relay.attachment_id, &relay.turn_id]
+            .into_iter()
+            .chain(relay.grant_id.iter())
+        {
             let parsed = Uuid::parse_str(id)?;
             ensure!(
                 !parsed.is_nil() && parsed.to_string() == *id,
@@ -146,7 +161,9 @@ impl StoreSession<'_> {
             let attachment = self.relay_attachment(&who, &relay.attachment_id)?;
             ensure!(
                 !attachment.detached
-                    && attachment.expires_at > self.timestamp as u64
+                    && attachment
+                        .expires_at
+                        .is_none_or(|expiry| expiry > self.timestamp as u64)
                     && attachment.target == message.recipient
                     && attachment.grant_id == relay.grant_id,
                 "relay attachment is no longer active"
@@ -226,12 +243,7 @@ impl StoreSession<'_> {
             let relay = root.relay.as_ref().unwrap();
             let closed = if root.expires_at <= self.timestamp {
                 Some("expired")
-            } else if !self
-                .config
-                .policy
-                .relay_grants
-                .contains_key(&relay.grant_id)
-            {
+            } else if self.legacy_relay_revoked(relay) {
                 Some("revoked")
             } else {
                 None
@@ -371,13 +383,7 @@ impl StoreSession<'_> {
             "expired"
         } else if closed.is_some() {
             closed.as_deref().unwrap()
-        } else if !self
-            .config
-            .policy
-            .relay_grants
-            .contains_key(&root.relay.as_ref().unwrap().grant_id)
-            || rejected
-        {
+        } else if self.legacy_relay_revoked(root.relay.as_ref().unwrap()) || rejected {
             "revoked"
         } else if !self.relay_authorized(&root)? {
             "blocked"
@@ -411,7 +417,9 @@ impl StoreSession<'_> {
                 message.acknowledged = acknowledged;
                 bytes += payload.len();
                 next_after = Some(message.id.clone());
-                replies.push(message);
+                if self.deliverable(&message)? {
+                    replies.push(message);
+                }
             }
         }
         Ok(
@@ -480,16 +488,21 @@ impl StoreSession<'_> {
             );
         }
         let now = self.timestamp as u64;
-        let grant = self.config.policy.relay_grants.get(&attachment.grant_id);
-        let valid_grant = grant.is_some_and(|grant| {
-            grant.intermediary == who.id
-                && grant.target == target.id
-                && grant.issued_at <= now
-                && grant.expires_at > now
+        let valid_grant = attachment.grant_id.as_ref().is_none_or(|id| {
+            self.config
+                .policy
+                .relay_grants
+                .get(id)
+                .is_some_and(|grant| {
+                    grant.intermediary == who.id
+                        && grant.target == target.id
+                        && grant.issued_at <= now
+                        && grant.expires_at > now
+                })
         });
         let state = if attachment.detached {
             "detached"
-        } else if attachment.expires_at <= now {
+        } else if attachment.expires_at.is_some_and(|expiry| expiry <= now) {
             "expired"
         } else if !valid_grant {
             "revoked"
@@ -535,19 +548,6 @@ impl StoreSession<'_> {
             UNAVAILABLE
         );
         let now = self.timestamp as u64;
-        let (grant_id, grant) = self
-            .config
-            .policy
-            .relay_grants
-            .iter()
-            .filter(|(_, grant)| {
-                grant.intermediary == who.id
-                    && grant.target == peer.id
-                    && grant.issued_at <= now
-                    && grant.expires_at > now
-            })
-            .max_by_key(|(id, grant)| (grant.expires_at, grant.issued_at, *id))
-            .context("relay target requires an active owner grant")?;
         let count: u32 = self.db.query_row(
             "SELECT COUNT(*) FROM relay_attachments WHERE intermediary=?1",
             [&who.id],
@@ -563,14 +563,14 @@ impl StoreSession<'_> {
             id,
             intermediary: who.id.clone(),
             target: peer.id.clone(),
-            grant_id: grant_id.clone(),
+            grant_id: None,
             security_mode: if who.node_id == peer.node_id {
                 RelaySecurityMode::LocalDaemon
             } else {
                 RelaySecurityMode::EncryptedDaemonLink
             },
             created_at: now,
-            expires_at: grant.expires_at,
+            expires_at: None,
             detached: false,
         };
         // The outer RPC transaction makes switching and its retry record atomic.

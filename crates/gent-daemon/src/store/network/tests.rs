@@ -41,22 +41,6 @@ struct Pair {
 }
 impl Pair {
     fn relay_attach(&mut self) -> String {
-        let grant = Uuid::new_v4().to_string();
-        self.stores[0]
-            .execute(Request::Owner {
-                credential: config::read_private(&self.homes[0].path().join("owner.key")).unwrap(),
-                action: OwnerOp::Configure {
-                    request_id: grant.clone(),
-                    edit: ConfigurationEdit::GrantRelay {
-                        grant_id: grant,
-                        intermediary: self.agents[0].clone(),
-                        target: self.agents[1].clone(),
-                        lifetime_seconds: 3600,
-                    },
-                },
-            })
-            .unwrap();
-        self.pump();
         self.agent(
             0,
             AgentOp::RelayAttach {
@@ -578,20 +562,9 @@ async fn crossed_cancellation_and_completion_do_not_reopen_or_lose_a_remote_turn
 }
 
 #[tokio::test]
-async fn grant_revocation_blocks_relay_turns_before_encryption_and_before_target_work() {
+async fn permission_denial_blocks_relay_turns_before_encryption_and_before_target_work() {
     let mut pair = Pair::new().await;
     let attachment = pair.relay_attach();
-    let grant = pair
-        .agent(
-            0,
-            AgentOp::RelayStatus {
-                attachment_id: None,
-            },
-        )
-        .unwrap()["attachment"]["grant_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     let first = pair
         .agent(
             0,
@@ -627,12 +600,19 @@ async fn grant_revocation_blocks_relay_turns_before_encryption_and_before_target
         .as_str()
         .unwrap()
         .to_owned();
+    let mut policy = pair.stores[0].config.policy.clone();
+    policy.rules.push(Rule {
+        actor: Selector::Agent(pair.agents[0].clone()),
+        peer: Selector::Agent(pair.agents[1].clone()),
+        permission: Permission::Send,
+        effect: Effect::Deny,
+    });
     pair.stores[0]
         .execute(Request::Owner {
             credential: config::read_private(&pair.homes[0].path().join("owner.key")).unwrap(),
             action: OwnerOp::Configure {
                 request_id: Uuid::new_v4().to_string(),
-                edit: ConfigurationEdit::RevokeRelay { grant_id: grant },
+                edit: ConfigurationEdit::Policy { policy },
             },
         })
         .unwrap();

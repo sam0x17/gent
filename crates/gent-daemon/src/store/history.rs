@@ -131,7 +131,8 @@ fn clean(db: &Connection, timestamp: i64, dry_run: bool) -> Result<Value> {
     let attachments = db
         .prepare(
             "SELECT id FROM relay_attachments
-        WHERE json_extract(payload,'$.expires_at')<=?1
+        WHERE (json_extract(payload,'$.expires_at')<=?1
+          OR (detached=1 AND json_extract(payload,'$.created_at')<=?1))
           AND NOT EXISTS(SELECT 1 FROM relay_turns WHERE attachment=relay_attachments.id)
         ORDER BY rowid LIMIT 128",
         )?

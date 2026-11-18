@@ -325,8 +325,6 @@ def main():
             wait_for(lambda: (home / 'daemon.sock').exists())
             wait_for(lambda: any(m['id'] == queued['message_id'] for m in a.call('gent_inbox')[0]))
             a.call('gent_ack', {'message_id': queued['message_id']})
-            grant = cli('relay', 'grant', aid, bid)
-            assert grant['state'] == 'applied'
             attached = a.call('gent_relay_attach', {'target': bid, 'request_id': a.request_id()})[0]
             assert attached['attachment']['security_mode'] == 'encrypted_daemon_link'
 

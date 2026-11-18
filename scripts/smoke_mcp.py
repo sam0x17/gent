@@ -12,7 +12,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from pathlib import Path
 
 from mcp_client import Client
@@ -69,15 +68,11 @@ def main():
             a.call("gent_send", dict(attempt, recipient=hid), error=True)
             assert {agent["id"] for agent in a.call("gent_agents")[0]} == {aid, bid}
             attachment_request = {"target": bid, "request_id": a.request_id()}
-            a.call("gent_relay_attach", attachment_request, error=True)
-            grant_id = str(uuid.uuid4())
-            granted = json.loads(cli("--request-id", grant_id, "relay", "grant", aid, bid))
-            assert granted["state"] == "applied" and granted["grant_id"] == grant_id
-            assert json.loads(cli("--request-id", grant_id, "relay", "grant", aid, bid))["revision"] == granted["revision"]
-            assert grant_id in json.loads(cli("relay", "grants"))["grants"]
             attached = a.call("gent_relay_attach", attachment_request)[0]
             attachment_id = attached["attachment"]["id"]
             assert attached["state"] == "attached" and attached["supports_turns"] is True
+            assert "grant_id" not in attached["attachment"]
+            assert "expires_at" not in attached["attachment"]
             assert a.call("gent_relay_attach", attachment_request)[0] == attached
             outsider.call("gent_relay_status", {"attachment_id": attachment_id}, error=True)
             assert json.loads(cli("relay", "attachments"))[0]["id"] == attachment_id
@@ -122,8 +117,8 @@ def main():
             a = connect("a.key")
             assert a.call("gent_identity")[0]["agent"]["id"] == aid
             assert a.call("gent_relay_status")[0]["attachment"]["id"] == attachment_id
-            assert json.loads(cli("relay", "revoke", grant_id))["state"] == "applied"
-            assert a.call("gent_relay_status")[0]["state"] == "revoked"
+            cli("permission", "deny", aid, bid, "--permission", "send")
+            assert a.call("gent_relay_status")[0]["state"] == "blocked"
             a.call("gent_relay_detach", {"attachment_id": attachment_id})
             assert a.call("gent_relay_status")[0] is None
             assert a.call("gent_relay_attach", attachment_request)[0]["state"] == "detached"
@@ -139,7 +134,7 @@ def main():
             credential = (home / "bindings" / "a.key").read_text()
             assert credential not in json.dumps(a.call("gent_identity"))
             assert os.stat(home / "bindings" / "a.key").st_mode & 0o077 == 0
-            print("PASS: MCP registration, isolation, permissions, replies, image bytes, deduplication, restart recovery, ordered relay turns/cancellation, grants, and revocation")
+            print("PASS: MCP registration, isolation, permissions, replies, image bytes, deduplication, restart recovery, ordered relay turns/cancellation without grants, and restrictions")
         finally:
             for client in clients:
                 client.close()

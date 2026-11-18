@@ -267,12 +267,10 @@ def exercise(aid, bid, local, remote, owner, local_state, remote_state, offline,
     assert approval['reply_to'] == revision_id and approval['text'] == 'APPROVED: green right'
     print('Both real hosts exported and inspected images; visual revision survived both daemon restarts', flush=True)
 
-    grant = owner('relay', 'grant', aid, bid, '--ttl-seconds', '3600')
-    wait_for(lambda: local_state()['config']['applied_revision'] == grant['revision'], 'native relay grant')
     user_text = marker + '\nReview the revised files and return them unchanged.\nKeep  two spaces; tab\there.\n'
     forward = local('native-relay-forward',
         'Call gent_identity and acknowledge the final approval. I now want relay mode to visual-reviewer. Discover and attach '
-        'using the supplied owner grant. Forward one new user turn using gent_relay_send and the file IDs you imported for your revision. '
+        'using the existing messaging permissions. Forward one new user turn using gent_relay_send and the file IDs you imported for your revision. '
         'Copy this JSON text value unchanged, including whitespace: ' + json.dumps(user_text) +
         '. Check the turn once and report pending. Do not resubmit or convert files to base64.')
     identity(forward, aid)

@@ -76,8 +76,8 @@ pub struct Policy {
     /// Signed membership, changed by the owner or a separately delegated agent.
     #[serde(default)]
     pub groups: BTreeMap<String, Vec<String>>,
-    /// Explicit owner authorization to select a target for user relay work.
-    /// Messaging permissions still apply. Empty maps preserve old signed bytes.
+    /// Legacy relay authorizations, retained to verify existing signed state.
+    /// New relay selections use ordinary messaging permissions alone.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub relay_grants: BTreeMap<String, RelayGrant>,
     /// Editing authority is separate from message permissions. Empty maps keep
@@ -103,10 +103,14 @@ pub struct RelayAttachment {
     pub id: String,
     pub intermediary: String,
     pub target: String,
-    pub grant_id: String,
+    /// Present only on selections created by older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
     pub security_mode: RelaySecurityMode,
     pub created_at: u64,
-    pub expires_at: u64,
+    /// New selections last until detached; legacy selections retain their expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
     pub detached: bool,
 }
 
@@ -118,12 +122,14 @@ pub enum RelaySecurityMode {
 }
 
 /// Authenticated relay context inside the encrypted message, never inferred
-/// from text. The grant delegates relay access, not human authorship.
+/// from text. Relay access follows messaging policy, not asserted human authorship.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelayMessage {
     pub attachment_id: String,
-    pub grant_id: String,
+    /// Retained on legacy turns so their original restrictions and retries survive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
     pub turn_id: String,
     pub kind: RelayMessageKind,
 }
