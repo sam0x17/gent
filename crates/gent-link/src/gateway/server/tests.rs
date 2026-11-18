@@ -9,6 +9,7 @@ use tokio::{
     net::TcpStream,
     task::JoinHandle,
 };
+mod capability;
 mod cimd;
 mod conversations;
 mod downloads;

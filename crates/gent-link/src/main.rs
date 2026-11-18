@@ -28,6 +28,7 @@ mod setup;
 mod ui;
 mod update;
 mod wake;
+mod web;
 mod work;
 
 use anyhow::{Context, Result, ensure};
@@ -357,8 +358,13 @@ enum AgentCommand {
 enum NodeCommand {
     /// Stop local services and archive this node for fresh enrollment; keep GitHub login.
     Reset,
-    /// Issue a one-time invitation that assigns this name to the joining node.
+    /// Add a named node through a one-time invitation, or host one with --web.
     Add(enrollment::AddArgs),
+    /// Manage named web/mobile connectors hosted by this machine.
+    Web {
+        #[command(subcommand)]
+        command: web::Command,
+    },
     /// Remove another node from membership and revoke its service access.
     Remove { node: String },
     /// List durable removal progress. Confirmation refers to service access, not peer sync.
@@ -768,6 +774,9 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Node {
             command: Some(NodeCommand::Add(args)),
         }) => enrollment::add(&home, args).await?,
+        Some(Command::Node {
+            command: Some(NodeCommand::Web { command }),
+        }) => web::execute(&home, command).await?,
         Some(Command::Cluster {
             command: Some(ClusterCommand::Invite(args)),
         }) => invitations::create(&home, args).await?,
@@ -1099,6 +1108,8 @@ async fn execute(cli: Cli) -> Result<()> {
     drop(progress);
     if output_format.raw() {
         output_format.print(&output)?;
+    } else if output["web_node"] == true || output["web_nodes"].is_array() {
+        web::print(&output);
     } else if let Some(view) = display {
         print!("{}", display::render(view, &output)?);
     } else if owner_transfer_output {

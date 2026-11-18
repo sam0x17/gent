@@ -169,6 +169,23 @@ pub struct Run {
     file_downloads: Vec<String>,
 }
 
+pub(crate) async fn run_web(
+    home: PathBuf,
+    stop: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let options = Run {
+        listen: "127.0.0.1:8787".parse().unwrap(),
+        hosted: Some("https://mcp.gent.link".into()),
+        origin: None,
+        tls_cert: None,
+        tls_key: None,
+        client_metadata: Vec::new(),
+        file_origin: Vec::new(),
+        file_downloads: Vec::new(),
+    };
+    hosted::run_until(home, options, stop).await
+}
+
 pub async fn execute(home: &Path, command: Command) -> Result<Option<Value>> {
     let home = managed_file::normalize(home)?;
     match command {

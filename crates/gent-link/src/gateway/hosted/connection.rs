@@ -28,6 +28,7 @@ pub(super) async fn run(
     token: String,
     app: Router,
     connected: Arc<AtomicBool>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let mut request = endpoint.socket.clone().into_client_request()?;
     request
@@ -71,6 +72,7 @@ pub(super) async fn run(
             return Ok(());
         }
         tokio::select! {
+            _ = shutdown.cancelled(), if !draining => { draining = true; },
             message=reader.next()=> {
                 let message=message.context("hosted MCP connection ended")??;
                 last_received=Instant::now();

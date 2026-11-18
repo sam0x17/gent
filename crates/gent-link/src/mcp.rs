@@ -206,7 +206,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_agents",
-            "List only agents this registration may discover.",
+            "List registered agents visible across this cluster, including id, name, node_id, node_name and provider. A unique exact name such as cit can be selected directly. For multiple matching names, ask the user to choose using node/provider and agent ID; never pick the first or guess from a similar name. Send and attach by the selected ID. Offline entries may be stale; this directory does not discover unregistered native chats or prove wake readiness.",
             json!({}),
             vec![],
         ),

@@ -889,12 +889,7 @@ impl StoreSession<'_> {
                 self.rename_agent(&who.id, &name, expected_generation)?;
                 self.agent_identity(&who.id)
             }
-            AgentOp::Agents => Ok(json!(
-                self.all_agents()?
-                    .into_iter()
-                    .filter(|other| self.config.policy.visible(&who, other))
-                    .collect::<Vec<_>>()
-            )),
+            AgentOp::Agents => self.visible_agents(&who),
             AgentOp::HistoryImports => self.recovered_imports(Some(&who)),
             AgentOp::HistoryMessages { import_id, after } => {
                 self.recovered_messages(&who, &import_id, after)

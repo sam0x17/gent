@@ -96,16 +96,31 @@ pub fn valid_path(path: &str) -> bool {
     if query && !matches!(path, "/oauth/authorize" | "/oauth/continue") {
         return false;
     }
-    matches!(
-        path,
-        "/mcp"
-            | "/.well-known/oauth-protected-resource"
-            | "/.well-known/oauth-protected-resource/mcp"
-            | "/.well-known/oauth-authorization-server"
-            | "/oauth/authorize"
-            | "/oauth/continue"
-            | "/oauth/token"
-    )
+    capability_token(path).is_some()
+        || matches!(
+            path,
+            "/mcp"
+                | "/.well-known/oauth-protected-resource"
+                | "/.well-known/oauth-protected-resource/mcp"
+                | "/.well-known/oauth-authorization-server"
+                | "/oauth/authorize"
+                | "/oauth/continue"
+                | "/oauth/token"
+        )
+}
+
+/// A private URL is a credential, never an OAuth redirect or discovery route.
+/// Only the canonical alphabet is accepted, without query strings or escapes.
+pub fn capability_token(path: &str) -> Option<&str> {
+    let token = path.strip_prefix("/mcp/")?;
+    let rest = token.strip_prefix("gent_g1.")?;
+    let (id, secret) = rest.split_once('.')?;
+    (valid_id(id)
+        && secret.len() == 64
+        && secret
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(token)
 }
 
 pub fn request_header(name: &str) -> bool {
@@ -229,6 +244,27 @@ mod tests {
             "/nodes/not-a-node/mcp".into(),
         ] {
             assert!(route(&path).is_none(), "{path}");
+        }
+    }
+
+    #[test]
+    fn connector_urls_have_one_canonical_route_and_keep_cluster_and_node_scope() {
+        let token = format!("gent_g1.{NODE}.{}", "a".repeat(64));
+        let native = format!("/mcp/{token}");
+        assert_eq!(capability_token(&native), Some(token.as_str()));
+        assert_eq!(
+            route(&format!("/clusters/{CLUSTER}/nodes/{NODE}{native}")),
+            Some((CLUSTER, NODE, native.clone()))
+        );
+        for invalid in [
+            format!("{native}/"),
+            format!("{native}?x=y"),
+            native.replace("gent_g1.", "gent_a1."),
+            native.replace("gent_g1", "%67ent_g1"),
+            native.replace(NODE, "00000000-0000-0000-0000-000000000000"),
+        ] {
+            assert!(!valid_path(&invalid));
+            assert!(capability_token(&invalid).is_none());
         }
     }
 

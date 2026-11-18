@@ -129,15 +129,22 @@ pub async fn run_daemon(
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let home = lock.home().to_owned();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let web = crate::web::maintain(&home, stop.clone());
+    tokio::pin!(web);
     // Poll the daemon first so a missing configuration or held daemon lock fails
     // before maintenance. Dropping maintain cancels network waits on shutdown.
-    tokio::select! {
+    let result = tokio::select! {
         biased;
         result = gent_daemon::run_locked(lock, shutdown) => result,
         _ = maintain(&home) => unreachable!("maintenance continues until daemon shutdown"),
         _ = crate::node::maintain(&home) => unreachable!("node removals continue until daemon shutdown"),
         _ = crate::integration::recovery::maintain(&home) => unreachable!("host recovery continues until daemon shutdown"),
-    }
+        _ = &mut web => anyhow::bail!("web node supervisor stopped unexpectedly"),
+    };
+    stop.cancel();
+    web.await;
+    result
 }
 
 #[cfg(test)]

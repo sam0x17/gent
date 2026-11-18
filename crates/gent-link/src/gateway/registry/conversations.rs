@@ -5,6 +5,7 @@ use super::*;
 // Kept in the existing binding policy slot so export retries cannot silently
 // switch identity modes. Registry v8/export v6 make older readers reject it.
 pub(crate) const KEY: &str = "gent/explicit-conversation";
+pub(crate) const URL_KEY: &str = "gent/url-conversation";
 const PREFIX: &str = "gent_h1.";
 
 #[derive(Clone)]
@@ -26,7 +27,7 @@ impl From<&Value> for Conversation {
 }
 
 pub(super) fn enabled(client: &Client) -> bool {
-    client.conversation_key == KEY
+    matches!(client.conversation_key.as_str(), KEY | URL_KEY)
 }
 
 fn key(permit: &Permit, handle: &str) -> Result<String> {

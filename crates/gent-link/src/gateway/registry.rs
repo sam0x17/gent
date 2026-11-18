@@ -29,6 +29,7 @@ pub(crate) mod conversations;
 pub(crate) use conversations::Conversation;
 mod downloads;
 pub(crate) use downloads::{Download, DownloadTarget};
+pub(crate) mod capability;
 mod keys;
 mod recovery;
 pub(crate) use bindings::BindingKeys;
@@ -236,7 +237,13 @@ impl State {
         });
         ensure!(
             self.version
-                == if self.clients.values().any(conversations::enabled) {
+                == if self
+                    .clients
+                    .values()
+                    .any(|c| c.conversation_key == conversations::URL_KEY)
+                {
+                    9
+                } else if self.clients.values().any(conversations::enabled) {
                     8
                 } else if recovered {
                     7
@@ -265,6 +272,11 @@ impl State {
         for (id, client) in &self.clients {
             config::label(&client.name)?;
             metadata_key(&client.conversation_key)?;
+            ensure!(
+                client.conversation_key != conversations::URL_KEY
+                    || (client.oauth.is_none() && client.mtls.is_none()),
+                "URL credentials cannot use OAuth or client certificates"
+            );
             ensure!(
                 !conversations::enabled(client) || client.subject_key.is_none(),
                 "explicit conversations are scoped to the OAuth grant, not host metadata"
@@ -601,7 +613,12 @@ pub(super) fn add_client(
 ) -> Result<Value> {
     let binding = binding.into();
     let key = binding.conversation.as_str();
-    let handles = key == conversations::KEY;
+    let url = key == conversations::URL_KEY;
+    let handles = url || key == conversations::KEY;
+    ensure!(
+        !url || (oauth.is_none() && mtls.is_none()),
+        "URL credentials cannot use OAuth or client certificates"
+    );
     let subject_key = binding.subject;
     ensure!(
         !handles || subject_key.is_none(),
@@ -689,7 +706,9 @@ pub(super) fn add_client(
         );
         let id = Uuid::new_v4().to_string();
         Export {
-            version: if handles {
+            version: if url {
+                7
+            } else if handles {
                 6
             } else if subject_key.is_some() {
                 5
@@ -721,7 +740,9 @@ pub(super) fn add_client(
     };
     ensure!(
         value.version
-            == if handles {
+            == if url {
+                7
+            } else if handles {
                 6
             } else if subject_key.is_some() {
                 5
@@ -809,7 +830,9 @@ pub(super) fn add_client(
         // Export first, registry second. A retry after either write reuses the
         // same secret. No bearer or signing key is printed by the command.
         exported.write(&(serde_json::to_string(&value)? + "\n"))?;
-        state.version = state.version.max(if handles {
+        state.version = state.version.max(if url {
+            9
+        } else if handles {
             8
         } else if subject_key.is_some() {
             6

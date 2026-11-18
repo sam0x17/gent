@@ -115,6 +115,14 @@ pub(super) async fn validate(home: &Path, options: &Run) -> Result<()> {
 }
 
 pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
+    run_until(home, options, CancellationToken::new()).await
+}
+
+pub(super) async fn run_until(
+    home: PathBuf,
+    options: Run,
+    shutdown: CancellationToken,
+) -> Result<()> {
     let endpoint = endpoint(&home, &options)?;
     credential(&home)?;
     let _lock = managed_file::lock(&home.join("gateway/runtime.lock"))?;
@@ -130,31 +138,55 @@ pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
     let publish = async {
         let mut delay = 1;
         loop {
+            if shutdown.is_cancelled() {
+                return Ok::<_, anyhow::Error>(());
+            }
             // Reload after every disconnect: account renewal can replace the
             // node's transport credential while this process remains alive.
             if let Ok(token) = credential(&home) {
                 let began = tokio::time::Instant::now();
-                let _ = connection::run(&endpoint, token, app.clone(), connected.clone()).await;
+                let _ = connection::run(
+                    &endpoint,
+                    token,
+                    app.clone(),
+                    connected.clone(),
+                    shutdown.clone(),
+                )
+                .await;
                 if began.elapsed() > Duration::from_secs(60) {
                     delay = 1;
                 }
             }
             connected.store(false, Ordering::Release);
+            if shutdown.is_cancelled() {
+                return Ok(());
+            }
             eprintln!(
                 "Gent hosted MCP disconnected; reconnecting in {delay}s. Accepted tool calls are not replayed."
             );
-            tokio::time::sleep(Duration::from_secs(delay)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(delay)) => {},
+                _ = shutdown.cancelled() => return Ok(()),
+            }
             delay = (delay * 2).min(30);
         }
     };
+    tokio::pin!(publish);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let result = tokio::select! {
-        never=publish=>never,
+        result=&mut publish=>result,
         result=control.serve_status(||json!({"version":1,"process_id":std::process::id(),"listen":null,
             "origin":endpoint.origin,"endpoint":format!("{}/mcp",endpoint.base),"transport":"hosted_bridge",
             "connected":connected.load(Ordering::Acquire)}))=>result,
-        result=tokio::signal::ctrl_c()=>result.map_err(Into::into),
-        _=terminate.recv()=>Ok(()),
+        result=tokio::signal::ctrl_c()=>{
+            shutdown.cancel();
+            publish.await?;
+            result.map_err(Into::into)
+        },
+        _=terminate.recv()=>{
+            shutdown.cancel();
+            publish.await
+        },
     };
     stop.cancel();
     result

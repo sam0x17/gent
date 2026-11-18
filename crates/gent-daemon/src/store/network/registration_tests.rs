@@ -1,5 +1,56 @@
 use super::*;
 
+#[tokio::test]
+async fn discovery_keeps_duplicate_names_distinct_and_labels_only_visible_nodes() {
+    let mut pair = Pair::new().await;
+    rename(&mut pair, 0, "cit", 1).unwrap();
+    rename(&mut pair, 1, "cit", 1).unwrap();
+    let local_duplicate = pair.stores[0]
+        .execute(Request::Agent {
+            credential: config::secret(),
+            action: AgentOp::Register {
+                name: "cit".into(),
+                provider: "another-host".into(),
+            },
+        })
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    pair.pump();
+    let found = pair.agent(0, AgentOp::Agents).unwrap();
+    let entries = found.as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    let state = pair.stores[0].identity.state(&pair.stores[0].db).unwrap();
+    for row in entries {
+        assert_eq!(row["name"], "cit");
+        assert_eq!(
+            row["node_name"],
+            state.state().nodes[row["node_id"].as_str().unwrap()].name
+        );
+    }
+    assert_eq!(
+        entries
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+    assert!(entries.iter().any(|r| r["id"] == local_duplicate));
+    let mut policy = pair.stores[0].config.policy.clone();
+    policy.rules.push(gent_protocol::Rule {
+        actor: gent_protocol::Selector::Agent(pair.agents[0].clone()),
+        peer: gent_protocol::Selector::Agent(pair.agents[1].clone()),
+        permission: gent_protocol::Permission::Enumerate,
+        effect: gent_protocol::Effect::Deny,
+    });
+    owner(&mut pair, 0, OwnerOp::SetPolicy { policy }).unwrap();
+    let restricted = pair.agent(0, AgentOp::Agents).unwrap();
+    assert!(!restricted.to_string().contains(&pair.agents[1]));
+    assert!(!restricted.to_string().contains("joined"));
+}
+
 fn owner(pair: &mut Pair, index: usize, action: OwnerOp) -> Result<Value> {
     let credential = config::read_private(&pair.homes[index].path().join("owner.key"))?;
     pair.stores[index].execute(Request::Owner { credential, action })

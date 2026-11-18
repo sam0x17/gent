@@ -5,13 +5,16 @@ use zeroize::Zeroize;
 
 #[derive(clap::Args)]
 pub struct AddArgs {
-    /// Name assigned to the new node by this invitation.
+    /// Name assigned to the invited or hosted node.
     name: String,
+    /// Create a named web/mobile node and return its private connector URL.
+    #[arg(long, conflicts_with = "no_configure")]
+    web: bool,
     /// Disable the admin rights granted to new nodes by default (messaging only).
     #[arg(long)]
     no_configure: bool,
-    /// Write the code to a private file instead of displaying it in a terminal.
-    #[arg(long)]
+    /// Save the invitation code or web connector URL in a private file.
+    #[arg(long, alias = "url-out")]
     code_out: Option<PathBuf>,
 }
 
@@ -34,6 +37,9 @@ impl Drop for Saved {
 }
 
 pub async fn add(home: &Path, args: AddArgs) -> Result<Value> {
+    if args.web {
+        return crate::web::add(home, &args.name, args.code_out.as_deref()).await;
+    }
     config::label(&args.name)?;
     ensure!(
         args.code_out.is_some() || io::stderr().is_terminal(),

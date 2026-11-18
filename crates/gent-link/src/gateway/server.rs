@@ -114,35 +114,57 @@ async fn guard(
                 )
                 .await;
         }
-        if request.uri().path() != "/mcp" {
+        let url_token =
+            gent_protocol::hosted_mcp::capability_token(request.uri().path()).map(str::to_owned);
+        if request.uri().path().starts_with("/mcp/") && url_token.is_none() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        if request.uri().path() != "/mcp" && url_token.is_none() {
             return oauth::handle(&boundary, request).await;
         }
-        let token = one(request.headers(), "authorization")
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .filter(|s| s.len() <= 128)
-            .map(str::to_owned);
+        let by_url = url_token.is_some();
+        if by_url && request.headers().contains_key(header::AUTHORIZATION) {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        let token = url_token.or_else(|| {
+            one(request.headers(), "authorization")
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .filter(|s| s.len() <= 128)
+                .map(str::to_owned)
+        });
         // The SDK sees the authorization decision, never the raw bearer.
         request.headers_mut().remove(header::AUTHORIZATION);
         let Some(token) = token else {
             return oauth::challenge(&boundary.origin);
         };
-        let permit = boundary
-            .registry
-            .authenticate_remote(
-                token,
-                format!("{}/mcp", boundary.origin),
-                request
-                    .extensions()
-                    .get::<Peer>()
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .await;
+        let permit = if by_url {
+            boundary.registry.authenticate_url_remote(token).await
+        } else {
+            boundary
+                .registry
+                .authenticate_remote(
+                    token,
+                    format!("{}/mcp", boundary.origin),
+                    request
+                        .extensions()
+                        .get::<Peer>()
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+                .await
+        };
         let permit = match permit {
             Ok(permit) => permit,
             Err(error) if error.is::<super::registry::Busy>() => return oauth::busy(),
+            Err(_) if by_url => return StatusCode::NOT_FOUND.into_response(),
             Err(_) => return oauth::challenge(&boundary.origin),
         };
+        if by_url {
+            // Remove the raw URL and axum's original URI/path parameters before
+            // handing the request to the MCP SDK or a tool implementation.
+            *request.uri_mut() = "/mcp".parse().unwrap();
+            request.extensions_mut().clear();
+        }
         request.extensions_mut().insert(permit);
         next.run(request).await
     };
@@ -266,7 +288,8 @@ pub(super) fn router(
         config,
     );
     Router::new()
-        .route_service("/mcp", any_service(service))
+        .route_service("/mcp", any_service(service.clone()))
+        .route_service("/mcp/{credential}", any_service(service))
         .layer(middleware::from_fn_with_state(
             Boundary {
                 home: gateway_home,

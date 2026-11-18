@@ -1,96 +1,88 @@
 # Connect a web or mobile chat
 
-The hosted gateway publishes your node at
-`https://mcp.gent.link/clusters/CLUSTER_UUID/nodes/NODE_UUID/mcp`. Your node opens an outbound
-connection; no inbound port or separate tunnel is required. Keep this node and
-its Gent daemon online. The target agent can run on another cluster node.
+On a cluster machine that will stay online:
+
+```sh
+gent node add claude-personal --web
+```
+
+Gent creates a named web node and displays its private MCP URL. Paste that URL
+into your provider's custom connector settings and select **No authentication**.
+The URL itself is the credential; no OAuth client ID, secret or approval step is
+needed. Keep it out of chat prompts, screenshots and public logs.
+
+Use another name for each provider account, for example `claude-work` or
+`chatgpt-personal`. Each web node has its own enrolled identity, encrypted node
+transport, message storage and conversations. The machine's current cluster
+and native node identity stay the same. Web nodes have the usual open default
+permissions; use node/agent restrictions when needed.
+
+The machine's Gent daemon starts and supervises these nodes automatically.
+Keep it online and signed in. It renews their service leases without copying
+GitHub credentials into them. Updates restart their runtimes using the new
+binary. Their messages, node identities and chat bindings persist.
 
 This route is **not end-to-end encrypted**. The model provider, Gent/Cloudflare's
-web endpoint, and your gateway node can read connector messages and files.
+web endpoint, and your hosting machine can read connector messages and files.
 Other node-to-node traffic continues to use Gent's encrypted transport.
 
-The Worker/native round trip has local integration coverage. Actual Claude and
-ChatGPT mobile acceptance is still being verified. The native Gent mobile app
-is a separate, future project.
+## Use the connector
 
-## Prepare the gateway
+Set up the connector on the provider's web or desktop interface first. In a new
+chat, enable Gent and ask:
 
-Run `gent cluster --json` on the node that will stay online and copy its
-`node.id` and `cluster.id`. Replace `NODE_UUID` and `CLUSTER_UUID` below with
-those values. Register each provider
-separately; credentials belong in the provider's connector settings, never in
-a chat prompt.
+> Register this chat with Gent and let me talk to my target agent through you.
 
-For Claude:
+`gent_agents` discovers registered agents across the cluster, with node names
+and stable IDs. A unique name such as `cit` is enough; duplicate or similar
+names require a choice before sending. A native conversation must use Gent
+once to establish its identity and wake binding. Waking an unknown chat does
+not register it.
 
-```sh
-gent gateway clients add claude --conversation-handles \
-  --oauth-resource https://mcp.gent.link/clusters/CLUSTER_UUID/nodes/NODE_UUID/mcp \
-  --redirect-uri https://claude.ai/api/mcp/auth_callback \
-  --out ~/.gent/claude-connector.json
-```
+The connector opens a conversation handle, attaches to the selected agent,
+sends each turn once, and retrieves the reply. The target needs a working
+native wake adapter to answer while idle. The intermediary can be any active
+chat with the connector. Neither ChatGPT nor Claude hosted MCP starts a new
+turn in an idle web/mobile conversation.
 
-For ChatGPT:
+After web works, try the same connector on your phone. Availability depends on
+your account and the provider's current rollout. Actual Claude and ChatGPT
+mobile acceptance is still being verified. Native Gent mobile apps are future
+work.
 
-```sh
-gent gateway clients add chatgpt --conversation-handles \
-  --oauth-resource https://mcp.gent.link/clusters/CLUSTER_UUID/nodes/NODE_UUID/mcp \
-  --redirect-uri https://chatgpt.com/connector_platform_oauth_redirect \
-  --out ~/.gent/chatgpt-connector.json
-```
-
-Gent implements issuer identification, which permits ChatGPT's stable callback.
-Check the callback shown in your MCP management page; if it differs, register
-that exact URL instead. Existing registrations cannot change callbacks through
-an installation retry. See [OAuth setup](gateway-oauth.md) for signed clients,
-client metadata documents and revocation.
-
-The private export's `client` is the OAuth client ID; `token` is the client
-secret. Registration retries with the same options and export preserve them.
-The registration defaults to a thirty-day lifetime.
-
-Install and inspect the publisher:
+## Manage a web node
 
 ```sh
-gent gateway service install --hosted
-gent gateway service status --json
+gent node web list
+gent node web url claude-personal
+gent node web rotate claude-personal
+gent node web revoke claude-personal
 ```
 
-`connected: true` means the publisher reached Gent's bridge. It does
-not prove that a provider has connected. `gent gateway run --hosted` is the
-foreground alternative. Service installation and updates retain hosted mode.
+`list` shows connectivity without printing credentials. `url` retrieves the
+current private URL. `rotate` invalidates the old URL and preserves the node's
+existing agents and conversation handles. Update the provider's connector
+settings with the replacement URL. URLs expire after one year; rotation
+renews that lifetime. `revoke` disables the connector and stops its hosted
+runtime while retaining data. Use a new name to create another web node, or
+`gent node remove NODE_ID` to remove the revoked node from cluster membership.
 
-## Connect the provider
-
-In Claude's web or desktop connector settings, add a custom connector with the
-MCP URL above. Select OAuth and **Use your own OAuth client**, then enter the
-export's client ID and secret. Custom connector setup on mobile is still a
-provider beta; web or desktop setup is the primary route.
-
-In ChatGPT's MCP/plugin management, add the same URL using a predefined OAuth
-client and its separate export. Whether a private connector is available on
-your phone depends on your account and the provider's current rollout.
-
-Start the connection. Gent's browser page displays its request ID and callback.
-On the gateway node:
+For scripted setup, write the URL to a private file:
 
 ```sh
-gent gateway oauth requests
-gent gateway oauth approve REQUEST_UUID
+gent node add claude-personal --web --code-out ~/.gent/claude-url.txt
+gent node web url claude-personal --out ~/.gent/claude-url.txt
 ```
 
-Approve only the request from the connection you just started, then click
-**Continue after approval** in the browser. Normal chat turns require no
-terminal access; reauthorization requires approval again.
+Setup retries reuse the same node and URL. If setup reports the node is saved
+but offline, keep the updated daemon running and check `gent node web list`.
+An interrupted URL rotation resumes from its private journal. A revoked URL
+cannot be reactivated by repeating setup.
 
-Enable the connector in a chat and ask it to register with Gent, list agents,
-and relay to the selected agent. The connector instructions open and retain
-this chat's conversation handle, attach the target, send each turn once, and
-wait for its response. A completed response preserves the target's text and
-images. For longer work, keep the turn ID and retrieve its result later.
-
-The selected remote agent needs a working native wake adapter to answer while
-idle. An MCP connection by itself cannot wake a provider conversation.
+Each machine can host up to 16 web nodes. Hosted state lives under `~/.gent/web`;
+these are managed runtimes, with no profile selection or separate logins.
+Existing OAuth gateway commands remain available for hosts that require OAuth;
+see [OAuth setup](gateway-oauth.md).
 
 ## Interruptions and files
 
@@ -100,12 +92,11 @@ creating a new request ID can duplicate work. A disconnected waiting call can
 be resumed against the same turn ID. Replies remain on the daemon.
 
 `gent_file_read` and `gent_file_view` work through the bridge. Inline raster
-images are supported. Provider download imports require the existing explicit
-origin policy. Hosted bearer download links (`--file-downloads`) are not yet
-supported, and provider attachment rendering still needs acceptance testing.
+images are supported. Hosted bearer download links are not supported yet,
+and provider attachment rendering still needs acceptance testing.
 
-Conversation handles separate saved agents and are scoped to the connector's
-OAuth authorization. Refresh preserves them; reauthorization creates a new
-scope. They do not authenticate a provider's actual chat ID. A copied handle
-within the same authorization can be used by another chat, and a chat can open
-more handles. Apply mandatory restrictions to the gateway node when needed.
+Conversation handles separate saved agents within each connector. They do not
+authenticate the provider's actual chat ID. Someone with both the connector URL
+and a copied handle can access that conversation. Rotation preserves handles;
+revocation blocks all further connector requests. Apply mandatory restrictions
+to the web node when needed.
