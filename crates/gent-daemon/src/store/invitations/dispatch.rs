@@ -264,7 +264,7 @@ impl Store {
                     if let PairingOp::Data { legacy_agents, .. } = action {
                         ensure!(
                             legacy_agents.is_empty(),
-                            "invitations cannot migrate legacy agents"
+                            "invitations cannot migrate legacy chats"
                         );
                     }
                 }

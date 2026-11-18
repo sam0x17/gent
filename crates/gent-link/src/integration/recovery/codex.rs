@@ -14,7 +14,7 @@ pub(super) async fn inspect(home: &Path, agent_id: &str, entry: &RecoveryAgent) 
     let identity = agent(home, &credential, AgentOp::Identity).await?;
     ensure!(
         identity["agent"]["id"] == agent_id,
-        "host recovery agent changed"
+        "host recovery chat changed"
     );
     use crate::wake::codex::recovery::{Readiness, inspect};
     let state = match inspect(&socket, &entry.thread_id).await? {
@@ -44,7 +44,7 @@ pub(super) async fn select(
     );
     let id = identity["agent"]["id"]
         .as_str()
-        .context("missing local agent identity")?
+        .context("missing local chat identity")?
         .to_owned();
     ensure!(
         crate::wake::codex::recovery::inspect(&socket, &thread_id).await?
@@ -79,7 +79,7 @@ pub(super) async fn recover(
         "host recovery credential changed"
     );
     let pending = agent(home, &credential, AgentOp::WakePending).await?;
-    ensure!(pending["agent"] == agent_id, "host recovery agent changed");
+    ensure!(pending["agent"] == agent_id, "host recovery chat changed");
     if pending["pending"]
         .as_array()
         .context("invalid pending messages")?
@@ -114,7 +114,7 @@ pub(super) async fn recover(
         "host recovery binding changed during startup"
     );
     let pending = agent(home, &credential, AgentOp::WakePending).await?;
-    ensure!(pending["agent"] == agent_id, "host recovery agent changed");
+    ensure!(pending["agent"] == agent_id, "host recovery chat changed");
     if pending["pending"]
         .as_array()
         .context("invalid pending messages")?

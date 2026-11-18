@@ -222,7 +222,7 @@ pub(super) fn export(
         for agent in [&record.sender, &record.recipient] {
             validate_agent(agent)?;
             if let Some(old) = agents.insert(agent.id.clone(), agent.clone()) {
-                ensure!(old == *agent, "conflicting historical agent labels");
+                ensure!(old == *agent, "conflicting historical chat labels");
             }
         }
         let mut assets = Vec::new();

@@ -90,7 +90,7 @@ gent integration install claude-code
 gent doctor --online
 ```
 
-Join assigns the name from the code and starts the daemon. The node and its agents receive fresh identities; old messages and bindings stay in the archive. Reload the host's Gent MCP connection after reinstalling. For Codex in VS Code, run **Developer: Reload Window** and reopen the chat. There is no profile move step.
+Join assigns the name from the code and starts the daemon. The node and its chats receive fresh identities; old messages and bindings stay in the archive. Reload the host's Gent MCP connection after reinstalling. For Codex in VS Code, run **Developer: Reload Window** and reopen the chat. There is no profile move step.
 
 ## Add another machine with an invitation
 

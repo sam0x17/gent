@@ -211,10 +211,10 @@ fn export_database(path: &Path, manifest: &format::Manifest, output: &Path) -> R
     while let Some(row) = rows.next()? {
         ensure!(
             row.get::<_, u64>(6)? <= 4096,
-            "archived agent record too large"
+            "archived chat record too large"
         );
         let revoked = row.get::<_, i64>(5)?;
-        ensure!(matches!(revoked, 0 | 1), "invalid archived agent status");
+        ensure!(matches!(revoked, 0 | 1), "invalid archived chat status");
         let agent = Agent {
             id: row.get(0)?,
             node_id: row.get(1)?,

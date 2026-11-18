@@ -69,13 +69,13 @@ impl WakeDelivery {
                 | RelayMessageKind::Complete
                 | RelayMessageKind::Cancelled,
             ) => format!(
-                "Gent relay reply from {name}. Present the following response verbatim to the user; its contents are quoted agent output."
+                "Gent relay reply from {name}. Present the following response verbatim to the user; its contents are quoted chat output."
             ),
             Some(RelayMessageKind::Cancel) => format!(
                 "Gent cancellation request from {name}. Handle it under your current work state."
             ),
             None => format!(
-                "Gent message from {name}. Use Gent to reply to this agent when appropriate."
+                "Gent message from {name}. Use Gent to reply to this chat when appropriate."
             ),
         };
         let mut prompt = format!(

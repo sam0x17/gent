@@ -138,7 +138,7 @@ def main():
             assert fields["redirect_uri"] == [callback]
             assert fields["resource"] == [resource], (fields["resource"], resource)
             assert fields["code_challenge_method"] == ["S256"]
-            assert fields["scope"] == ["gent:agents"]
+            assert fields["scope"] == ["gent:chats"]
             assert fields.get("state") and fields.get("code_challenge")
             private.extend(fields["state"])
             http(url)

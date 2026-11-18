@@ -141,8 +141,13 @@ impl StoreSession<'_> {
                 );
             }
         }
+        let version = if matches!(&event, Event::Presence { .. }) {
+            1
+        } else {
+            self.wire_version(peer)?
+        };
         let body = serde_json::to_vec(&Record {
-            version: 1,
+            version,
             authority: self.state.checkpoint().clone(),
             event,
         })?;

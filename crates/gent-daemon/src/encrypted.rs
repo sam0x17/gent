@@ -284,7 +284,7 @@ impl<'a> EncryptedEndpoint<'a> {
         .collect()
     }
 
-    /// Trusted local inspection only. Agent policy and revocation must be checked
+    /// Trusted local inspection only. Chat policy and revocation must be checked
     /// again before exposing a stored plaintext to an MCP conversation.
     pub fn inbox(
         &self,

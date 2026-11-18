@@ -16,9 +16,9 @@ Use `gent cluster` to inspect the accepted sequence and `gent nodes` to inspect 
 
 Every newly enrolled node has full cluster administration by default. The node that creates a cluster has no permanent extra privilege. Any unrestricted node can change shared configuration, enroll another node, manage permissions and remove a node. Explicit restrictions can remove these capabilities. There is one node administration model, with no separate owner tier.
 
-Agent permissions remain separate. Installing Gent on a fully authorized node does not give every chat unrestricted configuration tools. Agent requests retain their authenticated identity and delegated scope, and the executing daemon checks that scope against the current configuration.
+Chat permissions remain separate. Installing Gent on a fully authorized node does not give every chat unrestricted configuration tools. Chat requests retain their authenticated identity and delegated scope, and the executing daemon checks that scope against the current configuration.
 
-A node going offline does not revoke it, trigger ownership transfer, or stop the other nodes from administering the cluster. Any surviving unrestricted node must be sufficient, provided the Gent service is reachable. The unavailable node's own agents and local conversation history remain unavailable unless their host provides separate recovery.
+A node going offline does not revoke it, trigger ownership transfer, or stop the other nodes from administering the cluster. Any surviving unrestricted node must be sufficient, provided the Gent service is reachable. The unavailable node's own chats and local conversation history remain unavailable unless their host provides separate recovery.
 
 ## Sequence and finality
 
@@ -31,7 +31,7 @@ The highest valid committed sequence determines the shared configuration. A newe
 The write path is:
 
 1. Fetch and verify the current committed head and any missing history.
-2. Check the originating node's or agent's permission against that state.
+2. Check the originating node's or chat's permission against that state.
 3. Prepare, sign and encrypt the requested configuration change, binding its cluster, predecessor and expected next sequence.
 4. Submit with a stable operation ID, an intent fingerprint and the expected current head.
 5. Atomically commit only if the expected head still matches. Return the original result for an already committed retry with the same intent; reject reuse of its ID for a different intent.
@@ -44,7 +44,7 @@ For example, two nodes start at sequence 41. A commits sequence 42. B's attempt 
 
 ## Encryption and authorization
 
-Configuration contents, private names, agent policy and key material remain end-to-end encrypted. Ordering metadata such as sequence numbers, opaque cluster/request identifiers, ciphertext lengths and digests is visible to the service. Account and transport authentication alone does not establish permission to change the encrypted configuration.
+Configuration contents, private names, chat policy and key material remain end-to-end encrypted. Ordering metadata such as sequence numbers, opaque cluster/request identifiers, ciphertext lengths and digests is visible to the service. Account and transport authentication alone does not establish permission to change the encrypted configuration.
 
 Endpoint signatures must bind the operation to an authorized node and the exact ordered record. Receiving endpoints verify the cluster, signature, predecessor, sequence and applicable authorization before exposing new policy. The service cannot substitute keys or author a valid configuration merely by assigning a sequence number. Finality depends on the ordering service preserving its durable log; encryption does not make a malicious or rolled-back ordering service trustworthy. Endpoints retain checkpoints and reject conflicting or older histories.
 
@@ -64,7 +64,7 @@ Operations whose responses are lost must remain retryable across daemon restarts
 
 The existing implementation has owner dependencies in signed authority, configuration proposals, lease renewal, invitations, stream grants, mesh setup and recovery. Renaming the ADMIN column does not remove them.
 
-The migration must introduce a versioned authority protocol and a verifiable transition from each cluster's pinned existing state. It must preserve node and agent identities, messages, file keys, request IDs, permission restrictions and accepted checkpoints. New nodes default to full authority; an upgrade must not silently undo an existing explicit restriction.
+The migration must introduce a versioned authority protocol and a verifiable transition from each cluster's pinned existing state. It must preserve node and chat identities, messages, file keys, request IDs, permission restrictions and accepted checkpoints. New nodes default to full authority; an upgrade must not silently undo an existing explicit restriction.
 
 The old writer must be fenced before the new log becomes authoritative, with a durable record distinguishing an uncommitted transition from a committed one. After activation, no legacy writer or old replica may publish a competing history or reset the sequence. Older clients must report an upgrade requirement rather than silently maintaining a separate authority. Recovery must consult the committed transition; binary rollback cannot reopen a retired signing path.
 
@@ -80,6 +80,6 @@ The account owner's billing/account role and the local user's RPC credential are
 - Reorder notifications, interrupt synchronization and restart nodes during local projection. Verify automatic catch-up, checkpoint continuity and preservation of local-only settings.
 - Inspect stored service data and request logs for plaintext configuration or keys. Exercise ciphertext/signature tampering, cross-cluster substitution, replay and conflicting history.
 - Interrupt migration before and after commitment. Verify either the original authority remains valid or every upgraded node follows the new authority, with no simultaneous writers under incompatible rules.
-- Preserve agent permissions, messaging, files, wake adapters and chat identities across migration. Verify that losing a member only makes that member's hosted agents unavailable.
+- Preserve chat permissions, messaging, files, wake adapters and chat identities across migration. Verify that losing a member only makes that member's hosted chats unavailable.
 
-These checks cover migration and release validation. They do not establish that every external host or mobile connector can wake an idle agent; host adapters retain their separate acceptance requirements.
+These checks cover migration and release validation. They do not establish that every external host or mobile connector can wake an idle chat; host adapters retain their separate acceptance requirements.

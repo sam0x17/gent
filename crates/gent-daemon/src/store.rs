@@ -21,6 +21,7 @@ mod activity;
 mod administration;
 mod agents;
 mod configuration;
+mod wire;
 pub(crate) use configuration::pending::schema as pending_configuration_schema;
 pub(crate) use configuration::routing::schema as configuration_routing_schema;
 mod diagnostics;
@@ -143,6 +144,7 @@ impl Store {
         presence::schema(&db)?;
         directory::schema(&db)?;
         activity::schema(&db)?;
+        wire::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -370,8 +372,8 @@ impl Store {
         Ok(())
     }
 
-    /// The owner daemon renews its lease without requiring an agent turn.
-    /// Agent RPCs never bypass expiry or trigger a renewal themselves.
+    /// The owner daemon renews its lease without requiring a chat turn.
+    /// Chat RPCs never bypass expiry or trigger a renewal themselves.
     pub fn maintain(&mut self) -> Result<()> {
         // Local cleanup remains available after membership/lease loss.
         self.clean_invitations()?;
@@ -636,7 +638,7 @@ impl StoreSession<'_> {
                 )?;
                 let id = registered["agent"]["id"]
                     .as_str()
-                    .context("missing recovered agent identity")?;
+                    .context("missing recovered chat identity")?;
                 let agent = self.get_agent(id)?;
                 ensure!(
                     agent.name == name && agent.provider == provider,
@@ -838,7 +840,7 @@ impl StoreSession<'_> {
                         "UPDATE agents SET revoked=1 WHERE id=?1 AND node_id=?2",
                         params![agent_id, self.identity.node.id()]
                     )? == 1,
-                    "unknown agent"
+                    "unknown chat"
                 );
                 self.db.execute(
                     "UPDATE network_origins SET generation=generation+1 WHERE agent=?1",

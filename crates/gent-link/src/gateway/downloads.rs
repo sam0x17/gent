@@ -47,7 +47,7 @@ impl AsRef<[u8]> for Payload {
 
 pub(crate) fn tool() -> rmcp::model::Tool {
     serde_json::from_value(json!({"name":"gent_file_link",
-        "description":"Create a download link for an authorized complete file up to 32 MiB, only when the owner enables links for this host. Anyone holding the URL can fetch this file for up to five minutes without host credentials. Current host/grant, agent, message and expiry rules still apply. Use for a user-requested download; keep it private. Forward file_ids for agent messaging. Call again for a new link after expiry. Host support for MCP resource links varies.",
+        "description":"Create a download link for an authorized complete file up to 32 MiB, only when the owner enables links for this host. Anyone holding the URL can fetch this file for up to five minutes without host credentials. Current host/grant, chat, message and expiry rules still apply. Use for a user-requested download; keep it private. Forward file_ids for chat messaging. Call again for a new link after expiry. Host support for MCP resource links varies.",
         "inputSchema":{"type":"object","additionalProperties":false,"required":["file_id"],"properties":{"file_id":{"type":"string","format":"uuid"}}},
         "annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":true}
     })).expect("valid download tool")

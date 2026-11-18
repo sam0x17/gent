@@ -239,7 +239,7 @@ async fn join_inner(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<V
     storage::private(&journal)?.remove()?;
     result["pairing"] = json!("code_verified");
     result["next"] = json!(
-        "Connect agents with gent integration install codex or gent integration install claude-code."
+        "Connect chats with gent integration install codex or gent integration install claude-code."
     );
     Ok(result)
 }

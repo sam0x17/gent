@@ -270,7 +270,7 @@ impl StoreSession<'_> {
         if let Some((administrator, request_id)) = administration::edit_identity(&edit) {
             ensure!(
                 administration::request_id(administrator, request_id)? == request,
-                "invalid agent configuration request identity"
+                "invalid chat configuration request identity"
             );
             requests::admit(request_id, self.timestamp)?;
             self.validate_agent_configuration(&origin, &edit)?;
@@ -605,7 +605,7 @@ impl StoreSession<'_> {
             );
             ensure!(
                 administration::request_id(administrator, request_id)? == request,
-                "invalid agent configuration request identity"
+                "invalid chat configuration request identity"
             );
         }
         if self.state.state().peer.is_some() {
@@ -817,7 +817,7 @@ impl StoreSession<'_> {
                 changes,
                 ..
             } => self.agent_permission_rule_policy(origin, administrator, changes),
-            _ => anyhow::bail!("not an agent configuration edit"),
+            _ => anyhow::bail!("not a chat configuration edit"),
         }
     }
     pub(super) fn configuration_status_for(&self, origin: &str, id: &str) -> Result<Value> {

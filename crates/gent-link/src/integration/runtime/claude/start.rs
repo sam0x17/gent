@@ -34,12 +34,12 @@ pub(super) async fn binding(home: &Path, session: &str) -> Result<Binding> {
     .context("Gent did not confirm the Claude binding")??;
     ensure!(
         identity["cluster_id"] == cfg.cluster.id && identity["agent"]["node_id"] == cfg.node.id,
-        "Claude startup requires a local agent in the selected cluster"
+        "Claude startup requires a local chat in the selected cluster"
     );
     let agent = identity["agent"]["id"]
         .as_str()
         .filter(|id| valid_thread(id))
-        .context("invalid Claude agent identity")?
+        .context("invalid Claude chat identity")?
         .to_owned();
     Ok(Binding { credential, agent })
 }

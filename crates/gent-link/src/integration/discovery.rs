@@ -106,7 +106,7 @@ fn status(home: &Path) -> Result<Value> {
             "id":entry.agent,"name":entry.name,"host":entry.host,"native_id":entry.native,
             "automatic_recovery":entry.recovery.is_some()
         })).collect::<Vec<_>>(),
-        "note":"Disabling stops indexing and discovery-driven recovery. Already published registrations and loaded native chats remain; use agent revoke or integration uninstall to remove their access."}),
+        "note":"Disabling stops indexing and discovery-driven recovery. Already published registrations and loaded native chats remain; use chat revoke or integration uninstall to remove their access."}),
     )
 }
 
@@ -330,7 +330,7 @@ async fn refresh(home: &Path) -> Result<()> {
                     .count();
                 catalog.hosts.insert(host.name().into(), json!({"status":if failures > 0 || truncated { "partial" } else if more { "scanning" } else { "indexed" },"count":count,"failed":failures,"truncated":truncated,"cursor":next,"error":error,
                     "next_page":inventory.page.and_then(|page| page.next),
-                    "scope":if host == Host::Codex { "native interactive history, including archived chats; wake requires a supported shared server" } else { "local session titles and native background agents; closed interactive sessions require manual reopening" }}));
+                    "scope":if host == Host::Codex { "native interactive history, including archived chats; wake requires a supported shared server" } else { "local session titles and native background chats; closed interactive sessions require manual reopening" }}));
             }
             Err(error) => {
                 let previous = catalog

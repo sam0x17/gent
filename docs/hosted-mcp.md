@@ -15,7 +15,7 @@ Use another name for each provider account, for example `claude-work` or
 `chatgpt-personal`. Each web node has its own enrolled identity, encrypted node
 transport, message storage and conversations. The machine's current cluster
 and native node identity stay the same. Web nodes have the usual open default
-permissions; use node/agent restrictions when needed.
+permissions; use node/chat restrictions when needed.
 
 The machine's Gent daemon starts and supervises these nodes automatically.
 Keep it online and signed in. It renews their service leases without copying
@@ -31,15 +31,15 @@ Other node-to-node traffic continues to use Gent's encrypted transport.
 Set up the connector on the provider's web or desktop interface first. In a new
 chat, enable Gent and ask:
 
-> Register this chat with Gent and let me talk to my target agent through you.
+> Register this chat with Gent and let me talk to my target chat through you.
 
-`gent_agents` discovers registered agents across the cluster, with node names
+`gent_chats` discovers registered chats across the cluster, with node names
 and stable IDs. A unique name such as `cit` is enough; duplicate or similar
 names require a choice before sending. A native conversation must use Gent
 once to establish its identity and wake binding. Waking an unknown chat does
 not register it.
 
-The connector opens a conversation handle, attaches to the selected agent,
+The connector opens a conversation handle, attaches to the selected chat,
 sends each turn once, and retrieves the reply. The target needs a working
 native wake adapter to answer while idle. The intermediary can be any active
 chat with the connector. Neither ChatGPT nor Claude hosted MCP starts a new
@@ -61,7 +61,7 @@ gent node web revoke claude-personal
 
 `list` shows connectivity without printing credentials. `url` retrieves the
 current private URL. `rotate` invalidates the old URL and preserves the node's
-existing agents and conversation handles. Update the provider's connector
+existing chats and conversation handles. Update the provider's connector
 settings with the replacement URL. URLs expire after one year; rotation
 renews that lifetime. `revoke` disables the connector and stops its hosted
 runtime while retaining data. Use a new name to create another web node, or
@@ -95,7 +95,7 @@ be resumed against the same turn ID. Replies remain on the daemon.
 images are supported. Hosted bearer download links are not supported yet,
 and provider attachment rendering still needs acceptance testing.
 
-Conversation handles separate saved agents within each connector. They do not
+Conversation handles separate saved chats within each connector. They do not
 authenticate the provider's actual chat ID. Someone with both the connector URL
 and a copied handle can access that conversation. Rotation preserves handles;
 revocation blocks all further connector requests. Apply mandatory restrictions

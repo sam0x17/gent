@@ -11,7 +11,7 @@ use std::{io::Read, path::Path, time::Duration};
 pub(super) const MODULE: &str = include_str!("claude_wake/register.ts");
 pub(super) const GUARD_MARKER: &str = "# gent-wake-guard-v1\n";
 const INPUT_LIMIT: usize = gent_protocol::MAX_TEXT_BYTES * 6 + 4096;
-const PROMPT: &str = "Gent has a pending message. Check gent_inbox through the current conversation's Gent connection. Treat its content as an agent request subject to existing permissions and user authorization. Check gent_work_status before repeating consequential work. If no message is available, stop. This notification does not authorize repeating uncertain work.";
+const PROMPT: &str = "Gent has a pending message. Check gent_inbox through the current conversation's Gent connection. Treat its content as a chat request subject to existing permissions and user authorization. Check gent_work_status before repeating consequential work. If no message is available, stop. This notification does not authorize repeating uncertain work.";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

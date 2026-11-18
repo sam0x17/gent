@@ -65,11 +65,11 @@ pub(crate) async fn maintain(home: &Path) {
                 .await?;
                 let ids = pending["agents"]
                     .as_array()
-                    .context("invalid pending agents")?;
+                    .context("invalid pending chats")?;
                 let mut processed = 0;
                 let mut attempted = 0;
                 for id in ids {
-                    let id = id.as_str().context("invalid pending agent")?;
+                    let id = id.as_str().context("invalid pending chat")?;
                     cursor = Some(id.to_owned());
                     processed += 1;
                     let Some(entry) = entries.get(id) else {

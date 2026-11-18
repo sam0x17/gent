@@ -2,7 +2,7 @@
 
 `gent recovery` collects signed reports of the configuration checkpoints accepted by surviving nodes. It identifies missing nodes, differing revisions and conflicting signatures before an owner-recovery decision. Owner replacement is not implemented. Collecting or inspecting these reports does not authorize a new owner, stop an existing writer or activate a restored database.
 
-This workflow complements [encrypted backups and fresh joined-node replacement](recovery.md). It can run on a surviving joined node without the cluster owner's signing secret. The local owner's RPC credential is required to create a challenge or sign a report. Agents have no MCP tool for these operations.
+This workflow complements [encrypted backups and fresh joined-node replacement](recovery.md). It can run on a surviving joined node without the cluster owner's signing secret. The local owner's RPC credential is required to create a challenge or sign a report. Chats have no MCP tool for these operations.
 
 `gent recovery status` reports the local owner epoch, whether signing is frozen, the issued handoff request and successor node, prepared/completed candidate counts, decision-journal snapshot counts and reserved bytes, and readiness report counts and storage limits. It does not return keys or private configuration. The [handoff preparation APIs](owner-succession.md#preparation-on-separate-nodes) are available to trusted Rust callers; the CLI exposes their status only until coordinated activation exists.
 
@@ -50,7 +50,7 @@ Each accepted report has one relation to the baseline:
 
 `all_match_baseline` means every node pinned in the baseline supplied a matching report. Even that result leaves `authorizes_owner_change`, `proves_writer_stopped` and `proves_global_freshness` false. A signature authenticates a node's claim. A compromised node can lie, a disconnected writer can have newer state, and nodes can accept changes after reporting. Self-contained signatures cannot establish that the supplied baseline is the cluster the user intended to recover.
 
-Expired signed configuration can still be reported, with `state_expired` calculated when inspection finishes. This does not renew its lease or authorize agent operations. Report collection uses the normal request transaction and can update the local request clock and TOML projection. It performs no signing-key or authority change; ordinary background synchronization and maintenance continue independently.
+Expired signed configuration can still be reported, with `state_expired` calculated when inspection finishes. This does not renew its lease or authorize chat operations. Report collection uses the normal request transaction and can update the local request clock and TOML projection. It performs no signing-key or authority change; ordinary background synchronization and maintenance continue independently.
 
 ## Protocol boundary
 
@@ -60,7 +60,7 @@ Files use strict canonical JCS JSON. Challenges are limited to 4 KiB; baselines 
 
 ## Required before owner replacement
 
-The cluster trust anchor pins the original owner public key. The [signer succession protocol](owner-succession.md) verifies delegation to a fresh signer while retaining that root, including configuration grants, invitations and legacy agent certificates. Trusted runtime APIs now activate a prepared successor with its decision journal and confirmed peer connections. The local-owner `gent cluster owner prepare/commit/resume` workflow coordinates encrypted preparation, explicit commitment and automatic completion. It still requires authorization from the current signer and cannot recover a lost key. Merely copying the current secret from an archive would let both copies sign competing histories.
+The cluster trust anchor pins the original owner public key. The [signer succession protocol](owner-succession.md) verifies delegation to a fresh signer while retaining that root, including configuration grants, invitations and legacy chat certificates. Trusted runtime APIs now activate a prepared successor with its decision journal and confirmed peer connections. The local-owner `gent cluster owner prepare/commit/resume` workflow coordinates encrypted preparation, explicit commitment and automatic completion. It still requires authorization from the current signer and cannot recover a lost key. Merely copying the current secret from an archive would let both copies sign competing histories.
 
 The remaining activation and lost-key recovery work must define and verify:
 
@@ -69,6 +69,6 @@ The remaining activation and lost-key recovery work must define and verify:
 - Durable retirement of old authority on participating endpoints and service credentials. Offline peers must verify succession before accepting more traffic. The design must state what happens to peers that never receive it and to a still-running old writer.
 - History reconciliation and explicit handling of unavailable or conflicting peers. A majority of reports is not currently a quorum or a recovery policy.
 - Atomic persistence, restart behavior and rejection of replayed succession records. Recovering processes need fresh node identities and encrypted sending state where rollback cannot be excluded.
-- Migration rules for invitations, administrative grants, agent bindings, peer permissions and unfinished work. An old signature or backup must not silently restore revoked authority.
+- Migration rules for invitations, administrative grants, chat bindings, peer permissions and unfinished work. An old signature or backup must not silently restore revoked authority.
 
 Until those requirements are implemented and tested, use these commands to inspect evidence only. There is no owner-activation command.

@@ -262,7 +262,7 @@ impl StoreSession<'_> {
         let recipient = self.get_agent(target)?;
         ensure!(
             !recipient.revoked && recipient.node_id == self.identity.node.id(),
-            "history recipient must be an active local agent"
+            "history recipient must be an active local chat"
         );
         let id = gent_crypto::scoped_id(
             b"gent/history-import/v1",
@@ -349,13 +349,13 @@ impl StoreSession<'_> {
             config::label(&agent.provider)?;
             ensure!(
                 agents.insert(agent.id.clone(), agent).is_none(),
-                "duplicate historical agent"
+                "duplicate historical chat"
             );
             Ok(())
         })?;
         let original = agents
             .get(source)
-            .context("archived agent is absent from this history")?;
+            .context("archived chat is absent from this history")?;
         let mut summary = json!({"archive_id":manifest.archive_id,"cluster_id":manifest.cluster_id,"node_id":manifest.node_id,
             "captured_at":manifest.captured_at,"database_sha256":manifest.database_sha256,
             "source_agent":original,"target_agent":target,"imported_at":self.timestamp,

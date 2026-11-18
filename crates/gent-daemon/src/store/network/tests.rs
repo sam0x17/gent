@@ -20,6 +20,8 @@ mod registration_tests;
 mod retention_tests;
 #[path = "retries.rs"]
 mod retries;
+#[path = "wire_tests.rs"]
+mod wire_tests;
 
 struct OwnerPeer<'a>(&'a mut Store, String);
 impl Peer for OwnerPeer<'_> {

@@ -61,7 +61,7 @@ impl StoreSession<'_> {
         let agent = self.get_agent(id)?;
         ensure!(
             agent.node_id == self.identity.node.id(),
-            "rename on the agent's hosting node, or use gent_rename in that conversation"
+            "rename on the chat's hosting node, or use gent_rename in that conversation"
         );
         ensure!(!agent.revoked, "registration revoked");
         let generation = self.registration_generation(&agent)?;

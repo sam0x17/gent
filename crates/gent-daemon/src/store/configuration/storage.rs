@@ -274,7 +274,7 @@ pub(in crate::store) fn insert(
                 && own < MAX_PER_AGENT
                 && (result.is_some() || pending < MAX_AGENT_PENDING)
                 && reserved.saturating_add(bytes) <= MAX_AGENT_BYTES,
-            "agent administration history capacity exhausted; inspect gent history status"
+            "chat administration history capacity exhausted; inspect gent history status"
         );
     }
     db.execute("INSERT INTO configuration_edits(origin,id,writer,fingerprint,edit,result,compact) VALUES(?1,?2,?3,?4,?5,?6,1)",

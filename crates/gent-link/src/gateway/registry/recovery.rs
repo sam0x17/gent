@@ -53,7 +53,7 @@ impl Binding {
             Self::Recovery(value) => {
                 ensure!(
                     value.completed.is_some(),
-                    "binding recovery is pending; rerun the same gent agent recover command"
+                    "binding recovery is pending; rerun the same gent chat recover command"
                 );
                 Ok(&value.credential)
             }
@@ -125,7 +125,7 @@ impl Registry {
         );
         let credential = match client.bindings.get(&key) {
             Some(Binding::Credential(_)) => anyhow::bail!(
-                "recovery requires an unused gateway binding; use history import for an existing agent"
+                "recovery requires an unused gateway binding; use history import for an existing chat"
             ),
             Some(Binding::Recovery(saved)) => {
                 ensure!(
@@ -178,7 +178,7 @@ impl Registry {
             agent_id: result["agent"]["id"]
                 .as_str()
                 .filter(|s| uuid(s))
-                .context("invalid recovered agent response")?
+                .context("invalid recovered chat response")?
                 .into(),
             import_id: result["history"]["import_id"]
                 .as_str()

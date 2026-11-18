@@ -66,7 +66,7 @@ pub enum ClientCommand {
     },
     /// Register a trusted host and write its private connection configuration.
     Add(Box<ClientAdd>),
-    /// Reject future requests from this host, retaining agent identities and messages.
+    /// Reject future requests from this host, retaining chat identities and messages.
     Revoke {
         client: String,
     },
@@ -123,7 +123,7 @@ pub enum KeyCommand {
     Show {
         client: String,
     },
-    /// Replace the complete key set while preserving the client and its agents.
+    /// Replace the complete key set while preserving the client and its chats.
     Set {
         client: String,
         #[arg(long)]

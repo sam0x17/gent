@@ -40,6 +40,7 @@ pub struct Agent {
 )]
 pub enum Selector {
     All,
+    #[serde(alias = "chat")]
     Agent(String),
     Node(String),
     SameNode,
@@ -75,7 +76,7 @@ pub struct Rule {
 pub struct Policy {
     #[serde(default)]
     pub rules: Vec<Rule>,
-    /// Signed membership, changed by the owner or a separately delegated agent.
+    /// Signed membership, changed by the owner or a separately delegated chat.
     #[serde(default)]
     pub groups: BTreeMap<String, Vec<String>>,
     /// Legacy relay authorizations, retained to verify existing signed state.
@@ -207,8 +208,8 @@ pub struct FilePart {
     pub data_base64: String,
 }
 
-/// Agent-visible attachment metadata. Decryption keys are a separate private
-/// wire type and must never be serialized into an agent RPC or MCP response.
+/// Chat-visible attachment metadata. Decryption keys are a separate private
+/// wire type and must never be serialized into a chat RPC or MCP response.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileDescriptor {
@@ -333,7 +334,7 @@ pub enum AgentOp {
     FileView {
         file_id: String,
     },
-    /// Local historical imports explicitly assigned to this authenticated agent.
+    /// Local historical imports explicitly assigned to this authenticated chat.
     HistoryImports,
     HistoryMessages {
         import_id: String,
@@ -598,7 +599,7 @@ pub enum OwnerOp {
         node_id: String,
         allow: bool,
     },
-    /// Local signing-owner administration, never exposed as an agent tool.
+    /// Local signing-owner administration, never exposed as a chat tool.
     RemoveNode {
         node_id: String,
     },
@@ -729,7 +730,7 @@ pub enum OwnerOp {
         cluster_id: String,
         action: PairingOp,
     },
-    /// Local owner administration; private invitation material is never an agent tool.
+    /// Local owner administration; private invitation material is never a chat tool.
     Invitation {
         action: InvitationOp,
     },

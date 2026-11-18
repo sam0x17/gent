@@ -18,7 +18,7 @@ pub(super) async fn recover(
         "host recovery credential changed"
     );
     let pending = agent(home, &credential, AgentOp::WakePending).await?;
-    ensure!(pending["agent"] == agent_id, "host recovery agent changed");
+    ensure!(pending["agent"] == agent_id, "host recovery chat changed");
     if pending["pending"]
         .as_array()
         .context("invalid pending messages")?

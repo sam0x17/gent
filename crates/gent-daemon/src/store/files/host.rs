@@ -115,7 +115,7 @@ impl Folders {
     pub fn open(home: &Path, agent: &str) -> Result<Self> {
         ensure!(
             uuid::Uuid::parse_str(agent)?.to_string() == agent,
-            "invalid agent identity"
+            "invalid chat identity"
         );
         let root = File::from(open(
             home,

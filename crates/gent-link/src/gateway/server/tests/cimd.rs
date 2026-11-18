@@ -204,7 +204,7 @@ async fn cimd_discovery_fetch_rotation_restart_and_failed_refresh_preserve_agent
             issued["access_token"].as_str().unwrap(),
             "same-chat",
             "gent_register",
-            json!({"name":"CIMD agent","provider":"synthetic"}),
+            json!({"name":"CIMD chat","provider":"synthetic"}),
         )
         .await;
     source.reply(

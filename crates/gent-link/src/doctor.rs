@@ -388,7 +388,7 @@ async fn inspect_node(report: &mut Report, home: &Path, cfg: &config::Config, on
         Ok(v) if v["configured"] == false => report.add("gateway", Status::Skip, "Optional remote MCP gateway is not configured.", json!({}), None),
         Ok(v) if v["clock_ahead"] == false && v["active_clients"].as_u64().is_some_and(|n| n > 0) => report.add("gateway", Status::Pass, "Gateway pins and host grants are valid; listener and provider behavior were not probed.", v, None),
         Ok(v) => report.add("gateway", Status::Warn, "Gateway access is blocked by its clock watermark or has no active host grants.", v, Some(("Check system time and host grant status.", &["gateway", "status"]))),
-        Err(_) => report.add("gateway", Status::Fail, "Gateway state or its node/cluster pin is inconsistent.", json!({}), Some(("Preserve the registry and its config pin. Deleting it would lose established agent bindings.", &[]))),
+        Err(_) => report.add("gateway", Status::Fail, "Gateway state or its node/cluster pin is inconsistent.", json!({}), Some(("Preserve the registry and its config pin. Deleting it would lose established chat bindings.", &[]))),
     }
 }
 

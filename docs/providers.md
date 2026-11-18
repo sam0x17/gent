@@ -1,30 +1,30 @@
-# MCP hosts and agent registration
+# MCP hosts and chat registration
 
-Gent connects existing agents through a common MCP interface. The host owns the model, inference credentials, tools, and conversation history. Gent supplies registration, discovery, permissions, and durable messages with files. The [local implementation](local-proof.md) proves these operations with generic MCP clients and explicit per-conversation bindings in Codex and Claude Code CLIs on macOS and Linux. [Host conversation bindings](local-proof.md#host-conversation-bindings) additionally select credentials from Codex thread metadata or Claude Code's per-call hook. Persistent target selection and ordered relay turns use the same generic MCP interface and ordinary messaging permissions, without separate relay grants. Generic MCP proofs cover images, restarts, cancellation, and final outcomes on both OSes and across machines. Both real Codex/Claude intermediary-target pairings also pass those relay workflows with exact text/files and detach. Linux VS Code checks cover selected and pasted images in both hosts, plus original text and ZIP files through the paths described below. Hosted remote MCP connectors and broader native upload support remain unverified.
+Gent connects existing chats through a common MCP interface. The host owns the model, inference credentials, tools, and conversation history. Gent supplies registration, discovery, permissions, and durable messages with files. The [local implementation](local-proof.md) proves these operations with generic MCP clients and explicit per-conversation bindings in Codex and Claude Code CLIs on macOS and Linux. [Host conversation bindings](local-proof.md#host-conversation-bindings) additionally select credentials from Codex thread metadata or Claude Code's per-call hook. Persistent target selection and ordered relay turns use the same generic MCP interface and ordinary messaging permissions, without separate relay grants. Generic MCP proofs cover images, restarts, cancellation, and final outcomes on both OSes and across machines. Both real Codex/Claude intermediary-target pairings also pass those relay workflows with exact text/files and detach. Linux VS Code checks cover selected and pasted images in both hosts, plus original text and ZIP files through the paths described below. Hosted remote MCP connectors and broader native upload support remain unverified.
 
 ## Connection and registration
 
-For a local host, `gent mcp serve` provides an MCP server over stdio and connects to the local Gent daemon. Agents with the Gent integration announce themselves through the registration tool. A hosted chat uses the equivalent tools through an authorized remote connector or gateway, with the security mode described in the project plan.
+For a local host, `gent mcp serve` provides an MCP server over stdio and connects to the local Gent daemon. Chats with the Gent integration announce themselves through the registration tool. A hosted chat uses the equivalent tools through an authorized remote connector or gateway, with the security mode described in the project plan.
 
 The registration flow is:
 
 1. Establish an authenticated local daemon or remote connector connection.
-2. Register the current agent with its provider/host label. Omit `name` to use the host's chat title, or supply a user-selected alias.
-3. Bind the registration to an authenticated connection and a stable Gent agent identity. Return the agent's own location and permitted capabilities.
+2. Register the current chat with its provider/host label. Omit `name` to use the host's chat title, or supply a user-selected alias.
+3. Bind the registration to an authenticated connection and a stable Gent chat identity. Return the chat's own location and permitted capabilities.
 4. Use the shared tools to discover allowed peers, send messages and files, retrieve incoming messages, acknowledge delivery, and reply.
-5. Reconnect to the same registration when the host can prove continuity. Update presence without duplicating the agent.
+5. Reconnect to the same registration when the host can prove continuity. Update presence without duplicating the chat.
 
-The daemon determines the local node identity. Provider labels and model-supplied agent IDs are descriptive metadata, not authentication. Registering does not grant permission to discover or message other agents; normal cluster policy applies.
+The daemon determines the local node identity. Provider labels and model-supplied chat IDs are descriptive metadata, not authentication. Registering does not grant permission to discover or message other chats; normal cluster policy applies.
 
-## Default agent names
+## Default chat names
 
 Call `gent_register` with `provider` and omit `name`. Codex uses the bound thread's `name` from its connected native server, including the server behind Gent's VS Code integration. The lookup requests metadata only, checks the returned thread ID, and has a two-second deadline. It never loads or resumes a conversation or submits a model turn.
 
-Claude Code's binding hook uses the current session's saved title: its `custom-title.json` sidecar, or explicit `custom-title` / `ai-title` records in a bounded transcript tail. It does not infer a title from a prompt or summary. Child agents do not inherit their parent's title. Missing or unsupported metadata, unnamed chats, and unavailable native servers use a stable name such as `codex-abc123...`, `claude-code-abc123...`, or `agent-abc123...`. The suffix derives from the binding; it is not the credential or host session ID. Other MCP hosts can supply their known chat title as `name` when they cannot expose it through an adapter.
+Claude Code's binding hook uses the current session's saved title: its `custom-title.json` sidecar, or explicit `custom-title` / `ai-title` records in a bounded transcript tail. It does not infer a title from a prompt or summary. Child chats do not inherit their parent's title. Missing or unsupported metadata, unnamed chats, and unavailable native servers use a stable name such as `codex-abc123...`, `claude-code-abc123...`, or `agent-abc123...`. The suffix derives from the binding; it is not the credential or host session ID. Other MCP hosts can supply their known chat title as `name` when they cannot expose it through an adapter.
 
-Host titles are trimmed and shortened at a UTF-8 character boundary to Gent's 128-byte limit. Empty titles and control characters trigger the fallback. Explicit aliases retain the usual validation. Names are labels, not unique identifiers; use the IDs from `gent_agents` to address messages.
+Host titles are trimmed and shortened at a UTF-8 character boundary to Gent's 128-byte limit. Empty titles and control characters trigger the fallback. Explicit aliases retain the usual validation. Names are labels, not unique identifiers; use the IDs from `gent_chats` to address messages.
 
-The default is chosen when a new agent registers. Existing registrations and explicit renames keep their names across reconnects and later host-title changes. Use `gent_rename` to change an existing Gent label without re-enrollment. Restart the host's Gent MCP connection after upgrading to load the optional-name tool schema and guidance.
+The default is chosen when a new chat registers. Existing registrations and explicit renames keep their names across reconnects and later host-title changes. Use `gent_rename` to change an existing Gent label without re-enrollment. Restart the host's Gent MCP connection after upgrading to load the optional-name tool schema and guidance.
 
 The native process proof checks defaults, fallback stability, aliases and Claude hook isolation. With `--codex`, it additionally creates a disposable native thread named `cit` and verifies that another MCP client discovers it under that name, without provider inference:
 
@@ -33,31 +33,31 @@ uv run --with websockets python scripts/prove_chat_names.py \
   --gent target/release/gent --codex /absolute/path/to/codex
 ```
 
-## Rename an agent
+## Rename a chat
 
-An agent can change its own Gent display name through `gent_rename`. First read `gent_identity`, then pass the new `name` and its returned `registration_generation` as `expected_generation`. The authenticated connection selects the agent; this tool accepts no target agent ID, node or provider override. Names remain nonempty labels of at most 128 UTF-8 bytes, without control characters.
+A chat can change its own Gent display name through `gent_rename`. First read `gent_identity`, then pass the new `name` and its returned `registration_generation` as `expected_generation`. The authenticated connection selects the chat; this tool accepts no target chat ID, node or provider override. Names remain nonempty labels of at most 128 UTF-8 bytes, without control characters.
 
-The local owner can inspect and rename an agent on its hosting node:
+The local owner can inspect and rename a chat on its hosting node:
 
 ```sh
-gent agent show AGENT_UUID
-gent agent rename AGENT_UUID 'Build coordinator'
-gent agent rename AGENT_UUID 'Release coordinator' --expect-generation 2
+gent chat show CHAT_UUID
+gent chat rename CHAT_UUID 'Build coordinator'
+gent chat rename CHAT_UUID 'Release coordinator' --expect-generation 2
 ```
 
-Without `--expect-generation`, the CLI reads the current generation and compares it when committing. A concurrent change causes an error rather than being overwritten. For an uncertain result, reuse the same name and expected generation. A retry succeeds without another update if the requested name is already at exactly the next generation; intervening changes require another inspection and decision. Setting the current name at its current generation neither increments it nor queues another announcement. Revoked agents and stale or removed nodes cannot rename, including through an old successful request.
+Without `--expect-generation`, the CLI reads the current generation and compares it when committing. A concurrent change causes an error rather than being overwritten. For an uncertain result, reuse the same name and expected generation. A retry succeeds without another update if the requested name is already at exactly the next generation; intervening changes require another inspection and decision. Setting the current name at its current generation neither increments it nor queues another announcement. Revoked chats and stale or removed nodes cannot rename, including through an old successful request.
 
-Renaming preserves the agent ID, credential, provider label, node binding, permissions, relay selections and queued messages/files. It changes the Gent label only; the host's conversation title is separate. Repeating `gent_register` after a reconnect preserves the current name. Names need not be unique, so continue routing by the IDs returned from discovery.
+Renaming preserves the chat ID, credential, provider label, node binding, permissions, relay selections and queued messages/files. It changes the Gent label only; the host's conversation title is separate. Repeating `gent_register` after a reconnect preserves the current name. Names need not be unique, so continue routing by the IDs returned from discovery.
 
-Name and generation changes commit with encrypted registration publication. A queue or storage failure rolls back the rename. An invalid or obsolete legacy binding also refuses the edit; renaming cannot repair registration provenance. Connected peers receive the update through the existing registration stream; offline peers catch up later. Older embedded registrations cannot roll the name back. Owner inspection includes `registration_generation`, which can be cached for a remote node; rename on that node or through that agent's own MCP connection. This does not grant one agent permission to rename another or add a remote owner-administration route.
+Name and generation changes commit with encrypted registration publication. A queue or storage failure rolls back the rename. An invalid or obsolete legacy binding also refuses the edit; renaming cannot repair registration provenance. Connected peers receive the update through the existing registration stream; offline peers catch up later. Older embedded registrations cannot roll the name back. Owner inspection includes `registration_generation`, which can be cached for a remote node; rename on that node or through that chat's own MCP connection. This does not grant one chat permission to rename another or add a remote owner-administration route.
 
 A shared provider login or MCP connection may serve multiple conversations. The implementation must prove per-conversation isolation using host session metadata or explicit pairing with credentials scoped to the registration. Keep credentials and cryptographic keys outside model-visible tool results. If a host cannot distinguish conversations reliably, record the limitation rather than merging them or allowing one to impersonate another.
 
 ## Providers and setup
 
-A provider identifies the host reported by registered agents, such as Codex, Claude Code, or another MCP-capable application. `gent providers list` and `gent providers` summarize those registrations and their availability. `gent provider show <provider>` shows authorized host metadata and capabilities. Provider names remain extensible; an unknown name does not require a new Gent adapter.
+A provider identifies the host reported by registered chats, such as Codex, Claude Code, or another MCP-capable application. `gent providers list` and `gent providers` summarize those registrations and their availability. `gent provider show <provider>` shows authorized host metadata and capabilities. Provider names remain extensible; an unknown name does not require a new Gent adapter.
 
-Adding a provider means connecting its MCP-capable host and letting its agents register. Gent does not maintain model API endpoints, API keys, model catalogs, or a separate inference runner.
+Adding a provider means connecting its MCP-capable host and letting its chats register. Gent does not maintain model API endpoints, API keys, model catalogs, or a separate inference runner.
 
 For convenient setup, detect installed Codex and Claude Code hosts and existing Gent integration entries where supported. `gent integration install <host>` installs the same MCP server and required identity hook using that host's configuration format, preserving unrelated settings. The bundled [Gent skill](../crates/gent-link/skills/gent/SKILL.md) supplies the MCP server's instructions, so connected hosts receive the shared guidance without a separate skill-file installation. Its Markdown file is also available for host skill catalogs; the installer does not currently create those catalog entries. Model selection, provider credentials, profiles, and inference settings continue to be resolved by the host. Generic MCP setup instructions cover other hosts without vendor-specific Gent code.
 
@@ -65,15 +65,15 @@ Some hosts truncate MCP startup instructions. Gent puts registration, messaging 
 
 `gent integration config codex` prints the default socket fragment without editing settings. Claude automatic delivery needs the managed installer; `gent integration config claude-code --no-wake` prints a manual-inbox fragment. `gent integrations` and `gent integration status [HOST]` inspect recorded user-scope setup; `gent integration uninstall HOST` removes managed entries. See [installation and recovery](local-proof.md#install-host-integrations) for ownership, overrides, and limitations. The Claude binding hook supplies session identity; it neither wakes an idle model nor approves a tool call. Both host modes use the same registration and messaging RPCs. Missing identity metadata is an error, and credentials never appear in tool inputs or results.
 
-An agent using LM Studio, llama.cpp, or a compatible hosted API participates through its MCP-capable host. The model backend stays behind that host. An inference server by itself is not an MCP client or a persistent agent; Gent does not need to connect to its inference API.
+A chat using LM Studio, llama.cpp, or a compatible hosted API participates through its MCP-capable host. The model backend stays behind that host. An inference server by itself is not an MCP client or a persistent chat; Gent does not need to connect to its inference API.
 
 ## Delivery and host capabilities
 
-The core delivery path is a durable inbox accessed through MCP. The agent checks for messages during its turns or through a host-supported waiting mechanism, then replies using the same tools. Queue messages while it is busy or disconnected and preserve their IDs across retries. Report freshness and distinguish a connected MCP transport from an agent that is actively checking its inbox.
+The core delivery path is a durable inbox accessed through MCP. The chat checks for messages during its turns or through a host-supported waiting mechanism, then replies using the same tools. Queue messages while it is busy or disconnected and preserve their IDs across retries. Report freshness and distinguish a connected MCP transport from a chat that is actively checking its inbox.
 
 Hosts may additionally support notifications, incoming-turn delivery, or safe wake/resume hooks. Track these capabilities separately and verify them before enabling automatic resumption. MCP tool availability alone does not establish that an idle host will start a model turn. Where a verified host mechanism exists, retain the idle-wake, busy-queue, and no-automatic-interruption defaults. Otherwise leave the message pending until the host checks its inbox.
 
-The local [host dispatch journal](wake.md) records one submission claim per incoming message and exposes `gent wake` inspection. Exact retries cannot grant another submission after a lost response or restart. Codex enables queued direct message delivery by default with `gent integration install codex`, which selects the default socket under its configuration directory. Use `--wake-socket PATH` for a custom server. This requires a running local server, a loaded conversation and a binding initially established through a Gent tool call. Saved attachments let replacement MCP processes recover delivery without another registration or model turn; at least one opted-in MCP process must remain running. Busy queues and explicit interruption holds remain intact. Claude Code also enables native delivery by default with `gent integration install claude-code`; CLI real-model proofs pass on both OSes and Linux VS Code replies pass across restart. Selected Codex and existing Claude background agents can opt into [bounded recovery](host-recovery.md). Broader GUI acceptance remains unfinished. The journal keeps adapter-reported submission, inbox observation, message acknowledgment and reported work separate.
+The local [host dispatch journal](wake.md) records one submission claim per incoming message and exposes `gent wake` inspection. Exact retries cannot grant another submission after a lost response or restart. Codex enables queued direct message delivery by default with `gent integration install codex`, which selects the default socket under its configuration directory. Use `--wake-socket PATH` for a custom server. This requires a running local server, a loaded conversation and a binding initially established through a Gent tool call. Saved attachments let replacement MCP processes recover delivery without another registration or model turn; at least one opted-in MCP process must remain running. Busy queues and explicit interruption holds remain intact. Claude Code also enables native delivery by default with `gent integration install claude-code`; CLI real-model proofs pass on both OSes and Linux VS Code replies pass across restart. Selected Codex and existing Claude background chats can opt into [bounded recovery](host-recovery.md). Broader GUI acceptance remains unfinished. The journal keeps adapter-reported submission, inbox observation, message acknowledgment and reported work separate.
 
 Codex's ordinary embedded IDE server remains polling-only. The experimental `gent integration install codex --vscode` route connects the extension to an explicitly started shared server through a managed Rust transport. See [VS Code delivery](wake.md#vs-code-delivery) for tested versions, configuration, opt-out and remaining acceptance checks.
 
@@ -87,7 +87,7 @@ This route supports embedded PNG, JPEG, WebP and GIF data up to 32 MiB. It requi
 
 Native checks pass Codex 0.167.2 on Linux and 0.167.0 on macOS: import from an earlier turn, reject another conversation's reference, retry after Gent restart and export identical bytes. These use a loopback model. A real Linux VS Code chat additionally imports a pasted 3,073,103-byte PNG, sends it to a generic MCP peer, retrieves its returned attachment after a daemon restart, and displays the original image inline. The peer and Codex exports, model image content and user preview all match the pasted bytes. This is one local daemon, not cross-node IDE or Mac GUI acceptance.
 
-Claude Code's tested Linux extension supplies a cached original PNG path for a pasted screenshot. Copying that file into the agent's handoff directory and calling `gent_file_import` preserves the original, including when Claude converts its model preview to JPEG. A real Claude-to-Codex exchange preserves the 3,073,103-byte original through a Gent restart, export, model inspection and inline display.
+Claude Code's tested Linux extension supplies a cached original PNG path for a pasted screenshot. Copying that file into the chat's handoff directory and calling `gent_file_import` preserves the original, including when Claude converts its model preview to JPEG. A real Claude-to-Codex exchange preserves the 3,073,103-byte original through a Gent restart, export, model inspection and inline display.
 
 Both real Linux IDE hosts also pass a pasted-image round trip to a separate physical Mac node through a local Worker. The Mac peer uses a generic MCP client. After both Gent daemons restart, it exports the unchanged originals and replies with the received file IDs; both IDE chats acknowledge and export the returned files. All four exports match the original 3,073,103-byte PNG. Codex displays the returned original inline, and Claude's exported link opens the editor image viewer. This uses the development relay and polling fallback; hosted deployment and Mac GUI behavior remain separate checks.
 
@@ -97,17 +97,17 @@ Model inspection and user-visible file presentation are separate. In the tested 
 
 ## Configuration and visibility
 
-`~/.gent/config.toml` contains local node and integration settings alongside the cluster profiles and shared permission policy. Agent registrations and durable queues live in daemon state. Replicate authorized registration metadata through encrypted cluster state; a node disconnect must not erase its agents' identities or their permissions.
+`~/.gent/config.toml` contains local node and integration settings alongside the cluster profiles and shared permission policy. Chat registrations and durable queues live in daemon state. Replicate authorized registration metadata through encrypted cluster state; a node disconnect must not erase its chats' identities or their permissions.
 
-Provider listing and diagnostics must respect the caller's authority. An agent must not discover hidden peers through provider names, counts, or status. The owner can inspect the full cluster view. Registering or changing a display label cannot bypass permission checks or change a node binding.
+Provider listing and diagnostics must respect the caller's authority. A chat must not discover hidden peers through provider names, counts, or status. The owner can inspect the full cluster view. Registering or changing a display label cannot bypass permission checks or change a node binding.
 
-Removing a Gent integration removes only its managed configuration entries. It does not delete host conversations, uninstall the host, or revoke unrelated agents. Explicit agent revocation invalidates that registration's future access under the cluster policy.
+Removing a Gent integration removes only its managed configuration entries. It does not delete host conversations, uninstall the host, or revoke unrelated chats. Explicit chat revocation invalidates that registration's future access under the cluster policy.
 
 ## Initial acceptance criteria
 
 - Install or configure the same Gent MCP server in Codex and Claude Code on macOS and Linux, preserving unrelated host settings.
-- Register distinct conversations, reconnect without duplicate identities, and reject attempts to impersonate another agent or claim another node.
+- Register distinct conversations, reconnect without duplicate identities, and reject attempts to impersonate another chat or claim another node.
 - Exchange permission-checked messages, replies, files, and images through the common tools. Verify queues survive disconnects and retries do not repeat delivery effects.
 - Register a generic MCP client with a previously unknown provider label and complete the same messaging flow without adding provider-specific code or configuring a model API in Gent.
-- Show provider and agent availability accurately, including polling-only hosts. Test wake/resume only for hosts with a verified lifecycle mechanism.
+- Show provider and chat availability accurately, including polling-only hosts. Test wake/resume only for hosts with a verified lifecycle mechanism.
 - Keep registration credentials, keys, hidden identities, and private content out of unauthorized tool results and service logs.

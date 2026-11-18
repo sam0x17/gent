@@ -131,7 +131,7 @@ impl StoreSession<'_> {
         let agent = self.get_agent(id)?;
         ensure!(
             agent.node_id == self.identity.node.id() && !agent.revoked,
-            "activity requires an active local agent"
+            "activity requires an active local chat"
         );
         if self.save_activity(id, timestamp)? {
             self.announce_activity(id)?;

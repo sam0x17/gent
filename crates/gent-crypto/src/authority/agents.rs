@@ -5,10 +5,10 @@ const LEGACY_DOMAIN: &[u8] = b"gent/legacy-agent-binding/v1\0";
 const MAX_LEGACY_BINDING_BYTES: usize = MAX_OWNER_CHAIN_BYTES + 4096;
 
 /// Public, node-bound IDs prevent an authenticated node from claiming another
-/// node's agent UUID before the receiver has seen its directory announcement.
+/// node's chat UUID before the receiver has seen its directory announcement.
 pub fn agent_id(node: &str, nonce: Uuid) -> Result<String> {
     id(node)?;
-    ensure!(!nonce.is_nil(), "nil agent nonce");
+    ensure!(!nonce.is_nil(), "nil chat nonce");
     Ok(scoped_id(
         b"gent/agent-id/v1\0",
         &[Uuid::parse_str(node)?.as_bytes(), nonce.as_bytes()],
@@ -55,7 +55,7 @@ impl SignedLegacyAgentBinding {
             &self.binding.anchor == anchor
                 && self.binding.agent == agent
                 && self.binding.node == node,
-            "legacy agent binding mismatch"
+            "legacy chat binding mismatch"
         );
         let owner = verify_lineage(anchor, &self.binding.owner_transitions)?;
         verify(
@@ -83,7 +83,7 @@ impl SignedLegacyAgentBinding {
 }
 impl OwnerKey {
     /// Trusted owner migration approval. The runtime must retain unique bindings
-    /// and reject an agent UUID already assigned to a different node.
+    /// and reject a chat UUID already assigned to a different node.
     pub fn bind_legacy_agent(
         &self,
         state: &VerifiedState,
@@ -96,7 +96,7 @@ impl OwnerKey {
         state.require_fresh(now)?;
         ensure!(
             self.public_key() == state.state().owner_key && state.state().nodes.contains_key(node),
-            "legacy agent binding requires owner authority and enrolled node"
+            "legacy chat binding requires owner authority and enrolled node"
         );
         let binding = LegacyAgentBinding {
             anchor: state.anchor().clone(),

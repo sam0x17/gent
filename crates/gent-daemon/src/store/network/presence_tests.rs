@@ -1,6 +1,29 @@
 use super::*;
 
 #[tokio::test]
+async fn wire_capabilities_require_fresh_matching_proofs() {
+    let mut pair = Pair::new().await;
+    pair.stores[0].presence_tick().unwrap();
+    let first = challenge(&pair, 0);
+    reply(&pair, 0, wire::acknowledgement(Uuid::new_v4(), 2)).unwrap();
+    assert_eq!(count(&pair, 0, "wire_peers"), 0);
+    reply(&pair, 0, wire::acknowledgement(first, 3)).unwrap();
+    assert_eq!(count(&pair, 0, "wire_peers"), 0);
+    advance(&pair, 0, 31);
+    reply(&pair, 0, wire::acknowledgement(first, 2)).unwrap();
+    assert_eq!(count(&pair, 0, "wire_peers"), 0);
+    pair.stores[0].presence_tick().unwrap();
+    let second = challenge(&pair, 0);
+    reply(&pair, 0, wire::acknowledgement(second, 2)).unwrap();
+    assert_eq!(count(&pair, 0, "wire_peers"), 1);
+    assert_eq!(remote(&mut pair, 0)["wire_version"], 2);
+    advance(&pair, 0, 91);
+    assert_eq!(remote(&mut pair, 0)["wire_version"], 1);
+    reply(&pair, 0, wire::acknowledgement(second, 2)).unwrap();
+    assert_eq!(remote(&mut pair, 0)["wire_version"], 1);
+}
+
+#[tokio::test]
 async fn legacy_presence_reply_does_not_enable_activity_and_unmatched_proof_is_ignored() {
     let mut pair = Pair::new().await;
     pair.stores[0].presence_tick().unwrap();

@@ -120,7 +120,7 @@ impl Policy {
     }
 
     /// Caller must authenticate and validate the ENTIRE batch against the
-    /// original policy before invoking this. Only exact agent-pair rules change.
+    /// original policy before invoking this. Only exact chat-pair rules change.
     pub fn apply_permission_changes(&mut self, changes: &[PermissionChange]) {
         for change in changes {
             self.replace_rule(

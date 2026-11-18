@@ -431,7 +431,7 @@ pub async fn install(
         })).context("daemon is installed; shell setup failed; retry gent hooks install with the same shell/path")?;
     }
     result["next"] = json!(
-        "Connect your agents with gent integration install codex and gent integration install claude-code."
+        "Connect your chats with gent integration install codex and gent integration install claude-code."
     );
     if human {
         eprintln!("{}", result["next"].as_str().unwrap());

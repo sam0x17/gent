@@ -27,7 +27,7 @@ impl Remote {
                     "Synchronizing cluster configuration"
                 }
                 PairingOp::Data { .. } | PairingOp::AcceptData { .. } => {
-                    "Establishing encrypted agent communication"
+                    "Establishing encrypted chat communication"
                 }
             },
         };
@@ -227,7 +227,7 @@ pub async fn join(
     if let Some(target) = replacement {
         result["replaced_node"] = json!(target.id);
         result["recovery"] =
-            json!("fresh identity and streams; historical agents and work were not imported");
+            json!("fresh identity and streams; historical chats and work were not imported");
     }
     if let Some(receipt) = remote.journal.receipt() {
         result["invitation_receipt"] = receipt.clone();

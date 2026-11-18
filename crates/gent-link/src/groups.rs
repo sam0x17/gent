@@ -31,12 +31,12 @@ pub(crate) enum Command {
 pub(crate) enum Members {
     Add {
         group: String,
-        #[arg(required = true, num_args = 1..=32)]
+        #[arg(required = true, num_args = 1..=32, value_name = "CHAT_ID")]
         agents: Vec<String>,
     },
     Remove {
         group: String,
-        #[arg(required = true, num_args = 1..=32)]
+        #[arg(required = true, num_args = 1..=32, value_name = "CHAT_ID")]
         agents: Vec<String>,
     },
 }
@@ -59,7 +59,7 @@ impl From<Action> for GroupAction {
 pub(crate) enum Admin {
     List,
     History {
-        #[arg(long = "agent")]
+        #[arg(long = "chat", alias = "agent", value_name = "CHAT_ID")]
         administrator: Option<String>,
         #[arg(long)]
         before: Option<u64>,
@@ -69,7 +69,7 @@ pub(crate) enum Admin {
     Grant {
         administrator: String,
         group: String,
-        /// Permitted members: *, same-node (relative to admin), node:UUID, group:NAME or agent UUID.
+        /// Permitted members: *, same-node (relative to admin), node:UUID, group:NAME or chat UUID.
         members: String,
         #[arg(long, value_enum, num_args = 1.., required = true)]
         action: Vec<Action>,

@@ -56,10 +56,21 @@ def main():
         try:
             daemon = start_daemon()
             a, b, outsider = connect("a.key"), connect("b.key"), connect("outsider.key")
-            aid = a.call("gent_register", {"name": "a", "provider": "arbitrary-a"})[0]["agent"]["id"]
+            aid = a.call("gent_register", {"name": "a", "provider": "agents"})[0]["agent"]["id"]
             bid = b.call("gent_register", {"name": "b", "provider": "arbitrary-b"})[0]["agent"]["id"]
             hid = outsider.call("gent_register", {"name": "hidden", "provider": "hidden-provider"})[0]["agent"]["id"]
             assert {agent["id"] for agent in a.call("gent_agents")[0]} == {aid, bid, hid}
+            chats = a.call("gent_chats")[0]
+            assert {chat["chat_id"] for chat in chats} == {aid, bid, hid}
+            identity = a.call("gent_identity")[0]
+            assert identity["chat"]["chat_id"] == identity["agent"]["id"] == aid
+            for command in ("chats", "agents", "ls", "list"):
+                assert {chat["chat_id"] for chat in json.loads(cli(command))} == {aid, bid, hid}
+            for command in ("chat", "agent"):
+                assert json.loads(cli(command, "show", aid))["chat_id"] == aid
+            resolved = a.call("gent_resolve", {"name": "b"})[0]
+            assert resolved["selected"]["chat_id"] == bid
+            assert set(json.loads(cli("providers"))) == {"agents", "arbitrary-b", "hidden-provider"}
             # Explicit restrictions hide the third agent and keep B reply-only.
             cli("permission", "deny", "*", hid, "--permission", "enumerate")
             cli("permission", "deny", hid, "*", "--permission", "enumerate")
@@ -67,6 +78,8 @@ def main():
             attempt = {"recipient": bid, "request_id": a.request_id(), "text": "review", "files": [{"name": "pixel.png", "media_type": "image/png", "data_base64": PNG}]}
             a.call("gent_send", dict(attempt, recipient=hid), error=True)
             assert {agent["id"] for agent in a.call("gent_agents")[0]} == {aid, bid}
+            assert {chat["chat_id"] for chat in a.call("gent_chats")[0]} == {aid, bid}
+            a.call("gent_chats", {"credential": "forged"}, error=True)
             attachment_request = {"target": bid, "request_id": a.request_id()}
             attached = a.call("gent_relay_attach", attachment_request)[0]
             attachment_id = attached["attachment"]["id"]

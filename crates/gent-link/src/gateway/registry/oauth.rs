@@ -6,7 +6,7 @@ use crate::gateway::assertion;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 
-pub(crate) const SCOPE: &str = "gent:agents";
+pub(crate) const SCOPE: &str = "gent:chats";
 const REQUEST_TTL: u64 = 600;
 const CODE_TTL: u64 = 300;
 const ACCESS_TTL: u64 = 900;
@@ -333,7 +333,7 @@ pub(super) fn check_access(state: &State, permit: &Permit, now: u64) -> Result<(
 }
 
 /// A delegated file link follows the grant's lifetime and revocation, across
-/// ordinary access-token refresh. It grants no other OAuth or agent operation.
+/// ordinary access-token refresh. It grants no other OAuth or chat operation.
 pub(super) fn download_scope(
     state: &State,
     client: &str,
@@ -400,7 +400,8 @@ fn required<'a>(p: &'a Parameters, key: &str) -> Result<&'a str> {
 }
 fn scope(p: &Parameters) -> Result<()> {
     ensure!(
-        p.get("scope").is_none_or(|s| s == SCOPE),
+        p.get("scope")
+            .is_none_or(|s| s == SCOPE || s == "gent:agents"),
         "unsupported OAuth scope"
     );
     Ok(())

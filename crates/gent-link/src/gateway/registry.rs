@@ -564,7 +564,7 @@ impl Registry {
         client.revoked = true;
         self.save(&state)?;
         Ok(
-            json!({"client":id,"revoked":true,"scope":"future host requests; already accepted work and agent data are retained"}),
+            json!({"client":id,"revoked":true,"scope":"future host requests; already accepted work and chat data are retained"}),
         )
     }
     pub(super) fn tls_policies(&self) -> Result<Vec<TlsPolicy>> {
@@ -878,6 +878,6 @@ pub(super) fn add_client(
         json!({"client":value.client,"name":name,"credential_file":out,"expires_at":value.expires_at,
         "conversation_key":key,"conversation_handles":handles,"security_mode":"user_controlled_gateway","oauth":value.oauth,
         "mtls":value.mtls.as_ref().map(TlsPolicy::summary),
-        "scope": if handles { "explicit conversation handles scoped to this connector and OAuth grant" } else { "trusted host namespace; required conversation metadata selects each agent" }}),
+        "scope": if handles { "explicit conversation handles scoped to this connector and OAuth grant" } else { "trusted host namespace; required conversation metadata selects each chat" }}),
     )
 }

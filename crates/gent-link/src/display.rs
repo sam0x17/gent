@@ -84,7 +84,7 @@ fn agent(output: &mut String, value: &Agent) -> std::fmt::Result {
         visible(&value.name),
         visible(&value.provider)
     )?;
-    writeln!(output, "  Agent ID: {}", visible(&value.id))?;
+    writeln!(output, "  Chat ID: {}", visible(&value.id))?;
     writeln!(output, "  Node ID: {}", visible(&value.node_id))?;
     writeln!(
         output,
@@ -223,8 +223,8 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
         View::Resolution => agents::resolution(&mut output, value)?,
         View::Agent => {
             let details: Agent =
-                serde_json::from_value(value.clone()).context("invalid agent response")?;
-            header(&mut output, "Agents (1)")?;
+                serde_json::from_value(value.clone()).context("invalid chat response")?;
+            header(&mut output, "Chats (1)")?;
             writeln!(output)?;
             agent(&mut output, &details)?;
             if let Some(generation) = value["registration_generation"].as_u64() {
@@ -242,7 +242,7 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
             for (name, agents) in &providers {
                 writeln!(
                     output,
-                    "\n{}: {} registered agent{}",
+                    "\n{}: {} registered chat{}",
                     visible(name),
                     agents.len(),
                     if agents.len() == 1 { "" } else { "s" }
@@ -256,7 +256,7 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
             } else {
                 writeln!(
                     output,
-                    "\nLabels come from agent registrations. Use gent agents for details."
+                    "\nLabels come from chat registrations. Use gent chats for details."
                 )?;
             }
         }

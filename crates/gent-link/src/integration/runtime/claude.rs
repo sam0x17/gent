@@ -80,7 +80,7 @@ async fn inspect(binary: &Path, target: &install::ClaudeRuntime) -> Result<Vec<s
     // Native stderr may contain account diagnostics; do not copy it into status.
     ensure!(
         output.status.success(),
-        "Claude session inspection failed; run claude agents --json --all in the selected profile for details"
+        "Claude session inspection failed; run claude chats --json --all in the selected profile for details"
     );
     sessions::parse(&output.stdout)
 }

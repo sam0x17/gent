@@ -311,7 +311,7 @@ impl StoreSession<'_> {
         if let Some(mut record) = self.wake_record(message_id)? {
             ensure!(
                 record.agent == who.id,
-                "wake record belongs to another agent"
+                "wake record belongs to another chat"
             );
             if record.inbox_seen_at.is_none() {
                 record.inbox_seen_at = Some(self.timestamp);

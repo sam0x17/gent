@@ -148,7 +148,7 @@ pub fn execute(command: Command, home: Option<&Path>, context: Option<&str>) -> 
 #[derive(clap::Args)]
 #[group(required = true, multiple = false)]
 pub struct HistorySelection {
-    #[arg(long)]
+    #[arg(long = "from-chat", alias = "from-agent", value_name = "CHAT_ID")]
     pub from_agent: Option<String>,
     #[arg(long)]
     pub from_import: Option<String>,
@@ -207,15 +207,15 @@ pub fn prepare_history(
             let report = history::export_import(archive, identity, &directory, &import)?;
             report["source_agent"]
                 .as_str()
-                .context("missing historical source agent")?
+                .context("missing historical source chat")?
                 .to_string()
         }
-        _ => anyhow::bail!("select exactly one of --from-agent or --from-import"),
+        _ => anyhow::bail!("select exactly one of --from-chat or --from-import"),
     };
     let directory = fs::canonicalize(directory)?;
     ensure!(
         gent_protocol::history::valid_id(&source_agent),
-        "invalid archived agent identity"
+        "invalid archived chat identity"
     );
     {
         use std::io::{BufRead, BufReader};
@@ -229,16 +229,16 @@ pub fn prepare_history(
             }
             ensure!(
                 size <= 4096 && line.last() == Some(&b'\n'),
-                "invalid exported agent record"
+                "invalid exported chat record"
             );
             let agent: gent_protocol::Agent =
-                serde_json::from_slice(&line).context("invalid exported agent record")?;
+                serde_json::from_slice(&line).context("invalid exported chat record")?;
             if agent.id == source_agent {
                 found = true;
                 break;
             }
         }
-        ensure!(found, "archived agent is absent from this history");
+        ensure!(found, "archived chat is absent from this history");
     }
     let manifest_sha256 = format!(
         "{:x}",

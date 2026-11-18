@@ -6,6 +6,7 @@ use gent_protocol::Message;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 pub mod owner_preparation;
+pub mod wire;
 
 pub const FRAGMENT_BYTES: usize = 256 * 1024;
 pub const MAX_RECORD_BYTES: usize = 2 * 1024 * 1024;
@@ -38,10 +39,10 @@ impl Registration {
         match (&self.nonce, &self.legacy) {
             (Some(nonce), None) => ensure!(
                 agent_id(node, *nonce)? == self.id,
-                "agent ID does not belong to node"
+                "chat ID does not belong to node"
             ),
             (None, Some(binding)) => binding.verify_current(state, &self.id, node)?,
-            _ => anyhow::bail!("ambiguous agent binding"),
+            _ => anyhow::bail!("ambiguous chat binding"),
         }
         Ok(())
     }
@@ -94,7 +95,7 @@ pub enum Event {
     },
 }
 
-/// Private MLS payload only. Never use this type in public agent responses.
+/// Private MLS payload only. Never use this type in public chat responses.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrivateAttachment {
@@ -153,8 +154,6 @@ pub enum EditResult {
     Applied { checkpoint: Checkpoint },
     Rejected { reason: String },
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Record {
     pub version: u8,
     pub authority: Checkpoint,

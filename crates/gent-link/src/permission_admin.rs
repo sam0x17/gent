@@ -2,23 +2,23 @@ use super::*;
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// List owner-visible agent delegations and retired grant IDs.
+    /// List owner-visible chat delegations and retired grant IDs.
     List,
-    /// Read durable agent-edit audit records, including requests from other nodes.
+    /// Read durable chat-edit audit records, including requests from other nodes.
     History {
-        #[arg(long = "agent")]
+        #[arg(long = "chat", alias = "agent", value_name = "CHAT_ID")]
         administrator: Option<String>,
         #[arg(long)]
         before: Option<u64>,
     },
-    /// Delegate exact-pair editing within selectors (*, same-node, node:UUID, group:NAME or agent UUID).
+    /// Delegate exact-pair editing within selectors (*, same-node, node:UUID, group:NAME or chat UUID).
     Grant {
         administrator: String,
         actor: String,
         peer: String,
         #[arg(long, value_enum, num_args=1.., required=true)]
         permission: Vec<PermissionName>,
-        /// Also permit selector-rule edits affecting hidden and future matching agents.
+        /// Also permit selector-rule edits affecting hidden and future matching chats.
         #[arg(long)]
         selector_rules: bool,
         #[arg(long, default_value_t = 86400)]

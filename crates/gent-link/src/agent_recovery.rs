@@ -24,7 +24,7 @@ pub struct Args {
     pub identity: PathBuf,
     #[command(flatten)]
     pub source: backup::HistorySelection,
-    /// Display name for the fresh agent.
+    /// Display name for the fresh chat.
     #[arg(long)]
     pub name: String,
     /// New private binding path for a host using explicit bindings.
@@ -46,7 +46,7 @@ pub struct Args {
     /// Exact host-reported user identifier, required for a user-scoped gateway host.
     #[arg(long, requires = "gateway_client")]
     pub subject: Option<String>,
-    /// Claude's optional child-agent identifier within the conversation.
+    /// Claude's optional child-chat identifier within the conversation.
     #[arg(long, requires = "host")]
     pub subagent: Option<String>,
     /// Descriptive provider label for an explicit or gateway binding; defaults to generic.
@@ -131,7 +131,7 @@ pub(crate) fn ensure_ready(path: &Path, cfg: &Config) -> Result<()> {
         validate(&saved, cfg)?;
         ensure!(
             saved.result.is_some(),
-            "binding recovery is pending; rerun the same gent agent recover command"
+            "binding recovery is pending; rerun the same gent chat recover command"
         );
         let credential = config::read_private(path)?;
         ensure!(
@@ -160,7 +160,7 @@ fn prepare(path: &Path, cfg: &Config, fingerprint: &str) -> Result<(Journal, Fil
         let scope = Snapshot::read(&binding::sidecar(path, ".scope.json"))?;
         ensure!(
             key.text.is_none() && scope.text.is_none(),
-            "recovery requires an unused binding; use history import for an existing agent"
+            "recovery requires an unused binding; use history import for an existing chat"
         );
         let credential = config::secret();
         Journal {
@@ -219,7 +219,7 @@ fn complete(path: &Path, cfg: &Config, record: &mut Journal, result: &Value) -> 
     let completed = Completed {
         agent_id: result["agent"]["id"]
             .as_str()
-            .context("recovery response lacks agent")?
+            .context("recovery response lacks chat")?
             .into(),
         import_id: result["history"]["import_id"]
             .as_str()

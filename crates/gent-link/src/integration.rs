@@ -281,7 +281,7 @@ pub(crate) fn recovery_binding(
     if let Some(id) = subagent {
         ensure!(
             host == Host::ClaudeCode,
-            "Codex child agents use their own conversation IDs"
+            "Codex child chats use their own conversation IDs"
         );
         identifier(Some(&json!(id)))?;
     }

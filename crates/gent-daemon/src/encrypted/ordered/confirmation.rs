@@ -30,7 +30,7 @@ fn mode(db: &Connection, group: &[u8]) -> Result<Purpose> {
 
 impl OrderedEndpoint<'_> {
     /// Sign only a committed stream head, including durably buffered plaintext
-    /// or configuration fragments. This does not acknowledge agent execution.
+    /// or configuration fragments. This does not acknowledge chat execution.
     pub fn receipt(&mut self, group: &[u8], now: u64) -> Result<Receipt> {
         let purpose = mode(&self.inner.db, group)?;
         self.inner

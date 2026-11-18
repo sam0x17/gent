@@ -10,7 +10,7 @@ struct Group {
 
 pub(super) fn render(output: &mut String, value: &Value) -> Result<()> {
     let agents: Vec<Entry> =
-        serde_json::from_value(value["agents"].clone()).context("invalid agent list response")?;
+        serde_json::from_value(value["agents"].clone()).context("invalid chat list response")?;
     let nodes: Vec<NodeStatus> =
         serde_json::from_value(value["nodes"].clone()).context("invalid node list response")?;
     let retired = agents
@@ -47,7 +47,7 @@ pub(super) fn render(output: &mut String, value: &Value) -> Result<()> {
     }
     let mut groups: Vec<_> = groups.into_iter().collect();
     groups.sort_by_cached_key(|(id, group)| (group.name.to_lowercase(), id.clone()));
-    header(output, &format!("Agents ({count})"))?;
+    header(output, &format!("Chats ({count})"))?;
     for (id, mut group) in groups {
         writeln!(
             output,
@@ -56,9 +56,9 @@ pub(super) fn render(output: &mut String, value: &Value) -> Result<()> {
             crate::ui::state(&visible(&group.status)),
             group.agents.len(),
             if group.agents.len() == 1 {
-                "agent"
+                "chat"
             } else {
-                "agents"
+                "chats"
             }
         )?;
         writeln!(output, "  Node ID: {}", visible(&id))?;
@@ -70,7 +70,7 @@ pub(super) fn render(output: &mut String, value: &Value) -> Result<()> {
             )
         });
         if group.agents.is_empty() {
-            writeln!(output, "  No known agents.")?;
+            writeln!(output, "  No known chats.")?;
             continue;
         }
         let rows = group
@@ -88,7 +88,7 @@ pub(super) fn render(output: &mut String, value: &Value) -> Result<()> {
                 ]
             })
             .collect::<Vec<_>>();
-        output.push_str(&table(&["AGENT", "PROVIDER", "LAST ACTIVE", "ID"], &rows));
+        output.push_str(&table(&["CHAT", "PROVIDER", "LAST ACTIVE", "ID"], &rows));
     }
     if retired > 0 {
         writeln!(
@@ -110,7 +110,7 @@ pub(super) fn render(output: &mut String, value: &Value) -> Result<()> {
 }
 
 pub(super) fn resolution(output: &mut String, value: &Value) -> Result<()> {
-    header(output, "Agent resolution")?;
+    header(output, "Chat resolution")?;
     row(
         output,
         "Status",
@@ -119,7 +119,7 @@ pub(super) fn resolution(output: &mut String, value: &Value) -> Result<()> {
     if !value["selected"].is_null() {
         let selected: Entry = serde_json::from_value(value["selected"].clone())?;
         for (label, text) in [
-            ("Agent", selected.agent.name),
+            ("Chat", selected.agent.name),
             ("Node", selected.node_name.unwrap_or(selected.agent.node_id)),
             ("Provider", selected.agent.provider),
             (
@@ -129,7 +129,7 @@ pub(super) fn resolution(output: &mut String, value: &Value) -> Result<()> {
                     .map(|t| date(t as u64))
                     .unwrap_or_else(|| "unknown".into()),
             ),
-            ("Agent ID", selected.agent.id),
+            ("Chat ID", selected.agent.id),
         ] {
             row(output, label, &text)?;
         }
@@ -151,12 +151,12 @@ pub(super) fn resolution(output: &mut String, value: &Value) -> Result<()> {
             })
             .collect::<Vec<_>>();
         output.push_str(&table(
-            &["AGENT", "NODE", "PROVIDER", "LAST ACTIVE", "ID"],
+            &["CHAT", "NODE", "PROVIDER", "LAST ACTIVE", "ID"],
             &rows,
         ));
         writeln!(
             output,
-            "\nActivity is missing or tied. Choose a node/provider or use the full agent ID."
+            "\nActivity is missing or tied. Choose a node/provider or use the full chat ID."
         )?;
     } else {
         writeln!(output, "  No matching active conversation.")?;

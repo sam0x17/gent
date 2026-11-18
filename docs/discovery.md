@@ -43,7 +43,7 @@ configuration changes. The daemon normally checks inventory once a minute;
 initial large inventories are registered in batches. Up to 4,096 native chats
 can be indexed. Indexing reads native metadata and explicit titles, without
 running model turns or publishing transcript bodies. Names follow ordinary
-encrypted agent registration and cluster visibility rules.
+encrypted chat registration and cluster visibility rules.
 
 Codex history is read in pages of 32 chats, including archived history. Each
 page is saved before the next is requested; a failed read retains earlier chats
@@ -69,11 +69,11 @@ Unknown native activity stays null; transcript modification time is not a substi
 Updates travel as metadata over the existing encrypted node links. Peers merge
 timestamps monotonically, so delayed updates cannot move activity backward.
 Older daemons continue ordinary messaging; activity sync starts after both
-endpoints support it. Only the hosting node can publish an agent's activity.
+endpoints support it. Only the hosting node can publish a chat's activity.
 The record contains an identity and timestamp, without transcript content.
 
 Name resolution uses exact case-insensitive names and optional node/provider
-qualifiers. Full agent IDs take precedence over names. When multiple visible
+qualifiers. Full chat IDs take precedence over names. When multiple visible
 active matches all have activity and one is strictly newest, it becomes the
 default. Missing or tied timestamps require a choice. Retired registrations
 never participate. Once attached, a relay keeps its target ID until explicitly
@@ -101,6 +101,6 @@ discovery does not answer native approval requests or authorize unrelated work.
 
 `gent node discovery disable` stops new indexing and discovery-driven recovery.
 Previously published registrations remain, and already loaded native chats keep
-their normal Gent integration. Use `gent agent revoke AGENT_ID` to remove an
-agent's access, or uninstall/disable the host's wake integration to stop native
+their normal Gent integration. Use `gent chat revoke AGENT_ID` to remove an
+chat's access, or uninstall/disable the host's wake integration to stop native
 delivery. Disabling indexing cannot recall names already shared with peers.

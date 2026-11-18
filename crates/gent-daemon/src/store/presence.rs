@@ -110,6 +110,20 @@ impl StoreSession<'_> {
             "presence peer must be remote"
         );
         if !reply {
+            // Send supported codecs newest first. Older peers ignore proofs
+            // they do not recognize, then consume their own supported reply.
+            for &version in crate::messages::wire::NEGOTIATED.iter().rev() {
+                let supported = wire::acknowledgement(challenge, version);
+                self.queue(
+                    peer,
+                    event_id(peer, supported, true),
+                    Event::Presence {
+                        challenge: supported,
+                        reply: true,
+                    },
+                    None,
+                )?;
+            }
             // This queues only node control traffic. It never creates an agent
             // message, receipt, registration update or host-input submission.
             let supported = activity::acknowledgement(challenge);
@@ -135,14 +149,23 @@ impl StoreSession<'_> {
         let Some(saved) = evidence(self.db, peer)? else {
             return Ok(());
         };
+        let codec = saved.challenge.and_then(|pending| {
+            crate::messages::wire::NEGOTIATED
+                .iter()
+                .rev()
+                .copied()
+                .find(|v| wire::acknowledgement(pending, *v) == challenge)
+        });
         let challenge = if saved.key == key
-            && saved
-                .challenge
-                .is_some_and(|pending| activity::acknowledgement(pending) == challenge)
-        {
+            && saved.challenge.is_some_and(|pending| {
+                codec.is_some() || activity::acknowledgement(pending) == challenge
+            }) {
             if saved.issued_at.is_some_and(|issued| {
                 issued <= self.timestamp && self.timestamp - issued <= RESPONSE_WINDOW
             }) {
+                if let Some(version) = codec {
+                    self.confirm_wire_version(peer, version)?;
+                }
                 self.confirm_activity_support(peer)?;
             }
             saved.challenge.unwrap()
@@ -197,6 +220,8 @@ impl StoreSession<'_> {
             {
                 self.db
                     .execute("DELETE FROM node_presence WHERE peer=?1", [&peer])?;
+                self.db
+                    .execute("DELETE FROM wire_peers WHERE peer=?1", [&peer])?;
             }
         }
         let peers = self.db.prepare(
@@ -302,6 +327,7 @@ impl StoreSession<'_> {
             nodes.push(
                 json!({"id":id,"name":member.name,"can_configure":member.can_configure,
                 "is_owner":owner.as_ref().map(|owner| owner == id),
+                "wire_version":if id==self.identity.node.id() {crate::messages::wire::CURRENT} else {self.wire_version(id)?},
                 "data_link":paired,"status":status,"revision":self.state.checkpoint().revision,
                 "last_seen":verified,"presence":{"reason":reason,"observed_at":self.timestamp,
                 "probe_started_at":issued,"last_timeout_at":failed,"response_window_seconds":RESPONSE_WINDOW,

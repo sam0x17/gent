@@ -10,7 +10,7 @@ gent --cluster CLUSTER_UUID doctor --online
 
 The default performs local reads, a bounded owner-authenticated daemon probe and service-manager queries. `--online` additionally checks a saved account session at its saved Gent service origin, after checking any cluster service/account pins. It sends that session's credential only to the saved origin, refuses redirects and has a five-second request deadline. It does not sign in, renew, log out or save returned account data. The daemon may already be communicating independently in the background.
 
-Exit codes are 0 when the available checks pass, 3 when a check warns or fails, and 2 for invalid command syntax. Optional absent integrations and checks without applicable state are marked `skip`. A successful report does not prove hosted-provider compatibility, GUI configuration, remote agent availability or end-to-end delivery. Read the individual results, including skipped checks.
+Exit codes are 0 when the available checks pass, 3 when a check warns or fails, and 2 for invalid command syntax. Optional absent integrations and checks without applicable state are marked `skip`. A successful report does not prove hosted-provider compatibility, GUI configuration, remote chat availability or end-to-end delivery. Read the individual results, including skipped checks.
 
 ## Checks
 
@@ -47,7 +47,7 @@ Suggested commands retain the selected cluster. Host and shell inspection sugges
 
 `--json` returns `version: 1`, resolved `home` and `cluster_id` when available, the online-check choice, and ordered `checks`. Each check has a stable `id`, `status` (`pass`, `warn`, `fail`, `skip`), fixed `summary`, whitelisted `evidence` and optional `next`. Advice contains a message and an optional command as an argument array. Commands for unrepresentable or control-character paths are omitted.
 
-The report includes local paths, node/cluster IDs, process IDs, grant counts and timestamps. It excludes credentials, account names, agent/message content, full policies, raw parser/configuration errors, host output and daemon logs. The separate suggested commands may expose more detail to the local owner. Gent writes no report file automatically.
+The report includes local paths, node/cluster IDs, process IDs, grant counts and timestamps. It excludes credentials, account names, chat/message content, full policies, raw parser/configuration errors, host output and daemon logs. The separate suggested commands may expose more detail to the local owner. Gent writes no report file automatically.
 
 ## Verification
 

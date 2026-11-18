@@ -3,7 +3,15 @@ use serde_json::Value;
 use std::fmt::Write;
 
 fn label(key: &str) -> String {
-    let text = key.replace('_', " ");
+    let text = key
+        .split('_')
+        .map(|word| match word {
+            "agent" => "chat",
+            "agents" => "chats",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut chars = text.chars();
     chars
         .next()
@@ -30,6 +38,15 @@ fn fields(out: &mut String, value: &Value, depth: usize) {
                 .unwrap_or(0)
                 .min(28);
             for (key, value) in values {
+                if matches!(key.as_str(), "agent" | "agents" | "agent_id")
+                    && values.contains_key(match key.as_str() {
+                        "agent" => "chat",
+                        "agents" => "chats",
+                        _ => "chat_id",
+                    })
+                {
+                    continue;
+                }
                 if value.is_null() {
                     continue;
                 }

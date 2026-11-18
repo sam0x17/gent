@@ -21,8 +21,11 @@ use std::{
 pub enum Command {
     /// List node-local automatic recovery selections. Does not contact a host.
     List,
-    /// Inspect a selected agent's native recovery readiness without starting it.
-    Inspect { agent: String },
+    /// Inspect a selected chat's native recovery readiness without starting it.
+    Inspect {
+        #[arg(value_name = "CHAT_ID")]
+        agent: String,
+    },
     /// Restore this native conversation for pending messages after a host outage.
     Enable {
         host: Host,
@@ -32,8 +35,11 @@ pub enum Command {
         #[arg(long)]
         host_binary: Option<PathBuf>,
     },
-    /// Stop automatic startup/resume for this agent; leave loaded hosts running.
-    Disable { agent: String },
+    /// Stop automatic startup/resume for this chat; leave loaded hosts running.
+    Disable {
+        #[arg(value_name = "CHAT_ID")]
+        agent: String,
+    },
 }
 
 fn hash(credential: &str) -> String {
@@ -92,7 +98,7 @@ pub(crate) async fn execute(home: &Path, command: Command) -> Result<Value> {
             let entry = selected
                 .agents
                 .get(&agent)
-                .context("agent is not selected for recovery")?;
+                .context("chat is not selected for recovery")?;
             let readiness = match entry.host {
                 RecoveryHost::Codex => codex::inspect(home, &agent, entry).await?,
                 RecoveryHost::ClaudeCode => serde_json::to_value(

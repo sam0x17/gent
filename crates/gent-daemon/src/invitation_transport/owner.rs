@@ -230,7 +230,7 @@ impl Owner {
     }
 }
 
-/// Separate from normal sync, so invitation latency cannot delay agent traffic.
+/// Separate from normal sync, so invitation latency cannot delay chat traffic.
 /// Dropping the worker aborts it, including on unexpected daemon exit paths.
 pub struct Worker(JoinHandle<()>);
 impl Drop for Worker {

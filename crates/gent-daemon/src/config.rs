@@ -239,7 +239,7 @@ pub fn read_private(path: &Path) -> Result<String> {
 }
 
 /// Relay transport accepts a service-issued node credential or the local proof
-/// token. Owner RPC and agent binding readers retain their separate format.
+/// token. Owner RPC and chat binding readers retain their separate format.
 pub fn read_relay_credential(path: &Path) -> Result<String> {
     read_credential(path, true)
 }

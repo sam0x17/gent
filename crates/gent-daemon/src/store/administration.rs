@@ -119,7 +119,7 @@ impl StoreSession<'_> {
         Ok(
             json!({"administrator":administrator.id,"actor":actor.id,"peer":peer.id,"grants":grants,
             "max_changes":MAX_PERMISSION_CHANGES,"decisions":["allow","deny","inherit"],
-            "scope":"changes replace exact agent-pair rules only; broader rules still apply"}),
+            "scope":"changes replace exact chat-pair rules only; broader rules still apply"}),
         )
     }
 

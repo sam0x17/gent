@@ -2,7 +2,7 @@
 
 November 15, 2026. The offer, claim, encrypted channel, owner admission journal, daemon polling and joining session driver are implemented. Private-file CLI enrollment connects these components to the account and relay Workers, with durable invocation IDs, independent node credentials and explicit continuation. Physical Linux-Mac enrollment passes in both directions against local Workers, including continuation after actual expiry. Scoped replacement of a lost joined node and SSH joining are also available. The private trial services are deployed.
 
-An invitation admits one trusted daemon to an existing cluster. It must authenticate the owner independently of Gent's service, protect bootstrap metadata and keys, and preserve the same joining identity across interruptions. Initial enrollment requires the same human account on both machines. Hosted agents and future multi-user admission need separate, narrower capabilities.
+An invitation admits one trusted daemon to an existing cluster. It must authenticate the owner independently of Gent's service, protect bootstrap metadata and keys, and preserve the same joining identity across interruptions. Initial enrollment requires the same human account on both machines. Hosted chats and future multi-user admission need separate, narrower capabilities.
 
 ## Trust and delivery
 
@@ -119,7 +119,7 @@ The current `Store::pair` API assumes owner authentication. Invitation holders i
 | Enroll | The exact claimed node/key/name, signed request, offered anchor, replacement scope, fresh checkpoint and current owner-approved privileges. Existing membership still requires proof of the same key. |
 | Configuration | The claimed peer and its verified MLS credential; durable request/input binding and recorded resulting group. |
 | History | This cluster and the retained bootstrap checkpoint/history needed by this join, with bounded reads. |
-| Data | The claimed peer, verified key package, and request/group bindings; no legacy-agent migration through a new-node invitation. |
+| Data | The claimed peer, verified key package, and request/group bindings; no legacy-chat migration through a new-node invitation. |
 | AcceptData | The claimed signer and roster, and the exact outgoing group created for this invitation. |
 | Finish | The claimed node and completed bootstrap; an idempotent completion receipt. |
 

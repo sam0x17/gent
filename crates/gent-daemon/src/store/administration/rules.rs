@@ -52,7 +52,7 @@ impl StoreSession<'_> {
             .map(|(id,g)|json!({"grant_id":id,"actor":g.actor,"peer":g.peer,"permissions":g.permissions,"expires_at":g.expires_at})).collect();
         Ok(
             json!({"administrator":admin.id,"grants":grants,"max_changes":MAX_PERMISSION_CHANGES,
-            "scope":"selector rules may affect hidden and future matching agents; no membership or matching counts are disclosed"}),
+            "scope":"selector rules may affect hidden and future matching chats; no membership or matching counts are disclosed"}),
         )
     }
     pub(in crate::store) fn agent_permission_rule_policy(
@@ -141,7 +141,7 @@ impl StoreSession<'_> {
     ) -> Result<Value> {
         self.agent_permission_rule_policy(&admin.node_id, &admin.id, changes)?;
         Ok(json!({"administrator":admin.id,"changes":changes,
-            "scope":"preview only; replaces rules with these exact selectors and permission; other overlapping rules still apply; hidden and future agents can be affected; no reservation"}))
+            "scope":"preview only; replaces rules with these exact selectors and permission; other overlapping rules still apply; hidden and future chats can be affected; no reservation"}))
     }
     pub(in crate::store) fn permission_rule_apply(
         &mut self,

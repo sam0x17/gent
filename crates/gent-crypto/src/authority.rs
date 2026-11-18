@@ -670,7 +670,7 @@ impl OwnerKey {
         Self(SigningKey::from_bytes(bytes))
     }
 
-    /// For protected endpoint storage only. Never pass the result to an agent or relay.
+    /// For protected endpoint storage only. Never pass the result to a chat or relay.
     pub fn expose_secret(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(*self.0.as_bytes())
     }
@@ -802,7 +802,7 @@ impl NodeIdentity {
         })
     }
 
-    /// For protected endpoint storage only. Never pass the result to an agent or relay.
+    /// For protected endpoint storage only. Never pass the result to a chat or relay.
     pub fn expose_secret(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(*self.key.as_bytes())
     }
@@ -1045,7 +1045,7 @@ impl VerifiedState {
         fresh(self.state().issued_at, self.state().expires_at, now)
     }
 
-    /// Authorizes a node key, not agent discovery or messaging. Check agent policy separately.
+    /// Authorizes a node key, not chat discovery or messaging. Check chat policy separately.
     pub fn authorize_node(
         &self,
         node_id: &str,

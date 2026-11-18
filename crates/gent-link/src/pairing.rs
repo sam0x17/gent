@@ -355,7 +355,7 @@ pub async fn join(home: &Path, args: JoinArgs) -> Result<Value> {
     if let Some(target) = pairing::installed_replacement(home)? {
         result["replaced_node"] = serde_json::json!(target.id);
         result["recovery"] = serde_json::json!(
-            "fresh identity and streams; historical agents and work were not imported"
+            "fresh identity and streams; historical chats and work were not imported"
         );
     }
     Ok(result)

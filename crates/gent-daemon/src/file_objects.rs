@@ -353,7 +353,7 @@ impl<'a> Objects<'a> {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Records service storage only; this never means agent delivery or completion.
+    /// Records service storage only; this never means chat delivery or completion.
     pub fn acknowledge_upload(&self, id: &str, index: u32) -> Result<()> {
         self.ready(id)?.ciphertext_len(index)?;
         ensure!(

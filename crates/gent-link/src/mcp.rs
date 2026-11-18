@@ -35,6 +35,15 @@ impl GentMcp {
 
     fn available_tools(&self) -> Vec<Tool> {
         let mut tools = tools();
+        let mut legacy = tools
+            .iter()
+            .find(|t| t.name == "gent_chats")
+            .unwrap()
+            .clone();
+        legacy.name = "gent_agents".into();
+        legacy.description =
+            Some("Compatibility alias for gent_chats. Use gent_chats for new calls.".into());
+        tools.push(legacy);
         tools.push(relay_wait::tool());
         if matches!(self.credentials, Credentials::Remote(_)) {
             tools.retain(|t| {
@@ -81,7 +90,7 @@ fn tools() -> Vec<Tool> {
             "decision":{"type":"string","enum":["allow","deny","inherit"]}}}});
     let selector = json!({"oneOf":[
         {"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"enum":["all","same_node"]}}},
-        {"type":"object","additionalProperties":false,"required":["kind","id"],"properties":{"kind":{"enum":["agent","node","group"]},"id":{"type":"string","minLength":1,"maxLength":128}}}
+        {"type":"object","additionalProperties":false,"required":["kind","id"],"properties":{"kind":{"enum":["chat","agent","node","group"]},"id":{"type":"string","minLength":1,"maxLength":128}}}
     ]});
     let mut rule_changes = permission_changes.clone();
     rule_changes["items"]["properties"]["actor"] = selector.clone();
@@ -92,7 +101,7 @@ fn tools() -> Vec<Tool> {
     let declarations = vec![
         (
             "gent_history_imports",
-            "List historical Gent imports the owner assigned to this agent. These contain archived records, not new requests, current agent identities, routing permissions or reply rights. No imports assigned to other agents are disclosed.",
+            "List historical Gent imports the owner assigned to this chat. These contain archived records, not new requests, current chat identities, routing permissions or reply rights. No imports assigned to other chats are disclosed.",
             json!({}),
             vec![],
         ),
@@ -110,19 +119,19 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_history_file_view",
-            "Verify and view a ready historical PNG, JPEG, WebP or GIF up to 4 MiB as MCP image content. Use import_id, original message_id and file_index from gent_history_messages. The owner must have assigned that import to this agent; retired imports are unavailable.",
+            "Verify and view a ready historical PNG, JPEG, WebP or GIF up to 4 MiB as MCP image content. Use import_id, original message_id and file_index from gent_history_messages. The owner must have assigned that import to this chat; retired imports are unavailable.",
             json!({"import_id":{"type":"string","format":"uuid"},"message_id":{"type":"string","format":"uuid"},"file_index":{"type":"integer","minimum":0,"maximum":127}}),
             vec!["import_id", "message_id", "file_index"],
         ),
         (
             "gent_group_admin_scopes",
-            "List this authenticated agent's separate owner-issued group membership grants. Each names a group, member selector, add/remove actions and expiry. Same-node compares the member with this administrator. No hidden identities or group membership counts. Membership edits affect ALL rules and existing editing scopes referencing the group; permission-edit grants alone confer no membership authority.",
+            "List this authenticated chat's separate owner-issued group membership grants. Each names a group, member selector, add/remove actions and expiry. Same-node compares the member with this administrator. No hidden identities or group membership counts. Membership edits affect ALL rules and existing editing scopes referencing the group; permission-edit grants alone confer no membership authority.",
             json!({}),
             vec![],
         ),
         (
             "gent_group_members",
-            "List currently visible members of a group named in your active membership grants, filtered to your editable member scopes. This is not a complete list and has no hidden-member count. Hidden or unknown group names are unavailable. Use gent_agents to choose a visible candidate to add, or your own identity.",
+            "List currently visible members of a group named in your active membership grants, filtered to your editable member scopes. This is not a complete list and has no hidden-member count. Hidden or unknown group names are unavailable. Use gent_chats to choose a visible candidate to add, or your own identity.",
             json!({"group":{"type":"string","maxLength":128}}),
             vec!["group"],
         ),
@@ -140,7 +149,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_group_request",
-            "Read this authenticated agent's saved administration request. Shares status and retry IDs with permission editing; reusing an ID for a different operation conflicts. Applied describes a past accepted edit, not current membership. No other agent's requests, owner errors or cluster revision are exposed.",
+            "Read this authenticated chat's saved administration request. Shares status and retry IDs with permission editing; reusing an ID for a different operation conflicts. Applied describes a past accepted edit, not current membership. No other chat's requests, owner errors or cluster revision are exposed.",
             json!({"request_id":{"type":"string","format":"uuid"}}),
             vec!["request_id"],
         ),
@@ -152,13 +161,13 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_file_paths",
-            "Get this agent's local file handoff folders. A CLI host can copy real files into import_directory with its own filesystem tools. Paths refer to the daemon machine.",
+            "Get this chat's local file handoff folders. A CLI host can copy real files into import_directory with its own filesystem tools. Paths refer to the daemon machine.",
             json!({}),
             vec![],
         ),
         (
             "gent_file_import",
-            "Import a regular file from this agent's import_directory by basename, up to 32 MiB. Returns a file ID usable in file_ids on send, reply, relay_send, or relay_respond. Keep source bytes unchanged for identical request_id retries. Gent cleans unchanged handoff copies after cleanup_after; save lasting files elsewhere.",
+            "Import a regular file from this chat's import_directory by basename, up to 32 MiB. Returns a file ID usable in file_ids on send, reply, relay_send, or relay_respond. Keep source bytes unchanged for identical request_id retries. Gent cleans unchanged handoff copies after cleanup_after; save lasting files elsewhere.",
             json!({"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"name":{"type":"string","maxLength":128},"media_type":{"type":"string","maxLength":128}}),
             vec!["request_id", "name", "media_type"],
         ),
@@ -176,13 +185,13 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_file_view",
-            "Read and verify an authorized complete PNG, JPEG, WebP, or GIF up to 4 MiB and return its actual bytes as MCP image content for visual inspection. No resizing or filesystem access. Check gent_file_status while pending. For larger images use gent_file_read or ask the source agent for a smaller preview. This lets the model inspect bytes; it may not display an attachment to the user. For local user-facing images/files, use gent_file_export and a supported preview or file link. Keep relay response text unchanged and omit file IDs or diagnostic reports.",
+            "Read and verify an authorized complete PNG, JPEG, WebP, or GIF up to 4 MiB and return its actual bytes as MCP image content for visual inspection. No resizing or filesystem access. Check gent_file_status while pending. For larger images use gent_file_read or ask the source chat for a smaller preview. This lets the model inspect bytes; it may not display an attachment to the user. For local user-facing images/files, use gent_file_export and a supported preview or file link. Keep relay response text unchanged and omit file IDs or diagnostic reports.",
             json!({"file_id":{"type":"string","format":"uuid"}}),
             vec!["file_id"],
         ),
         (
             "gent_file_export",
-            "Verify and export an authorized complete file into this agent's export_directory. Returns a local path and cleanup_after for this temporary copy. When the host shares the daemon filesystem, use that exact path for presentation. For Codex VS Code images, prefer an inline Markdown image; plain binary-file links may fail to open. Claude Code VS Code blocks local inline images, so use a Markdown file link to open its editor viewer. For other files use a supported file link and report opening failures. In relay mode, add only this file presentation to the unchanged target text; omit export/acknowledgment reports, IDs and checksums. Check gent_file_status while pending. Existing files with different bytes are never overwritten. Save lasting files outside the handoff folder.",
+            "Verify and export an authorized complete file into this chat's export_directory. Returns a local path and cleanup_after for this temporary copy. When the host shares the daemon filesystem, use that exact path for presentation. For Codex VS Code images, prefer an inline Markdown image; plain binary-file links may fail to open. Claude Code VS Code blocks local inline images, so use a Markdown file link to open its editor viewer. For other files use a supported file link and report opening failures. In relay mode, add only this file presentation to the unchanged target text; omit export/acknowledgment reports, IDs and checksums. Check gent_file_status while pending. Existing files with different bytes are never overwritten. Save lasting files outside the handoff folder.",
             json!({"file_id":{"type":"string","format":"uuid"}}),
             vec!["file_id"],
         ),
@@ -205,26 +214,26 @@ fn tools() -> Vec<Tool> {
             vec!["name", "expected_generation"],
         ),
         (
-            "gent_agents",
-            "List registered agents visible across this cluster, including id, name, node_id, node_name and provider. Use gent_resolve for a name: it selects the most recently active exact match when timestamps are known and distinct. last_activity_at is conversation activity; last_seen is Gent contact and must not rank chats. Send and attach by the selected ID. Offline entries may be stale; this directory does not discover unregistered native chats or prove wake readiness.",
+            "gent_chats",
+            "List registered chats visible across this cluster, including chat_id, name, node_id, node_name and provider. Use gent_resolve for a name: it selects the most recently active exact match when timestamps are known and distinct. last_activity_at is conversation activity; last_seen is Gent contact and must not rank chats. Send and attach by the selected ID. Offline entries may be stale; this directory does not discover unregistered native chats or prove wake readiness.",
             json!({}),
             vec![],
         ),
         (
             "gent_resolve",
-            "Resolve an exact name or agent ID among visible active conversations. Optional node and provider narrow the match. Defaults to the most recent last_activity_at when all candidates have timestamps and the newest is unique. Use selected.id for sends/relay attachment. Ask the user only when status is ambiguous; never rank by last_seen. Selection does not send or wake anything. Keep the selected ID for the relay and for retries.",
+            "Resolve an exact name or chat ID among visible active conversations. Optional node and provider narrow the match. Defaults to the most recent last_activity_at when all candidates have timestamps and the newest is unique. Use selected.chat_id for sends/relay attachment. Ask the user only when status is ambiguous; never rank by last_seen. Selection does not send or wake anything. Keep the selected ID for the relay and for retries.",
             json!({"name":{"type":"string","minLength":1,"maxLength":128},"node":{"type":"string","maxLength":128},"provider":{"type":"string","maxLength":128}}),
             vec!["name"],
         ),
         (
             "gent_permission_check",
-            "Check current enumeration, unsolicited send/receive and reply-policy gates with a peer from gent_agents. Hidden and unknown peers are indistinguishable. No policy editing or rule/group disclosure. Reply-policy approval still requires an accepted unexpired received message and remaining exchange capacity; this tool issues no grant and does not prove delivery or connectivity.",
+            "Check current enumeration, unsolicited send/receive and reply-policy gates with a peer from gent_chats. Hidden and unknown peers are indistinguishable. No policy editing or rule/group disclosure. Reply-policy approval still requires an accepted unexpired received message and remaining exchange capacity; this tool issues no grant and does not prove delivery or connectivity.",
             json!({"peer":{"type":"string","format":"uuid"}}),
             vec!["peer"],
         ),
         (
             "gent_permission_admin_check",
-            "Check this authenticated agent's owner-issued editing grants for an actor/peer pair. Use only this agent's own ID or peers visible in gent_agents. Actor/peer select the relationship to edit, not the administrator's identity. No hidden agents, raw rules or group membership are disclosed. Grants permit exact-pair edits only; broader rules still apply.",
+            "Check this authenticated chat's owner-issued editing grants for an actor/peer pair. Use only this chat's own ID or peers visible in gent_chats. Actor/peer select the relationship to edit, not the administrator's identity. No hidden chats, raw rules or group membership are disclosed. Grants permit exact-pair edits only; broader rules still apply.",
             json!({"actor":{"type":"string","format":"uuid"},"peer":{"type":"string","format":"uuid"}}),
             vec!["actor", "peer"],
         ),
@@ -236,37 +245,37 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_permission_apply",
-            "Apply a user-authorized batch of exact-pair permission changes under this agent's delegated scope. Preview first. Use a fresh UUIDv7 from gent_request_ids and keep it with identical changes for retries. The owner applies the whole batch atomically after rechecking current grants, visibility and expiry. Queued is pending: check gent_permission_request without resubmitting. Changes persist when the editing grant expires or is revoked.",
+            "Apply a user-authorized batch of exact-pair permission changes under this chat's delegated scope. Preview first. Use a fresh UUIDv7 from gent_request_ids and keep it with identical changes for retries. The owner applies the whole batch atomically after rechecking current grants, visibility and expiry. Queued is pending: check gent_permission_request without resubmitting. Changes persist when the editing grant expires or is revoked.",
             json!({"request_id":{"type":"string","format":"uuid"},"changes":permission_changes}),
             vec!["request_id", "changes"],
         ),
         (
             "gent_permission_request",
-            "Inspect this authenticated agent's own saved permission-edit request. Applied records a past accepted batch, not a guarantee that its rules are still current. Queued work remains pending. No cluster revision, writer identity or other agent's request is exposed.",
+            "Inspect this authenticated chat's own saved permission-edit request. Applied records a past accepted batch, not a guarantee that its rules are still current. Queued work remains pending. No cluster revision, writer identity or other chat's request is exposed.",
             json!({"request_id":{"type":"string","format":"uuid"}}),
             vec!["request_id"],
         ),
         (
             "gent_permission_rule_scopes",
-            "List this authenticated agent's active owner grants explicitly enabled for selector-rule editing. Returns only granted selectors, permission types and expiry, never group membership, matching agents or counts. A grant naming a hidden agent is omitted. These grants can authorize changes affecting hidden and future matches; they do not themselves grant enumeration.",
+            "List this authenticated chat's active owner grants explicitly enabled for selector-rule editing. Returns only granted selectors, permission types and expiry, never group membership, matching chats or counts. A grant naming a hidden chat is omitted. These grants can authorize changes affecting hidden and future matches; they do not themselves grant enumeration.",
             json!({}),
             vec![],
         ),
         (
             "gent_permission_rule_preview",
-            "Preview 1-32 selector-rule changes within an explicit selector-rule delegation. Each actor/peer is {kind:all|same_node} or {kind:agent|node|group,id:...}. Use groups named in active rule or membership scopes and nodes from those scopes, your node, or visible agents. Membership grants alone do not authorize rule edits. Named agents must already be visible or yourself. Scope containment is checked structurally; a node or group can narrow to a visible member, but group/node subsets are never inferred from current contents. Matching hidden/future agents can be affected, but none are listed. Other overlapping rules still apply.",
+            "Preview 1-32 selector-rule changes within an explicit selector-rule delegation. Each actor/peer is {kind:all|same_node} or {kind:chat|node|group,id:...}. Use groups named in active rule or membership scopes and nodes from those scopes, your node, or visible chats. Membership grants alone do not authorize rule edits. Named chats must already be visible or yourself. Scope containment is checked structurally; a node or group can narrow to a visible member, but group/node subsets are never inferred from current contents. Matching hidden/future chats can be affected, but none are listed. Other overlapping rules still apply.",
             json!({"changes":rule_changes.clone()}),
             vec!["changes"],
         ),
         (
             "gent_permission_rule_apply",
-            "Apply a user-authorized batch previously reviewed with gent_permission_rule_preview. Requires the owner's separate selector-rule opt-in. Allow/deny replace rules with the exact selectors and permission; inherit removes them. Other rules remain. Uses a new UUIDv7 from gent_request_ids, retained for identical retries. Acceptance rechecks current scope and visibility atomically. Queued results use gent_permission_request. Rules cover future matching agents and persist after grant revocation.",
+            "Apply a user-authorized batch previously reviewed with gent_permission_rule_preview. Requires the owner's separate selector-rule opt-in. Allow/deny replace rules with the exact selectors and permission; inherit removes them. Other rules remain. Uses a new UUIDv7 from gent_request_ids, retained for identical retries. Acceptance rechecks current scope and visibility atomically. Queued results use gent_permission_request. Rules cover future matching chats and persist after grant revocation.",
             json!({"request_id":{"type":"string","format":"uuid"},"changes":rule_changes}),
             vec!["request_id", "changes"],
         ),
         (
             "gent_send",
-            "Send to the recipient agent ID returned by gent_agents. Get a UUIDv7 request_id from gent_request_ids for new work; reuse it only for an identical retry. Optional files contain actual bytes.",
+            "Send to the recipient chat ID returned by gent_chats. Get a UUIDv7 request_id from gent_request_ids for new work; reuse it only for an identical retry. Optional files contain actual bytes.",
             json!({"recipient":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
             vec!["recipient", "request_id", "text"],
         ),
@@ -314,19 +323,19 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_relay_attach",
-            "Persist a target agent ID using ordinary messaging permissions; no separate grant is required. Selection lasts until detached. Use a UUIDv7 request_id from gent_request_ids; an identical retry preserves the original attachment. This selects a target without sending a message.",
+            "Persist a target chat ID using ordinary messaging permissions; no separate grant is required. Selection lasts until detached. Use a UUIDv7 request_id from gent_request_ids; an identical retry preserves the original attachment. This selects a target without sending a message.",
             json!({"target":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"}}),
             vec!["target", "request_id"],
         ),
         (
             "gent_relay_status",
-            "Inspect this agent's current attachment, or a specific attachment ID. Selection persists across restarts; use gent_relay_turns to recover pending work. Hidden targets are omitted.",
+            "Inspect this chat's current attachment, or a specific attachment ID. Selection persists across restarts; use gent_relay_turns to recover pending work. Hidden targets are omitted.",
             json!({"attachment_id":{"type":"string","format":"uuid"}}),
             vec![],
         ),
         (
             "gent_relay_detach",
-            "Detach this agent's specified attachment. It does not cancel work already sent, and cannot detach a different current target.",
+            "Detach this chat's specified attachment. It does not cancel work already sent, and cannot detach a different current target.",
             json!({"attachment_id":{"type":"string","format":"uuid"}}),
             vec!["attachment_id"],
         ),
@@ -380,7 +389,7 @@ fn instructions(route: Option<crate::gateway::access::AccessRoute>) -> String {
     if let Some(route) = route {
         let disclosure = route.disclosure();
         format!(
-            "{disclosure} Never put host credentials in tool arguments or prompts. Local filesystem tools are unavailable; use the listed remote file tools. Host file import requires an owner-approved origin. A gent_file_link download URL grants its holder access for up to five minutes without host credentials; keep it private and use file_ids for agent messaging. Provider file presentation still needs verification.\n\n{instructions}"
+            "{disclosure} Never put host credentials in tool arguments or prompts. Local filesystem tools are unavailable; use the listed remote file tools. Host file import requires an owner-approved origin. A gent_file_link download URL grants its holder access for up to five minutes without host credentials; keep it private and use file_ids for chat messaging. Provider file presentation still needs verification.\n\n{instructions}"
         )
     } else {
         instructions.to_string()
@@ -393,7 +402,7 @@ impl ServerHandler for GentMcp {
             .with_server_info(
                 Implementation::new("gent", env!("CARGO_PKG_VERSION"))
                     .with_title("Gent")
-                    .with_description("Connect your agents across devices.")
+                    .with_description("Connect your chats across devices.")
                     .with_website_url("https://gent.link")
                     .with_icons(vec![
                         Icon::new("https://mcp.gent.link/branding/inkling-256.png")
@@ -440,6 +449,11 @@ impl ServerHandler for GentMcp {
     ) -> Result<CallToolResponse, ErrorData> {
         let Some(operation) = call.name.strip_prefix("gent_") else {
             return Err(ErrorData::invalid_params("unknown tool", None));
+        };
+        let operation = if operation == "chats" {
+            "agents"
+        } else {
+            operation
         };
         let tool = self
             .get_tool(&call.name)
@@ -710,6 +724,7 @@ impl ServerHandler for GentMcp {
         };
         Ok(match result {
             Ok(mut value) => {
+                crate::chats::expose(&mut value);
                 if matches!(self.credentials, Credentials::Remote(_))
                     && matches!(
                         operation,

@@ -1,5 +1,19 @@
 use super::*;
 use std::fs;
+
+#[test]
+fn chat_scope_accepts_the_legacy_name_without_expanding_permissions() {
+    for accepted in ["gent:chats", "gent:agents"] {
+        assert!(scope(&Parameters::from([("scope".into(), accepted.into())])).is_ok());
+    }
+    for rejected in [
+        "gent:admin",
+        "gent:chats gent:agents",
+        "gent:chats gent:admin",
+    ] {
+        assert!(scope(&Parameters::from([("scope".into(), rejected.into())])).is_err());
+    }
+}
 const RESOURCE: &str = "https://node.example/mcp";
 const REDIRECT: &str = "https://host.example/callback?tenant=one";
 mod conversations;

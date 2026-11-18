@@ -4,32 +4,41 @@ The Cargo package is `gent-link`; it installs the `gent` binary. This document d
 
 ## Command conventions
 
-Use nouns to identify resources and verbs to change them. Bare status commands such as `gent`, `gent node`, `gent cluster`, `gent daemon`, `gent hooks`, and `gent auth` show the current state without modifying it. Plurals such as `gent nodes`, `gent clusters`, `gent agents`, and `gent providers` list the corresponding resources. `gent providers list` is an explicit listing form. Explicit `status` subcommands are also available where they improve discoverability.
+Use nouns to identify resources and verbs to change them. Bare status commands such as `gent`, `gent node`, `gent cluster`, `gent daemon`, `gent hooks`, and `gent auth` show the current state without modifying it. Plurals such as `gent nodes`, `gent clusters`, `gent chats`, and `gent providers` list the corresponding resources. `gent providers list` is an explicit listing form. Explicit `status` subcommands are also available where they improve discoverability.
 
-The current `gent`, `gent cluster [status]`, `gent node`, `gent nodes`, `gent agents`, `gent agent show ID`, and `gent providers [list]` views use readable text by default. IDs remain complete for copying, timestamps use GMT, and empty inventories explain how registrations appear. `gent node` labels its source as local configuration and works with a stopped daemon; the live cluster and inventory views require the daemon. The cluster summary reports signed configuration and transport readiness. Use `gent auth` or `gent doctor` for account status.
+The current `gent`, `gent cluster [status]`, `gent node`, `gent nodes`, `gent chats`, `gent chat show ID`, and `gent providers [list]` views use readable text by default. IDs remain complete for copying, timestamps use GMT, and empty inventories explain how registrations appear. `gent node` labels its source as local configuration and works with a stopped daemon; the live cluster and inventory views require the daemon. The cluster summary reports signed configuration and transport readiness. Use `gent auth` or `gent doctor` for account status.
 
-`gent ls` and `gent list` are aliases for `gent agents`. They show the cluster's
+`gent ls` and `gent list` are aliases for `gent chats`. They show the cluster's
 known chats grouped by node name, with node connectivity, provider, last activity
-and full IDs. Nodes and agents are sorted by name; duplicate names show the most
+and full IDs. Nodes and chats are sorted by name; duplicate names show the most
 recent activity first and retain separate IDs. Empty nodes are included, and
 offline nodes retain their known registrations. Retired registrations are
 collapsed into a count. `--verbose` or `--json` shows the full flat directory,
 including retired entries, their last known `node_name` and `node_id`.
 
-`gent agents clear --dry-run` previews retired registrations eligible for removal
-from this node's directory. `gent agents clear` clears those entries and their
+`chat` and `chats` are the canonical command names. The older `agent` and
+`agents` spellings remain accepted aliases, including their subcommands.
+History selection uses `--from-chat` and `--chat`; the previous flags still work.
+JSON directory entries expose `chat_id`, with `id` retained for existing callers.
+MCP uses `gent_chats`; `gent_agents` remains a compatibility alias. Identity
+responses expose `chat`, retaining `agent` for existing integrations. Names,
+credentials and registration IDs are preserved through this terminology change.
+See [protocol versions](security.md#protocol-versions) for node wire evolution.
+
+`gent chats clear --dry-run` previews retired registrations eligible for removal
+from this node's directory. `gent chats clear` clears those entries and their
 summary count. It is retryable and preserves native conversations, retained
 messages and revocation records. Other nodes keep their own directory views.
 The `ls` and `list` aliases accept the same subcommands.
 
 `gent resolve rtao` selects the exact matching active conversation with the most
 recent `last_activity_at`. Use `--node NAME_OR_ID` or `--provider HOST` to narrow
-the match, or supply a full agent ID. Missing or tied activity returns an
+the match, or supply a full chat ID. Missing or tied activity returns an
 ambiguous result with candidates. Resolving never sends a message or starts a
 model. The CLI uses local owner access; MCP `gent_resolve` first filters by the
-calling agent's enumeration permissions. See [activity metadata](discovery.md#conversation-activity).
+calling chat's enumeration permissions. See [activity metadata](discovery.md#conversation-activity).
 
-`gent agent show ID` also reports the registration generation. Use `gent agent rename ID NAME` on the hosting node to change its Gent label while preserving identity and permissions. `--expect-generation N` compares with a previous observation; without it, the CLI reads the generation before committing. See [agent renaming](providers.md#rename-an-agent) for concurrent edits, retries and the equivalent MCP tool.
+`gent chat show ID` also reports the registration generation. Use `gent chat rename ID NAME` on the hosting node to change its Gent label while preserving identity and permissions. `--expect-generation N` compares with a previous observation; without it, the CLI reads the generation before committing. See [chat renaming](providers.md#rename-a-chat) for concurrent edits, retries and the equivalent MCP tool.
 
 Use `--json` for scripts and structured output. It preserves the existing response fields and values, including original labels. Human output escapes terminal controls, line separators and bidirectional formatting characters in labels. A paired link or an active registration does not prove that a remote daemon or host is currently running; the readable views keep those limits visible. Selecting `--home` or `--cluster` applies equally to human and JSON output.
 
@@ -95,13 +104,13 @@ The current build guides missing login and cluster enrollment through `gent daem
 | `gent cluster invitations revoke ID` | Close local admission, then revoke service routing; retry if offline. |
 | `gent cluster leave` | Leave the active cluster after showing the consequences for local access and pending work. |
 
-Names are display labels. Renaming a node must preserve its stable identity, keys, and policy relationships. Reject ambiguous name lookups with a list of authorized matches and their IDs. Human-readable cluster names and node names remain encrypted in routing storage; a hosted web bridge may see only the labels included in its agent's authorized view.
+Names are display labels. Renaming a node must preserve its stable identity, keys, and policy relationships. Reject ambiguous name lookups with a list of authorized matches and their IDs. Human-readable cluster names and node names remain encrypted in routing storage; a hosted web bridge may see only the labels included in its chat's authorized view.
 
 Each node belongs to one cluster in `~/.gent`, shared by CLI commands and all chats. A second cluster creation or join is refused. `gent node reset` stops managed services, archives old state, removes its managed host entries, and preserves the GitHub session for fresh enrollment. See [re-enrollment](service-setup.md#re-enroll-an-existing-machine).
 
 New nodes are admins by default. The `ADMIN` column in `gent nodes` shows `owner` for the cluster's signing owner, `yes` for other admins, and `no` for restricted nodes. Admins can submit cluster configuration edits; the owner signs those edits and controls enrollment and admin grants. Use `--no-configure` when inviting a restricted node, or `gent node admin revoke NODE_UUID` on the owner to restrict an existing node. Retrying enrollment preserves any explicit restriction. The JSON response keeps the signed `can_configure` delegation flag and adds `is_owner` (`null` if the owner cannot be determined); the owner has authority independently of that flag.
 
-`gent nodes` lists signed membership and reports `local`, `connected`, `degraded`, `disconnected`, or `unknown`, with the last verified round trip and its age. Remote connectivity requires a matching encrypted probe reply within 30 seconds; successful evidence remains recent for 90 seconds unless a newer probe times out. Its `data_link` field records pairing to the current signing key, independently of connectivity. A disconnected node can still have running local agents. Authorized owner CLI queries can list the cluster's nodes; agent-facing queries retain their enumeration permissions. See [node connectivity](node-presence.md) for status reasons, restart behavior and the requirement to upgrade both nodes from pre-presence builds.
+`gent nodes` lists signed membership and reports `local`, `connected`, `degraded`, `disconnected`, or `unknown`, with the last verified round trip and its age. Remote connectivity requires a matching encrypted probe reply within 30 seconds; successful evidence remains recent for 90 seconds unless a newer probe times out. Its `data_link` field records pairing to the current signing key, independently of connectivity. A disconnected node can still have running local chats. Authorized owner CLI queries can list the cluster's nodes; chat-facing queries retain their enumeration permissions. See [node connectivity](node-presence.md) for status reasons, restart behavior and the requirement to upgrade both nodes from pre-presence builds.
 
 ## Daemon and shell hooks
 
@@ -120,7 +129,7 @@ New nodes are admins by default. The `ADMIN` column in `gent nodes` shows `owner
 | `gent hooks remove` | Alias for `gent hooks uninstall`. |
 | `gent completions <shell>` | Emit completion definitions for `bash`, `zsh`, or `fish`, without requiring configured state. |
 
-Shell hooks must use a clearly marked managed block or dedicated sourced file. Repeated installation updates that block without duplication. Removal preserves unrelated user edits and explains any manual cleanup needed if the managed block has been altered. Shell hooks do not authorize uploading arbitrary command history or establish provider session identity by themselves. Provider-specific agent hooks and MCP registration belong to the integration commands below. The implemented PATH/completion setup supports `--rc-file PATH`, preserves surrounding bytes, and refuses edited blocks. See [shell integration](local-proof.md#shell-integration) for startup files, activation, and tested versions.
+Shell hooks must use a clearly marked managed block or dedicated sourced file. Repeated installation updates that block without duplication. Removal preserves unrelated user edits and explains any manual cleanup needed if the managed block has been altered. Shell hooks do not authorize uploading arbitrary command history or establish provider session identity by themselves. Provider-specific chat hooks and MCP registration belong to the integration commands below. The implemented PATH/completion setup supports `--rc-file PATH`, preserves surrounding bytes, and refuses edited blocks. See [shell integration](local-proof.md#shell-integration) for startup files, activation, and tested versions.
 
 ## Authentication and integrations
 
@@ -135,22 +144,22 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent integration status codex --live` | Probe the installed endpoint and report connectivity and a bounded loaded-thread count without starting a host or model turn. |
 | `gent integration status claude-code --live` | Inspect native interactive/background session metadata without starting or resuming a conversation. Supports `--config-dir PATH` and `--host-binary PATH`; see [live status](wake.md#claude-live-status). |
 | `gent integration start codex` | Start or reuse Codex's native background daemon for an intact default-socket `--wake` installation. Supports `--config-dir PATH` and `--host-binary PATH`. |
-| `gent integration start claude-code SESSION_ID` | Reopen an existing native background session after checking its Gent binding and `--wake` installation. Takes the full native UUID; supports the same path options. See [Claude startup](wake.md#reopen-a-claude-background-agent). |
-| `gent integration recovery enable codex THREAD_ID` | Select an existing loaded agent for node-local automatic startup and idle recovery. Supports `--config-dir PATH` and `--host-binary PATH`; see [recovery conditions](host-recovery.md). |
-| `gent integration recovery enable claude-code SESSION_ID` | Select a running, registered native background agent for recovery after an idle crash. Requires saved native provider settings and the full session UUID; supports the same path options. |
-| `gent integration recovery list` | Inspect selected agents and their persisted recovery budget without contacting a host. |
+| `gent integration start claude-code SESSION_ID` | Reopen an existing native background session after checking its Gent binding and `--wake` installation. Takes the full native UUID; supports the same path options. See [Claude startup](wake.md#reopen-a-claude-background-chat). |
+| `gent integration recovery enable codex THREAD_ID` | Select an existing loaded chat for node-local automatic startup and idle recovery. Supports `--config-dir PATH` and `--host-binary PATH`; see [recovery conditions](host-recovery.md). |
+| `gent integration recovery enable claude-code SESSION_ID` | Select a running, registered native background chat for recovery after an idle crash. Requires saved native provider settings and the full session UUID; supports the same path options. |
+| `gent integration recovery list` | Inspect selected chats and their persisted recovery budget without contacting a host. |
 | `gent integration recovery inspect AGENT_ID` | Check a selection's native readiness without startup; Claude reports why an uncertain history or job needs owner review. |
 | `gent integration recovery disable AGENT_ID` | Remove a recovery selection while leaving native hosts and ordinary MCP delivery running. |
 | `gent integration install <host>` | Install MCP, identity binding and automatic host delivery by default. Codex VS Code adds `--vscode`; repeated installs retain that route. `--no-wake` disables automatic delivery; `--no-vscode` removes only the editor route. See [host setup](wake.md). |
 | `gent integration uninstall <host>` | Remove Gent-managed integration entries while preserving unrelated host configuration. |
 | `gent integration remove <host>` | Alias for `gent integration uninstall`. |
-| `gent mcp serve` | Serve the shared MCP interface over stdio, connecting the host's registered agents to the local daemon. |
+| `gent mcp serve` | Serve the shared MCP interface over stdio, connecting the host's registered chats to the local daemon. |
 | `gent gateway` / `gent gateway status` | Inspect local remote-MCP grants and limits without probing a listener. |
 | `gent gateway clients add NAME --conversation-key KEY --out FILE` | Export a private credential for a trusted host's conversation namespace. |
 | `gent gateway clients add NAME ... --tls-client-ca FILE --tls-client-name DNS` | Additionally require a certificate chaining to the pinned CA with that exact DNS SAN. Applies to MCP access and OAuth token requests. |
 | `gent gateway clients add NAME ... --subject-key KEY` | Require a distinct host-owned user metadata field, pin each OAuth grant to its first reported user, and scope conversations by user. |
 | `gent gateway clients add NAME ... --oauth-metadata URL --oauth-resource URL --redirect-uri URL` | Import published signed-client metadata and public keys, retaining only owner-selected callbacks. |
-| `gent gateway clients keys show ID` / `keys set ID --jwks FILE --expect-revision N` | Inspect or replace a signed client's keys without changing its grants or agents. |
+| `gent gateway clients keys show ID` / `keys set ID --jwks FILE --expect-revision N` | Inspect or replace a signed client's keys without changing its grants or chats. |
 | `gent gateway clients keys refresh ID --expect-revision N` | Explicitly re-fetch the client's metadata and keys, preserving its callback selection. |
 | `gent gateway run ... --client-metadata ID` | Enable CIMD discovery and bounded runtime metadata/key refresh for an existing signed host. Repeat for additional hosts. |
 | `gent gateway clients list` / `gent gateway clients revoke ID` | Inspect or revoke remote host grants. |
@@ -159,7 +168,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent gateway service install` | Validate and save the complete listener options, then start its user service. |
 | `gent gateway service start` / `stop` / `restart` | Control the installed listener independently of its daemon. |
 | `gent gateway service logs [--lines N]` | Read the listener's journal or private log. |
-| `gent gateway service uninstall` / `remove` | Remove the listener service, preserving the daemon, host grants and stored agent state. |
+| `gent gateway service uninstall` / `remove` | Remove the listener service, preserving the daemon, host grants and stored chat state. |
 | `gent gateway oauth requests` | Inspect pending OAuth client requests, callback URLs and decisions without displaying codes or tokens. |
 | `gent gateway oauth approve ID` / `gent gateway oauth deny ID` | Decide a specific connection request as the local node owner. |
 
@@ -169,7 +178,7 @@ The auth commands are implemented as a prototype. `gent auth login --headless` u
 
 Status checks the service without changing local state and never reports an offline cached identity as authenticated. Status exits 3 when signed out or unavailable. Logout disables the local credential before contacting the service; an offline attempt reports `revocation_pending`, exits 3 and can be retried. Interrupted login can also leave revocation pending until its session commits or the candidate's 15-minute creation window closes. Successful mutations exit 0; malformed state and other failures exit 1. `--json` supports these results without exposing credentials.
 
-Service login establishes an account session. Cluster enrollment establishes permission to receive cluster keys and participate as a trusted endpoint. Account login, recovery, or a changed SQL membership record alone cannot grant access to encrypted data. Service sessions initially last 30 days; the daemon renews active sessions near expiry. Logout revokes dependent node credentials in the service-backed relay prototype; the shared-token development relay remains independent. Guided owner/invitation setup, service-backed SSH joining, automatic session renewal and manual reconnection through `gent cluster connect` are implemented. Private-file invitation enrollment passes local Worker proofs in both Linux/Mac directions, including actual-expiry continuation. Those proofs use synthetic login and SSH forwarding for local Workers. Real GitHub device consent now passes against the deployed private trial. Code enrollment and encrypted messages/files pass between physical Linux and Mac endpoints through the deployed services. The live proof reuses one real account session; the local fixture separately checks independent sessions. Hosted agent enrollment remains unfinished.
+Service login establishes an account session. Cluster enrollment establishes permission to receive cluster keys and participate as a trusted endpoint. Account login, recovery, or a changed SQL membership record alone cannot grant access to encrypted data. Service sessions initially last 30 days; the daemon renews active sessions near expiry. Logout revokes dependent node credentials in the service-backed relay prototype; the shared-token development relay remains independent. Guided owner/invitation setup, service-backed SSH joining, automatic session renewal and manual reconnection through `gent cluster connect` are implemented. Private-file invitation enrollment passes local Worker proofs in both Linux/Mac directions, including actual-expiry continuation. Those proofs use synthetic login and SSH forwarding for local Workers. Real GitHub device consent now passes against the deployed private trial. Code enrollment and encrypted messages/files pass between physical Linux and Mac endpoints through the deployed services. The live proof reuses one real account session; the local fixture separately checks independent sessions. Hosted chat enrollment remains unfinished.
 
 Codex and Claude Code CLI setup have equal priority on macOS and Linux. Report VS Code, desktop, web, and mobile support separately; detecting a provider CLI does not establish that its GUI integration works. Both mobile providers have equal priority, starting with iOS.
 
@@ -177,12 +186,12 @@ A web bridge must display: "This web connection is not end-to-end encrypted. Gen
 
 ## Providers
 
-Providers are host labels announced by registered agents. Connecting a host to Gent's MCP server allows its agents to register, without configuring inference APIs in Gent. See [MCP hosts and agent registration](providers.md) for identity, delivery, and capability behavior.
+Providers are host labels announced by registered chats. Connecting a host to Gent's MCP server allows its chats to register, without configuring inference APIs in Gent. See [MCP hosts and chat registration](providers.md) for identity, delivery, and capability behavior.
 
 | Command | Behavior |
 | --- | --- |
-| `gent providers` / `gent providers list` | List providers represented by visible agent registrations in the selected cluster, with node locations, availability, and known host capabilities. |
-| `gent provider show <provider>` | Show permitted metadata and registered agents for a host label; never imply that the label authenticates an agent. |
+| `gent providers` / `gent providers list` | List providers represented by visible chat registrations in the selected cluster, with node locations, availability, and known host capabilities. |
+| `gent provider show <provider>` | Show permitted metadata and registered chats for a host label; never imply that the label authenticates a chat. |
 
 Example host setup and inspection:
 
@@ -190,32 +199,32 @@ Example host setup and inspection:
 gent integration install codex
 gent integration install claude-code
 gent providers list
-gent agents
+gent chats
 ```
 
 For another MCP-capable host, configure `gent mcp serve` as its stdio server and use the same registration tools. Setup helpers may detect existing Codex and Claude Code integration configuration; model settings and credentials stay with those hosts. Provider listing reads Gent registrations and does not start inference or scan the network.
 
-## Agents and diagnostics
+## Chats and diagnostics
 
 Additional command families should follow the same grammar as their functionality is implemented:
 
 | Command | Behavior |
 | --- | --- |
-| `gent agents` | List agents the caller may discover in the selected cluster. |
+| `gent chats` | List chats the caller may discover in the selected cluster. |
 | `gent permission explain ACTOR_UUID PEER_UUID` | Explain current signed policy gates and matching rules under local owner authority. See [permission checks](permissions.md). |
 | `gent permission inherit ACTOR PEER --permission enumerate receive send` | Remove overrides for the exact selectors and permissions, restoring the remaining cluster rules. |
 | `gent group` / `gent group list` / `gent groups` | List owner-visible groups and members. |
 | `gent group new NAME` / `gent group show NAME` / `gent group delete NAME` | Create, inspect, or delete an unreferenced group. |
-| `gent group member add GROUP AGENT_UUID...` / `gent group member remove GROUP AGENT_UUID...` | Change up to 32 members while preserving unrelated membership. |
+| `gent group member add GROUP CHAT_UUID...` / `gent group member remove GROUP CHAT_UUID...` | Change up to 32 members while preserving unrelated membership. |
 | `gent group admin grant ADMIN_UUID GROUP MEMBER_SELECTOR --action add remove` | Delegate group membership within an explicit member scope. This affects all rules and existing editing scopes using the group. |
-| `gent group admin list` / `revoke GRANT_UUID` / `history [--agent UUID] [--before ROW]` | Inspect, revoke, and audit separate membership grants. See [group administration](administration.md#group-membership). |
-| `gent permission admin grant ADMIN_UUID ACTOR_SELECTOR PEER_SELECTOR --permission ...` | Delegate expiring exact-pair permission editing within the selected scope; `--selector-rules` also permits persistent selector rules affecting hidden and future matches. See [agent administration](administration.md). |
+| `gent group admin list` / `revoke GRANT_UUID` / `history [--chat UUID] [--before ROW]` | Inspect, revoke, and audit separate membership grants. See [group administration](administration.md#group-membership). |
+| `gent permission admin grant ADMIN_UUID ACTOR_SELECTOR PEER_SELECTOR --permission ...` | Delegate expiring exact-pair permission editing within the selected scope; `--selector-rules` also permits persistent selector rules affecting hidden and future matches. See [chat administration](administration.md). |
 | `gent permission admin list` / `revoke GRANT_UUID` | Inspect or revoke editing grants; already accepted rules remain in force. |
-| `gent permission admin history [--agent UUID] [--before ROW]` | Page through local and received agent-edit audit records under owner authority. |
-| `gent agent show <agent>` | Show permitted identity, location, availability, MCP/host capabilities, and connection security mode. |
+| `gent permission admin history [--chat UUID] [--before ROW]` | Page through local and received chat-edit audit records under owner authority. |
+| `gent chat show <chat>` | Show permitted identity, location, availability, MCP/host capabilities, and connection security mode. |
 | `gent files [status]` | Show local encrypted storage usage, tracked handoff copies, cleanup issues, and retained record counts under owner authority. |
 | `gent files clean [--dry-run]` | Reap expired encrypted objects and process one bounded batch of expired handoff copies. Preserve changed, replaced, and untracked files; `--dry-run` previews without deleting. |
-| `gent message send <agent> [text] [--file <path>]` | Send text, files, screenshots, or images under the caller's authority; allow repeated `--file` arguments and messages without files. |
+| `gent message send <chat> [text] [--file <path>]` | Send text, files, screenshots, or images under the caller's authority; allow repeated `--file` arguments and messages without files. |
 | `gent message reply <message-id> [text] [--file <path>]` | Reply within an authorized exchange, with optional files. |
 | `gent message status <message-id>` | Show authenticated delivery and response state available to the caller. |
 | `gent config` | Show a redacted effective configuration for the current node and selected cluster. |
@@ -227,7 +236,7 @@ Additional command families should follow the same grammar as their functionalit
 | `gent config request REQUEST_UUID` | Inspect a request's queued, applied, or rejected status and its revision or rejection reason. |
 | `gent doctor [--online]` | Inspect local configuration, auth, daemon, relay observations, hooks and MCP installation without changing state or starting inference. `--online` also checks the saved account session. See [diagnostics](diagnostics.md). |
 
-Messages carry an explicit authenticated user or agent identity. Do not infer sender authority from the shell's active cluster or an agent ID passed as an argument. Relay and permission-management commands must expose their acting identity and target scope when added.
+Messages carry an explicit authenticated user or chat identity. Do not infer sender authority from the shell's active cluster or a chat ID passed as an argument. Relay and permission-management commands must expose their acting identity and target scope when added.
 
 `gent config edit` edits this node’s `~/.gent/config.toml`. `--editor COMMAND` overrides the environment; quote executable paths and arguments containing spaces. Arguments are passed literally without shell expansion. GUI editors need their wait option, for example `gent config edit --editor 'code --wait'`. `--json` and redirected stdin or stdout are refused. See [editing configuration](local-proof.md#edit-local-configuration) for validation, conflicts and retained drafts.
 
@@ -235,9 +244,9 @@ Configuration mutations accept `--request-id UUID` for retrying an identical pro
 
 Queued status includes `payload_retained`, indicating whether this node still has the full input after transport cleanup. New requests retain it until their authenticated result commits. Older missing payloads can be restored by retrying the identical proposal with its original request ID; a summary alone cannot recreate a policy. `gent history` reports the separate pending-payload budget and missing count. Automatic rerouting to a successor is still part of the unfinished owner-activation workflow.
 
-Incoming delivery wakes or resumes idle agents where the host supports it, queues for busy agents, and never interrupts automatically. Expose pending state and the reason when the host requires a future user turn or inbox check. Bound automatic exchanges and report when a limit is reached.
+Incoming delivery wakes or resumes idle chats where the host supports it, queues for busy chats, and never interrupts automatically. Expose pending state and the reason when the host requires a future user turn or inbox check. Bound automatic exchanges and report when a limit is reached.
 
-Distinguish a mobile notification from an agent turn or user response. A notification can invite the user to return without starting a turn. Server coordinators use the ordinary wake/queue policy and can continue authorized work while the phone is unavailable.
+Distinguish a mobile notification from a chat turn or user response. A notification can invite the user to return without starting a turn. Server coordinators use the ordinary wake/queue policy and can continue authorized work while the phone is unavailable.
 
 `~/.gent/config.toml` holds local settings and the node’s sole cluster configuration. Only each cluster's shared policy and authorized metadata are replicated to its members. Keep authentication secrets and private keys in an OS credential store or protected local key store outside TOML.
 
@@ -247,9 +256,9 @@ Distinguish a mobile notification from an agent turn or user response. A notific
 | --- | --- |
 | `gent history` / `gent history status` | Report Gent messages, payload usage, exchanges, import retries, relay selections, and pending events. |
 | `gent history clean --dry-run` | Preview one bounded cleanup batch. |
-| `gent history clean` | Retire exchanges seven days after expiry and eligible agent retry records. |
+| `gent history clean` | Retire exchanges seven days after expiry and eligible chat retry records. |
 
-All support `--json`. Cleanup runs automatically at startup and every 15 minutes. These owner commands require no model call. Message limits and the UUIDv7 agent-request contract are documented in [message history and retries](local-proof.md#message-history-and-retries); encrypted transport and provider histories are separate.
+All support `--json`. Cleanup runs automatically at startup and every 15 minutes. These owner commands require no model call. Message limits and the UUIDv7 chat-request contract are documented in [message history and retries](local-proof.md#message-history-and-retries); encrypted transport and provider histories are separate.
 
 ## Encrypted transport storage (implemented)
 
@@ -269,8 +278,8 @@ All support `--json` and use local owner authority. Authenticated receiver check
 
 `gent backup keygen --output KEY` creates a private recovery identity. `gent backup create ARCHIVE --identity KEY` captures a stopped node. `verify` checks the complete archive; `inspect [--files]` verifies before returning its metadata. `gent backup extract ARCHIVE --identity KEY --output DIRECTORY` publishes a verified, guarded offline copy at a new path. Keys, archives and extraction outputs are never overwritten. Only `create` uses cluster selection. See [backup scope, limits and examples](recovery.md).
 
-`gent history import ARCHIVE --identity KEY --from-agent OLD_UUID --agent CURRENT_UUID` assigns retained historical messages/files to an existing local agent. Use `--from-import IMPORT_UUID` instead to select an assignment saved in a later backup. `gent history imports` lists assignments; removal and restoration require their current access revision.
+`gent history import ARCHIVE --identity KEY --from-chat OLD_UUID --chat CURRENT_UUID` assigns retained historical messages/files to an existing local chat. Use `--from-import IMPORT_UUID` instead to select an assignment saved in a later backup. `gent history imports` lists assignments; removal and restoration require their current access revision.
 
-`gent agent recover ARCHIVE --identity KEY --from-agent OLD_UUID --name NAME` prepares a fresh agent and assigns that history. Choose `--binding NEW_PATH`, `--host codex|claude-code --conversation HOST_ID`, or `--gateway-client CLIENT_UUID --conversation HOST_ID`. Claude children also use `--subagent`; gateway hosts with a user policy require `--subject HOST_USER_ID`. The destination must be unused, and `--from-import` works here too. Reconnect the host to the replacement node after recovery. See [conversation recovery](recovery.md#recover-a-conversation-binding) for retry behavior and gateway authentication requirements.
+`gent chat recover ARCHIVE --identity KEY --from-chat OLD_UUID --name NAME` prepares a fresh chat and assigns that history. Choose `--binding NEW_PATH`, `--host codex|claude-code --conversation HOST_ID`, or `--gateway-client CLIENT_UUID --conversation HOST_ID`. Claude children also use `--subagent`; gateway hosts with a user policy require `--subject HOST_USER_ID`. The destination must be unused, and `--from-import` works here too. Reconnect the host to the replacement node after recovery. See [conversation recovery](recovery.md#recover-a-conversation-binding) for retry behavior and gateway authentication requirements.
 
 Restored-node activation remains unimplemented. The CLI refuses state marked `recovery-required.json` before contacting a daemon. Archived node state cannot redirect commands to a live directory. Removing the marker does not make old encryption state safe to resume.

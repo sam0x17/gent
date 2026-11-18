@@ -3,6 +3,7 @@ mod agent_recovery;
 mod auth;
 mod backup;
 mod build_info;
+mod chats;
 mod cluster;
 mod config_editor;
 mod display;
@@ -42,7 +43,7 @@ use std::{io::Write, path::PathBuf};
 #[command(
     name = "gent",
     version,
-    about = "Permissioned communication between agents",
+    about = "Permissioned communication between chats",
     after_help = "Guided setup: gent daemon install\nScripted setup: gent auth login && gent daemon install --new demo --no-input\nLocal development: gent daemon install --local demo\nConnect a host: gent mcp serve --binding /private/path/to/chat.key"
 )]
 struct Cli {
@@ -140,18 +141,18 @@ enum Command {
     },
     /// Print a completion script; does not read Gent state or start the daemon.
     Completions { shell: hooks::Shell },
-    /// List host labels announced by registered agents.
+    /// List host labels announced by registered chats.
     Providers {
         #[command(subcommand)]
         command: Option<ListCommand>,
     },
-    /// List known agents across the cluster, grouped by node.
-    #[command(visible_aliases = ["ls", "list"])]
+    /// List known chats across the cluster, grouped by node.
+    #[command(name = "chats", alias = "agents", visible_aliases = ["ls", "list"])]
     Agents {
         #[command(subcommand)]
         command: Option<AgentsCommand>,
     },
-    /// Resolve an exact agent name, defaulting to its most recent conversation activity.
+    /// Resolve an exact chat name, defaulting to its most recent conversation activity.
     Resolve {
         name: String,
         #[arg(long)]
@@ -177,6 +178,7 @@ enum Command {
         command: Option<TransportCommand>,
     },
     /// Inspect, rename, recover or revoke a registration.
+    #[command(name = "chat", alias = "agent")]
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
@@ -225,14 +227,14 @@ enum HistoryCommand {
     Status,
     /// List historical imports, their recipients, and access revisions.
     Imports,
-    /// Recover one archived agent's exchanges for one current local agent.
+    /// Recover one archived chat's exchanges for one current local chat.
     Import {
         archive: PathBuf,
         #[arg(long)]
         identity: PathBuf,
         #[command(flatten)]
         selection: backup::HistorySelection,
-        #[arg(long)]
+        #[arg(long = "chat", alias = "agent", value_name = "CHAT_ID")]
         agent: String,
         /// Explicitly restore a removed import at its last observed revision.
         #[arg(long)]
@@ -358,13 +360,16 @@ enum ListCommand {
 #[derive(Subcommand)]
 enum AgentCommand {
     Show {
+        #[arg(value_name = "CHAT_ID")]
         agent: String,
     },
     Revoke {
+        #[arg(value_name = "CHAT_ID")]
         agent: String,
     },
-    /// Rename an agent on this node without changing its identity or permissions.
+    /// Rename a chat on this node without changing its identity or permissions.
     Rename {
+        #[arg(value_name = "CHAT_ID")]
         agent: String,
         name: String,
         /// Compare with a previously observed generation; do not overwrite a later rename.
@@ -440,14 +445,14 @@ enum PermissionName {
 }
 #[derive(Subcommand)]
 enum PermissionCommand {
-    /// Delegate bounded permission editing to an agent, or revoke a delegation.
+    /// Delegate bounded permission editing to a chat, or revoke a delegation.
     Admin {
         #[command(subcommand)]
         command: permission_admin::Command,
     },
-    /// Explain effective policy between two registered agent IDs, including matching rules.
+    /// Explain effective policy between two registered chat IDs, including matching rules.
     Explain { actor: String, peer: String },
-    /// Add grants. Selectors: agent UUID, *, same-node, node:UUID, group:NAME.
+    /// Add grants. Selectors: chat UUID, *, same-node, node:UUID, group:NAME.
     Allow {
         actor: String,
         peer: String,
@@ -530,6 +535,10 @@ async fn main() {
 }
 
 async fn execute(cli: Cli) -> Result<()> {
+    let chat_output = matches!(
+        &cli.command,
+        Some(Command::Agent { .. } | Command::Agents { .. } | Command::Resolve { .. })
+    );
     let output_format = ui::Output::for_cli(&cli);
     ui::configure(output_format.raw());
     if matches!(cli.command, Some(Command::Version)) {
@@ -1166,6 +1175,10 @@ async fn execute(cli: Cli) -> Result<()> {
             .await?
         }
     };
+    let mut output = output;
+    if chat_output {
+        chats::expose(&mut output);
+    }
     drop(progress);
     if output_format.raw() {
         output_format.print(&output)?;
@@ -1188,7 +1201,7 @@ async fn execute(cli: Cli) -> Result<()> {
             output["cluster"]["id"].as_str().unwrap_or("")
         );
         if let Some(target) = output["replaced_node"].as_str() {
-            println!("Replaced node {target}. Old agents and history were not imported.");
+            println!("Replaced node {target}. Old chats and history were not imported.");
         }
         println!("Start the daemon with gent daemon install.");
     } else if files_output {

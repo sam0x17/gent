@@ -147,7 +147,7 @@ impl Spec {
         let description = if self.gateway.is_some() {
             "remote MCP gateway"
         } else {
-            "agent communication daemon"
+            "chat communication daemon"
         };
         let log = xml(&format!("{home}/{}.log", self.kind().name()));
         let rendered = match self.platform {

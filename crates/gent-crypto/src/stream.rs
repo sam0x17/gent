@@ -88,7 +88,7 @@ impl Receipt {
     }
 }
 
-/// Contains no node IDs, names, public keys, plaintext, or agent request IDs.
+/// Contains no node IDs, names, public keys, plaintext, or chat request IDs.
 /// Opaque group IDs, sequence counters, predecessor hashes and sizes are visible.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

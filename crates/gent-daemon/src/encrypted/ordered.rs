@@ -370,7 +370,7 @@ impl<'a> OrderedEndpoint<'a> {
         })
     }
 
-    /// Trusted endpoint inspection. Agent-level delivery still needs its policy check.
+    /// Trusted endpoint inspection. Chat-level delivery still needs its policy check.
     pub fn inbox(
         &self,
         group: &[u8],

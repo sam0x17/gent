@@ -39,7 +39,7 @@ pub(in crate::integration) async fn select(
     let row = start::select(inspect(binary, &target).await?, session)?;
     ensure!(
         row.pid.is_some(),
-        "load this native Claude background agent before enabling recovery"
+        "load this native Claude background chat before enabling recovery"
     );
     ensure!(
         start::pinned(home, &target.directory).await? == target
@@ -67,7 +67,7 @@ pub(super) fn authorize(
                 == entry.credential_hash
             && entry.working_dir.as_ref() == Some(&row.cwd)
             && row.session_id.as_deref() == Some(&entry.thread_id),
-        "selected Claude agent, binding or working directory changed"
+        "selected Claude chat, binding or working directory changed"
     );
     Ok(())
 }

@@ -66,7 +66,7 @@ impl StoreSession<'_> {
         let agent = self.get_agent(id)?;
         ensure!(
             agent.node_id == self.identity.node.id(),
-            "agent belongs to another node"
+            "chat belongs to another node"
         );
         if self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM network_origins WHERE agent=?1)",
@@ -94,7 +94,7 @@ impl StoreSession<'_> {
         {
             ensure!(
                 saved_node == node,
-                "legacy agent already belongs to another node"
+                "legacy chat already belongs to another node"
             );
             let certificate: SignedLegacyAgentBinding = serde_json::from_slice(&certificate)?;
             certificate.verify_current(&self.state, id, node)?;
@@ -106,7 +106,7 @@ impl StoreSession<'_> {
             .optional()?;
         ensure!(
             existing.is_none_or(|existing| existing == node),
-            "agent ID already belongs to another node"
+            "chat ID already belongs to another node"
         );
         let certificate = self.identity.signing_owner(self.db)?.bind_legacy_agent(
             &self.state,
@@ -282,7 +282,7 @@ impl StoreSession<'_> {
         {
             ensure!(
                 existing.0 == node,
-                "agent ID already belongs to another node"
+                "chat ID already belongs to another node"
             );
             let (nonce, legacy, generation): (Option<String>, Option<Vec<u8>>, u64) =
                 self.db.query_row(
@@ -298,7 +298,7 @@ impl StoreSession<'_> {
                             .as_ref()
                             .map(serde_json::to_vec)
                             .transpose()?,
-                "agent binding changed"
+                "chat binding changed"
             );
             if incoming.generation < generation {
                 return Ok(());
@@ -309,13 +309,13 @@ impl StoreSession<'_> {
                     previous.name == incoming.name
                         && previous.provider == incoming.provider
                         && previous.revoked == incoming.revoked,
-                    "conflicting agent generation"
+                    "conflicting chat generation"
                 );
                 return Ok(());
             }
             ensure!(
                 !existing.1 || incoming.revoked,
-                "revoked agent cannot be restored"
+                "revoked chat cannot be restored"
             );
             self.db.execute(
                 "UPDATE agents SET name=?1,provider=?2,revoked=?3,last_seen=?4 WHERE id=?5",
@@ -335,7 +335,7 @@ impl StoreSession<'_> {
             let count: usize = self
                 .db
                 .query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))?;
-            ensure!(count < 16384, "agent directory limit reached");
+            ensure!(count < 16384, "chat directory limit reached");
             self.db.execute(
                 "INSERT INTO agents VALUES(?1,?2,?3,?4,?5,?6,?7)",
                 params![
@@ -953,7 +953,6 @@ impl Store {
                             "node record digest mismatch"
                         );
                         let record: Record = serde_json::from_slice(&record)?;
-                        ensure!(record.version == 1, "unsupported node record");
                         let state = self.identity.state(&tx)?;
                         if record.authority.revision > state.checkpoint().revision {
                             return Ok(());

@@ -1,6 +1,6 @@
 # Backup and recovery
 
-Gent can create encrypted backups of a stopped node, verify every payload, extract the archive into a guarded offline directory, and export retained Gent history with recovered files. The owner can assign one archived agent's history to a current local agent or prepare a fresh conversation binding with that history. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Migrating old agent identities, peer permissions or pending work, and replacing a lost cluster owner remain unfinished.
+Gent can create encrypted backups of a stopped node, verify every payload, extract the archive into a guarded offline directory, and export retained Gent history with recovered files. The owner can assign one archived chat's history to a current local chat or prepare a fresh conversation binding with that history. A lost joined node can be replaced through authenticated SSH or a scoped private invitation using a fresh identity and fresh encrypted streams. Migrating old chat identities, peer permissions or pending work, and replacing a lost cluster owner remain unfinished.
 
 For interrupted work on an intact node, the [local work journal](work.md) records a recipient's start and checked outcome. `gent work` lists reports and `gent work reconcile` records an owner-reviewed outcome or permits a subsequent attempt. These records survive message cleanup but are not assigned through historical recovery. They do not establish exactly-once external execution or make an old database safe to resume.
 
@@ -72,7 +72,7 @@ The extracted copy retains historical keys and credentials. It must remain offli
 The output contains:
 
 - `history.json`: format version, archive/cluster/node IDs, capture time, source database digest, JSONL hashes/counts and file outcomes.
-- `agents.jsonl`: historical agent IDs, node IDs, names, providers, activity times and revocation flags. No credentials or credential hashes.
+- `agents.jsonl`: historical chat IDs, node IDs, names, providers, activity times and revocation flags. No credentials or credential hashes.
 - `messages.jsonl`: original message IDs, participants, exchange/reply/relay references, text, timestamps, inline file contents and attachment descriptors. The saved acknowledgment column supplies the historical acknowledgment flag. Each record also lists recovered file paths and outcomes.
 - `files/`: inline files and complete native attachments, named with generated identity-based paths. Original filenames and media types remain in the JSON records. Native files pass chunk authentication and whole-file SHA-256 verification before publication.
 - `recovery-required.json`: the offline activation guard. The export is historical data and has no command that activates it as node state.
@@ -81,26 +81,26 @@ The export includes expired or revoked historical records still present in the a
 
 Signing keys, local RPC credentials, account/gateway secrets, file decryption grants, MLS state, policy and live queue records are excluded. Provider-owned conversation transcripts remain outside the node archive and this export. Source IDs and hashes establish which authenticated archive the exporter read; the resulting plaintext files are not independently signed and do not prove current cluster authority or independently authenticate each historical sender.
 
-The destination must be new, with the same parent ownership/permission requirements as extraction. Directories use `0700` and files `0600`; publication refuses an existing destination, including races. Limits are 65,536 agents, 65,536 messages, 6 MiB per stored message and 1 GiB of exported JSONL/file content. Known message/file types and table layouts are checked; unsupported schemas or inconsistent records fail without publishing partial output. Interrupted processes may leave guarded temporary directories.
+The destination must be new, with the same parent ownership/permission requirements as extraction. Directories use `0700` and files `0600`; publication refuses an existing destination, including races. Limits are 65,536 chats, 65,536 messages, 6 MiB per stored message and 1 GiB of exported JSONL/file content. Known message/file types and table layouts are checked; unsupported schemas or inconsistent records fail without publishing partial output. Interrupted processes may leave guarded temporary directories.
 
-## Assign history to a current agent
+## Assign history to a current chat
 
-Start or enroll a fresh node normally and register its replacement agent through MCP. Use `agents.jsonl` from an offline export to identify the original agent and `gent agents` on the current node to identify the recipient. With the current daemon running, assign the selected history:
+Start or enroll a fresh node normally and register its replacement chat through MCP. Use `agents.jsonl` from an offline export to identify the original chat and `gent chats` on the current node to identify the recipient. With the current daemon running, assign the selected history:
 
 ```sh
 gent history import ~/gent-backups/node.age --identity ~/gent-recovery.key \
-  --from-agent OLD_AGENT_UUID --agent CURRENT_AGENT_UUID
+  --from-chat OLD_CHAT_UUID --chat CURRENT_CHAT_UUID
 gent history imports
 gent history status
 ```
 
-The command authenticates the entire archive and creates a private temporary history export. An owner-authenticated local request pins its manifest digest and selects exactly one archived agent and one current, nonrevoked local agent. The daemon validates JSONL counts and hashes, historical references, selected file lengths and hashes, ownership and private permissions before committing. Failure rolls back records, access and quota together. The temporary export is removed when the command exits normally; a killed process may leave guarded plaintext staging files.
+The command authenticates the entire archive and creates a private temporary history export. An owner-authenticated local request pins its manifest digest and selects exactly one archived chat and one current, nonrevoked local chat. The daemon validates JSONL counts and hashes, historical references, selected file lengths and hashes, ownership and private permissions before committing. Failure rolls back records, access and quota together. The temporary export is removed when the command exits normally; a killed process may leave guarded plaintext staging files.
 
-Only messages sent or received by the selected historical agent are assigned, along with their historical participant labels and file outcomes. Other archived conversations remain inaccessible. The recipient reads these records through `gent_history_imports` and `gent_history_messages`; pages contain at most 20 messages and 1 MiB of serialized records. Follow `next_after` while `has_more` is true. `gent_history_file_read` returns ready files in 256 KiB chunks; `gent_history_file_view` returns verified PNG, JPEG, WebP or GIF bytes up to 4 MiB as an MCP image. Missing and incomplete files remain labelled and cannot be read.
+Only messages sent or received by the selected historical chat are assigned, along with their historical participant labels and file outcomes. Other archived conversations remain inaccessible. The recipient reads these records through `gent_history_imports` and `gent_history_messages`; pages contain at most 20 messages and 1 MiB of serialized records. Follow `next_after` while `has_more` is true. `gent_history_file_read` returns ready files in 256 KiB chunks; `gent_history_file_view` returns verified PNG, JPEG, WebP or GIF bytes up to 4 MiB as an MCP image. Missing and incomplete files remain labelled and cannot be read.
 
-The assignment is a separate read grant. It includes retained expired messages and historical labels that the recipient may lack permission to enumerate as live agents. Original message IDs, acknowledgments, timestamps and archive provenance remain attached to the records. They establish historical context only: the old agent, exchange, relay and file IDs confer no live routing or reply rights. Records never enter the current inbox or transport queues. No keys, old credentials, permissions, conversation bindings or pending work are restored. Repeating an old action requires checking current host state; the archive cannot prove that the action never ran.
+The assignment is a separate read grant. It includes retained expired messages and historical labels that the recipient may lack permission to enumerate as live chats. Original message IDs, acknowledgments, timestamps and archive provenance remain attached to the records. They establish historical context only: the old chat, exchange, relay and file IDs confer no live routing or reply rights. Records never enter the current inbox or transport queues. No keys, old credentials, permissions, conversation bindings or pending work are restored. Repeating an old action requires checking current host state; the archive cannot prove that the action never ran.
 
-Imported content stays in separate tables in the current node's private SQLite database. It is plaintext at that trusted endpoint, like current Gent messages, and is not replicated to other nodes or uploaded to the relay. The selected agent can read it through either local MCP or its configured remote gateway; the existing provider/gateway trust boundary applies. Revoking that agent immediately prevents further reads. Another agent needs its own owner-issued import assignment.
+Imported content stays in separate tables in the current node's private SQLite database. It is plaintext at that trusted endpoint, like current Gent messages, and is not replicated to other nodes or uploaded to the relay. The selected chat can read it through either local MCP or its configured remote gateway; the existing provider/gateway trust boundary applies. Revoking that chat immediately prevents further reads. Another chat needs its own owner-issued import assignment.
 
 ### Remove or restore an assignment
 
@@ -114,7 +114,7 @@ Removal deletes the imported message/file rows and advances the receipt to revis
 
 ```sh
 gent history import ~/gent-backups/node.age --identity ~/gent-recovery.key \
-  --from-agent OLD_AGENT_UUID --agent CURRENT_AGENT_UUID --restore-revision 2
+  --from-chat OLD_CHAT_UUID --chat CURRENT_CHAT_UUID --restore-revision 2
 ```
 
 That restoration advances the revision to 3. Exact removal/restoration retries are safe; stale revisions are refused. Recreating an archive produces a different import identity, so overlapping archives can contain the same historical messages. Use source cluster/archive provenance and original message IDs when comparing them.
@@ -136,65 +136,65 @@ gent backup history ~/gent-backups/later.age --identity ~/later-recovery.key \
   --from-import SAVED_IMPORT_UUID --output ~/gent-recovered-history
 ```
 
-This produces a version-2 history export with the same JSONL/file layout and an additional `lineage` array. Each entry preserves the preceding archive/cluster/node IDs, capture time, database digest, import ID, source manifest digest, original agent, assigned recipient, recipient revocation flag, import time and access revision. The top-level archive fields identify the newly read backup; the first lineage entry identifies the original source. Up to 64 assignments are retained. Exceeding that limit fails without dropping provenance. Version-1 exports remain supported; older Gent builds reject version 2.
+This produces a version-2 history export with the same JSONL/file layout and an additional `lineage` array. Each entry preserves the preceding archive/cluster/node IDs, capture time, database digest, import ID, source manifest digest, original chat, assigned recipient, recipient revocation flag, import time and access revision. The top-level archive fields identify the newly read backup; the first lineage entry identifies the original source. Up to 64 assignments are retained. Exceeding that limit fails without dropping provenance. Version-1 exports remain supported; older Gent builds reject version 2.
 
-Re-export verifies the selected receipt's identity, message/participant bindings, file descriptors, chunk and whole-file hashes, stored byte counts and supported schema. Inline images retain their original bytes, and missing/incomplete attachments retain their status. It does not export unrelated assignments or combine overlapping histories, even when their original message IDs match. Removed assignments remain receipts and cannot supply content. A saved recipient revocation flag is reported as historical state; an owner may deliberately assign the retained content to a different current agent.
+Re-export verifies the selected receipt's identity, message/participant bindings, file descriptors, chunk and whole-file hashes, stored byte counts and supported schema. Inline images retain their original bytes, and missing/incomplete attachments retain their status. It does not export unrelated assignments or combine overlapping histories, even when their original message IDs match. Removed assignments remain receipts and cannot supply content. A saved recipient revocation flag is reported as historical state; an owner may deliberately assign the retained content to a different current chat.
 
-To grant that selected history directly to a current local agent, use the later archive and its key:
+To grant that selected history directly to a current local chat, use the later archive and its key:
 
 ```sh
 gent history import ~/gent-backups/later.age --identity ~/later-recovery.key \
-  --from-import SAVED_IMPORT_UUID --agent CURRENT_AGENT_UUID
+  --from-import SAVED_IMPORT_UUID --chat CURRENT_CHAT_UUID
 ```
 
-Choose exactly one of `--from-agent` or `--from-import`. The latter uses the selected import's original agent scope, and does not expand it to other archived conversations. The new assignment gets its own ID and access revision; its provenance includes the earlier assignment. Existing duplicate/removal/restoration rules apply to that new assignment. The old recipient, its credentials and its permissions are never reactivated.
+Choose exactly one of `--from-chat` or `--from-import`. The latter uses the selected import's original chat scope, and does not expand it to other archived conversations. The new assignment gets its own ID and access revision; its provenance includes the earlier assignment. Existing duplicate/removal/restoration rules apply to that new assignment. The old recipient, its credentials and its permissions are never reactivated.
 
-Once captured in a later backup, imported content can be recovered using that backup and its key alone. Earlier archives remain necessary for records or files that were never included in the import. A snapshot taken before removal still contains its earlier history; neither a later removal nor agent revocation can retract old archives. Restoring a raw database as live node state remains unsafe and blocked by the activation guard.
+Once captured in a later backup, imported content can be recovered using that backup and its key alone. Earlier archives remain necessary for records or files that were never included in the import. A snapshot taken before removal still contains its earlier history; neither a later removal nor chat revocation can retract old archives. Restoring a raw database as live node state remains unsafe and blocked by the activation guard.
 
 ## Recover a conversation binding
 
-Start or enroll the replacement node normally. Close the host's Gent MCP connection before preparing its binding. Choose the historical agent from an offline export, then run one of these commands against the replacement node:
+Start or enroll the replacement node normally. Close the host's Gent MCP connection before preparing its binding. Choose the historical chat from an offline export, then run one of these commands against the replacement node:
 
 ```sh
-gent --home ~/.gent-replacement agent recover ~/gent-backups/node.age \
-  --identity ~/gent-recovery.key --from-agent OLD_AGENT_UUID \
-  --name recovered-agent --binding ~/.gent-replacement/bindings/recovered.key
+gent --home ~/.gent-replacement chat recover ~/gent-backups/node.age \
+  --identity ~/gent-recovery.key --from-chat OLD_CHAT_UUID \
+  --name recovered-chat --binding ~/.gent-replacement/bindings/recovered.key
 
-gent --home ~/.gent-replacement agent recover ~/gent-backups/node.age \
-  --identity ~/gent-recovery.key --from-agent OLD_AGENT_UUID \
+gent --home ~/.gent-replacement chat recover ~/gent-backups/node.age \
+  --identity ~/gent-recovery.key --from-chat OLD_CHAT_UUID \
   --name recovered-codex --host codex --conversation CODEX_THREAD_ID
 
-gent --home ~/.gent-replacement agent recover ~/gent-backups/node.age \
+gent --home ~/.gent-replacement chat recover ~/gent-backups/node.age \
   --identity ~/gent-recovery.key --from-import SAVED_IMPORT_UUID \
   --name recovered-claude --host claude-code --conversation CLAUDE_SESSION_ID
 ```
 
-Select exactly one of `--from-agent` or `--from-import`. The latter reads an assignment saved in a later backup. Select either an explicit `--binding` path or a supported `--host` with its actual conversation ID. Use the Codex thread ID from that conversation or Claude's session ID, not an agent UUID or display name. For a Claude child, also supply its actual `--subagent CHILD_ID`; Codex children have their own thread IDs. Explicit bindings accept an optional descriptive `--provider`, defaulting to `generic`; host mode supplies its provider label.
+Select exactly one of `--from-chat` or `--from-import`. The latter reads an assignment saved in a later backup. Select either an explicit `--binding` path or a supported `--host` with its actual conversation ID. Use the Codex thread ID from that conversation or Claude's session ID, not a chat UUID or display name. For a Claude child, also supply its actual `--subagent CHILD_ID`; Codex children have their own thread IDs. Explicit bindings accept an optional descriptive `--provider`, defaulting to `generic`; host mode supplies its provider label.
 
-The destination must be unused. An ordinary existing binding is never overwritten, even if it has not registered yet. Use `gent history import --agent CURRENT_AGENT_UUID` to add history to an existing agent. The daemon registers a fresh agent and assigns its selected history in one transaction, including registration announcements and quota accounting. Its new identity receives the current cluster's applicable blanket/same-node permissions. Old credentials, explicit peer permissions, reply rights and pending work remain historical state.
+The destination must be unused. An ordinary existing binding is never overwritten, even if it has not registered yet. Use `gent history import --chat CURRENT_CHAT_UUID` to add history to an existing chat. The daemon registers a fresh chat and assigns its selected history in one transaction, including registration announcements and quota accounting. Its new identity receives the current cluster's applicable blanket/same-node permissions. Old credentials, explicit peer permissions, reply rights and pending work remain historical state.
 
 Reconnect the conversation with Gent configured to use the replacement node's explicit `--home` or `--cluster`. For an explicit binding, also select the returned binding path. Host mode derives the normal conversation path automatically. Recovery does not edit host settings or move provider transcripts. Close the old connection before changing configuration; for installed entries, use the existing integration uninstall/install workflow to select the replacement home. Check `gent_identity` after reconnecting, then read `gent_history_imports`. Historical messages remain outside the live inbox and must not trigger old actions automatically.
 
-For local bindings, a private `.recovery.json` sidecar records publication. While pending, it holds the newly generated credential and blocks MCP use of that binding. If the daemon is unavailable, a reply is lost or the command is interrupted, rerun the exact same command with the same archive, destination and labels. The retry reuses the credential, agent and assignment. Completion removes the credential from the sidecar; keep the receipt, binding key and `.scope.json` together. Changed arguments, conflicting files, busy bindings or a different node cause refusal. A missing pending key can be recreated from its own record; a missing completed key is never silently regenerated. Removal of the assignment or revocation of the new agent prevents recovery retries from restoring access.
+For local bindings, a private `.recovery.json` sidecar records publication. While pending, it holds the newly generated credential and blocks MCP use of that binding. If the daemon is unavailable, a reply is lost or the command is interrupted, rerun the exact same command with the same archive, destination and labels. The retry reuses the credential, chat and assignment. Completion removes the credential from the sidecar; keep the receipt, binding key and `.scope.json` together. Changed arguments, conflicting files, busy bindings or a different node cause refusal. A missing pending key can be recreated from its own record; a missing completed key is never silently regenerated. Removal of the assignment or revocation of the new chat prevents recovery retries from restoring access.
 
 ### Recover a gateway conversation
 
 For a remote MCP conversation, create its host namespace on the replacement node through `gent gateway clients add`, with the verified conversation metadata policy and any required OAuth/user/certificate policy. Existing unused conversations in a current namespace also work. Obtain the namespace UUID from `gent gateway clients list`, then prepare the binding before reconnecting the host:
 
 ```sh
-gent --home ~/.gent-replacement agent recover ~/gent-backups/node.age \
-  --identity ~/gent-recovery.key --from-agent OLD_AGENT_UUID \
+gent --home ~/.gent-replacement chat recover ~/gent-backups/node.age \
+  --identity ~/gent-recovery.key --from-chat OLD_CHAT_UUID \
   --name recovered-remote --gateway-client CLIENT_UUID \
   --conversation HOST_CONVERSATION_ID
 ```
 
-Use `--subject HOST_USER_ID` exactly when that namespace has a `--subject-key` policy. These values must match the host-owned metadata on its future calls. Prompts, tool arguments, display names and local agent IDs cannot substitute for them. The owner selects the historical read grant; normal host authentication and OAuth user pins still apply on every call. The recovery command neither issues OAuth consent nor pins an unbound grant. A call refused because recovery is pending leaves that grant's user pin unchanged. Raw conversation/user identifiers are hashed before storage; as with ordinary bindings, hashes do not conceal guessable identifiers from someone with registry access.
+Use `--subject HOST_USER_ID` exactly when that namespace has a `--subject-key` policy. These values must match the host-owned metadata on its future calls. Prompts, tool arguments, display names and local chat IDs cannot substitute for them. The owner selects the historical read grant; normal host authentication and OAuth user pins still apply on every call. The recovery command neither issues OAuth consent nor pins an unbound grant. A call refused because recovery is pending leaves that grant's user pin unchanged. Raw conversation/user identifiers are hashed before storage; as with ordinary bindings, hashes do not conceal guessable identifiers from someone with registry access.
 
-Select `--gateway-client` instead of `--binding` or `--host`. Both archive selectors remain available, and `--provider` is a descriptive label defaulting to `generic`. Gent refuses an already allocated ordinary gateway binding, even if it has not registered with the daemon. Use `gent history import --agent CURRENT_UUID` for an existing agent. Concurrent host calls and recovery commands share the registry lock: whichever first allocates the binding establishes its destination, and the other operation cannot overwrite it.
+Select `--gateway-client` instead of `--binding` or `--host`. Both archive selectors remain available, and `--provider` is a descriptive label defaulting to `generic`. Gent refuses an already allocated ordinary gateway binding, even if it has not registered with the daemon. Use `gent history import --chat CURRENT_UUID` for an existing chat. Concurrent host calls and recovery commands share the registry lock: whichever first allocates the binding establishes its destination, and the other operation cannot overwrite it.
 
-Gateway recovery stores a pending/completed record and its credential in private `gateway/state.json`, using registry version 7. Existing ordinary bindings retain their encoding and credentials, and host export formats stay unchanged. Upgrade the gateway executable before recovery; older readers reject version 7. Pending records block tool access and file-download authorization for that binding. The daemon commits fresh registration and history atomically; registry completion is a separate local write. An interrupted or lost reply leaves a reservation for the same credential, so rerunning the exact command finishes publication without another agent. Pending/completed entries count toward existing conversation and registry limits.
+Gateway recovery stores a pending/completed record and its credential in private `gateway/state.json`, using registry version 7. Existing ordinary bindings retain their encoding and credentials, and host export formats stay unchanged. Upgrade the gateway executable before recovery; older readers reject version 7. Pending records block tool access and file-download authorization for that binding. The daemon commits fresh registration and history atomically; registry completion is a separate local write. An interrupted or lost reply leaves a reservation for the same credential, so rerunning the exact command finishes publication without another chat. Pending/completed entries count toward existing conversation and registry limits.
 
-Reconnect using the replacement gateway's host credentials or a newly approved OAuth grant. The selected host must actually provide stable conversation metadata; recovery cannot supply missing provider metadata. It does not transfer old access/refresh tokens, host grants, certificates or provider transcripts. A revoked/expired host, removed import or revoked recovered agent prevents retries from restoring access. If host access is permanently revoked after daemon assignment but before publication, the binding stays unusable; the owner can inspect `gent history imports` and remove the assignment or revoke its recipient through the normal CLI. Previously assigned data and network announcements are not rolled back automatically.
+Reconnect using the replacement gateway's host credentials or a newly approved OAuth grant. The selected host must actually provide stable conversation metadata; recovery cannot supply missing provider metadata. It does not transfer old access/refresh tokens, host grants, certificates or provider transcripts. A revoked/expired host, removed import or revoked recovered chat prevents retries from restoring access. If host access is permanently revoked after daemon assignment but before publication, the binding stays unusable; the owner can inspect `gent history imports` and remove the assignment or revoke its recipient through the normal CLI. Previously assigned data and network announcements are not rolled back automatically.
 
 ## Replace a lost joined node
 
@@ -208,13 +208,13 @@ gent --home ~/.gent-replacement daemon install
 
 The owner daemon and its configured relay must be available. SSH uses strict host-key verification and the existing owner's local authority. The usual `--remote-gent`, `--remote-home`, and development-only `--relay-endpoint` options apply. Service-backed clusters require login to the same account/service before joining. The active signing owner cannot be replaced by this command. Ordinary invitation files do not authorize replacement; the scoped invitation flow below does.
 
-One signed revision retires the old node ID and signing key and enrolls the fresh identity. A durable removal record commits in the same database transaction and binds the old ID/key to the replacement ID/key. A retry after a lost reply reuses that identity; another fresh directory cannot replace the same retired node. Configuration administration is preserved only if the old node had it. Old node-specific rules, agent IDs, message history, pending sends, reply grants and conversation bindings are not transferred. Existing blanket and same-node rules apply normally to newly registered agents. Configure any new explicit permissions deliberately.
+One signed revision retires the old node ID and signing key and enrolls the fresh identity. A durable removal record commits in the same database transaction and binds the old ID/key to the replacement ID/key. A retry after a lost reply reuses that identity; another fresh directory cannot replace the same retired node. Configuration administration is preserved only if the old node had it. Old node-specific rules, chat IDs, message history, pending sends, reply grants and conversation bindings are not transferred. Existing blanket and same-node rules apply normally to newly registered chats. Configure any new explicit permissions deliberately.
 
 If joining is interrupted, rerun the identical command with the same home, name and `--replace-node` value. Keep the sibling `.joining` directory: it contains the new private identity, trusted old-key pin and retry records. A committed retirement is not rolled back if later stream or service setup fails. Losing the pending identity after that commit needs separate recovery; starting another directory is refused. Completed installations retain `node-replacement.json` and its hash in local TOML; missing or changed records are refused. These files are local recovery evidence, not cluster permission rules.
 
 Signed revocation applies as peers receive current configuration. Offline peers can retain stale authority until synchronization or lease expiry. Service credential removal follows the existing owner maintenance journal and may remain pending during service downtime. On the owner, `gent node removals` reports the old node, replacement identity and cleanup status; service confirmation does not prove that every peer has caught up. The development relay uses a shared credential and has no per-node service revocation.
 
-The new node never opens the archived runtime, resumes an old MLS ratchet or clears the recovery guard. Keep extracted archives offline. Use the separate history assignment or fresh binding recovery above to grant a new agent read access to selected archived exchanges. Pending work and peer permissions still need deliberate migration rules; archived requests must not silently become new sends. Replacing a node cannot remove historical data already held by it or its backups.
+The new node never opens the archived runtime, resumes an old MLS ratchet or clears the recovery guard. Keep extracted archives offline. Use the separate history assignment or fresh binding recovery above to grant a new chat read access to selected archived exchanges. Pending work and peer permissions still need deliberate migration rules; archived requests must not silently become new sends. Replacing a node cannot remove historical data already held by it or its backups.
 
 ## Replace through a private invitation
 
@@ -237,7 +237,7 @@ Gent enrollment uses the invitation's encrypted Noise mailbox; SSH is unnecessar
 
 ## Remaining recovery work
 
-Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, a new cluster can receive selected archived history through the assignment commands above, without recovering the old cluster's authority. Migration of old agent identities and peer permissions, actual hosted-provider recovery acceptance and pending-work reconciliation remain unfinished. Multi-user recovery authority remains future work.
+Owner replacement additionally needs current authenticated cluster checkpoints, retirement of the previous writer, and a policy for unavailable or conflicting peers. An old owner's key and backup cannot establish the newest history by themselves. If no trustworthy current authority remains, a new cluster can receive selected archived history through the assignment commands above, without recovering the old cluster's authority. Migration of old chat identities and peer permissions, actual hosted-provider recovery acceptance and pending-work reconciliation remain unfinished. Multi-user recovery authority remains future work.
 
 ## Validation
 
