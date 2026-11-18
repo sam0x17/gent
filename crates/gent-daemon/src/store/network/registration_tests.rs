@@ -3,6 +3,21 @@ use super::*;
 #[tokio::test]
 async fn discovery_keeps_duplicate_names_distinct_and_labels_only_visible_nodes() {
     let mut pair = Pair::new().await;
+    let mut discovery_policy = Policy::default();
+    discovery_policy.rules.push(Rule {
+        actor: Selector::All,
+        peer: Selector::All,
+        permission: Permission::Enumerate,
+        effect: Effect::Allow,
+    });
+    owner(
+        &mut pair,
+        0,
+        OwnerOp::SetPolicy {
+            policy: discovery_policy,
+        },
+    )
+    .unwrap();
     rename(&mut pair, 0, "cit", 1).unwrap();
     rename(&mut pair, 1, "cit", 1).unwrap();
     let local_duplicate = pair.stores[0]
