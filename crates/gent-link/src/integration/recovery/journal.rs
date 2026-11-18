@@ -62,7 +62,12 @@ fn read(home: &Path, cfg: &config::Config, create: bool) -> Result<(Snapshot, Jo
         Some(text) => {
             serde_json::from_str::<Journal>(text).context("invalid host recovery journal")?
         }
-        None if create && cfg.host_recovery()?.is_none() => Journal::new(cfg),
+        None if create
+            && cfg.host_recovery()?.is_none()
+            && !home.join("chat-discovery.json").exists() =>
+        {
+            Journal::new(cfg)
+        }
         None => anyhow::bail!("host recovery journal is missing; restore this node's state"),
     };
     ensure!(
@@ -82,7 +87,7 @@ fn read(home: &Path, cfg: &config::Config, create: bool) -> Result<(Snapshot, Jo
     Ok((saved, journal))
 }
 
-pub(super) fn initialize(home: &Path, cfg: &config::Config) -> Result<()> {
+pub(in crate::integration) fn initialize(home: &Path, cfg: &config::Config) -> Result<()> {
     let (saved, journal) = read(home, cfg, true)?;
     if saved.text.is_none() {
         saved.write(&(serde_json::to_string(&journal)? + "\n"))?;

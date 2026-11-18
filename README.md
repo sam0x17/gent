@@ -16,6 +16,8 @@ An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQL
 
 Gent [automatically updates](docs/updates.md) from the GitHub `stable` tag every five minutes, with staged builds, atomic executable replacement and startup rollback. Normal CLI responses are readable; use `--json` for scripts or `--verbose` for full response details.
 
+Opt into [automatic native chat discovery](docs/discovery.md) with `gent node discovery enable`. Supported chats become visible without first calling a Gent tool, using their native titles and stable session IDs. New-node enrollment asks about this setting. Existing nodes remain unchanged until enabled.
+
 Run `scripts/check.sh` for [development checks](docs/testing.md), including formatting, strict Clippy, Rust tests and local CLI/MCP smoke checks. The GitHub workflow uses Linux; macOS testing remains deliberate.
 
 The [local work journal](docs/work.md) records an agent's start before consequential host work and preserves uncertain attempts across restarts. `gent work` lists reports; owner-only `gent work reconcile` records reviewed outcomes or permits a subsequent attempt. It does not execute work, independently verify completion or restore old execution authority from an archive.
@@ -93,7 +95,7 @@ Mobile primarily lets the user send requests and retrieve replies. Occasional cr
 
 ## Visual identity
 
-Gent's icon and logo will use a top hat motif. The exact design, colors, and typography remain open.
+The Inkling is Gent's main logo and MCP icon: a cream character wearing a black top hat. The Classic top hat is the browser favicon. Vector masters, PNGs and ICOs are in [the branding assets](assets/branding/README.md).
 
 ## Future native applications
 

@@ -165,3 +165,4 @@ pub(crate) async fn start(home: &Path, args: Args) -> Result<Value> {
 
 #[cfg(test)]
 mod tests;
+pub(super) use claude::discovery as claude_discovery;

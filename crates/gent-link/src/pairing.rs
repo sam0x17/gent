@@ -40,6 +40,9 @@ pub struct JoinArgs {
     /// Enroll without installing a background service (for managed environments).
     #[arg(long, conflicts_with_all = ["via", "invite_file"])]
     pub(crate) no_daemon: bool,
+    /// Discover supported native chats automatically (true/false); asks on an interactive join.
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub(crate) discover_chats: Option<bool>,
     /// Retire this lost joined node and enroll a fresh identity through SSH.
     #[arg(long, conflicts_with = "invite_file")]
     replace_node: Option<String>,
@@ -64,6 +67,7 @@ impl JoinArgs {
             continue_invitation: false,
             code_file: None,
             no_daemon: false,
+            discover_chats: None,
             replace_node: None,
             remote_gent: "gent".into(),
             remote_home: None,
@@ -419,6 +423,7 @@ mod tests {
     #[test]
     fn ssh_arguments_preserve_remote_paths_and_require_authentication() {
         let mut args = JoinArgs {
+            discover_chats: None,
             code_file: None,
             no_daemon: false,
             cluster: Some("cluster".into()),

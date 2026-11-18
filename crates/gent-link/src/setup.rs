@@ -374,6 +374,7 @@ pub async fn install(
                 crate::enrollment::join(&home, {
                     let mut args = crate::pairing::JoinArgs::code(Some(code));
                     args.no_daemon = true;
+                    args.discover_chats = (!interactive).then_some(false);
                     args
                 })
                 .await?,

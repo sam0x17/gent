@@ -140,6 +140,7 @@ pub async fn run_daemon(
         _ = maintain(&home) => unreachable!("maintenance continues until daemon shutdown"),
         _ = crate::node::maintain(&home) => unreachable!("node removals continue until daemon shutdown"),
         _ = crate::integration::recovery::maintain(&home) => unreachable!("host recovery continues until daemon shutdown"),
+        _ = crate::integration::discovery::maintain(&home) => unreachable!("chat discovery continues until daemon shutdown"),
         _ = &mut web => anyhow::bail!("web node supervisor stopped unexpectedly"),
     };
     stop.cancel();

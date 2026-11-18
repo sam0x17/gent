@@ -91,6 +91,32 @@ fn report(sessions: &[sessions::Session]) -> Value {
         "session_count":sessions.len(),"sessions":sessions,"gent_bindings_checked":false})
 }
 
+pub(in crate::integration) async fn discovery(
+    home: &Path,
+    binary: &Path,
+) -> Result<(PathBuf, Vec<crate::integration::discovery::hosts::Chat>)> {
+    let target = install::claude_runtime_target(home, None)?;
+    target.require_wake()?;
+    let sessions = inspect(binary, &target).await?;
+    ensure!(
+        install::claude_runtime_target(home, None)? == target,
+        "Claude installation changed during discovery"
+    );
+    let chats = sessions
+        .into_iter()
+        .filter_map(|row| {
+            let id = row.session_id?;
+            Some(crate::integration::discovery::hosts::Chat {
+                id,
+                name: row.name,
+                working_dir: Some(row.cwd),
+                recoverable: row.native_id.is_some() && row.native_kind == "background",
+            })
+        })
+        .collect();
+    Ok((target.directory, chats))
+}
+
 pub(super) async fn status(
     home: &Path,
     directory: Option<PathBuf>,

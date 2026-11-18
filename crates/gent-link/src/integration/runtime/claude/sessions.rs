@@ -16,6 +16,7 @@ struct NativeSession {
     pid: Option<u32>,
     status: Option<String>,
     state: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -31,6 +32,8 @@ enum State {
 
 #[derive(Serialize)]
 pub(super) struct Session {
+    #[serde(skip)]
+    pub name: Option<String>,
     pub native_id: Option<String>,
     pub session_id: Option<String>,
     pub native_kind: String,
@@ -104,6 +107,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Vec<Session>> {
             }
         };
         result.push(Session {
+            name: row
+                .name
+                .and_then(|name| crate::integration::naming::title(&serde_json::json!(name))),
             native_id: row.id,
             session_id: row.session_id,
             native_kind: row.kind,

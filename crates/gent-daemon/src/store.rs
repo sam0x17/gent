@@ -290,7 +290,10 @@ impl Store {
         let read_only = matches!(
             &request,
             Request::Owner {
-                action: OwnerOp::Status | OwnerOp::Nodes | OwnerOp::NodeRemovals { .. },
+                action: OwnerOp::Status
+                    | OwnerOp::Nodes
+                    | OwnerOp::NodeRemovals { .. }
+                    | OwnerOp::WakePendingAgents { .. },
                 ..
             }
         ) && !runtime::projection_pending(&self.db)?;
@@ -728,6 +731,7 @@ impl StoreSession<'_> {
             OwnerOp::WorkList { after_message_id } => self.work_list(after_message_id.as_deref()),
             OwnerOp::WakeList { after_message_id } => self.wake_list(after_message_id.as_deref()),
             OwnerOp::WakeStatus => wake::retention::status(self.db, self.timestamp),
+            OwnerOp::WakePendingAgents { after } => self.wake_pending_agents(after.as_deref()),
             OwnerOp::WakeClean { dry_run } => {
                 wake::retention::clean(self.db, self.timestamp, dry_run)
             }

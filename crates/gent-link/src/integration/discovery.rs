@@ -1,0 +1,265 @@
+//! Opt-in indexing and wake of native chats, without requiring a first MCP call.
+mod bindings;
+mod claude;
+pub(super) mod hosts;
+mod scheduler;
+mod storage;
+pub(crate) use scheduler::maintain;
+#[cfg(test)]
+mod tests;
+
+use super::{Host, install};
+use anyhow::{Context, Result, ensure};
+use gent_daemon::config;
+use gent_protocol::{AgentOp, Request};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use storage::Entry;
+
+#[derive(clap::Subcommand)]
+pub(crate) enum Command {
+    /// Inspect local discovery settings, indexed chats and host limitations.
+    Status,
+    /// Publish supported native chats and permit waking them for incoming messages.
+    Enable,
+    /// Stop new discovery and automatic recovery; existing registrations remain.
+    Disable,
+    /// Refresh the inventory now without starting any model turns.
+    Refresh,
+}
+
+fn enabled(home: &Path, expected: &config::Config) -> Result<()> {
+    let cfg = config::load(home)?;
+    ensure!(
+        cfg.discovery()?.enabled
+            && cfg.node.id == expected.node.id
+            && cfg.cluster.id == expected.cluster.id,
+        "chat discovery was disabled or the node changed"
+    );
+    Ok(())
+}
+
+async fn agent(home: &Path, key: &str, action: AgentOp) -> Result<Value> {
+    gent_daemon::request(
+        home,
+        Request::Agent {
+            credential: key.into(),
+            action,
+        },
+    )
+    .await
+}
+
+pub(crate) fn configure(home: &Path, value: bool) -> Result<()> {
+    let _lock = super::recovery::discovery_lock(home)?;
+    let cfg = config::load(home)?;
+    if value {
+        super::recovery::initialize_discovery(home, &cfg)?;
+    }
+    config::edit_local(home, |cfg| {
+        cfg.set_discovery(config::Discovery { enabled: value })
+    })
+}
+
+pub(crate) async fn execute(home: &Path, command: Command) -> Result<Value> {
+    match command {
+        Command::Enable => configure(home, true)?,
+        Command::Disable => configure(home, false)?,
+        Command::Refresh => refresh(home).await?,
+        Command::Status => {}
+    }
+    status(home)
+}
+
+fn status(home: &Path) -> Result<Value> {
+    let cfg = config::load(home)?;
+    let (_, catalog) = storage::read(home, &cfg)?;
+    Ok(
+        json!({"chat_discovery":true,"enabled":cfg.discovery()?.enabled,"checked_at":catalog.checked,
+        "hosts":catalog.hosts,"agents":catalog.entries.values().map(|entry| json!({
+            "id":entry.agent,"name":entry.name,"host":entry.host,"native_id":entry.native,
+            "automatic_recovery":entry.recovery.is_some()
+        })).collect::<Vec<_>>(),
+        "note":"Disabling stops indexing and discovery-driven recovery. Already published registrations and loaded native chats remain; use agent revoke or integration uninstall to remove their access."}),
+    )
+}
+
+pub(crate) fn print(value: &Value) {
+    crate::ui::heading("Chat discovery");
+    crate::ui::field(
+        "Enabled",
+        if value["enabled"] == true {
+            "yes"
+        } else {
+            "no"
+        },
+    );
+    if let Some(agents) = value["agents"].as_array() {
+        crate::ui::field("Indexed chats", &agents.len().to_string());
+    }
+    if let Some(hosts) = value["hosts"].as_object() {
+        for (host, state) in hosts {
+            crate::ui::field(host, state["status"].as_str().unwrap_or("unknown"));
+            if let Some(error) = state["error"].as_str() {
+                crate::ui::field("Details", error);
+            }
+        }
+    }
+    if value["enabled"] == true {
+        println!(
+            "  The daemon indexes supported native chats automatically. Names sync to the cluster."
+        );
+    } else {
+        println!("  Enable with gent node discovery enable.");
+    }
+    println!("  Existing registrations remain when discovery is disabled.");
+}
+
+async fn register(
+    home: &Path,
+    cfg: &config::Config,
+    host: Host,
+    inventory: &hosts::Inventory,
+    chat: &hosts::Chat,
+) -> Result<Entry> {
+    enabled(home, cfg)?;
+    let credential = bindings::credential(home, cfg, host, &chat.id)?;
+    let name = chat
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("{}-{}", host.name(), &chat.id[24..]));
+    let identity = agent(
+        home,
+        &credential,
+        AgentOp::Register {
+            name,
+            provider: host.name().into(),
+        },
+    )
+    .await?;
+    ensure!(
+        identity["cluster_id"] == cfg.cluster.id && identity["agent"]["node_id"] == cfg.node.id,
+        "discovered chat registration belongs to another node"
+    );
+    let id = identity["agent"]["id"]
+        .as_str()
+        .context("missing registered identity")?
+        .to_owned();
+    let name = identity["agent"]["name"]
+        .as_str()
+        .context("missing registered name")?
+        .to_owned();
+    enabled(home, cfg)?;
+    if let Some(socket) = &inventory.socket {
+        // Never redirect an already bound chat from its live native endpoint.
+        bindings::remember(home, cfg, &chat.id, &credential, socket)?;
+    }
+    use sha2::{Digest, Sha256};
+    let recovery = chat.recoverable.then(|| config::RecoveryAgent {
+        host: match host {
+            Host::Codex => config::RecoveryHost::Codex,
+            Host::ClaudeCode => config::RecoveryHost::ClaudeCode,
+        },
+        id: uuid::Uuid::new_v4().to_string(),
+        thread_id: chat.id.clone(),
+        config_dir: inventory.directory.clone(),
+        host_binary: inventory.binary.clone(),
+        credential_hash: format!("{:x}", Sha256::digest(credential.as_bytes())),
+        working_dir: chat.working_dir.clone(),
+    });
+    Ok(Entry {
+        agent: id,
+        host,
+        native: chat.id.clone(),
+        name,
+        endpoint: inventory.socket.clone(),
+        recovery,
+    })
+}
+
+async fn refresh(home: &Path) -> Result<()> {
+    let _lock = config::state_lock(home, "chat-discovery.lock")?;
+    let cfg = config::load(home)?;
+    enabled(home, &cfg)?;
+    {
+        let _recovery_lock = super::recovery::discovery_lock(home)?;
+        super::recovery::initialize_discovery(home, &cfg)?;
+    }
+    let (saved, mut catalog) = storage::read(home, &cfg)?;
+    for host in [Host::Codex, Host::ClaudeCode] {
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            match host {
+                Host::Codex => hosts::codex(home).await,
+                Host::ClaudeCode => hosts::claude(home).await,
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "native inventory timed out; the next scan retries"
+            ))
+        });
+        match result {
+            Ok(inventory) => {
+                let mut failures = 0;
+                let mut indexed = 0;
+                let mut error = None;
+                let mut added = 0;
+                let count = inventory.chats.len();
+                let start = catalog
+                    .hosts
+                    .get(host.name())
+                    .and_then(|state| state["cursor"].as_u64())
+                    .unwrap_or(0) as usize
+                    % count.max(1);
+                let mut next = 0;
+                for offset in 0..count {
+                    let index = (start + offset) % count;
+                    let chat = &inventory.chats[index];
+                    enabled(home, &cfg)?;
+                    let key = storage::key(host, &chat.id);
+                    if catalog.entries.len() >= storage::LIMIT
+                        && !catalog.entries.contains_key(&key)
+                    {
+                        break;
+                    }
+                    if catalog.entries.contains_key(&key) {
+                        indexed += 1;
+                        continue;
+                    }
+                    if added >= 32 {
+                        next = index;
+                        break;
+                    }
+                    added += 1;
+                    match register(home, &cfg, host, &inventory, chat).await {
+                        Ok(entry) => {
+                            catalog.entries.insert(key, entry);
+                            indexed += 1;
+                        }
+                        Err(e) => {
+                            failures += 1;
+                            error = Some(e.to_string());
+                        }
+                    }
+                }
+                let truncated = inventory.truncated || indexed + failures < inventory.chats.len();
+                catalog.hosts.insert(host.name().into(), json!({"status":if failures == 0 && !truncated { "indexed" } else { "partial" },"count":indexed,"failed":failures,"truncated":truncated,"cursor":next,"error":error,
+                    "scope":if host == Host::Codex { "native interactive history, including archived chats; wake requires a supported shared server" } else { "local session titles and native background agents; closed interactive sessions require manual reopening" }}));
+            }
+            Err(error) => {
+                catalog.hosts.insert(
+                    host.name().into(),
+                    json!({"status":"unavailable","error":error.to_string()}),
+                );
+            }
+        }
+    }
+    enabled(home, &cfg)?;
+    catalog.checked = Some(super::now()?);
+    storage::save(&saved, &catalog)
+}

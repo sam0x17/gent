@@ -110,6 +110,17 @@ pub(super) fn remember(
     credential: &str,
     endpoint: Option<&Path>,
 ) -> Result<()> {
+    remember_at(folder, cfg, thread, credential, endpoint, false)
+}
+
+fn remember_at(
+    folder: &Path,
+    cfg: &config::Config,
+    thread: &str,
+    credential: &str,
+    endpoint: Option<&Path>,
+    preserve_endpoint: bool,
+) -> Result<()> {
     let path = binding::sidecar(&key_path(folder, thread), ".wake.json");
     let saved = snapshot(&path)?;
     if endpoint.is_none() && saved.text.is_none() {
@@ -130,10 +141,36 @@ pub(super) fn remember(
             current.credential_hash == desired.credential_hash,
             "wake attachment credential changed"
         );
+        ensure!(
+            !preserve_endpoint
+                || current.endpoint.is_none()
+                || current.endpoint == desired.endpoint,
+            "chat already belongs to another native endpoint"
+        );
+        if current == desired {
+            return Ok(());
+        }
     }
     let text = serde_json::to_string(&desired)? + "\n";
     ensure!(text.len() as u64 <= MAX_BYTES, "wake attachment too large");
     saved.write(&text)
+}
+
+pub(super) fn remember_discovered(
+    folder: &Path,
+    cfg: &config::Config,
+    thread: &str,
+    credential: &str,
+    socket: &Path,
+) -> Result<()> {
+    remember_at(
+        folder,
+        cfg,
+        thread,
+        credential,
+        Some(&endpoint(socket)?),
+        true,
+    )
 }
 
 pub(crate) struct Registry {

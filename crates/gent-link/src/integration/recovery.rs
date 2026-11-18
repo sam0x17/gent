@@ -40,9 +40,30 @@ fn hash(credential: &str) -> String {
     format!("{:x}", Sha256::digest(credential.as_bytes()))
 }
 
-fn lock(home: &Path) -> Result<std::fs::File> {
+pub(super) fn lock(home: &Path) -> Result<std::fs::File> {
     config::state_lock(home, "host-recovery.lock")
         .context("another host recovery operation is in progress; retry after it finishes")
+}
+
+pub(super) use journal::initialize as initialize_discovery;
+pub(super) use lock as discovery_lock;
+
+pub(super) async fn recover_discovered(
+    home: &Path,
+    agent: &str,
+    entry: &RecoveryAgent,
+) -> Result<&'static str> {
+    let _lock = lock(home)?;
+    let cfg = config::load(home)?;
+    ensure!(cfg.discovery()?.enabled, "chat discovery is disabled");
+    let mut validation = cfg.clone();
+    let mut selected = HostRecovery::new(&cfg);
+    selected.agents.insert(agent.into(), entry.clone());
+    validation.set_host_recovery(selected)?;
+    match entry.host {
+        RecoveryHost::Codex => codex::recover(home, &cfg, agent, entry).await,
+        RecoveryHost::ClaudeCode => claude::recover(home, &cfg, agent, entry).await,
+    }
 }
 
 async fn agent(home: &Path, credential: &str, action: AgentOp) -> Result<Value> {

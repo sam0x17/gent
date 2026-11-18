@@ -133,6 +133,31 @@ fn record(db: &Connection, message_id: &str) -> Result<Option<WakeRecord>> {
 }
 
 impl StoreSession<'_> {
+    pub(super) fn wake_pending_agents(&self, after: Option<&str>) -> Result<Value> {
+        if let Some(after) = after {
+            id(after)?;
+        }
+        let mut statement = self.db.prepare(
+            "SELECT DISTINCT a.id FROM agents a JOIN messages m ON m.recipient=a.id
+            WHERE a.node_id=?1 AND a.revoked=0 AND m.acknowledged=0
+            AND json_extract(m.payload,'$.expires_at')>?2 AND (?3 IS NULL OR a.id>?3)
+            AND NOT EXISTS(SELECT 1 FROM wake_dispatches w WHERE w.message_id=m.id)
+            ORDER BY a.id LIMIT 129",
+        )?;
+        let mut agents = statement
+            .query_map(
+                params![self.identity.node.id(), self.timestamp, after],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let next = if agents.len() > 128 {
+            agents.truncate(128);
+            agents.last().cloned()
+        } else {
+            None
+        };
+        Ok(json!({"agents":agents,"next":next}))
+    }
     pub(super) fn wake_check(
         &self,
         who: &Agent,

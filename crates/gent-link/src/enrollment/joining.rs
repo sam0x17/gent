@@ -47,7 +47,33 @@ pub(crate) fn pending(home: &Path) -> Result<Option<(PathBuf, String)>> {
     Ok(Some((saved.file, saved.name)))
 }
 
-pub async fn join(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Value> {
+pub async fn join(home: &Path, args: crate::pairing::JoinArgs) -> Result<Value> {
+    let preference = args.discover_chats;
+    let mut result = join_inner(home, args).await?;
+    let cfg = config::load(home)?;
+    let preference = if preference.is_some() || cfg.extra.contains_key("discovery") {
+        preference
+    } else if crate::ui::human() && io::stdin().is_terminal() && io::stderr().is_terminal() {
+        eprintln!(
+            "Gent can publish supported native chat names to your cluster and wake those chats for incoming messages. Host approvals still apply."
+        );
+        let answer = prompt(
+            "Do you want all chats on this system to be automatically discoverable by Gent? [y/N] ",
+        )?;
+        Some(matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes"))
+    } else {
+        None
+    };
+    if let Some(enabled) = preference {
+        crate::integration::discovery::configure(home, enabled).context(
+            "node enrolled; set chat discovery with gent node discovery enable or disable",
+        )?;
+    }
+    result["chat_discovery_enabled"] = json!(config::load(home)?.discovery()?.enabled);
+    Ok(result)
+}
+
+async fn join_inner(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<Value> {
     if !args.code_route()? {
         return crate::node_home::provision::join(home, args).await;
     }

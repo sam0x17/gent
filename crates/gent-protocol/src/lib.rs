@@ -645,6 +645,10 @@ pub enum OwnerOp {
         after_message_id: Option<String>,
     },
     WakeStatus,
+    /// Owner-only pending recipient IDs; does not expose message content.
+    WakePendingAgents {
+        after: Option<String>,
+    },
     WakeClean {
         dry_run: bool,
     },

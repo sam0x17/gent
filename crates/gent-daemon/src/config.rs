@@ -11,6 +11,8 @@ use std::{
 
 mod host_recovery;
 pub use host_recovery::{HostRecovery, MAX_RECOVERY_AGENTS, RecoveryAgent, RecoveryHost};
+mod discovery;
+pub use discovery::Discovery;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -342,12 +344,14 @@ pub fn save(home: &Path, config: &Config) -> Result<()> {
         }
         // Update preferences are node-local and direct TOML edits take effect
         // without config apply. Never replace them with a stale projection.
-        match previous.extra.get("updates") {
-            Some(updates) => {
-                next.extra.insert("updates".into(), updates.clone());
-            }
-            None => {
-                next.extra.remove("updates");
+        for name in ["updates", "discovery"] {
+            match previous.extra.get(name) {
+                Some(value) => {
+                    next.extra.insert(name.into(), value.clone());
+                }
+                None => {
+                    next.extra.remove(name);
+                }
             }
         }
     }
@@ -557,6 +561,7 @@ impl Config {
     /// edit. Live policy authority comes from the verified daemon database.
     pub fn validate_local(&self) -> Result<()> {
         self.updates()?;
+        self.discovery()?;
         ensure!(
             matches!(self.version, 1..=3),
             "unsupported configuration version"

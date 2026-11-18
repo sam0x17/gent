@@ -356,6 +356,11 @@ enum AgentCommand {
 }
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Configure automatic discovery and waking of supported native chats.
+    Discovery {
+        #[command(subcommand)]
+        command: Option<integration::discovery::Command>,
+    },
     /// Stop local services and archive this node for fresh enrollment; keep GitHub login.
     Reset,
     /// Add a named node through a one-time invitation, or host one with --web.
@@ -777,6 +782,15 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Node {
             command: Some(NodeCommand::Web { command }),
         }) => web::execute(&home, command).await?,
+        Some(Command::Node {
+            command: Some(NodeCommand::Discovery { command }),
+        }) => {
+            integration::discovery::execute(
+                &home,
+                command.unwrap_or(integration::discovery::Command::Status),
+            )
+            .await?
+        }
         Some(Command::Cluster {
             command: Some(ClusterCommand::Invite(args)),
         }) => invitations::create(&home, args).await?,
@@ -1110,6 +1124,8 @@ async fn execute(cli: Cli) -> Result<()> {
         output_format.print(&output)?;
     } else if output["web_node"] == true || output["web_nodes"].is_array() {
         web::print(&output);
+    } else if output["chat_discovery"] == true {
+        integration::discovery::print(&output);
     } else if let Some(view) = display {
         print!("{}", display::render(view, &output)?);
     } else if owner_transfer_output {
