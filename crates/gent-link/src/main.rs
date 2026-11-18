@@ -145,7 +145,8 @@ enum Command {
         #[command(subcommand)]
         command: Option<ListCommand>,
     },
-    /// List registered agents as the local owner.
+    /// List known agents across the cluster, grouped by node.
+    #[command(visible_aliases = ["ls", "list"])]
     Agents,
     /// List enrolled nodes and recent encrypted connectivity checks.
     Nodes,
@@ -862,7 +863,15 @@ async fn execute(cli: Cli) -> Result<()> {
             },
         )?,
         Some(Command::Providers { .. }) => owner(&home, OwnerOp::Providers).await?,
-        Some(Command::Agents) => owner(&home, OwnerOp::Agents).await?,
+        Some(Command::Agents) => {
+            let agents = owner(&home, OwnerOp::Agents).await?;
+            if output_format.raw() {
+                agents
+            } else {
+                let nodes = owner(&home, OwnerOp::Nodes).await?;
+                json!({"agents":agents,"nodes":nodes})
+            }
+        }
         Some(Command::Nodes) => owner(&home, OwnerOp::Nodes).await?,
         Some(Command::Files { command }) => {
             let action = match command.unwrap_or(FilesCommand::Status) {

@@ -59,6 +59,7 @@ gent integration install claude-code
 gent node name
 gent node name set my-node
 gent nodes
+gent ls                         # Known chats across the cluster, grouped by node
 gent cluster
 gent cluster new
 gent cluster join my-cluster-id

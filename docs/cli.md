@@ -8,6 +8,15 @@ Use nouns to identify resources and verbs to change them. Bare status commands s
 
 The current `gent`, `gent cluster [status]`, `gent node`, `gent nodes`, `gent agents`, `gent agent show ID`, and `gent providers [list]` views use readable text by default. IDs remain complete for copying, timestamps use GMT, and empty inventories explain how registrations appear. `gent node` labels its source as local configuration and works with a stopped daemon; the live cluster and inventory views require the daemon. The cluster summary reports signed configuration and transport readiness. Use `gent auth` or `gent doctor` for account status.
 
+`gent ls` and `gent list` are aliases for `gent agents`. They show the cluster's
+known chats grouped by node name, with node connectivity, provider, registration
+state and full IDs. Nodes and agents are sorted by name; identical names remain
+separate by ID. Empty nodes are included, and offline nodes retain their known
+registrations. Chats appear after registration or opt-in discovery on their
+hosting node. The CLI uses local owner access; MCP enumeration still follows
+the calling agent's permissions. `--json` and `--verbose` preserve the existing
+flat agent array with `node_id` on each entry.
+
 `gent agent show ID` also reports the registration generation. Use `gent agent rename ID NAME` on the hosting node to change its Gent label while preserving identity and permissions. `--expect-generation N` compares with a previous observation; without it, the CLI reads the generation before committing. See [agent renaming](providers.md#rename-an-agent) for concurrent edits, retries and the equivalent MCP tool.
 
 Use `--json` for scripts and structured output. It preserves the existing response fields and values, including original labels. Human output escapes terminal controls, line separators and bidirectional formatting characters in labels. A paired link or an active registration does not prove that a remote daemon or host is currently running; the readable views keep those limits visible. Selecting `--home` or `--cluster` applies equally to human and JSON output.

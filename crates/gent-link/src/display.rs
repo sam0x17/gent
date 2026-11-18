@@ -1,5 +1,7 @@
 //! Human views of existing responses. Rendering performs no I/O or RPC calls;
 //! JSON callers retain the original response and its complete field set.
+mod agents;
+
 use anyhow::{Context, Result};
 use gent_daemon::config::{ClusterConfig, NodeConfig};
 use gent_protocol::Agent;
@@ -216,53 +218,20 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
                 "\n  Status reflects recent daemon communication. Use --verbose for connection evidence."
             )?;
         }
-        View::Agent | View::Agents => {
-            let agents: Vec<Agent> = if matches!(view, View::Agent) {
-                vec![serde_json::from_value(value.clone()).context("invalid agent response")?]
-            } else {
-                serde_json::from_value(value.clone()).context("invalid agent list response")?
-            };
-            writeln!(
-                output,
-                "{}  {}",
-                crate::ui::paint("gent", "1;36"),
-                crate::ui::paint(&format!("Agents ({})", agents.len()), "1")
-            )?;
-            if matches!(view, View::Agent) {
-                for value in &agents {
-                    writeln!(output)?;
-                    agent(&mut output, value)?;
-                }
-            } else {
-                let rows = agents
-                    .iter()
-                    .map(|value| {
-                        vec![
-                            value.name.clone(),
-                            value.provider.clone(),
-                            if value.revoked { "revoked" } else { "active" }.into(),
-                            value.id.clone(),
-                        ]
-                    })
-                    .collect::<Vec<_>>();
-                output.push_str(&table(&["AGENT", "PROVIDER", "REGISTRATION", "ID"], &rows));
-            }
-            if matches!(view, View::Agent)
-                && let Some(generation) = value["registration_generation"].as_u64()
-            {
+        View::Agents => agents::render(&mut output, value)?,
+        View::Agent => {
+            let details: Agent =
+                serde_json::from_value(value.clone()).context("invalid agent response")?;
+            header(&mut output, "Agents (1)")?;
+            writeln!(output)?;
+            agent(&mut output, &details)?;
+            if let Some(generation) = value["registration_generation"].as_u64() {
                 writeln!(output, "  Registration generation: {generation}")?;
             }
-            if agents.is_empty() {
-                writeln!(
-                    output,
-                    "\nRegister an existing chat through its Gent MCP connection."
-                )?;
-            } else {
-                writeln!(
-                    output,
-                    "\nActivity is the daemon's recorded contact time. Live host availability is unknown."
-                )?;
-            }
+            writeln!(
+                output,
+                "\nActivity is the daemon's recorded contact time. Live host availability is unknown."
+            )?;
         }
         View::Providers => {
             let providers: BTreeMap<String, Vec<Agent>> =
