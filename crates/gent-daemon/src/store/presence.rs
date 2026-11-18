@@ -112,6 +112,16 @@ impl StoreSession<'_> {
         if !reply {
             // This queues only node control traffic. It never creates an agent
             // message, receipt, registration update or host-input submission.
+            let supported = activity::acknowledgement(challenge);
+            self.queue(
+                peer,
+                event_id(peer, supported, true),
+                Event::Presence {
+                    challenge: supported,
+                    reply: true,
+                },
+                None,
+            )?;
             return self.queue(
                 peer,
                 event_id(peer, challenge, true),
@@ -124,6 +134,20 @@ impl StoreSession<'_> {
         }
         let Some(saved) = evidence(self.db, peer)? else {
             return Ok(());
+        };
+        let challenge = if saved.key == key
+            && saved
+                .challenge
+                .is_some_and(|pending| activity::acknowledgement(pending) == challenge)
+        {
+            if saved.issued_at.is_some_and(|issued| {
+                issued <= self.timestamp && self.timestamp - issued <= RESPONSE_WINDOW
+            }) {
+                self.confirm_activity_support(peer)?;
+            }
+            saved.challenge.unwrap()
+        } else {
+            challenge
         };
         if saved.key != key || saved.challenge != Some(challenge) {
             return Ok(());

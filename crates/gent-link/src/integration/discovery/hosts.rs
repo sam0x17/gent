@@ -4,6 +4,7 @@ use super::*;
 pub(in crate::integration) struct Chat {
     pub id: String,
     pub name: Option<String>,
+    pub last_activity_at: Option<i64>,
     pub working_dir: Option<PathBuf>,
     pub recoverable: bool,
 }
@@ -113,6 +114,7 @@ fn codex_page(value: &Value) -> Result<(Vec<Chat>, Option<String>)> {
         result.push(Chat {
             id: id.into(),
             name: super::super::naming::title(&row["name"]),
+            last_activity_at: super::activity::timestamp(row["updatedAt"].as_i64()),
             working_dir: None,
             recoverable: true,
         });

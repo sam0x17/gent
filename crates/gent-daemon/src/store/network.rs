@@ -265,7 +265,7 @@ impl StoreSession<'_> {
             Some(expires),
         )
     }
-    fn import_registration(&self, node: &str, incoming: &Registration) -> Result<()> {
+    pub(super) fn import_registration(&self, node: &str, incoming: &Registration) -> Result<()> {
         incoming.verify(&self.state, node)?;
         ensure!(
             node != self.identity.node.id(),
@@ -390,6 +390,9 @@ impl StoreSession<'_> {
                 ),
             },
             Event::Registration { agent } => self.import_registration(peer, &agent),
+            Event::ConversationActivity { agent, timestamp } => {
+                self.import_activity(peer, &agent, timestamp)
+            }
             Event::Receipt {
                 message_id,
                 delivered,

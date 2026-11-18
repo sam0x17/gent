@@ -39,7 +39,7 @@ The `Linux checks` workflow runs on pushes to `main`, pull requests and manual d
 
 Checkout and dependency-cache actions use commit pins. The job has read-only repository permissions, does not persist checkout credentials and needs no repository secrets. It caches downloaded Cargo dependencies; compiled targets are rebuilt. Native debug information and incremental compilation are disabled to limit runner disk use. Update the toolchain/action pins deliberately, then run the checks before committing.
 
-This repository has no macOS Actions job. Test on a Mac deliberately over SSH. Any future macOS workflow must use only `workflow_dispatch`, without push, pull-request, schedule or automatic workflow chaining. On the trial Mac, raise the shell's file-descriptor limit with `ulimit -n 4096` before the Rust suite.
+This repository has no macOS Actions job. Test on a Mac deliberately over SSH. Any future macOS workflow must use only `workflow_dispatch`, without push, pull-request, schedule or automatic workflow chaining. The shared check script defaults to two Rust test threads because parallel fixtures open many independent node databases in one process. For direct Cargo tests, use `RUST_TEST_THREADS=2 cargo test --workspace --locked`. No raised file-descriptor limit is required. Developers can override the thread count when their environment supports more concurrent fixtures.
 
 The private parent has separate Worker and native-tool workspaces; this client workflow does not check them or fetch the parent. Their formatting, strict Clippy and service tests remain separate checks.
 

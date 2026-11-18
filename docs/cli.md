@@ -9,13 +9,25 @@ Use nouns to identify resources and verbs to change them. Bare status commands s
 The current `gent`, `gent cluster [status]`, `gent node`, `gent nodes`, `gent agents`, `gent agent show ID`, and `gent providers [list]` views use readable text by default. IDs remain complete for copying, timestamps use GMT, and empty inventories explain how registrations appear. `gent node` labels its source as local configuration and works with a stopped daemon; the live cluster and inventory views require the daemon. The cluster summary reports signed configuration and transport readiness. Use `gent auth` or `gent doctor` for account status.
 
 `gent ls` and `gent list` are aliases for `gent agents`. They show the cluster's
-known chats grouped by node name, with node connectivity, provider, registration
-state and full IDs. Nodes and agents are sorted by name; identical names remain
-separate by ID. Empty nodes are included, and offline nodes retain their known
-registrations. Chats appear after registration or opt-in discovery on their
-hosting node. The CLI uses local owner access; MCP enumeration still follows
-the calling agent's permissions. `--json` and `--verbose` preserve the existing
-flat agent array with `node_id` on each entry.
+known chats grouped by node name, with node connectivity, provider, last activity
+and full IDs. Nodes and agents are sorted by name; duplicate names show the most
+recent activity first and retain separate IDs. Empty nodes are included, and
+offline nodes retain their known registrations. Retired registrations are
+collapsed into a count. `--verbose` or `--json` shows the full flat directory,
+including retired entries, their last known `node_name` and `node_id`.
+
+`gent agents clear --dry-run` previews retired registrations eligible for removal
+from this node's directory. `gent agents clear` clears those entries and their
+summary count. It is retryable and preserves native conversations, retained
+messages and revocation records. Other nodes keep their own directory views.
+The `ls` and `list` aliases accept the same subcommands.
+
+`gent resolve rtao` selects the exact matching active conversation with the most
+recent `last_activity_at`. Use `--node NAME_OR_ID` or `--provider HOST` to narrow
+the match, or supply a full agent ID. Missing or tied activity returns an
+ambiguous result with candidates. Resolving never sends a message or starts a
+model. The CLI uses local owner access; MCP `gent_resolve` first filters by the
+calling agent's enumeration permissions. See [activity metadata](discovery.md#conversation-activity).
 
 `gent agent show ID` also reports the registration generation. Use `gent agent rename ID NAME` on the hosting node to change its Gent label while preserving identity and permissions. `--expect-generation N` compares with a previous observation; without it, the CLI reads the generation before committing. See [agent renaming](providers.md#rename-an-agent) for concurrent edits, retries and the equivalent MCP tool.
 

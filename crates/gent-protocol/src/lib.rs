@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub mod administration;
 pub mod configuration_log;
+pub mod directory;
 pub mod file_objects;
 pub mod history;
 pub mod hosted_mcp;
@@ -291,6 +292,11 @@ pub enum AgentOp {
         changes: Vec<administration::PermissionRuleChange>,
     },
     Agents,
+    Resolve {
+        name: String,
+        node: Option<String>,
+        provider: Option<String>,
+    },
     RequestIds {
         #[serde(default = "one_request_id")]
         count: u32,
@@ -618,6 +624,18 @@ pub enum OwnerOp {
     },
     Nodes,
     Agents,
+    ObserveActivity {
+        agent_id: String,
+        last_activity_at: i64,
+    },
+    ClearRetiredAgents {
+        dry_run: bool,
+    },
+    Resolve {
+        name: String,
+        node: Option<String>,
+        provider: Option<String>,
+    },
     Agent {
         agent_id: String,
     },

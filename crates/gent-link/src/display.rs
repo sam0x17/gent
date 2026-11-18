@@ -16,6 +16,7 @@ pub(crate) enum View {
     Nodes,
     Agent,
     Agents,
+    Resolution,
     Providers,
 }
 
@@ -219,6 +220,7 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
             )?;
         }
         View::Agents => agents::render(&mut output, value)?,
+        View::Resolution => agents::resolution(&mut output, value)?,
         View::Agent => {
             let details: Agent =
                 serde_json::from_value(value.clone()).context("invalid agent response")?;

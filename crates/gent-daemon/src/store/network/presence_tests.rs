@@ -1,5 +1,22 @@
 use super::*;
 
+#[tokio::test]
+async fn legacy_presence_reply_does_not_enable_activity_and_unmatched_proof_is_ignored() {
+    let mut pair = Pair::new().await;
+    pair.stores[0].presence_tick().unwrap();
+    let first = challenge(&pair, 0);
+    reply(&pair, 0, first).unwrap();
+    assert_eq!(count(&pair, 0, "activity_peers"), 0);
+    advance(&pair, 0, 31);
+    pair.stores[0].presence_tick().unwrap();
+    let second = challenge(&pair, 0);
+    reply(&pair, 0, activity::acknowledgement(first)).unwrap();
+    assert_eq!(count(&pair, 0, "activity_peers"), 0);
+    reply(&pair, 0, activity::acknowledgement(second)).unwrap();
+    assert_eq!(count(&pair, 0, "activity_peers"), 1);
+    assert_eq!(remote(&mut pair, 0)["status"], "connected");
+}
+
 fn owner(pair: &mut Pair, index: usize, action: OwnerOp) -> Result<Value> {
     let credential = config::read_private(&pair.homes[index].path().join("owner.key"))?;
     pair.stores[index].execute(Request::Owner { credential, action })

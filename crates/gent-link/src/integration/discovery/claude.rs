@@ -43,7 +43,7 @@ pub(super) fn history(directory: &Path, chats: &mut Vec<hosts::Chat>) -> Result<
             let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if !super::super::wake::valid_thread(id) || !known.insert(id.into()) {
+            if !super::super::wake::valid_thread(id) {
                 continue;
             }
             if chats.len() == storage::LIMIT {
@@ -58,9 +58,17 @@ pub(super) fn history(directory: &Path, chats: &mut Vec<hosts::Chat>) -> Result<
             let name = super::super::naming::claude_title(
                 &json!({"session_id":id,"transcript_path":path}),
             );
+            let last_activity_at = super::activity::claude(&path, id);
+            if !known.insert(id.into()) {
+                if let Some(chat) = chats.iter_mut().find(|chat| chat.id == id) {
+                    chat.last_activity_at = last_activity_at;
+                }
+                continue;
+            }
             chats.push(hosts::Chat {
                 id: id.into(),
                 name,
+                last_activity_at,
                 working_dir: None,
                 recoverable: false,
             });

@@ -81,7 +81,7 @@ pub(super) fn title(value: &Value) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-fn open_metadata(path: &Path) -> Result<std::fs::File> {
+pub(super) fn open_metadata(path: &Path) -> Result<std::fs::File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(

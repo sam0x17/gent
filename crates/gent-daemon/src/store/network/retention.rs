@@ -92,6 +92,7 @@ impl StoreSession<'_> {
                 Some(receipt_expires.context("receipt lacks a retention deadline")?),
                 None,
             ),
+            Event::ConversationActivity { .. } => ("control", Some(timestamp + 86400), None),
             Event::Registration { agent } => {
                 ("control", None, Some((agent.id.clone(), agent.generation)))
             }

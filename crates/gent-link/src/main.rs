@@ -147,7 +147,18 @@ enum Command {
     },
     /// List known agents across the cluster, grouped by node.
     #[command(visible_aliases = ["ls", "list"])]
-    Agents,
+    Agents {
+        #[command(subcommand)]
+        command: Option<AgentsCommand>,
+    },
+    /// Resolve an exact agent name, defaulting to its most recent conversation activity.
+    Resolve {
+        name: String,
+        #[arg(long)]
+        node: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// List enrolled nodes and recent encrypted connectivity checks.
     Nodes,
     /// Inspect local file storage and clean expired handoff copies.
@@ -189,6 +200,14 @@ enum Command {
     Relay {
         #[command(subcommand)]
         command: Option<RelayCommand>,
+    },
+}
+#[derive(Subcommand)]
+enum AgentsCommand {
+    /// Clear retired registrations from this node's directory; preserve chat history.
+    Clear {
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 #[derive(Subcommand)]
@@ -729,7 +748,8 @@ async fn execute(cli: Cli) -> Result<()> {
         }) => Some(display::View::Cluster),
         Some(Command::Node { command: None }) => Some(display::View::Node),
         Some(Command::Nodes) => Some(display::View::Nodes),
-        Some(Command::Agents) => Some(display::View::Agents),
+        Some(Command::Agents { command: None }) => Some(display::View::Agents),
+        Some(Command::Resolve { .. }) => Some(display::View::Resolution),
         Some(Command::Agent {
             command: AgentCommand::Show { .. } | AgentCommand::Rename { .. },
         }) => Some(display::View::Agent),
@@ -863,7 +883,25 @@ async fn execute(cli: Cli) -> Result<()> {
             },
         )?,
         Some(Command::Providers { .. }) => owner(&home, OwnerOp::Providers).await?,
-        Some(Command::Agents) => {
+        Some(Command::Resolve {
+            name,
+            node,
+            provider,
+        }) => {
+            owner(
+                &home,
+                OwnerOp::Resolve {
+                    name,
+                    node,
+                    provider,
+                },
+            )
+            .await?
+        }
+        Some(Command::Agents {
+            command: Some(AgentsCommand::Clear { dry_run }),
+        }) => owner(&home, OwnerOp::ClearRetiredAgents { dry_run }).await?,
+        Some(Command::Agents { command: None }) => {
             let agents = owner(&home, OwnerOp::Agents).await?;
             if output_format.raw() {
                 agents

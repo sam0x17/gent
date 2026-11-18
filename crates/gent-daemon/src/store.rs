@@ -17,12 +17,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Notify;
+mod activity;
 mod administration;
 mod agents;
 mod configuration;
 pub(crate) use configuration::pending::schema as pending_configuration_schema;
 pub(crate) use configuration::routing::schema as configuration_routing_schema;
 mod diagnostics;
+pub(crate) mod directory;
 mod files;
 pub(crate) mod handoff;
 mod history;
@@ -139,6 +141,8 @@ impl Store {
         work::schema(&db)?;
         wake::schema(&db)?;
         presence::schema(&db)?;
+        directory::schema(&db)?;
+        activity::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -171,6 +175,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let identity = Identity::load_or_create(home, &config, &tx, now() as u64)?;
         peer_configuration::check_state(&tx, &identity.state(&tx)?)?;
+        directory::backfill_names(&tx, &identity.state(&tx)?)?;
         configuration::pending::recover(&tx, identity.node.id())?;
         if let Some(record) = replacement {
             record.verify_node(&identity.node)?;
@@ -699,7 +704,17 @@ impl StoreSession<'_> {
                 before,
             } => self.permission_admin_history(administrator.as_deref(), before),
             OwnerOp::Nodes => self.nodes(),
-            OwnerOp::Agents => Ok(serde_json::to_value(self.all_agents()?)?),
+            OwnerOp::Agents => Ok(serde_json::to_value(self.directory(None)?)?),
+            OwnerOp::Resolve {
+                name,
+                node,
+                provider,
+            } => self.resolve_agent(None, &name, node.as_deref(), provider.as_deref()),
+            OwnerOp::ObserveActivity {
+                agent_id,
+                last_activity_at,
+            } => self.observe_activity(&agent_id, last_activity_at),
+            OwnerOp::ClearRetiredAgents { dry_run } => self.clear_retired_agents(dry_run),
             OwnerOp::Agent { agent_id } => self.agent_details(&agent_id),
             OwnerOp::RenameAgent {
                 agent_id,
@@ -894,6 +909,11 @@ impl StoreSession<'_> {
                 self.agent_identity(&who.id)
             }
             AgentOp::Agents => self.visible_agents(&who),
+            AgentOp::Resolve {
+                name,
+                node,
+                provider,
+            } => self.resolve_agent(Some(&who), &name, node.as_deref(), provider.as_deref()),
             AgentOp::HistoryImports => self.recovered_imports(Some(&who)),
             AgentOp::HistoryMessages { import_id, after } => {
                 self.recovered_messages(&who, &import_id, after)
@@ -1336,6 +1356,7 @@ impl StoreSession<'_> {
         tx.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES (?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
         self.bind_attachments(&message, &attachments)?;
         self.record_relay_message(&message)?;
+        self.save_activity(&sender.id, message.created_at)?;
         if remote {
             self.queue_message(&recipient.node_id, request_id, &message)?;
         }

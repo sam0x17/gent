@@ -1,4 +1,5 @@
 //! Opt-in indexing and wake of native chats, without requiring a first MCP call.
+mod activity;
 mod bindings;
 mod claude;
 pub(super) mod hosts;
@@ -215,6 +216,7 @@ async fn register(
         host,
         native: chat.id.clone(),
         name,
+        last_activity_at: None,
         endpoint: inventory.socket.clone(),
         recovery,
     })
@@ -284,8 +286,14 @@ async fn refresh(home: &Path) -> Result<()> {
                     {
                         break;
                     }
-                    if catalog.entries.contains_key(&key) {
-                        indexed += 1;
+                    if let Some(entry) = catalog.entries.get_mut(&key) {
+                        match observe_activity(home, entry, chat.last_activity_at).await {
+                            Ok(()) => indexed += 1,
+                            Err(e) => {
+                                failures += 1;
+                                error = Some(e.to_string());
+                            }
+                        }
                         continue;
                     }
                     if added >= 32 {
@@ -294,7 +302,13 @@ async fn refresh(home: &Path) -> Result<()> {
                     }
                     added += 1;
                     match register(home, &cfg, host, &inventory, chat).await {
-                        Ok(entry) => {
+                        Ok(mut entry) => {
+                            if let Err(e) =
+                                observe_activity(home, &mut entry, chat.last_activity_at).await
+                            {
+                                failures += 1;
+                                error = Some(e.to_string());
+                            }
                             catalog.entries.insert(key, entry);
                             indexed += 1;
                         }
@@ -348,4 +362,21 @@ fn record_failure(previous: &mut Value, error: &str) {
     if failures >= 3 {
         previous["next_page"] = Value::Null;
     }
+}
+
+async fn observe_activity(home: &Path, entry: &mut Entry, timestamp: Option<i64>) -> Result<()> {
+    if let Some(timestamp) =
+        timestamp.filter(|value| entry.last_activity_at.is_none_or(|old| *value > old))
+    {
+        crate::owner(
+            home,
+            gent_protocol::OwnerOp::ObserveActivity {
+                agent_id: entry.agent.clone(),
+                last_activity_at: timestamp,
+            },
+        )
+        .await?;
+        entry.last_activity_at = Some(timestamp);
+    }
+    Ok(())
 }

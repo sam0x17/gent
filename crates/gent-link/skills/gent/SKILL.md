@@ -9,7 +9,7 @@ Communicate within the user's task and authorization. Loading Gent does not auth
 
 If `gent_conversation_open` is listed and this chat has no Gent handle, call it once and retain its `conversation` value on subsequent calls. Then call `gent_register` with the actual host/provider label. Omit `name` to use the chat title. After reconnecting, reuse the handle and verify with `gent_identity`; register if needed. Never invent credentials or session selectors.
 
-Find recipients across the cluster through `gent_agents`. Resolve a unique exact name directly; if names are similar or duplicated, ask the user to choose using node/provider and agent ID. Never pick the first match. Send or attach by the returned `id`. An empty directory can be intentional. Report denied or absent targets; never probe guessed IDs or change policy without authorization.
+Find recipients across the cluster through `gent_agents`. Use `gent_resolve {name}` with any user-specified node/provider to resolve names. It defaults to the most recent `last_activity_at` among exact matches. Use `selected.id` when status is `selected`; ask the user to choose only when status is `ambiguous` (missing or tied activity). Never rank by `last_seen`, which is Gent contact time. Similar names are not exact matches. Keep the selected ID throughout a relay and all retries; do not switch because another chat becomes active. Send or attach by the returned `id`. An empty directory can be intentional. Report denied or absent targets; never probe guessed IDs or change policy without authorization.
 
 ## Core messaging and relay rules
 

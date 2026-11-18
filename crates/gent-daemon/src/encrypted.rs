@@ -944,6 +944,10 @@ pub(crate) fn persist_authority(
 ) -> Result<()> {
     crate::store::handoff::check_state(db, state)?;
     crate::store::handoff::admit_epochs(db, identity, state, false, None)?;
+    crate::store::directory::remember_nodes(db, state.state())?;
+    for update in updates {
+        crate::store::directory::remember_nodes(db, &update.state)?;
+    }
     // All callers own a transaction. Cleanup may release records required only
     // by peers revoked in this update; a capacity or cleanup failure restores
     // the previous authority together with its history.

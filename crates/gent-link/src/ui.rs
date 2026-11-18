@@ -109,7 +109,7 @@ impl Output {
             Some(C::Node { .. }) => "Node",
             Some(C::Nodes) => "Nodes",
             Some(C::Agent { .. }) => "Agent",
-            Some(C::Agents) => "Agents",
+            Some(C::Agents { .. } | C::Resolve { .. }) => "Agents",
             Some(C::Integration { .. } | C::Integrations) => "Integrations",
             Some(C::Hooks { .. } | C::Completions { .. }) => "Shell",
             Some(C::Config { .. }) => "Configuration",

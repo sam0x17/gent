@@ -5,19 +5,7 @@ use gent_protocol::MAX_REGISTRATION_GENERATION;
 
 impl StoreSession<'_> {
     pub(super) fn visible_agents(&self, who: &Agent) -> Result<Value> {
-        self.all_agents()?
-            .into_iter()
-            .filter(|other| self.config.policy.visible(who, other))
-            .map(|agent| {
-                let node = self.state.state().nodes.get(&agent.node_id);
-                let mut value = serde_json::to_value(&agent)?;
-                // Reveal a node label only alongside an already-visible agent.
-                // Display names are not identities and need not be unique.
-                value["node_name"] = json!(node.map(|node| &node.name));
-                Ok(value)
-            })
-            .collect::<Result<Vec<_>>>()
-            .map(Value::Array)
+        Ok(serde_json::to_value(self.directory(Some(who))?)?)
     }
 
     fn registration_generation(&self, agent: &Agent) -> Result<u64> {

@@ -53,9 +53,31 @@ message submissions retain their existing timeout and uncertainty rules.
 
 Each native session ID maps to one Gent identity. Later MCP calls in that chat
 reuse it. Identical titles produce separate entries, including on the same
-node. Send by the returned agent ID after resolving a unique name; ask the user
-to choose when several entries match. Native title changes do not overwrite a
-name the user already set in Gent.
+node. Use `gent_resolve` (or CLI `gent resolve`) to select the most recently active
+exact match, then send by its returned ID. Native title changes do not overwrite
+a name the user already set in Gent.
+
+## Conversation activity
+
+The daemon stores `last_activity_at` separately from `last_seen`. Discovery
+refreshes it from Codex's native `updatedAt` metadata and Claude's most recent
+non-meta user/assistant record timestamp in a bounded transcript tail. New
+outbound Gent messages also record activity; identical send retries do not.
+Polling, listing, registration and synchronization never make a chat more recent.
+Unknown native activity stays null; transcript modification time is not a substitute.
+
+Updates travel as metadata over the existing encrypted node links. Peers merge
+timestamps monotonically, so delayed updates cannot move activity backward.
+Older daemons continue ordinary messaging; activity sync starts after both
+endpoints support it. Only the hosting node can publish an agent's activity.
+The record contains an identity and timestamp, without transcript content.
+
+Name resolution uses exact case-insensitive names and optional node/provider
+qualifiers. Full agent IDs take precedence over names. When multiple visible
+active matches all have activity and one is strictly newest, it becomes the
+default. Missing or tied timestamps require a choice. Retired registrations
+never participate. Once attached, a relay keeps its target ID until explicitly
+changed; activity updates and retries cannot redirect an existing exchange.
 
 ## Waking an indexed chat
 

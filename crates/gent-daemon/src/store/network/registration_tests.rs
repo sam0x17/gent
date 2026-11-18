@@ -1,6 +1,147 @@
 use super::*;
 
 #[tokio::test]
+async fn conversation_activity_syncs_resolves_and_survives_polling_restart_and_restriction() {
+    let mut pair = Pair::new().await;
+    rename(&mut pair, 0, "rtao", 1).unwrap();
+    rename(&mut pair, 1, "rtao", 1).unwrap();
+    let now = now();
+    for (index, age) in [(0, 200), (1, 100)] {
+        let id = pair.agents[index].clone();
+        owner(
+            &mut pair,
+            index,
+            OwnerOp::ObserveActivity {
+                agent_id: id,
+                last_activity_at: now - age,
+            },
+        )
+        .unwrap();
+    }
+    pair.pump();
+    for store in &mut pair.stores {
+        store.presence_tick().unwrap();
+    }
+    pair.pump();
+    let resolve = || AgentOp::Resolve {
+        name: "rtao".into(),
+        node: None,
+        provider: None,
+    };
+    let selected = pair.agent(0, resolve()).unwrap();
+    assert_eq!(selected["selected"]["id"], pair.agents[1]);
+    assert_eq!(selected["selected"]["last_activity_at"], now - 100);
+    pair.agent(0, AgentOp::Identity).unwrap();
+    pair.agent(0, AgentOp::Inbox).unwrap();
+    pair.reopen(0);
+    assert_eq!(
+        pair.agent(0, resolve()).unwrap()["selected"]["id"],
+        pair.agents[1]
+    );
+    let remote = pair.agents[1].clone();
+    assert!(
+        owner(
+            &mut pair,
+            0,
+            OwnerOp::ObserveActivity {
+                agent_id: remote.clone(),
+                last_activity_at: now
+            }
+        )
+        .is_err()
+    );
+    owner(
+        &mut pair,
+        1,
+        OwnerOp::ObserveActivity {
+            agent_id: remote.clone(),
+            last_activity_at: now - 300,
+        },
+    )
+    .unwrap();
+    pair.pump();
+    assert_eq!(
+        pair.agent(0, resolve()).unwrap()["selected"]["last_activity_at"],
+        now - 100
+    );
+    let mut policy = pair.stores[0].config.policy.clone();
+    policy.rules.push(Rule {
+        actor: Selector::All,
+        peer: Selector::Agent(remote.clone()),
+        permission: Permission::Enumerate,
+        effect: Effect::Deny,
+    });
+    owner(&mut pair, 0, OwnerOp::SetPolicy { policy }).unwrap();
+    let restricted = pair.agent(0, resolve()).unwrap();
+    assert!(!restricted.to_string().contains(&remote));
+}
+
+#[tokio::test]
+async fn clearing_retired_directory_keeps_node_labels_history_and_revocation() {
+    let mut pair = Pair::new().await;
+    let sent = pair.send(vec![]).unwrap();
+    pair.pump();
+    let node = pair.stores[1].identity.node.id().to_owned();
+    let name = pair.stores[0]
+        .identity
+        .state(&pair.stores[0].db)
+        .unwrap()
+        .state()
+        .nodes[&node]
+        .name
+        .clone();
+    owner(&mut pair, 0, OwnerOp::RemoveNode { node_id: node }).unwrap();
+    let directory = owner(&mut pair, 0, OwnerOp::Agents).unwrap();
+    let retired = directory
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == pair.agents[1])
+        .unwrap();
+    assert_eq!(retired["node_name"], name);
+    assert_eq!(retired["retired"], true);
+    assert_eq!(
+        owner(&mut pair, 0, OwnerOp::ClearRetiredAgents { dry_run: true }).unwrap()["eligible"],
+        1
+    );
+    assert_eq!(
+        owner(&mut pair, 0, OwnerOp::Agents)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        owner(&mut pair, 0, OwnerOp::ClearRetiredAgents { dry_run: false }).unwrap()["cleared"],
+        1
+    );
+    pair.reopen(0);
+    assert_eq!(
+        owner(&mut pair, 0, OwnerOp::ClearRetiredAgents { dry_run: false }).unwrap()["cleared"],
+        0
+    );
+    assert_eq!(
+        owner(&mut pair, 0, OwnerOp::Agents)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(details(&mut pair, 0, 1)["revoked"], true);
+    assert!(
+        pair.agent(
+            0,
+            AgentOp::MessageStatus {
+                message_id: sent["message_id"].as_str().unwrap().into()
+            }
+        )
+        .is_ok()
+    );
+}
+
+#[tokio::test]
 async fn discovery_keeps_duplicate_names_distinct_and_labels_only_visible_nodes() {
     let mut pair = Pair::new().await;
     let mut discovery_policy = Policy::default();

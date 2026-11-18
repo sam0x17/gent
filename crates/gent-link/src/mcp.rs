@@ -206,9 +206,15 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_agents",
-            "List registered agents visible across this cluster, including id, name, node_id, node_name and provider. A unique exact name such as cit can be selected directly. For multiple matching names, ask the user to choose using node/provider and agent ID; never pick the first or guess from a similar name. Send and attach by the selected ID. Offline entries may be stale; this directory does not discover unregistered native chats or prove wake readiness.",
+            "List registered agents visible across this cluster, including id, name, node_id, node_name and provider. Use gent_resolve for a name: it selects the most recently active exact match when timestamps are known and distinct. last_activity_at is conversation activity; last_seen is Gent contact and must not rank chats. Send and attach by the selected ID. Offline entries may be stale; this directory does not discover unregistered native chats or prove wake readiness.",
             json!({}),
             vec![],
+        ),
+        (
+            "gent_resolve",
+            "Resolve an exact name or agent ID among visible active conversations. Optional node and provider narrow the match. Defaults to the most recent last_activity_at when all candidates have timestamps and the newest is unique. Use selected.id for sends/relay attachment. Ask the user only when status is ambiguous; never rank by last_seen. Selection does not send or wake anything. Keep the selected ID for the relay and for retries.",
+            json!({"name":{"type":"string","minLength":1,"maxLength":128},"node":{"type":"string","maxLength":128},"provider":{"type":"string","maxLength":128}}),
+            vec!["name"],
         ),
         (
             "gent_permission_check",

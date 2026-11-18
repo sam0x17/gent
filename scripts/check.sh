@@ -20,6 +20,7 @@ cargo clippy -p gent-protocol -p gent-crypto --lib --all-features \
 CARGO_PROFILE_TEST_OPT_LEVEL=1 \
     CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true \
     CARGO_PROFILE_TEST_OVERFLOW_CHECKS=true \
+    RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}" \
     cargo test --workspace --locked
 cargo build -p gent-link --bin gent --locked
 

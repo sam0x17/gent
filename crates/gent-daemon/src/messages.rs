@@ -77,6 +77,10 @@ pub enum Event {
     Registration {
         agent: Registration,
     },
+    ConversationActivity {
+        agent: Registration,
+        timestamp: i64,
+    },
     Message {
         sender: Box<Registration>,
         request_id: String,
