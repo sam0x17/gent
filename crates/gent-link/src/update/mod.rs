@@ -5,6 +5,7 @@ mod notification;
 mod priority;
 mod process;
 mod release;
+mod status;
 mod workflow;
 use workflow::apply;
 
@@ -74,18 +75,13 @@ pub(crate) async fn execute(home: &Path, command: Command) -> Result<Value> {
             "automatic installation requires gent in CARGO_HOME/bin; install it with cargo first"
         );
         return Ok(
-            json!({"state":"unsupported_installation","running":build_info::current(),"enabled":config::load(home)?.updates()?.enabled,"check_interval_seconds":300}),
+            json!({"state":"unsupported_installation","cli":build_info::current(),"enabled":config::load(home)?.updates()?.enabled,"check_interval_seconds":300}),
         );
     };
     match command {
         Command::Check => check(&installation).await,
         Command::Install => apply(home, &installation, false).await,
-        Command::Status => Ok(json!({"enabled":config::load(home)?.updates()?.enabled,
-            "check_interval_seconds":300,"running":build_info::current(),
-            "installed":install::inspect(&installation.binary).await?,
-            "update_in_progress":installation.try_lock()?.is_none(),
-            "update":installation.status()?,"activation_pending":installation.pending()?.is_some(),
-            "build_log":installation.directory.join("build.log")})),
+        Command::Status => status::report(home, &installation).await,
         Command::Enable | Command::Disable => unreachable!(),
     }
 }
@@ -123,7 +119,7 @@ async fn monitor(home: &Path, installation: &Installation) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     loop {
-        match installation.healthy(&build_info::current()) {
+        match installation.healthy(home, &build_info::current()) {
             Ok(Some(build)) => {
                 notification::installed(&build).await;
                 break;
@@ -171,8 +167,9 @@ async fn monitor(home: &Path, installation: &Installation) {
 }
 
 pub(crate) async fn run_daemon(home: &Path) -> Result<()> {
-    let daemon_lock = gent_daemon::DaemonLock::acquire(home)?;
-    let mut installation = match Installation::discover() {
+    let daemon_lock = gent_daemon::DaemonLock::acquire(home)?
+        .with_build_info(serde_json::to_value(build_info::current())?);
+    let installation = match Installation::discover() {
         Ok(installation) => installation,
         Err(error) => {
             eprintln!("Gent automatic updates unavailable: {error}");
@@ -184,10 +181,10 @@ pub(crate) async fn run_daemon(home: &Path) -> Result<()> {
             Ok(true) => return activate(home, current),
             Ok(false) => {}
             Err(error) => {
-                // Optional update bookkeeping must not take messaging offline.
-                // Keep the journal for inspection and stop automatic mutations.
-                eprintln!("Gent automatic updates unavailable: {error}");
-                installation = None;
+                // Publication can still hold the writer lock during startup.
+                // Serve normally and let authenticated readiness reconcile the
+                // journal. Do not permanently disable the monitor after a race.
+                eprintln!("Gent update startup recovery pending: {error}");
             }
         }
     }

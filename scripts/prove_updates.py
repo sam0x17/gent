@@ -6,6 +6,8 @@ in the fixture builds; these binaries cannot be accepted by production Gent.
 """
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -83,6 +85,8 @@ def main():
         b = git("rev-parse", "HEAD")
         git("commit", "--allow-empty", "-qm", "Updater proof fixture C")
         c = git("rev-parse", "HEAD")
+        git("commit", "--allow-empty", "-qm", "Updater proof fixture D")
+        d = git("rev-parse", "HEAD")
         with (repo / "crates/gent-link/src/main.rs").open("a") as file:
             file.write('\ncompile_error!("intentional updater build failure");\n')
         git("add", ".")
@@ -203,7 +207,10 @@ def main():
                     flush=True,
                 )
             assert revision() == a
-            assert json.loads(cli("version").stdout)["dirty"] is False
+            initial_build = json.loads(cli("version").stdout)
+            assert initial_build["dirty"] is False
+            initial_binary = root / "initial-gent"
+            shutil.copy2(binary, initial_binary)
 
             def dependency_artifacts(target):
                 return {
@@ -358,6 +365,36 @@ def main():
                 "PASS atomic activation, same PID, retained MCP sessions, image bytes, replies and deduplication",
                 flush=True,
             )
+
+            # Start the verified candidate while publication still holds its
+            # lock. Readiness must finish the journal after the lock is released.
+            daemon.terminate()
+            daemon.wait(timeout=15)
+            new_build = json.loads(cli("version").stdout)
+            pending = {
+                "version": 1, "home": str(home), "old": initial_build, "new": new_build,
+                "old_hash": hashlib.sha256(initial_binary.read_bytes()).hexdigest(),
+                "new_hash": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "starting": False, "automatic": False,
+            }
+            with (updates / "update.lock").open("r+") as publication:
+                fcntl.flock(publication, fcntl.LOCK_EX)
+                (updates / "pending.json").write_text(json.dumps(pending))
+                with (root / "daemon.log").open("a") as log:
+                    daemon = subprocess.Popen(
+                        base + ["daemon", "run"], env=env, stdout=log, stderr=log
+                    )
+                wait(
+                    lambda: cli("daemon", "status", check=False).returncode == 0,
+                    "serve during startup publication contention", 15,
+                )
+                assert (updates / "pending.json").exists()
+            pid = daemon.pid
+            wait(lambda: not (updates / "pending.json").exists(), "reconcile readiness", 15)
+            assert json.loads(cli("update", "status").stdout)["running"]["commit"] == b
+            assert receiver.call("gent_inbox")[0] == inbox
+            print("PASS startup lock contention preserves serving and completes activation", flush=True)
+
             tag(c)
             wait(lambda: phase("rolled_back"), "startup rollback")
             assert revision() == b and daemon.pid == pid
@@ -381,6 +418,25 @@ def main():
                 "PASS failed-start rollback, retry suppression, explicit retry and durable inbox",
                 flush=True,
             )
+
+            # Simulate a cargo install that changes disk without restarting the
+            # daemon. A later update must not require journal.old == daemon.build.
+            replacement = install / "bin/gent-manual-install"
+            shutil.copy2(initial_binary, replacement)
+            replacement.replace(binary)
+            before = json.loads(cli("update", "status").stdout)
+            assert before["cli"]["commit"] == before["installed"]["commit"] == a
+            assert before["running"]["commit"] == b
+            tag(d)
+            wait(
+                lambda: revision() == d and phase("current")
+                and not (updates / "pending.json").exists(),
+                "activate after a different manually installed revision",
+            )
+            assert daemon.pid == pid
+            assert json.loads(cli("update", "status").stdout)["running"]["commit"] == d
+            assert receiver.call("gent_inbox")[0] == inbox
+            print("PASS differing CLI/daemon revisions activate and report the real running build", flush=True)
         finally:
             for client in clients:
                 client.close()

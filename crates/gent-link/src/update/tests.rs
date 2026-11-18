@@ -214,10 +214,15 @@ fn startup_journal_marks_readiness_or_restores_previous_after_an_interrupted_sta
         assert!(f.installation.pending().unwrap().unwrap().starting);
         if healthy {
             assert_eq!(
-                f.installation.healthy(&build('b')).unwrap(),
+                f.installation.healthy(f.root.path(), &build('b')).unwrap(),
                 Some(build('b'))
             );
-            assert!(f.installation.healthy(&build('b')).unwrap().is_none());
+            assert!(
+                f.installation
+                    .healthy(f.root.path(), &build('b'))
+                    .unwrap()
+                    .is_none()
+            );
             assert!(f.installation.pending().unwrap().is_none());
             assert_eq!(fs::read(&f.installation.binary).unwrap(), b"new executable");
         } else {
@@ -229,6 +234,54 @@ fn startup_journal_marks_readiness_or_restores_previous_after_an_interrupted_sta
             assert_eq!(fs::read(&f.installation.binary).unwrap(), b"old executable");
         }
     }
+}
+
+#[test]
+fn activation_accepts_a_daemon_older_than_the_previously_installed_binary() {
+    let f = Fixture::new();
+    f.publish();
+    // A manual cargo install can change the executable without restarting the
+    // daemon. The journal's old build then describes disk, not this process.
+    assert_ne!(
+        f.installation.pending().unwrap().unwrap().old,
+        build_info::current()
+    );
+    assert!(f.installation.needs_restart(f.root.path()).unwrap());
+    let other_home = tempfile::tempdir().unwrap();
+    assert!(!f.installation.needs_restart(other_home.path()).unwrap());
+    let lock = f.installation.lock().unwrap();
+    assert!(!f.installation.needs_restart(f.root.path()).unwrap());
+    drop(lock);
+    let mut pending = f.installation.pending().unwrap().unwrap();
+    pending.starting = true;
+    f.installation.write("pending.json", &pending).unwrap();
+    assert!(!f.installation.needs_restart(f.root.path()).unwrap());
+    pending.starting = false;
+    f.installation.write("pending.json", &pending).unwrap();
+    fs::write(&f.installation.binary, b"outside replacement").unwrap();
+    assert!(!f.installation.needs_restart(f.root.path()).unwrap());
+}
+
+#[test]
+fn authenticated_readiness_finishes_activation_after_startup_lock_contention() {
+    let f = Fixture::new();
+    f.publish();
+    let lock = f.installation.lock().unwrap();
+    assert!(
+        f.installation
+            .begin_startup(f.root.path(), &build('b'))
+            .is_err()
+    );
+    assert!(f.installation.healthy(f.root.path(), &build('b')).is_err());
+    assert!(!f.installation.pending().unwrap().unwrap().starting);
+    drop(lock);
+    assert_eq!(
+        f.installation.healthy(f.root.path(), &build('b')).unwrap(),
+        Some(build('b'))
+    );
+    assert!(f.installation.pending().unwrap().is_none());
+    assert_eq!(f.installation.status().unwrap().phase, "current");
+    assert_eq!(fs::read(&f.installation.binary).unwrap(), b"new executable");
 }
 
 #[test]
@@ -434,7 +487,12 @@ fn manual_activation_is_healthy_without_a_desktop_notification() {
             .begin_startup(f.root.path(), &build('b'))
             .unwrap()
     );
-    assert!(f.installation.healthy(&build('b')).unwrap().is_none());
+    assert!(
+        f.installation
+            .healthy(f.root.path(), &build('b'))
+            .unwrap()
+            .is_none()
+    );
     assert!(f.installation.pending().unwrap().is_none());
 }
 

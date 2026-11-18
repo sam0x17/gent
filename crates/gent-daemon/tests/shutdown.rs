@@ -16,7 +16,9 @@ async fn shutdown_drains_accepted_frames_before_releasing_ownership() {
     config::private_dir(home.path()).unwrap();
     config::initialize(home.path(), "drain").unwrap();
     let owner_key = config::read_private(&home.path().join("owner.key")).unwrap();
-    let lock = DaemonLock::acquire(home.path()).unwrap();
+    let lock = DaemonLock::acquire(home.path())
+        .unwrap()
+        .with_build_info(serde_json::json!({"commit":"loaded-daemon-build"}));
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let daemon = tokio::spawn(run_locked(lock, async {
         stopped.await.unwrap();
@@ -33,6 +35,21 @@ async fn shutdown_drains_accepted_frames_before_releasing_ownership() {
     .await
     .unwrap();
     assert!(DaemonLock::acquire(home.path()).is_err());
+    assert_eq!(
+        request(home.path(), status()).await.unwrap()["build"]["commit"],
+        "loaded-daemon-build"
+    );
+    assert!(
+        request(
+            home.path(),
+            Request::Owner {
+                credential: "wrong-key".into(),
+                action: OwnerOp::Status,
+            }
+        )
+        .await
+        .is_err()
+    );
     let key = config::secret();
     let registration = Request::Agent {
         credential: key.clone(),

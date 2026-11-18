@@ -88,6 +88,7 @@ pub async fn run(home: &Path) -> Result<()> {
 pub struct DaemonLock {
     home: std::path::PathBuf,
     _file: fs::File,
+    build_info: serde_json::Value,
 }
 
 impl DaemonLock {
@@ -97,11 +98,18 @@ impl DaemonLock {
         Ok(Self {
             home: home.to_owned(),
             _file: config::state_lock(home, "daemon.lock")?,
+            build_info: serde_json::Value::Null,
         })
     }
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Executable metadata reported only by authenticated owner status calls.
+    pub fn with_build_info(mut self, build_info: serde_json::Value) -> Self {
+        self.build_info = build_info;
+        self
     }
 }
 
@@ -117,6 +125,7 @@ pub async fn run_locked(
 ) -> Result<()> {
     tokio::pin!(shutdown);
     let home = lock.home();
+    let build_info = Arc::new(lock.build_info.clone());
     let store = Arc::new(Mutex::new(store::Store::open(home)?));
     let socket = home.join("daemon.sock");
     if socket.exists() {
@@ -162,8 +171,9 @@ pub async fn run_locked(
                 };
                 let store=store.clone();
                 let uploads=uploads.clone();
+                let build_info=build_info.clone();
                 requests.spawn(async move {
-                    let _=serve(stream,store,uploads,permit).await;
+                    let _=serve(stream,store,uploads,permit,build_info).await;
                 });
             }
         }
@@ -188,6 +198,7 @@ async fn serve(
     store: Arc<Mutex<store::Store>>,
     uploads: Arc<Semaphore>,
     permit: OwnedSemaphorePermit,
+    build_info: Arc<serde_json::Value>,
 ) -> Result<()> {
     let started = tokio::time::Instant::now();
     let mut stream = BufReader::new(stream);
@@ -205,6 +216,13 @@ async fn serve(
         "invalid request frame"
     );
     let decoded = serde_json::from_slice::<Request>(&frame);
+    let report_build = matches!(
+        &decoded,
+        Ok(Request::Owner {
+            action: gent_protocol::OwnerOp::Status,
+            ..
+        })
+    );
     let deadline = started
         + if matches!(
             &decoded,
@@ -218,7 +236,7 @@ async fn serve(
         } else {
             Duration::from_secs(10)
         };
-    let response = match decoded {
+    let mut response = match decoded {
         Ok(request) => {
             if matches!(
                 &request,
@@ -250,6 +268,12 @@ async fn serve(
         }
         Err(_) => Response::Error("invalid request".into()),
     };
+    if report_build
+        && !build_info.is_null()
+        && let Response::Ok(value) = &mut response
+    {
+        value["build"] = (*build_info).clone();
+    }
     let mut response = serde_json::to_vec(&response)?;
     response.push(b'\n');
     ensure!(response.len() <= MAX_FRAME_BYTES, "response too large");

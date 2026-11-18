@@ -113,6 +113,7 @@ async fn storage_timeout_returns_a_protocol_error_and_does_not_rename_later() {
         store.clone(),
         Arc::new(Semaphore::new(2)),
         permit,
+        Arc::new(serde_json::Value::Null),
     ));
     let request = Request::Owner {
         credential,

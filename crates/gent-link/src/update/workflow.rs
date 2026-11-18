@@ -41,7 +41,16 @@ async fn run(
             installation.interrupted_publication(&pending)?;
             *status = installation.status()?;
         } else {
-            return Ok(json!({"state":"awaiting_activation","commit":pending.new.commit}));
+            let next = if pending.home != std::fs::canonicalize(home)? {
+                "The pending update belongs to another Gent home; inspect gent update status --json."
+            } else if pending.starting {
+                "The new daemon has not acknowledged readiness; inspect gent daemon status before restarting."
+            } else {
+                "If this persists, run gent daemon restart, then gent update."
+            };
+            return Ok(
+                json!({"state":"awaiting_activation","commit":pending.new.commit,"next":next}),
+            );
         }
     }
     let installed = install::inspect(&installation.binary).await?;

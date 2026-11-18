@@ -169,6 +169,16 @@ fn updates(out: &mut String, value: &Value) {
     if let Some(log) = value["build_log"].as_str() {
         rows.push(("Build log", visible(log)));
     }
+    if value.get("daemon").is_some() {
+        let revision = value["running"]["commit"].as_str().unwrap_or_else(|| {
+            if value["daemon"]["reachable"] == true {
+                "unknown (older daemon)"
+            } else {
+                "not responding"
+            }
+        });
+        rows.push(("Daemon revision", visible(revision)));
+    }
     for (label, value) in rows {
         let _ = writeln!(
             out,

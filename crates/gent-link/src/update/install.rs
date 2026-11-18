@@ -374,7 +374,10 @@ impl Installation {
         Ok(false)
     }
 
-    pub fn healthy(&self, current: &Build) -> Result<Option<Build>> {
+    /// Called only after authenticated readiness from this daemon process.
+    /// Startup may have missed the `starting` write while publication held the
+    /// lock; a ready process running the verified candidate is still conclusive.
+    pub fn healthy(&self, home: &Path, current: &Build) -> Result<Option<Build>> {
         if self.pending()?.is_none() {
             return Ok(None);
         }
@@ -382,11 +385,15 @@ impl Installation {
         let Some(pending) = self.pending()? else {
             return Ok(None);
         };
+        ensure!(
+            pending.home == fs::canonicalize(home)?,
+            "pending update belongs to another Gent home"
+        );
         if pending.new != *current {
             return Ok(None);
         }
         ensure!(
-            pending.starting && hash(&self.binary)? == pending.new_hash,
+            hash(&self.binary)? == pending.new_hash,
             "update changed during startup"
         );
         let mut status = self.status()?;
@@ -409,7 +416,6 @@ impl Installation {
         };
         Ok(pending.home == fs::canonicalize(home)?
             && !pending.starting
-            && pending.old == build_info::current()
             && pending.new != build_info::current()
             && hash(&self.binary)? == pending.new_hash)
     }

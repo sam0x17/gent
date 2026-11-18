@@ -22,6 +22,10 @@ gent update enable           # resume automatic checks
 
 If an update is already running, `gent update` waits for it with a progress indicator, then rechecks the installed release. Ctrl-C during the wait leaves the existing updater running. Scheduled checks skip an update that is already in progress. `gent update status` reports whether an updater currently holds the lock, alongside the saved phase and build-log path; JSON includes `update_in_progress`. A leftover lock file alone does not mean an update is running. The lock is released when its owning process exits; do not delete it to bypass a running updater.
 
+Update status distinguishes the calling CLI (`cli`), executable on disk (`installed`), and authenticated daemon's loaded build (`running`). Older daemons that do not report build metadata leave `running` null; their version is never inferred from the CLI. `daemon.reachable` reports whether the status probe succeeded. Pending activation also reports `activation_home` and `activation_starting`.
+
+A manually installed binary can differ from the version already loaded by the daemon. That does not prevent activation of the next verified update. If startup encounters a busy update lock, the daemon keeps serving and retries acknowledgement after authenticated readiness. On older affected versions, a persistent `awaiting activation` with `activation_starting: false` can be completed with `gent daemon restart`, followed by `gent update`. A true starting flag requires inspecting daemon status before restarting, because startup recovery may roll back an unacknowledged build.
+
 Automatic updates default to enabled. These commands edit the node-local setting in `~/.gent/config.toml`:
 
 ```toml
