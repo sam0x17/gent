@@ -188,7 +188,9 @@ impl Registry {
     fn key_export(&self, id: &str, client: &Client) -> Export {
         let revision = client.key_update.as_ref().map_or(0, |u| u.revision);
         Export {
-            version: if client.subject_key.is_some() {
+            version: if conversations::enabled(client) {
+                6
+            } else if client.subject_key.is_some() {
                 5
             } else if revision > 0 {
                 4

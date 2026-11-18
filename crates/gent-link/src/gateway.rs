@@ -75,8 +75,15 @@ pub struct ClientAdd {
     name: String,
     /// Host-owned per-call MCP metadata field, e.g. gent/conversation or Codex threadId.
     /// Provider support and metadata provenance must be verified separately.
-    #[arg(long)]
-    conversation_key: String,
+    #[arg(
+        long,
+        required_unless_present = "conversation_handles",
+        conflicts_with = "conversation_handles"
+    )]
+    conversation_key: Option<String>,
+    /// Issue chat-retained conversation handles for a host without stable chat metadata.
+    #[arg(long, conflicts_with = "subject_key")]
+    conversation_handles: bool,
     /// Stable host-owned user metadata field. Requires OAuth and pins each grant to its first reported user.
     #[arg(long, requires = "oauth_resource")]
     subject_key: Option<String>,
@@ -193,6 +200,7 @@ pub async fn execute(home: &Path, command: Command) -> Result<Option<Value>> {
             let ClientAdd {
                 name,
                 conversation_key,
+                conversation_handles,
                 subject_key,
                 out,
                 ttl_hours,
@@ -220,7 +228,11 @@ pub async fn execute(home: &Path, command: Command) -> Result<Option<Value>> {
                 &home,
                 &name,
                 registry::BindingKeys {
-                    conversation: conversation_key,
+                    conversation: if conversation_handles {
+                        registry::conversations::KEY.into()
+                    } else {
+                        conversation_key.expect("clap requires a conversation policy")
+                    },
                     subject: subject_key,
                 },
                 &out,

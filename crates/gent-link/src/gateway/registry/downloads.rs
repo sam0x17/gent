@@ -69,23 +69,24 @@ impl Registry {
     pub(crate) async fn issue_download(
         &self,
         permit: Permit,
-        meta: Value,
+        meta: impl Into<Conversation>,
         credential: String,
         target: DownloadTarget,
     ) -> Result<(String, u64)> {
+        let meta = meta.into();
         self.blocking(move |registry| {
-            registry.issue_download_local(&permit, &meta, &credential, &target)
+            registry.issue_download_local(&permit, meta, &credential, &target)
         })
         .await
     }
     pub(super) fn issue_download_local(
         &self,
         permit: &Permit,
-        meta: &Value,
+        meta: impl Into<Conversation>,
         expected: &str,
         target: &DownloadTarget,
     ) -> Result<(String, u64)> {
-        let credential = self.credential(permit, meta)?;
+        let credential = self.conversation_credential(permit, &meta.into())?;
         ensure!(credential == expected, "download binding changed");
         directory_check(&self.directory())?;
         let _lock = managed_file::lock(&self.directory().join("state.lock"))?;

@@ -25,6 +25,8 @@ const MAX_LIFETIME: u64 = 8760 * 3600;
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WORKERS: usize = 16;
 mod bindings;
+pub(crate) mod conversations;
+pub(crate) use conversations::Conversation;
 mod downloads;
 pub(crate) use downloads::{Download, DownloadTarget};
 mod keys;
@@ -60,6 +62,7 @@ pub(crate) struct Permit {
     hash: String,
     oauth: Option<(String, String)>,
     peer: Peer,
+    pub(crate) conversation_handles: bool,
 }
 impl Permit {
     pub(crate) fn client_id(&self) -> &str {
@@ -232,7 +235,9 @@ impl State {
         });
         ensure!(
             self.version
-                == if recovered {
+                == if self.clients.values().any(conversations::enabled) {
+                    8
+                } else if recovered {
                     7
                 } else if subjects {
                     6
@@ -259,6 +264,10 @@ impl State {
         for (id, client) in &self.clients {
             config::label(&client.name)?;
             metadata_key(&client.conversation_key)?;
+            ensure!(
+                !conversations::enabled(client) || client.subject_key.is_none(),
+                "explicit conversations are scoped to the OAuth grant, not host metadata"
+            );
             ensure!(
                 client.subject_required == client.subject_key.is_some(),
                 "gateway subject policy is missing"
@@ -384,8 +393,13 @@ impl Registry {
         self.blocking(move |registry| registry.authenticate_peer(&token, Some(&resource), peer))
             .await
     }
-    pub(crate) async fn credential_remote(&self, permit: Permit, meta: Value) -> Result<String> {
-        self.blocking(move |registry| registry.credential(&permit, &meta))
+    pub(crate) async fn credential_remote(
+        &self,
+        permit: Permit,
+        conversation: impl Into<Conversation>,
+    ) -> Result<String> {
+        let conversation = conversation.into();
+        self.blocking(move |registry| registry.conversation_credential(&permit, &conversation))
             .await
     }
     pub(crate) fn with_file_origins(mut self, entries: &[String]) -> Result<Self> {
@@ -468,10 +482,11 @@ impl Registry {
                 hash: digest(token),
                 oauth: None,
                 peer: Peer::default(),
+                conversation_handles: false,
             }
         };
         permit.peer = peer;
-        Self::client(&state, &permit, now)?;
+        permit.conversation_handles = conversations::enabled(Self::client(&state, &permit, now)?);
         if state.clock != now {
             state.clock = now;
             self.save(&state)?;
@@ -511,7 +526,7 @@ impl Registry {
             .map(|(id, c)| {
                 json!({"id":id,"name":c.name,
             "conversation_key":c.conversation_key,"expires_at":c.expires_at,"revoked":c.revoked,
-            "subject_key":c.subject_key,
+            "subject_key":c.subject_key,"conversation_handles":conversations::enabled(c),
             "active":!c.revoked && now<c.expires_at,"conversations":c.bindings.len(),"oauth":c.oauth,
             "key_revision":c.key_update.as_ref().map_or(0, |u| u.revision),
             "key_export_pending":c.key_update.as_ref().is_some_and(|u| u.pending_export.is_some()),
@@ -584,7 +599,12 @@ pub(super) fn add_client(
 ) -> Result<Value> {
     let binding = binding.into();
     let key = binding.conversation.as_str();
+    let handles = key == conversations::KEY;
     let subject_key = binding.subject;
+    ensure!(
+        !handles || subject_key.is_none(),
+        "explicit conversations cannot use a subject metadata key"
+    );
     if let Some(subject) = &subject_key {
         bindings::subject_key(subject, key)?;
         ensure!(oauth.is_some(), "subject binding requires OAuth");
@@ -667,7 +687,9 @@ pub(super) fn add_client(
         );
         let id = Uuid::new_v4().to_string();
         Export {
-            version: if subject_key.is_some() {
+            version: if handles {
+                6
+            } else if subject_key.is_some() {
                 5
             } else if signed {
                 3
@@ -697,7 +719,9 @@ pub(super) fn add_client(
     };
     ensure!(
         value.version
-            == if subject_key.is_some() {
+            == if handles {
+                6
+            } else if subject_key.is_some() {
                 5
             } else if signed && value.key_revision > 0 {
                 4
@@ -783,7 +807,9 @@ pub(super) fn add_client(
         // Export first, registry second. A retry after either write reuses the
         // same secret. No bearer or signing key is printed by the command.
         exported.write(&(serde_json::to_string(&value)? + "\n"))?;
-        state.version = state.version.max(if subject_key.is_some() {
+        state.version = state.version.max(if handles {
+            8
+        } else if subject_key.is_some() {
             6
         } else if signed {
             4
@@ -825,8 +851,8 @@ pub(super) fn add_client(
     }
     Ok(
         json!({"client":value.client,"name":name,"credential_file":out,"expires_at":value.expires_at,
-        "conversation_key":key,"security_mode":"user_controlled_gateway","oauth":value.oauth,
+        "conversation_key":key,"conversation_handles":handles,"security_mode":"user_controlled_gateway","oauth":value.oauth,
         "mtls":value.mtls.as_ref().map(TlsPolicy::summary),
-        "scope":"trusted host namespace; required conversation metadata selects each agent"}),
+        "scope": if handles { "explicit conversation handles scoped to this connector and OAuth grant" } else { "trusted host namespace; required conversation metadata selects each agent" }}),
     )
 }

@@ -47,6 +47,46 @@ Claude Code HTTP calls supply `claudecode/toolUseId`, which changes for every ca
 
 A host credential authorizes a namespace containing several agents. Its holder can select any conversation in that namespace, so the host must supply conversation metadata outside model control. The gateway cannot prove that an arbitrary metadata string came from ChatGPT or Claude. Verify provenance and stability on each actual host before granting access. Separate host credentials isolate equal conversation identifiers from each other. Existing daemon permissions still determine discovery, messages, replies and relay selection; new clusters allow communication by default, subject to explicit restrictions.
 
+### Hosts without conversation metadata
+
+For a connector that does not supply a stable per-chat identifier, explicitly
+select handles instead of `--conversation-key`:
+
+```sh
+gent gateway clients add phone-host --conversation-handles \
+  --out /private/path/phone-host.json
+```
+
+The same option works with OAuth registration. Such a connector exposes
+`gent_conversation_open`, which allocates a random handle without sending any
+message. The chat retains the returned `conversation` and supplies it on every
+subsequent tool call, beginning with `gent_register`. It reuses that handle after
+reconnecting and for later relay turns. Opening again creates a separate
+identity; it never recovers an uncertain send.
+
+Handles require the authenticated connector on every call. With OAuth they are
+also bound to the exact authorization grant: token refresh preserves them, but
+a new authorization cannot use an older grant's handles. There is no handle
+listing, and guessed, malformed or wrong-scope handles cannot allocate an agent.
+Registry version 8 and export version 6 prevent older binaries from interpreting
+this policy as ordinary metadata. Host metadata clients never silently fall back
+to handles, and installation retries cannot switch a client's identity policy.
+
+The provider/model must retain its own handle. This separates Gent conversation
+state but cannot prove which provider chat is presenting a handle: a caller with
+the same authorization and a copied handle can use it, and can create new
+handles. Apply mandatory restrictions to the gateway node when the host cannot
+enforce chat identity; restricting one handle cannot constrain every new handle.
+This mode cannot be combined with `--subject-key`; OAuth grant scope supplies the
+authorization boundary. Each connector retains the existing 256-conversation
+limit, including handles whose initial response was lost.
+
+`gent_relay_wait` reads an existing relay turn for up to 20 seconds, returning
+when responses arrive or its state changes. It returns pending when no response
+has arrived. Use `next_after` as `after_message_id` for later responses. A timeout,
+disconnect or daemon error never repeats or cancels the send. Gateway
+authorization and daemon permissions are checked again during waiting.
+
 An owner can [recover a conversation on a replacement gateway](recovery.md#recover-a-gateway-conversation) with `gent agent recover --gateway-client CLIENT_UUID --conversation HOST_ID`. Recovery requires an unused binding, creates a fresh agent with selected archived history, and preserves host authentication and optional user scope. It cannot supply missing conversation metadata or restore provider-owned transcripts. Recovery records use registry version 7; existing host exports and ordinary bindings keep their formats.
 
 ### Scope conversations to a host user

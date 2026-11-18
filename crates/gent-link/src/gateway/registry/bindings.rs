@@ -66,6 +66,10 @@ impl Registry {
         let mut state = self.read()?;
         let now = auth::now()?;
         let client = Self::client(&state, permit, now)?;
+        ensure!(
+            !conversations::enabled(client),
+            "this connector requires a Gent-issued conversation handle"
+        );
         conversation_key(&client.conversation_key)?;
         let conversation = identity(meta, &client.conversation_key)?;
         let subject = client

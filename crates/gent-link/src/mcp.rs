@@ -9,6 +9,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 pub(crate) mod binding;
+mod relay_wait;
+mod remote;
 
 #[derive(Clone)]
 enum Credentials {
@@ -33,6 +35,7 @@ impl GentMcp {
 
     fn available_tools(&self) -> Vec<Tool> {
         let mut tools = tools();
+        tools.push(relay_wait::tool());
         if matches!(self.credentials, Credentials::Remote(_)) {
             tools.retain(|t| {
                 !matches!(
@@ -58,6 +61,9 @@ impl GentMcp {
                 .has_host_files()
         {
             tools.extend(crate::integration::codex_files::tools());
+        }
+        if matches!(self.credentials, Credentials::Remote(_)) {
+            remote::add_tools(&mut tools);
         }
         tools
     }
@@ -367,7 +373,7 @@ fn instructions(remote: bool) -> String {
         .1;
     if remote {
         format!(
-            "Remote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Each tool call requires host-owned conversation metadata; never put host credentials in tool arguments or prompts. Local file handoff tools are unavailable: send inline attachments (up to 1 MiB combined, four per message), forward authorized file_ids, read separate objects with gent_file_read, or inspect images up to 4 MiB with gent_file_view. If gent_file_import_remote is available and enabled for this host, use an actual host-provided file object from an owner-approved HTTPS origin. If gent_file_link is enabled for this host, use it for a user-requested download. It grants anyone holding the URL access to that file for up to five minutes, without host credentials or mTLS. Keep the URL private; use file_ids for agent messaging. Provider handling of resource links remains unverified.\n\n{instructions}"
+            "Remote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Never put host credentials in tool arguments or prompts. Local filesystem tools are unavailable; use the listed remote file tools. Host file import requires an owner-approved origin. A gent_file_link download URL grants its holder access for up to five minutes without host credentials; keep it private and use file_ids for agent messaging. Provider file presentation still needs verification.\n\n{instructions}"
         )
     } else {
         instructions.to_string()
@@ -384,13 +390,14 @@ impl ServerHandler for GentMcp {
     async fn list_tools(
         &self,
         _: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
+        let mut tools = self.available_tools();
+        if matches!(self.credentials, Credentials::Remote(_)) {
+            remote::describe(&mut tools, remote::permit(&context)?.conversation_handles);
+        }
         // Construction via serde tolerates SDK non-exhaustive response structs.
-        Ok(
-            serde_json::from_value(json!({"tools":self.available_tools()}))
-                .expect("valid tools result"),
-        )
+        Ok(serde_json::from_value(json!({"tools":tools})).expect("valid tools result"))
     }
     fn get_tool(&self, name: &str) -> Option<Tool> {
         self.available_tools()
@@ -400,7 +407,7 @@ impl ServerHandler for GentMcp {
 
     async fn call_tool(
         &self,
-        call: CallToolRequestParams,
+        mut call: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let Some(operation) = call.name.strip_prefix("gent_") else {
@@ -428,6 +435,7 @@ impl ServerHandler for GentMcp {
                 .is_none_or(|a| !a.contains_key("name"));
         let mut registration_name = crate::integration::naming::Source::Title(None);
         let mut host_files = None;
+        let mut remote_conversation = None;
         let credential = match &self.credentials {
             Credentials::Fixed(credential) => credential.clone(),
             Credentials::Remote(registry) => {
@@ -439,14 +447,43 @@ impl ServerHandler for GentMcp {
                     .ok_or_else(|| {
                         ErrorData::invalid_request("gateway authentication required", None)
                     })?;
-                let meta = serde_json::to_value(&context.meta).expect("MCP metadata serializes");
-                match registry.credential_remote(permit, meta).await {
+                if operation == "conversation_open" {
+                    return Ok(match registry.open_conversation_remote(permit).await {
+                        Ok(value) => {
+                            CallToolResult::success(vec![ContentBlock::text(value.to_string())])
+                        }
+                        Err(error) => {
+                            CallToolResult::error(vec![ContentBlock::text(error.to_string())])
+                        }
+                    }
+                    .into());
+                }
+                let conversation = match call
+                    .arguments
+                    .as_mut()
+                    .and_then(|args| args.remove("conversation"))
+                {
+                    Some(Value::String(handle)) => {
+                        crate::gateway::registry::Conversation::Handle(handle)
+                    }
+                    Some(_) => {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(
+                            "invalid conversation handle",
+                        )])
+                        .into());
+                    }
+                    None => crate::gateway::registry::Conversation::Metadata(
+                        serde_json::to_value(&context.meta).expect("MCP metadata serializes"),
+                    ),
+                };
+                remote_conversation = Some(conversation.clone());
+                match registry.credential_remote(permit, conversation).await {
                     Ok(credential) => credential,
                     Err(failure) => {
                         let message = if failure.is::<crate::gateway::registry::Busy>() {
                             "gateway is busy; retry identical arguments with the original request ID"
                         } else {
-                            "gateway authorization or conversation binding unavailable; check host metadata and credential status"
+                            "gateway authorization or conversation binding unavailable; use this chat's original conversation handle if required, otherwise check host metadata and credential status"
                         };
                         return Ok(CallToolResult::error(vec![ContentBlock::text(message)]).into());
                     }
@@ -547,7 +584,9 @@ impl ServerHandler for GentMcp {
                     .link(
                         registry,
                         permit,
-                        serde_json::to_value(&context.meta)?,
+                        remote_conversation
+                            .clone()
+                            .expect("remote conversation resolved"),
                         &self.home,
                         credential,
                         id.into(),
@@ -593,7 +632,7 @@ impl ServerHandler for GentMcp {
                     .import(
                         registry,
                         permit,
-                        serde_json::to_value(&context.meta)?,
+                        remote_conversation.expect("remote conversation resolved"),
                         &self.home,
                         credential,
                         input,
@@ -618,17 +657,29 @@ impl ServerHandler for GentMcp {
                 json!(registration_name.resolve(&credential, provider).await),
             );
         }
-        arguments.insert("op".into(), Value::String(operation.into()));
-        let action = match serde_json::from_value::<AgentOp>(Value::Object(arguments)) {
-            Ok(action) => action,
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "invalid tool arguments",
-                )])
-                .into());
-            }
+        let result = if operation == "relay_wait" {
+            let remote = match &self.credentials {
+                Credentials::Remote(registry) => Some(relay_wait::Remote {
+                    registry,
+                    permit: remote::permit(&context)?,
+                    conversation: remote_conversation.expect("remote conversation resolved"),
+                }),
+                _ => None,
+            };
+            relay_wait::run(&self.home, credential, Value::Object(arguments), remote).await
+        } else {
+            arguments.insert("op".into(), Value::String(operation.into()));
+            let action = match serde_json::from_value::<AgentOp>(Value::Object(arguments)) {
+                Ok(action) => action,
+                Err(_) => {
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(
+                        "invalid tool arguments",
+                    )])
+                    .into());
+                }
+            };
+            request(&self.home, Request::Agent { credential, action }).await
         };
-        let result = request(&self.home, Request::Agent { credential, action }).await;
         Ok(match result {
             Ok(mut value) => {
                 if matches!(self.credentials, Credentials::Remote(_))
@@ -654,10 +705,10 @@ impl ServerHandler for GentMcp {
                 };
                 let mut content = vec![ContentBlock::text(value.to_string())];
                 content.extend(viewed_image);
-                if matches!(operation, "inbox" | "relay_next" | "relay_turn_status") {
+                if matches!(operation, "inbox" | "relay_next" | "relay_turn_status" | "relay_wait") {
                     let messages: Vec<&Value> = match operation {
                         "relay_next" => value.get("request").into_iter().collect(),
-                        "relay_turn_status" => value["responses"]
+                        "relay_turn_status" | "relay_wait" => value["responses"]
                             .as_array()
                             .into_iter()
                             .flatten()

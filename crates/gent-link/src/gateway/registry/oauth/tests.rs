@@ -2,6 +2,7 @@ use super::*;
 use std::fs;
 const RESOURCE: &str = "https://node.example/mcp";
 const REDIRECT: &str = "https://host.example/callback?tenant=one";
+mod conversations;
 mod downloads;
 mod keys;
 mod subjects;
@@ -248,6 +249,9 @@ impl Fixture {
         Self::with_subject(signed, None)
     }
     fn with_subject(signed: bool, subject: Option<&str>) -> Self {
+        Self::with_binding(signed, subject, "test/conversation")
+    }
+    fn with_binding(signed: bool, subject: Option<&str>, conversation: &str) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("node");
         config::initialize(&home, "oauth").unwrap();
@@ -261,7 +265,7 @@ impl Fixture {
             &home,
             "host",
             BindingKeys {
-                conversation: "test/conversation".into(),
+                conversation: conversation.into(),
                 subject: subject.map(str::to_owned),
             },
             &out,
@@ -275,7 +279,7 @@ impl Fixture {
                 &home,
                 "host",
                 BindingKeys {
-                    conversation: "test/conversation".into(),
+                    conversation: conversation.into(),
                     subject: subject.map(str::to_owned)
                 },
                 &out,

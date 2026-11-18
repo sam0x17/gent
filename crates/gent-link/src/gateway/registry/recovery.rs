@@ -78,6 +78,10 @@ fn client<'a>(state: &'a State, id: &str, now: u64) -> Result<&'a Client> {
         "recovery host is inactive"
     );
     conversation_key(&client.conversation_key)?;
+    ensure!(
+        !conversations::enabled(client),
+        "explicit conversations cannot be recovered using a host metadata identifier"
+    );
     Ok(client)
 }
 
@@ -158,7 +162,7 @@ impl Registry {
                     completed: None,
                 })
             });
-        state.version = 7;
+        state.version = state.version.max(7);
         state.clock = now;
         self.save(&state)?;
         Ok(Ticket {

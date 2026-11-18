@@ -305,6 +305,7 @@ pub(super) fn access_permit(
         hash: digest(token),
         oauth: Some((id.into(), resource.into())),
         peer: Peer::default(),
+        conversation_handles: false,
     };
     check_access(state, &permit, now)?;
     Ok(permit)

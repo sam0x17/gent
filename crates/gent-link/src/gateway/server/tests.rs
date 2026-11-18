@@ -10,6 +10,7 @@ use tokio::{
     task::JoinHandle,
 };
 mod cimd;
+mod conversations;
 mod downloads;
 mod files;
 mod mtls;

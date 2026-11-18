@@ -150,7 +150,7 @@ impl Runtime {
         &self,
         registry: &Registry,
         permit: Permit,
-        meta: Value,
+        meta: impl Into<super::registry::Conversation>,
         home: &Path,
         credential: String,
         input: Input,
