@@ -677,7 +677,7 @@ fn legacy_expiry_is_preserved_without_limiting_new_selections() {
     let mut f = Fixture::new();
     // Keep ample time to attach even on slow CI. Wait only until the signed
     // boundary; no production API accepts a caller-controlled clock.
-    let grant = f.grant(1, 2);
+    let grant = f.grant(1, 10);
     let action = f.attach(1);
     let a = f.legacy_attachment(action.clone(), &grant);
     let expiry = a["attachment"]["expires_at"].as_i64().unwrap();

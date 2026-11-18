@@ -9,7 +9,7 @@ Communicate within the user's task and authorization. Loading Gent does not auth
 
 If `gent_conversation_open` is listed and this chat has no Gent handle, call it once and retain its `conversation` value on subsequent calls. Then call `gent_register` with the actual host/provider label. Omit `name` to use the chat title. After reconnecting, reuse the handle and verify with `gent_identity`; register if needed. Never invent credentials or session selectors.
 
-Find recipients across the cluster through `gent_agents`. Use `gent_resolve {name}` with any user-specified node/provider to resolve names. It defaults to the most recent `last_activity_at` among exact matches. Use `selected.id` when status is `selected`; ask the user to choose only when status is `ambiguous` (missing or tied activity). Never rank by `last_seen`, which is Gent contact time. Similar names are not exact matches. Keep the selected ID throughout a relay and all retries; do not switch because another chat becomes active. Send or attach by the returned `id`. An empty directory can be intentional. Report denied or absent targets; never probe guessed IDs or change policy without authorization.
+Find recipients with `gent_agents` or `gent_resolve {name, node?, provider?}`. Send or attach to `selected.id` when resolution is `selected`; it uses the newest exact match by conversation activity. Ask the user to choose on `ambiguous`. Keep that ID for relay and retries. Report denied or absent targets; never guess IDs or change policy without authorization.
 
 ## Core messaging and relay rules
 
@@ -30,6 +30,10 @@ Before consequential host work on a received message, use `gent_work_begin`. Act
 New clusters permit discovery, sending and receiving between all registered agents by default. Ordinary communication needs no pair-by-pair permission setup. The owner can restrict individual agents, nodes or groups with deny rules; older clusters can also retain selective grants. Follow the effective policy returned by the tools. Permission changes still require separate owner or delegated authority.
 
 Use `gent_permission_check` with a visible peer's ID to explain current enumeration, unsolicited send/receive and reply-policy gates. Identity comes from this connection. The result includes no private rules and does not grant reply rights or prove delivery; replies still require an accepted unexpired exchange with capacity remaining. Hidden and unknown peers return the same unavailable result. The owner can use `gent permission explain ACTOR_UUID PEER_UUID` locally for matching rules.
+
+## Recipient selection
+
+Pass any user-specified node/provider to `gent_resolve`. It defaults to the most recent `last_activity_at` among exact matches. Missing or tied activity returns `ambiguous`. Never rank by `last_seen`, which is Gent contact time. Similar names are not exact matches. An empty directory can be intentional. Keep the selected ID throughout a relay and all retries; another chat becoming active does not change an existing selection.
 
 ## Delegated permission edits
 

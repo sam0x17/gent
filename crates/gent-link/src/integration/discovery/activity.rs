@@ -45,7 +45,9 @@ mod tests {
     use super::*;
     #[test]
     fn only_conversation_records_count_and_file_modification_does_not() {
+        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = temp.path().join("chat.jsonl");
         let session = uuid::Uuid::new_v4().to_string();
         let rows = serde_json::json!([
