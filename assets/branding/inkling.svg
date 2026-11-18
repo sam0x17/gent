@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Gent Inkling</title>
+  <path id="body" fill="#fff9ec" stroke="#000" stroke-width="24" stroke-linejoin="round" d="M273 137C361 129 421 185 422 253C423 305 395 324 371 343C339 366 345 403 316 435C286 467 225 477 176 458C124 439 90 402 91 347C92 299 113 262 148 215C183 169 214 144 273 137Z"/>
+  <path id="hat" d="M159 148L129 96C121 81 128 72 143 63C166 49 201 36 223 33C238 30 246 35 249 48L264 108C291 93 312 90 320 103C327 114 321 124 317 128C302 146 280 158 252 171C224 184 191 193 174 197C149 202 122 198 118 185C112 166 131 156 159 148Z"/>
+  <ellipse cx="243" cy="259" rx="16" ry="31"/>
+  <ellipse cx="325" cy="245" rx="15" ry="31"/>
+</svg>

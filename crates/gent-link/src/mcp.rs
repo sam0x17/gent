@@ -383,12 +383,30 @@ fn instructions(route: Option<crate::gateway::access::AccessRoute>) -> String {
 
 impl ServerHandler for GentMcp {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            instructions(match &self.credentials {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                Implementation::new("gent", env!("CARGO_PKG_VERSION"))
+                    .with_title("Gent")
+                    .with_description("Connect your agents across devices.")
+                    .with_website_url("https://gent.link")
+                    .with_icons(vec![
+                        Icon::new("https://mcp.gent.link/branding/inkling-256.png")
+                            .with_mime_type("image/png")
+                            .with_sizes(vec!["256x256".into()]),
+                        Icon::new("https://mcp.gent.link/branding/inkling.svg")
+                            .with_mime_type("image/svg+xml")
+                            .with_sizes(vec!["any".into()])
+                            .with_theme(IconTheme::Light),
+                        Icon::new("https://mcp.gent.link/branding/inkling-dark.svg")
+                            .with_mime_type("image/svg+xml")
+                            .with_sizes(vec!["any".into()])
+                            .with_theme(IconTheme::Dark),
+                    ]),
+            )
+            .with_instructions(instructions(match &self.credentials {
                 Credentials::Remote(registry) => Some(registry.access),
                 _ => None,
-            }),
-        )
+            }))
     }
 
     async fn list_tools(

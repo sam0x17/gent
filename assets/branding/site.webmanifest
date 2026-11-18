@@ -1,0 +1,21 @@
+{
+  "name": "Gent",
+  "short_name": "Gent",
+  "icons": [
+    {
+      "src": "./inkling-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./inkling-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "theme_color": "#fff9ec",
+  "background_color": "#fff9ec",
+  "display": "standalone"
+}
