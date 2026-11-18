@@ -2,8 +2,8 @@
 
 Inkling is Gent's primary logo and app/MCP identity: a cream bean with a thick
 black outline, two upright oval eyes, a tilted solid black top hat, and no mouth.
-Optical-size Inkling is the browser favicon. Classic remains available as an
-alternate for downloads and comparison. Both marks were drawn as simple SVG
+Classic is the browser favicon. Optical-size Inkling remains available for
+downloads and comparison. Both marks were drawn as simple SVG
 paths from the selected references; the SVGs contain no raster images or fonts.
 
 Use `inkling-256.png` for the MCP server icon at
@@ -46,13 +46,10 @@ render permits partially covered edge pixels with about 50% opacity or less; the
 32px and 48px renders retain a fully transparent border. Each size is rendered
 directly from this SVG, including the matching frames in `inkling-favicon.ico`.
 
-Optical Inkling is the selected favicon: the face is readable at 16px and clear
-at 32px on both light and dark surfaces. `favicon.svg` is an exact copy of
-`inkling-favicon.svg`; `favicon.ico` matches `inkling-favicon.ico`. Every
-`favicon-*.png` uses the optical drawing. The `classic-*.png` downloads preserve
-the previous Classic favicon pixels under explicit filenames, and `classic.ico`
-preserves the previous Classic ICO. Use `classic-16.png`, `classic-32.png`, and
-`classic-48.png` for small-size comparisons.
+Classic is the selected favicon. `favicon.svg` matches `classic-dark.svg`,
+`favicon.ico` matches `classic.ico`, and every `favicon-*.png` matches its
+`classic-*.png` counterpart. The optical Inkling files remain available for
+comparison; the primary Inkling stays the app and MCP identity.
 
 ## Files
 
@@ -60,18 +57,18 @@ preserves the previous Classic ICO. Use `classic-16.png`, `classic-32.png`, and
 | --- | --- |
 | `inkling.svg` | Hand-authored primary master for light surfaces |
 | `inkling-dark.svg` | Same mark with a cream outside outline for dark surfaces |
-| `inkling-favicon.svg` | Independent optical-size Inkling master; source for the default favicon |
-| `inkling-favicon-16.png`, `inkling-favicon-32.png`, `inkling-favicon-48.png` | Named Inkling copies of the default small favicon PNGs |
-| `inkling-favicon.ico` | Named Inkling copy of the default ICO |
+| `inkling-favicon.svg` | Independent optical-size Inkling candidate |
+| `inkling-favicon-16.png`, `inkling-favicon-32.png`, `inkling-favicon-48.png` | Optical-size Inkling comparison PNGs |
+| `inkling-favicon.ico` | Alternate optical-size Inkling ICO |
 | `classic.svg` | Hand-authored Classic top-hat master |
 | `classic-dark.svg` | Classic with the cream outside outline |
 | `classic-16.png`, `classic-32.png`, `classic-48.png`, `classic-64.png` | Classic comparison icons, with the cream outside outline |
 | `classic-128.png`, `classic-192.png`, `classic-256.png`, `classic-512.png` | Larger Classic downloads |
-| `classic.ico` | Alternate Classic ICO with 16, 32, and 48px frames |
-| `favicon.svg` | Default optical Inkling with the outside outline, for either browser theme |
-| `favicon.ico` | Default optical Inkling; separate PNG-compressed 16, 32, and 48px frames |
-| `favicon-16.png`, `favicon-32.png`, `favicon-48.png`, `favicon-64.png` | Default optical Inkling browser icons |
-| `favicon-128.png`, `favicon-192.png`, `favicon-256.png`, `favicon-512.png` | Larger optical Inkling downloads |
+| `classic.ico` | Classic ICO with 16, 32, and 48px frames |
+| `favicon.svg` | Default Classic with the outside outline, for either browser theme |
+| `favicon.ico` | Default Classic; separate PNG-compressed 16, 32, and 48px frames |
+| `favicon-16.png`, `favicon-32.png`, `favicon-48.png`, `favicon-64.png` | Default Classic browser icons |
+| `favicon-128.png`, `favicon-192.png`, `favicon-256.png`, `favicon-512.png` | Larger Classic favicon downloads |
 | `inkling-16.png`, `inkling-32.png`, `inkling-48.png`, `inkling-64.png` | Inkling at small sizes; also used in the favicon comparison |
 | `inkling-128.png`, `inkling-192.png`, `inkling-256.png`, `inkling-512.png` | Primary Inkling app/MCP icons and downloads |
 | `apple-touch-icon.png` | 180px opaque Inkling icon |

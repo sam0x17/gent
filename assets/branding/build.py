@@ -23,8 +23,8 @@ PNG_SETS = {"inkling": SIZES, "classic": SIZES, "favicon": SIZES, "inkling-favic
 ICO_SETS = ("favicon", "inkling-favicon", "classic")
 COMPARISONS = (
     ("inkling", "Inkling / original"),
-    ("favicon", "Inkling / default favicon"),
-    ("classic", "Classic / alternate"),
+    ("inkling-favicon", "Inkling / optical size"),
+    ("classic", "Classic / selected favicon"),
 )
 CREAM = "#fff9ec"
 DARK = "#171717"
@@ -81,7 +81,7 @@ def build() -> tuple[dict[str, bytes], dict[str, str]]:
     masters = {name: (HERE / f"{name}.svg").read_text() for name in ("inkling", "classic", "inkling-favicon")}
     drawings = dict(masters)
     drawings.update({f"{name}-dark": outlined(masters[name]) for name in ("inkling", "classic")})
-    drawings["favicon"] = masters["inkling-favicon"]
+    drawings["favicon"] = drawings["classic-dark"]
     artifacts = {
         f"{name}.svg": svg.encode()
         for name, svg in drawings.items()
@@ -125,7 +125,7 @@ def verify(artifacts: dict[str, bytes], drawings: dict[str, str]) -> None:
             box = alpha.getbbox()
             if not box:
                 raise ValueError(f"Empty icon: {name}-{size}.png")
-            if name in ("favicon", "inkling-favicon"):
+            if name == "inkling-favicon":
                 # The tighter framing permits half-covered edge pixels at 16px.
                 edges = ((0, 0, size, 1), (0, size - 1, size, size),
                          (0, 0, 1, size), (size - 1, 0, size, size))
@@ -165,7 +165,7 @@ def contact_sheet(drawings: dict[str, str], artifacts: dict[str, bytes]) -> byte
     small = ImageFont.load_default(size=13)
     heading = ImageFont.load_default(size=24)
     draw.text((24, 20), "Gent / The Inkling", fill=DARK, font=heading)
-    draw.text((24, 54), "Primary identity and browser favicon: Inkling.", fill=DARK, font=font)
+    draw.text((24, 54), "Primary identity: Inkling. Browser favicon: Classic.", fill=DARK, font=font)
     for x, background, name, label in (
         (24, "#fff", "inkling", "Inkling / light surface"),
         (528, DARK, "inkling-dark", "Inkling / dark surface"),
@@ -229,7 +229,7 @@ section{padding:24px;border-radius:12px;min-width:0}.light{background:white}.dar
 figure{margin:0;min-width:48px}figure img{display:block}figcaption{margin-top:12px;font-size:12px}
 .note{margin:24px 0;line-height:1.5}@media(max-width:820px){.comparisons{grid-template-columns:1fr}}@media(max-width:620px){.grid{grid-template-columns:1fr}body{padding:16px}}
 </style><main><h1>Gent / The Inkling</h1>
-<p class="note">Inkling is the primary logo and app identity. Optical-size Inkling is the default browser favicon. Classic remains available as an alternate.</p>
+<p class="note">Inkling is the primary logo and app identity. Classic is the selected browser favicon. Optical-size Inkling remains available for comparison.</p>
 <div class="grid">""" + heroes + """</div>
 <p class="note">Compare the original Inkling, optical-size Inkling, and Classic at 16, 32 and 48 CSS pixels. Optical Inkling uses tighter framing, larger eyes, and a stronger body outline. All three include a cream outside outline. Use 100% browser zoom to compare their intended display sizes.</p>
 <div class="grid comparisons">""" + "".join(rows) + "</div></main></html>\n").encode()
