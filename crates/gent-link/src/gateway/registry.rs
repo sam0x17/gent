@@ -53,6 +53,7 @@ pub(crate) struct Registry {
     cluster: String,
     node: String,
     workers: Arc<tokio::sync::Semaphore>,
+    pub(crate) access: super::access::AccessRoute,
     pub(crate) files: Arc<super::files::Runtime>,
     pub(crate) downloads: Arc<super::downloads::Runtime>,
 }
@@ -358,6 +359,7 @@ impl Registry {
             .gateway_registry()?
             .context("configure a host with gent gateway clients add first")?;
         let value = Self {
+            access: super::access::AccessRoute::Direct,
             home,
             id,
             cluster: cfg.cluster.id,

@@ -1,9 +1,11 @@
 //! User-controlled remote MCP. The HTTP credential authenticates a trusted host
 //! namespace; every agent call also needs that host's conversation metadata.
+pub(crate) mod access;
 mod assertion;
 pub(crate) mod control;
 pub(crate) mod downloads;
 pub(crate) mod files;
+mod hosted;
 mod metadata;
 mod mtls;
 pub(crate) mod registry;
@@ -143,6 +145,10 @@ pub enum KeyCommand {
 pub struct Run {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
+    /// Publish through Gent's web bridge using an outbound connection. This route is not E2EE.
+    #[arg(long, num_args=0..=1, default_missing_value="https://mcp.gent.link", conflicts_with_all=["origin","tls_cert","tls_key"])]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hosted: Option<String>,
     /// Exact external HTTPS origin when serving TLS directly.
     #[arg(long, requires = "tls_cert")]
     origin: Option<String>,

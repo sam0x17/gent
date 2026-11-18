@@ -53,15 +53,24 @@ impl Server {
     }
 
     pub(super) async fn serve(&self, address: std::net::SocketAddr, origin: &str) -> Result<()> {
-        let response = serde_json::to_vec(&json!({"version":1, "process_id":std::process::id(),
-            "listen":address,"origin":origin}))?;
+        self.serve_status(|| {
+            json!({"version":1, "process_id":std::process::id(),
+            "listen":address,"origin":origin})
+        })
+        .await
+    }
+
+    pub(super) async fn serve_status(&self, status: impl Fn() -> Value) -> Result<()> {
         loop {
             let (mut stream, _) = self.listener.accept().await?;
             if stream.peer_cred()?.uid() != rustix::process::geteuid().as_raw() {
                 continue;
             }
-            let _ =
-                tokio::time::timeout(Duration::from_millis(200), stream.write_all(&response)).await;
+            let _ = tokio::time::timeout(
+                Duration::from_millis(200),
+                stream.write_all(&serde_json::to_vec(&status())?),
+            )
+            .await;
         }
     }
 }
@@ -90,18 +99,55 @@ pub(crate) async fn probe(home: &Path) -> Result<Value> {
     ensure!(
         value["version"] == 1
             && value["process_id"].as_u64().is_some_and(|pid| pid > 0)
-            && value["listen"]
-                .as_str()
-                .is_some_and(|s| s.parse::<std::net::SocketAddr>().is_ok())
+            && valid_transport(&value)
             && value["origin"].as_str().is_some(),
         "invalid gateway readiness response"
     );
     Ok(value)
 }
 
+fn valid_transport(value: &Value) -> bool {
+    if value["transport"] != "hosted_bridge" {
+        return value["listen"]
+            .as_str()
+            .is_some_and(|s| s.parse::<std::net::SocketAddr>().is_ok());
+    }
+    value["listen"].is_null()
+        && value["connected"].is_boolean()
+        && value["endpoint"]
+            .as_str()
+            .and_then(|s| url::Url::parse(s).ok())
+            .is_some_and(|url| {
+                value["origin"].as_str() == Some(url.origin().ascii_serialization().as_str())
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && gent_protocol::hosted_mcp::route(url.path())
+                        .is_some_and(|(_, _, path)| path == "/mcp")
+            })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hosted_readiness_reports_the_connection_without_a_local_listener() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("gateway")).unwrap();
+        let server = Server::bind(root.path()).unwrap();
+        let task = tokio::spawn(async move {
+            server.serve_status(|| json!({"version":1,"process_id":std::process::id(),"listen":null,
+                "transport":"hosted_bridge","connected":true,"origin":"https://mcp.gent.link",
+                "endpoint":"https://mcp.gent.link/clusters/629ec806-dc35-4c93-a174-38133d5b99f7/nodes/f84ce64e-2200-40b0-bc1d-cd64295d9c85/mcp"})).await
+        });
+        let value = probe(root.path()).await.unwrap();
+        assert_eq!(value["connected"], true);
+        let mut invalid = value;
+        invalid["endpoint"] = json!("https://other.example/mcp");
+        assert!(!valid_transport(&invalid));
+        task.abort();
+        let _ = task.await;
+    }
 
     #[tokio::test]
     async fn readiness_matches_the_process_and_cleanup_preserves_replaced_paths() {

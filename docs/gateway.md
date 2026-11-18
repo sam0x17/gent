@@ -2,6 +2,8 @@
 
 `gent gateway run` serves the shared agent tools over authenticated Streamable HTTP on a user's node. It connects to that node's daemon and accepts static host credentials or [owner-approved OAuth clients](gateway-oauth.md). This is a transport for testing trusted MCP hosts; ChatGPT and Claude hosted connectors, desktop integrations and mobile operation still need separate acceptance tests.
 
+For public HTTPS access without an inbound port, see the [hosted web/mobile gateway](hosted-mcp.md). That route has a separate plaintext disclosure and uses `--hosted`.
+
 ## Local trial
 
 Build `gent` from source and create a disposable local cluster. Use an absolute, physical node directory for all commands:

@@ -366,14 +366,15 @@ fn tools() -> Vec<Tool> {
 
 // Some hosts retain only the first 4096 instruction characters. Keep route
 // disclosure and core workflows ahead of optional detailed guidance.
-fn instructions(remote: bool) -> String {
+fn instructions(route: Option<crate::gateway::access::AccessRoute>) -> String {
     let instructions = include_str!("../skills/gent/SKILL.md")
         .split_once("\n---\n")
         .expect("bundled skill has closing frontmatter")
         .1;
-    if remote {
+    if let Some(route) = route {
+        let disclosure = route.disclosure();
         format!(
-            "Remote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider. Never put host credentials in tool arguments or prompts. Local filesystem tools are unavailable; use the listed remote file tools. Host file import requires an owner-approved origin. A gent_file_link download URL grants its holder access for up to five minutes without host credentials; keep it private and use file_ids for agent messaging. Provider file presentation still needs verification.\n\n{instructions}"
+            "{disclosure} Never put host credentials in tool arguments or prompts. Local filesystem tools are unavailable; use the listed remote file tools. Host file import requires an owner-approved origin. A gent_file_link download URL grants its holder access for up to five minutes without host credentials; keep it private and use file_ids for agent messaging. Provider file presentation still needs verification.\n\n{instructions}"
         )
     } else {
         instructions.to_string()
@@ -383,7 +384,10 @@ fn instructions(remote: bool) -> String {
 impl ServerHandler for GentMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            instructions(matches!(self.credentials, Credentials::Remote(_))),
+            instructions(match &self.credentials {
+                Credentials::Remote(registry) => Some(registry.access),
+                _ => None,
+            }),
         )
     }
 
@@ -683,29 +687,36 @@ impl ServerHandler for GentMcp {
         Ok(match result {
             Ok(mut value) => {
                 if matches!(self.credentials, Credentials::Remote(_))
-                    && matches!(operation, "register" | "identity" | "rename" | "relay_attach" | "relay_status")
+                    && matches!(
+                        operation,
+                        "register" | "identity" | "rename" | "relay_attach" | "relay_status"
+                    )
                     && let Some(object) = value.as_object_mut()
                 {
-                    object.insert("access_route".into(), json!({
-                        "mode":"user_controlled_gateway",
-                        "plaintext_endpoints":["model_provider","user_node"],
-                        "gent_relay":"encrypted_node_traffic_only",
-                        "file_access":"inline attachments, authorized file chunks and image views, optional host file import and five-minute bearer download links; no local filesystem"
-                    }));
+                    let Credentials::Remote(registry) = &self.credentials else {
+                        unreachable!()
+                    };
+                    object.insert("access_route".into(), registry.access.summary());
                 }
                 // Image data belongs in the image block, not a second large copy
                 // in text. The descriptor remains available for identification.
                 let viewed_image = if matches!(operation, "file_view" | "history_file_view") {
                     let data = value.as_object_mut().and_then(|v| v.remove("data_base64"));
-                    data.and_then(|data| Some(ContentBlock::image(
-                        data.as_str()?, value["file"]["media_type"].as_str()?,
-                    )))
+                    data.and_then(|data| {
+                        Some(ContentBlock::image(
+                            data.as_str()?,
+                            value["file"]["media_type"].as_str()?,
+                        ))
+                    })
                 } else {
                     None
                 };
                 let mut content = vec![ContentBlock::text(value.to_string())];
                 content.extend(viewed_image);
-                if matches!(operation, "inbox" | "relay_next" | "relay_turn_status" | "relay_wait") {
+                if matches!(
+                    operation,
+                    "inbox" | "relay_next" | "relay_turn_status" | "relay_wait"
+                ) {
                     let messages: Vec<&Value> = match operation {
                         "relay_next" => value.get("request").into_iter().collect(),
                         "relay_turn_status" | "relay_wait" => value["responses"]
@@ -828,15 +839,19 @@ mod instruction_tests {
 
     #[test]
     fn core_and_remote_disclosure_survive_host_instruction_cutoff() {
-        for remote in [false, true] {
-            let instructions = instructions(remote);
+        for route in [
+            None,
+            Some(crate::gateway::access::AccessRoute::Direct),
+            Some(crate::gateway::access::AccessRoute::Hosted),
+        ] {
+            let instructions = instructions(route);
             let detailed = instructions
                 .find("## Permission explanations")
                 .expect("core guidance precedes detailed workflows");
             assert!(instructions[..detailed].chars().count() <= 4096);
             assert!(instructions[..detailed].contains("only the target's exact response"));
-            if remote {
-                assert!(instructions.starts_with("Remote route: user-controlled gateway."));
+            if route.is_some() {
+                assert!(instructions.starts_with("Remote route:"));
                 assert!(instructions[..detailed].contains("model provider"));
             }
         }

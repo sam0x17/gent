@@ -42,6 +42,9 @@ impl Run {
         if let Some(origin) = &self.origin {
             args.extend(["--origin".into(), origin.clone()]);
         }
+        if let Some(hosted) = &self.hosted {
+            args.extend(["--hosted".into(), hosted.clone()]);
+        }
         for (flag, values) in [
             ("--client-metadata", &self.client_metadata),
             ("--file-origin", &self.file_origin),

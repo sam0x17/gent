@@ -5,6 +5,7 @@ pub mod administration;
 pub mod configuration_log;
 pub mod file_objects;
 pub mod history;
+pub mod hosted_mcp;
 pub mod owner_transfer;
 pub mod permissions;
 pub mod service;

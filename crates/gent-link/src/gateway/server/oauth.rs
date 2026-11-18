@@ -83,8 +83,9 @@ pub(super) async fn handle(boundary: &Boundary, request: Request<Body>) -> Respo
         return match boundary.registry.oauth_begin(fields, resource).await {
             Ok(value) => {
                 let id = value["request"].as_str().unwrap();
+                let disclosure = escape(boundary.registry.access.disclosure());
                 page(&format!(
-                    "<p>Allow <strong>{}</strong> to connect to your Gent agents?</p><p>Client: <code>{}</code></p><p>Callback: <code>{}</code></p><p>This grants a host namespace. The host selects each agent using conversation metadata; existing messaging permissions still apply.</p><p>On your Gent node, inspect <code>gent gateway oauth requests</code>. Check this request ID and callback, then approve only if you started this connection:</p><pre>gent gateway oauth approve {id}</pre><p>Request: <code>{id}</code></p><p>Your AI provider and your node can read tool content. Gent's central relay carries encrypted node traffic.</p><p><a href=\"/oauth/continue?request={id}\">Continue after approval</a></p>",
+                    "<p>Allow <strong>{}</strong> to connect to your Gent agents?</p><p>Client: <code>{}</code></p><p>Callback: <code>{}</code></p><p>This grants a host namespace. Conversations use this connector's configured identity policy; existing messaging permissions still apply.</p><p>On your Gent node, inspect <code>gent gateway oauth requests</code>. Check this request ID and callback, then approve only if you started this connection:</p><pre>gent gateway oauth approve {id}</pre><p>Request: <code>{id}</code></p><p>{disclosure}</p><p><a href=\"{origin}/oauth/continue?request={id}\">Continue after approval</a></p>",
                     escape(value["name"].as_str().unwrap()),
                     escape(value["oauth_client_id"].as_str().unwrap()),
                     escape(value["redirect_uri"].as_str().unwrap())

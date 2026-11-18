@@ -69,8 +69,11 @@ impl Registration {
         }
         let resource = url(&self.resource, false)?;
         ensure!(
-            resource.path() == "/mcp" && resource.query().is_none(),
-            "OAuth resource must name the exact /mcp endpoint"
+            (resource.path() == "/mcp"
+                || gent_protocol::hosted_mcp::route(resource.path())
+                    .is_some_and(|(_, _, path)| path == "/mcp"))
+                && resource.query().is_none(),
+            "OAuth resource must name an exact direct or hosted MCP endpoint"
         );
         ensure!(
             !self.redirect_uris.is_empty() && self.redirect_uris.len() <= 8,

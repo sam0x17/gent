@@ -73,7 +73,13 @@ impl Boundary {
         ensure!(
             request.uri().path().starts_with("/files/")
                 || !headers.contains_key("origin")
-                || one(headers, "origin") == Some(self.origin.as_str()),
+                || one(headers, "origin")
+                    == Some(
+                        url::Url::parse(&self.origin)?
+                            .origin()
+                            .ascii_serialization()
+                            .as_str()
+                    ),
             "invalid origin"
         );
         ensure!(
@@ -233,7 +239,7 @@ fn tls(options: &Run, policies: &[mtls::Policy]) -> Result<Option<TlsAcceptor>> 
     Ok(Some(TlsAcceptor::from(Arc::new(config))))
 }
 
-fn router(
+pub(super) fn router(
     home: PathBuf,
     registry: Registry,
     host: String,
@@ -246,7 +252,10 @@ fn router(
         .with_json_response(true)
         .with_max_request_body_bytes(gent_protocol::MAX_FRAME_BYTES)
         .with_allowed_hosts([host.clone()])
-        .with_allowed_origins([origin.clone()])
+        .with_allowed_origins([url::Url::parse(&origin)
+            .expect("validated origin")
+            .origin()
+            .ascii_serialization()])
         .enforce_origin_validation()
         .with_cancellation_token(stop);
     let binding = registry.clone();
@@ -320,6 +329,9 @@ async fn serve(
 }
 
 pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
+    if options.hosted.is_some() {
+        return super::hosted::run(home, options).await;
+    }
     let registry = Registry::open(&home)?.with_file_origins(&options.file_origin)?;
     let _lock = managed_file::lock(&home.join("gateway/runtime.lock"))?;
     // Validate exposure before binding any non-loopback socket.
@@ -352,6 +364,9 @@ pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
 
 /// Check every saved capability before writing or restarting a service.
 pub(super) async fn validate(home: &std::path::Path, options: &Run) -> Result<()> {
+    if options.hosted.is_some() {
+        return super::hosted::validate(home, options).await;
+    }
     let (_, origin) = origin(options, options.listen)?;
     let registry = Registry::open(home)?.with_file_origins(&options.file_origin)?;
     tls(options, &registry.tls_policies()?)?;

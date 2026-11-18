@@ -173,6 +173,7 @@ impl Endpoint {
         config::write_private(&key, generated.signing_key.serialize_pem().as_bytes()).unwrap();
         Self {
             options: Run {
+                hosted: None,
                 file_downloads: vec![],
                 file_origin: vec![],
                 client_metadata: vec![],
