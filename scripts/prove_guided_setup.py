@@ -154,16 +154,28 @@ def main():
             assert discovery in seen and discovery + " " + default in text
             assert tomllib.loads((home / "config.toml").read_text())["discovery"]["enabled"] == enabled
             assert (home / "identity.key").read_bytes() == identity
-        print("PASS: guided prompts, daemon readiness, every integration, partial failure/retry, shell hooks, cancellation, revisiting discovery, identity retention and noninteractive setup", flush=True)
     finally:
-        if native:
-            subprocess.run([str(args.codex.resolve()), "app-server", "daemon", "stop"],
-                           env=env, check=True, capture_output=True, timeout=30)
-        cli("daemon", "uninstall")
+        # Stop discovery before its native server so it cannot restart that server.
+        try:
+            cli("daemon", "uninstall")
+        finally:
+            if native:
+                subprocess.run([str(args.codex.resolve()), "app-server", "daemon", "stop"],
+                               env=env, check=True, capture_output=True, timeout=30)
     # Retain private logs; runtime state and host configuration are disposable.
     for directory in (home, user, Path(env["CODEX_HOME"]), Path(env["CLAUDE_CONFIG_DIR"])):
-        if directory.exists():
-            shutil.rmtree(directory)
+        deadline = time.monotonic() + 10
+        while directory.exists():
+            try:
+                shutil.rmtree(directory)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                # Native plugin-fetch subprocesses may finish after server shutdown.
+                if error.errno != errno.ENOTEMPTY or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.1)
+    print("PASS: guided prompts, daemon readiness, every integration, partial failure/retry, shell hooks, cancellation, revisiting discovery, identity retention and noninteractive setup", flush=True)
 
 
 if __name__ == "__main__":
