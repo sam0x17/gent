@@ -213,7 +213,26 @@ impl Document {
         );
         Ok(servers.and_then(|v| v.get("gent")))
     }
+    /// Per-tool Codex approval preferences belong to the user/host. They do
+    /// not change Gent's executable, credentials, endpoint or binding scope.
+    pub fn managed_server(&self) -> Result<Option<Value>> {
+        let mut value = self.server()?.cloned();
+        if matches!(self.format, Format::Toml(_))
+            && let Some(Value::Object(entry)) = &mut value
+        {
+            entry.remove("tools");
+        }
+        Ok(value)
+    }
     pub fn set_server(mut self, value: Option<&Value>) -> Result<String> {
+        let mut value = value.cloned();
+        if matches!(self.format, Format::Toml(_))
+            && let Some(entry) = value.as_mut()
+            && let Some(tools) = self.server()?.and_then(|s| s.get("tools"))
+        {
+            entry["tools"] = tools.clone();
+        }
+        let value = value.as_ref();
         if self.server()? == value {
             return Ok(self.original);
         }

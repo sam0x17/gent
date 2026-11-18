@@ -129,3 +129,31 @@ fn explicit_installs_remember_custom_directories_and_refresh_absence_creates_not
         layout.directory
     );
 }
+
+#[test]
+fn codex_refresh_preserves_tool_approval_preferences_but_rejects_changed_commands() {
+    let (_root, layout, spec) = fixture(Host::Codex);
+    config::initialize(&spec.home, "refresh").unwrap();
+    mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
+    let preferences = "\n[mcp_servers.gent.tools.gent_register]\napproval_mode = \"approve\"\n";
+    put(&layout.server, &(get(&layout.server) + preferences));
+    let mut updated = spec.clone();
+    updated.wake_socket = Some(layout.directory.join("native.sock"));
+    mutate(&layout, &spec.home, Some(updated.clone())).unwrap();
+    let text = get(&layout.server);
+    let doc = Document::parse(Some(&text), Host::Codex).unwrap();
+    assert_eq!(
+        doc.server().unwrap().unwrap()["tools"]["gent_register"]["approval_mode"],
+        "approve"
+    );
+    assert_eq!(
+        refresh_one(&spec.home, &layout, &spec.binary).unwrap()["state"],
+        "current"
+    );
+    let mut changed = doc.server().unwrap().unwrap().clone();
+    changed["command"] = json!("/another/executable");
+    put(&layout.server, &doc.set_server(Some(&changed)).unwrap());
+    let before = get(&layout.server);
+    assert!(mutate(&layout, &spec.home, Some(spec.clone())).is_err());
+    assert_eq!(get(&layout.server), before);
+}

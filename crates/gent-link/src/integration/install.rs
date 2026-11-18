@@ -468,7 +468,7 @@ impl Layout {
             .with_context(|| format!("inspect {}", self.server.display()))?;
         let target = after.as_ref().and_then(|v| v.pointer(pointer));
         matches_entry(
-            doc.server()?,
+            doc.managed_server()?.as_ref(),
             before.as_ref().and_then(|v| v.pointer(pointer)),
             target,
             recovery,
@@ -780,7 +780,8 @@ fn inspect(layout: &Layout, home: &Path) -> Result<Value> {
     } else {
         "/mcpServers/gent"
     };
-    let mut exact = doc.server()? == fragments.as_ref().and_then(|f| f.pointer(pointer));
+    let mut exact =
+        doc.managed_server()?.as_ref() == fragments.as_ref().and_then(|f| f.pointer(pointer));
     if let Some(spec) = &state.installed
         && let Some(ide) = &spec.codex_ide
     {
