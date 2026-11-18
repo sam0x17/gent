@@ -34,9 +34,12 @@ mod tests {
     #[tokio::test]
     async fn build_priority_is_inherited_without_lowering_the_daemon() {
         let before = rustix::process::getpriority_process(None).unwrap();
+        // This child intentionally yields to foreground CPU and disk work.
+        // Check its scheduling policy, not a five-second latency guarantee.
+        let timeout = Duration::from_secs(30);
         let mut command = command(Path::new("sh"));
         command.args(["-c", "ps -o ni= -p $$"]);
-        let output = super::super::process::capture(&mut command, 1024, Duration::from_secs(5))
+        let output = super::super::process::capture(&mut command, 1024, timeout)
             .await
             .unwrap();
         let priority: i32 = std::str::from_utf8(&output)
@@ -55,7 +58,7 @@ mod tests {
             command
                 .args(["-c", "/usr/bin/ionice -p $$"])
                 .env("LC_ALL", "C");
-            let output = super::super::process::capture(&mut command, 1024, Duration::from_secs(5))
+            let output = super::super::process::capture(&mut command, 1024, timeout)
                 .await
                 .unwrap();
             assert_eq!(std::str::from_utf8(&output).unwrap().trim(), "idle");

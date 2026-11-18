@@ -24,7 +24,7 @@ If an update is already running, `gent update` waits for it with a progress indi
 
 Update status distinguishes the calling CLI (`cli`), executable on disk (`installed`), and authenticated daemon's loaded build (`running`). Older daemons that do not report build metadata leave `running` null; their version is never inferred from the CLI. `daemon.reachable` reports whether the status probe succeeded. Pending activation also reports `activation_home` and `activation_starting`.
 
-A manually installed binary can differ from the version already loaded by the daemon. That does not prevent activation of the next verified update. If startup encounters a busy update lock, the daemon keeps serving and retries acknowledgement after authenticated readiness. On older affected versions, a persistent `awaiting activation` with `activation_starting: false` can be completed with `gent daemon restart`, followed by `gent update`. A true starting flag requires inspecting daemon status before restarting, because startup recovery may roll back an unacknowledged build.
+A manually installed binary can differ from the version already loaded by the daemon. That does not prevent activation of the next verified update. If startup encounters a busy update lock, the daemon keeps serving and retries acknowledgement after authenticated readiness. On older affected versions, a persistent `awaiting activation` whose pending record has `starting: false` can be completed with `gent daemon restart`, followed by `gent update`. A true starting flag requires inspecting daemon status before restarting, because startup recovery may roll back an unacknowledged build.
 
 Automatic updates default to enabled. These commands edit the node-local setting in `~/.gent/config.toml`:
 
