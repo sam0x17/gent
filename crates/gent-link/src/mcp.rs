@@ -281,7 +281,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_reply",
-            "Reply using a message ID from gent_inbox, within its bounded exchange. Reuse request_id only for an identical retry.",
+            "Reply using a message ID from gent_inbox, within its bounded exchange. Do not reply solely to acknowledge an acknowledgment or say thanks; use gent_ack for receipts. Reuse request_id only for an identical retry.",
             json!({"message_id":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
             vec!["message_id", "request_id", "text"],
         ),
@@ -293,7 +293,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_ack",
-            "Acknowledge a message delivered to this registration. This records receipt, not completion of the requested work.",
+            "Silently record receipt of a message delivered to this registration. This does not send a chat reply or complete the requested work.",
             json!({"message_id":{"type":"string","format":"uuid"}}),
             vec!["message_id"],
         ),
