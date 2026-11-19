@@ -162,14 +162,17 @@ impl Store {
                 params![node, path, gateway_hash],
             )?;
         }
-        tx.commit()?;
         // This required local feature also fences older binaries: they reject
         // the unknown feature instead of starting a second independent writer.
+        // Persist it before committing the journal, while the child lock is
+        // held. A failed commit leaves a fenced source that retry can reimport;
+        // a committed journal must never coexist with an unfenced child.
         child.set_hosted_parent(config::HostedParent {
             home: std::fs::canonicalize(&self.home)?,
             node_id: self.identity.node.id().into(),
         })?;
         config::save(&home, &child)?;
+        tx.commit()?;
         Ok(json!({"prepared":true,"node_id":node,"hosted_by":self.identity.node.id()}))
     }
 }

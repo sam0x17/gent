@@ -28,12 +28,16 @@ native cluster nodes with `gent update` for hosted-node routing. Existing web
 nodes migrate on their hosting machine and keep their connector URLs and chat
 IDs; there is no need to reenroll or register the conversation again.
 
-Migration reads a fixed snapshot while holding the child daemon lock, commits
-the imported application state in one parent transaction, then activates the
-signed hosting relationship. The original child database remains on disk as
-a retained snapshot; conversation bindings stay in the child filesystem. The
-parent becomes the live store. Interrupted preparation retries use its saved
-migration record without importing the child again.
+Migration reads a fixed snapshot while holding the child daemon lock. Before
+committing the imported application state and migration record in one parent
+transaction, it saves the child's required local hosting feature to block an
+independent writer, including older binaries. It then activates the signed
+hosting relationship. The original child database remains on disk as a
+retained snapshot; conversation bindings stay in the child filesystem. The
+parent becomes the live store. If the commit fails, the child stays fenced and
+a retry imports the unchanged source again. Once the record is committed,
+retries use it without importing again. A failed config save rolls back the
+parent transaction.
 
 Migration refuses conflicting records or combined storage limits that would
 be exceeded. It also refuses unsupported legacy chat bindings, tracked

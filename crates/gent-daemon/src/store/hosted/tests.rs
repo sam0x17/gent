@@ -226,6 +226,137 @@ fn failed_preparation_preserves_child_config_and_signed_mapping_until_retry() {
 }
 
 #[test]
+fn preparation_commit_failure_leaves_child_fenced_and_retry_reimports_source() {
+    let mut pair = Pair::new();
+    let action = send(&pair.agents[2]);
+    let sent = pair
+        .child
+        .execute(Request::Agent {
+            credential: pair.keys[1].clone(),
+            action: action.clone(),
+        })
+        .unwrap();
+    let source = pair.homes[1].path().join("state.sqlite3");
+    let source_before = std::fs::read(&source).unwrap();
+    let checkpoint = pair.state.checkpoint().clone();
+    // This constraint is deferred until COMMIT, after import, journal insertion
+    // and the child config save have all succeeded.
+    pair.parent
+        .db
+        .execute_batch(
+            "CREATE TABLE hosted_commit_guard (
+                node TEXT REFERENCES hosted_nodes(node) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER fail_hosted_commit AFTER INSERT ON hosted_nodes BEGIN
+                INSERT INTO hosted_commit_guard VALUES('missing-host');
+             END;",
+        )
+        .unwrap();
+    let error = pair
+        .parent
+        .prepare_hosted_node(pair.child.identity.node.id(), pair.homes[1].path())
+        .unwrap_err();
+    assert!(error.to_string().contains("FOREIGN KEY constraint failed"));
+    let config = config::load_for_runtime(pair.homes[1].path()).unwrap();
+    assert_eq!(
+        config.hosted_parent().unwrap().unwrap().node_id,
+        pair.parent.identity.node.id()
+    );
+    assert!(
+        Store::open(pair.homes[1].path())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("served by its native host daemon")
+    );
+    assert_preparation_rolled_back(&pair, &checkpoint);
+    assert_eq!(std::fs::read(&source).unwrap(), source_before);
+    assert_eq!(
+        pair.parent
+            .db
+            .query_row("SELECT COUNT(*) FROM hosted_commit_guard", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+    pair.parent
+        .db
+        .execute_batch("DROP TRIGGER fail_hosted_commit")
+        .unwrap();
+    pair.activate();
+    for i in 1..3 {
+        assert_eq!(
+            pair.call(i, AgentOp::Identity).unwrap()["agent"]["id"],
+            pair.agents[i]
+        );
+    }
+    let inbox = pair.call(2, AgentOp::Inbox).unwrap();
+    assert_eq!(inbox.as_array().unwrap().len(), 1);
+    assert_eq!(inbox[0]["id"], sent["message_id"]);
+    assert_eq!(inbox[0]["text"], "isolated hosted fixture");
+    let retried = pair.call(1, action).unwrap();
+    assert_eq!(retried["message_id"], sent["message_id"]);
+    assert_eq!(retried["duplicate"], true);
+    assert_eq!(std::fs::read(source).unwrap(), source_before);
+}
+
+fn assert_preparation_rolled_back(pair: &Pair, checkpoint: &gent_crypto::Checkpoint) {
+    assert!(pair.parent.db.is_autocommit());
+    assert_eq!(
+        pair.parent
+            .db
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM hosted_nodes),
+                        (SELECT COUNT(*) FROM agents WHERE node_id=?1),
+                        (SELECT COUNT(*) FROM messages)",
+                [pair.child.identity.node.id()],
+                |r| Ok((
+                    r.get::<_, u64>(0)?,
+                    r.get::<_, u64>(1)?,
+                    r.get::<_, u64>(2)?
+                )),
+            )
+            .unwrap(),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        pair.parent
+            .identity
+            .state(&pair.parent.db)
+            .unwrap()
+            .checkpoint(),
+        checkpoint
+    );
+}
+
+#[test]
+fn preparation_config_lock_failure_rolls_back_import_and_journal() {
+    let mut pair = Pair::new();
+    let checkpoint = pair.state.checkpoint().clone();
+    let source = pair.homes[1].path().join("state.sqlite3");
+    let source_before = std::fs::read(&source).unwrap();
+    let config_before = std::fs::read(config::path(pair.homes[1].path())).unwrap();
+    let lock = config::state_lock(pair.homes[1].path(), "config.lock").unwrap();
+    let error = pair
+        .parent
+        .prepare_hosted_node(pair.child.identity.node.id(), pair.homes[1].path())
+        .unwrap_err();
+    assert!(error.to_string().contains("configuration is busy"));
+    assert_preparation_rolled_back(&pair, &checkpoint);
+    assert_eq!(
+        std::fs::read(config::path(pair.homes[1].path())).unwrap(),
+        config_before
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), source_before);
+    drop(lock);
+    pair.activate();
+    assert_eq!(
+        pair.call(1, AgentOp::Identity).unwrap()["agent"]["id"],
+        pair.agents[1]
+    );
+    assert_eq!(std::fs::read(source).unwrap(), source_before);
+}
+
+#[test]
 fn hosted_scope_rejects_native_sibling_gateway_and_wrong_parent_credentials() {
     let mut pair = Pair::new();
     pair.activate();
