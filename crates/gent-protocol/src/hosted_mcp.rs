@@ -64,7 +64,8 @@ pub fn route(path: &str) -> Option<(&str, &str, String)> {
     if let Some(rest) = path.strip_prefix("/clusters/") {
         let (cluster, node, suffix) = scope(rest)?;
         let native = format!("/{suffix}");
-        return (native == "/connect" || valid_path(&native)).then_some((cluster, node, native));
+        return (matches!(native.as_str(), "/connect" | "/control") || valid_path(&native))
+            .then_some((cluster, node, native));
     }
     for (public, native, suffix) in [
         (

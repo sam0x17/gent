@@ -123,8 +123,21 @@ pub(super) async fn run_until(
     options: Run,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    run_portable(home, options, shutdown, None).await
+}
+
+pub(super) async fn run_portable(
+    home: PathBuf,
+    options: Run,
+    shutdown: CancellationToken,
+    session: Option<Arc<crate::web::failover::Session>>,
+) -> Result<()> {
     let endpoint = endpoint(&home, &options)?;
-    credential(&home)?;
+    if let Some(session) = &session {
+        session.credential()?;
+    } else {
+        credential(&home)?;
+    }
     let _lock = managed_file::lock(&home.join("gateway/runtime.lock"))?;
     let stop = CancellationToken::new();
     let app = app(&home, &options, &endpoint, stop.clone()).await?;
@@ -143,7 +156,10 @@ pub(super) async fn run_until(
             }
             // Reload after every disconnect: account renewal can replace the
             // node's transport credential while this process remains alive.
-            if let Ok(token) = credential(&home) {
+            if let Ok(token) = session
+                .as_ref()
+                .map_or_else(|| credential(&home), |s| s.credential())
+            {
                 let began = tokio::time::Instant::now();
                 let _ = connection::run(
                     &endpoint,
@@ -151,6 +167,7 @@ pub(super) async fn run_until(
                     app.clone(),
                     connected.clone(),
                     shutdown.clone(),
+                    session.clone(),
                 )
                 .await;
                 if began.elapsed() > Duration::from_secs(60) {
@@ -177,7 +194,9 @@ pub(super) async fn run_until(
         result=&mut publish=>result,
         result=control.serve_status(||json!({"version":1,"process_id":std::process::id(),"listen":null,
             "origin":endpoint.origin,"endpoint":format!("{}/mcp",endpoint.base),"transport":"hosted_bridge",
-            "connected":connected.load(Ordering::Acquire)}))=>result,
+            "connected":connected.load(Ordering::Acquire),
+            "carrier_epoch":session.as_ref().map(|s|s.epoch),
+            "checkpoint_management":session.as_ref().and_then(|s|s.management())}))=>result,
         result=tokio::signal::ctrl_c()=>{
             shutdown.cancel();
             publish.await?;

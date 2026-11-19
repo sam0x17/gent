@@ -148,7 +148,7 @@ fn chat_carriers_use_mapping_and_node_authentication_enforces_freshness() {
 }
 
 #[test]
-fn invalid_hosting_graphs_and_reassignment_are_rejected() {
+fn invalid_hosting_graphs_are_rejected_and_authorized_takeover_preserves_identity() {
     let mut f = Fixture::new();
     let missing = NodeIdentity::generate().unwrap();
     for (child, parent) in [
@@ -159,7 +159,7 @@ fn invalid_hosting_graphs_and_reassignment_are_rejected() {
         assert!(f.state.host_node(&f.owner, child, parent, NOW).is_err());
     }
     f.host(1, 0);
-    for (child, parent) in [(1, 2), (2, 1), (0, 1), (0, 2)] {
+    for (child, parent) in [(2, 1), (0, 1), (0, 2)] {
         assert!(
             f.state
                 .host_node(&f.owner, f.nodes[child].id(), f.nodes[parent].id(), NOW)
@@ -172,15 +172,34 @@ fn invalid_hosting_graphs_and_reassignment_are_rejected() {
         state.nodes.get_mut(f.nodes[2].id()).unwrap().hosted_by = Some(parent.into());
         assert!(f.owner.sign_revision(&f.state, state).is_err());
     }
-    // A valid graph still cannot unset or reassign an established mapping.
-    for parent in [None, Some(f.nodes[2].id().to_owned())] {
+    // A hosted identity remains hosted, while a signed takeover changes its carrier.
+    {
         let mut state = f.state.renew(&f.owner, NOW).unwrap().state;
-        state.nodes.get_mut(f.nodes[1].id()).unwrap().hosted_by = parent;
+        state.nodes.get_mut(f.nodes[1].id()).unwrap().hosted_by = None;
         let signed = f.owner.sign_revision(&f.state, state).unwrap();
         let mut follower = f.state.clone();
         assert!(follower.apply_chain(&[signed], NOW).is_err());
         assert_eq!(follower.checkpoint(), f.state.checkpoint());
     }
+    let before = f.state.state().nodes[f.nodes[1].id()].clone();
+    let next = f
+        .state
+        .host_node(&f.owner, f.nodes[1].id(), f.nodes[2].id(), NOW)
+        .unwrap();
+    f.state.apply_chain(&[next], NOW).unwrap();
+    let after = &f.state.state().nodes[f.nodes[1].id()];
+    assert_eq!(before.signing_key, after.signing_key);
+    assert_eq!(before.can_configure, after.can_configure);
+    assert!(
+        f.state
+            .authorize_chat_carrier(f.nodes[1].id(), f.nodes[0].id())
+            .is_err()
+    );
+    assert!(
+        f.state
+            .authorize_chat_carrier(f.nodes[1].id(), f.nodes[2].id())
+            .is_ok()
+    );
 }
 
 #[test]

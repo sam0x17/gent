@@ -34,8 +34,8 @@ pub(super) fn verify_step(previous: &ClusterState, next: &ClusterState) -> Resul
             && let Some(replacement) = next.nodes.get(id)
         {
             ensure!(
-                replacement.hosted_by == member.hosted_by,
-                "hosting parent is immutable"
+                replacement.hosted_by.is_some(),
+                "a hosted node cannot become a native node"
             );
         }
     }
@@ -66,7 +66,7 @@ impl VerifiedState {
         Ok(())
     }
 
-    /// Install an immutable parent using existing configuration signing authority.
+    /// Assign a native parent using existing configuration signing authority.
     /// Repeating the same mapping is allowed and changes no configuration grants.
     pub fn host_node(
         &self,
@@ -78,13 +78,6 @@ impl VerifiedState {
         self.require_fresh(now)?;
         self.revise(owner, now, |state| {
             let member = state.nodes.get_mut(node_id).context("node unavailable")?;
-            ensure!(
-                member
-                    .hosted_by
-                    .as_deref()
-                    .is_none_or(|saved| saved == parent),
-                "hosting parent is immutable"
-            );
             member.hosted_by = Some(parent.into());
             // Validate every relationship: hosting a node that already hosts
             // children would otherwise introduce a chain indirectly.

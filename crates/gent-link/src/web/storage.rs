@@ -25,6 +25,10 @@ pub(super) fn home(parent: &Path, name: &str) -> PathBuf {
         .join("node")
 }
 
+pub(super) fn portable_home(parent: &Path, node: &str) -> PathBuf {
+    home(parent, &format!("web-node:{node}"))
+}
+
 pub(super) fn directory(parent: &Path) -> Result<PathBuf> {
     node_home::inspect(parent)?;
     let path = parent.join("web");
@@ -46,7 +50,11 @@ pub(super) fn read(parent: &Path, home: &Path) -> Result<Option<Record>> {
         record.version == 1
             && record.cluster == cfg.cluster.id
             && record.parent == cfg.node.id
-            && home == self::home(parent, &record.name),
+            && (home == self::home(parent, &record.name)
+                || record
+                    .node
+                    .as_ref()
+                    .is_some_and(|node| home == portable_home(parent, node))),
         "web node belongs to another machine or cluster"
     );
     if let Some(node) = &record.node {

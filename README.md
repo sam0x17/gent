@@ -12,6 +12,8 @@ The planned daemon and native-client transport requires end-to-end encryption fo
 
 Web chats may use a Gent-hosted bridge with an explicit warning that Gent and the chosen provider can read messages and files shared through it. The bridge receives only its chat's authorized access; unrelated encrypted exchanges and full cluster policy remain protected. A verified user-controlled gateway or encryption-capable host may preserve confidentiality from Gent. Security status follows the actual transport path. Mobile integration still needs a separate proof and must never silently inherit a web exception.
 
+Named web connectors can move automatically to another online cluster node with configuration authority. Gent stores web-only checkpoints in Cloudflare to preserve the connector URL, chat handles and committed requests. The original hosting node must update and seed a checkpoint before failover is available. A carrier outage can briefly interrupt a call; retry its original request ID. URL display, rotation and revocation run on the current carrier, shown by `gent node web list`. Native-only traffic remains end-to-end encrypted.
+
 An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQLite inbox, permission evaluator, and stdio MCP server. Independent MCP clients can register, exchange text and image bytes, reply, and recover queued work after a restart. Follow the [local proof guide](docs/local-proof.md) to build and try it.
 
 Gent [automatically updates](docs/updates.md) from the GitHub `stable` tag every five minutes, with staged builds, atomic executable replacement and startup rollback. Normal CLI responses are readable; use `--json` for scripts or `--verbose` for full response details.

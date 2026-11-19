@@ -123,3 +123,17 @@ fn gateway_pin_survives_stale_projection_and_rejects_loss_or_identity_replacemen
     changed.cluster.id = uuid::Uuid::new_v4().to_string();
     assert!(config::save(root.path(), &changed).is_err());
 }
+#[test]
+fn portable_web_downgrade_fence_survives_stale_projection() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("node");
+    let stale = gent_daemon::config::initialize(&home, "portable-test").unwrap();
+    gent_daemon::config::edit_local(&home, |cfg| cfg.enable_portable_web()).unwrap();
+    gent_daemon::config::save(&home, &stale).unwrap();
+    assert!(
+        gent_daemon::config::load(&home)
+            .unwrap()
+            .portable_web()
+            .unwrap()
+    );
+}

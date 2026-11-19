@@ -31,6 +31,7 @@ mod downloads;
 pub(crate) use downloads::{Download, DownloadTarget};
 pub(crate) mod capability;
 mod keys;
+pub(crate) mod portable;
 mod recovery;
 pub(crate) use bindings::BindingKeys;
 pub(crate) mod oauth;

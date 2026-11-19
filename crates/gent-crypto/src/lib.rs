@@ -9,5 +9,6 @@ pub mod configuration_log;
 pub mod files;
 pub mod pairing;
 pub mod stream;
+pub mod web_failover;
 
 pub use authority::*;

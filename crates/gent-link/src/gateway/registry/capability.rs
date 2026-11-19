@@ -41,7 +41,7 @@ impl Registry {
     }
 }
 
-fn read_export(path: &Path) -> Result<Export> {
+pub(super) fn read_export(path: &Path) -> Result<Export> {
     let snapshot = snapshot(path)?;
     serde_json::from_str(
         snapshot
@@ -52,7 +52,7 @@ fn read_export(path: &Path) -> Result<Export> {
     .map_err(|_| anyhow::anyhow!("invalid connector URL record"))
 }
 
-fn recover(registry: &Registry, state: &mut State) -> Result<()> {
+pub(super) fn recover(registry: &Registry, state: &mut State) -> Result<()> {
     let pending = snapshot(&registry.directory().join(PENDING))?;
     let Some(text) = &pending.text else {
         return Ok(());

@@ -200,9 +200,12 @@ impl StoreSession<'_> {
         } else {
             active_peer(&self.state, peer, &key, self.timestamp)?;
         }
+        self.gate_web_event(&id.to_string(), &event)?;
         self.enqueue_event(peer, id, event, subject, receipt_expires)
     }
     pub(super) fn announce(&self, id: &str) -> Result<()> {
+        let registration = self.registration(id)?;
+        self.record_web_registration(&registration)?;
         let peers = self
             .db
             .prepare("SELECT peer,peer_key FROM network_links ORDER BY peer")?
@@ -213,7 +216,6 @@ impl StoreSession<'_> {
         if peers.is_empty() {
             return Ok(());
         }
-        let registration = self.registration(id)?;
         for (peer, key) in peers {
             // A revoked peer cannot block an otherwise local registration change.
             if active_peer(&self.state, &peer, &key, self.timestamp).is_err() {
@@ -293,6 +295,7 @@ impl StoreSession<'_> {
         self.state.authorize_chat_carrier(&incoming.node, node)?;
         let node = incoming.node.as_str();
         ensure!(!self.local_node(node), "remote node claimed local identity");
+        self.retire_web_registration(&incoming.id, node)?;
         if let Some(existing) = self
             .db
             .query_row(
@@ -789,6 +792,9 @@ impl Store {
         if let Some(subject) = &subject {
             let session = self.network_session(&self.db, state);
             let message = session.message(subject)?;
+            if !session.web_message_ready(&message)? {
+                return Ok(());
+            }
             if !session.deliverable(&message)? {
                 cancelled = true;
             } else if !cancelled {
@@ -994,8 +1000,14 @@ impl Store {
                             )? == record.authority,
                             "node record authority fork"
                         );
-                        self.network_session(&tx, state)
-                            .import_event(&peer, record.event)?;
+                        let mut session = self.network_session(&tx, state);
+                        if !session.obsolete_web_event(
+                            &peer,
+                            &record.event,
+                            record.authority.revision,
+                        )? {
+                            session.import_event(&peer, record.event)?;
+                        }
                         tx.execute("DELETE FROM network_partial WHERE group_id=?1", [group])?;
                     } else {
                         tx.execute("INSERT INTO network_partial VALUES(?1,?2,?3,?4,?5) ON CONFLICT(group_id) DO UPDATE SET body=excluded.body",params![group,id.to_string(),digest.as_slice(),total,record])?;

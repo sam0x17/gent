@@ -172,6 +172,7 @@ pub struct Run {
 pub(crate) async fn run_web(
     home: PathBuf,
     stop: tokio_util::sync::CancellationToken,
+    session: Option<std::sync::Arc<crate::web::failover::Session>>,
 ) -> Result<()> {
     let options = Run {
         listen: "127.0.0.1:8787".parse().unwrap(),
@@ -183,7 +184,7 @@ pub(crate) async fn run_web(
         file_origin: Vec::new(),
         file_downloads: Vec::new(),
     };
-    hosted::run_until(home, options, stop).await
+    hosted::run_portable(home, options, stop, session).await
 }
 
 pub async fn execute(home: &Path, command: Command) -> Result<Option<Value>> {

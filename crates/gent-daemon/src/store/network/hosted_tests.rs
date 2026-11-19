@@ -217,4 +217,142 @@ async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_id
             .import_registration(child.id(), &registration)
             .is_err()
     );
+    // A new pending turn survives a carrier change while its native target has
+    // already answered but the original carrier has not received that answer.
+    owner(
+        &mut pair.stores[0],
+        pair.homes[0].path(),
+        OwnerOp::WebLease {
+            node_id: child.id().into(),
+            seconds: 20,
+        },
+    );
+    let pending = AgentOp::RequestReply {
+        recipient: pair.agents[1].clone(),
+        request_id: Uuid::now_v7().to_string(),
+        text: "reply during takeover".into(),
+        files: vec![],
+        file_ids: vec![],
+    };
+    let turn = call(&mut pair.stores[0], pending.clone()).unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let checkpoint =
+        crate::store::hosted::snapshot::export(pair.homes[0].path(), child.id()).unwrap();
+    owner(
+        &mut pair.stores[0],
+        pair.homes[0].path(),
+        OwnerOp::WebCommit {
+            node_id: child.id().into(),
+            revision: checkpoint.revision,
+        },
+    );
+    let committed_identity = call(&mut pair.stores[0], AgentOp::Identity).unwrap();
+    call(
+        &mut pair.stores[0],
+        AgentOp::Rename {
+            name: "unpublished-before-carrier-loss".into(),
+            expected_generation: committed_identity["registration_generation"]
+                .as_u64()
+                .unwrap(),
+        },
+    )
+    .unwrap();
+    pair.pump();
+    let reply = pair
+        .agent(
+            1,
+            AgentOp::Reply {
+                message_id: turn.clone(),
+                request_id: Uuid::now_v7().to_string(),
+                text: "answer retained on the new carrier".into(),
+                files: vec![],
+                file_ids: vec![],
+            },
+        )
+        .unwrap();
+    let new_home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(new_home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut cfg = config::load_for_runtime(child_home.path()).unwrap();
+    cfg.set_hosted_parent(config::HostedParent {
+        home: pair.homes[1].path().into(),
+        node_id: remote.clone(),
+    })
+    .unwrap();
+    config::save(new_home.path(), &cfg).unwrap();
+    let new_gateway = config::secret();
+    config::write_private(&new_home.path().join("owner.key"), new_gateway.as_bytes()).unwrap();
+    {
+        let anchor = pair.stores[1]
+            .identity
+            .state(&pair.stores[1].db)
+            .unwrap()
+            .anchor()
+            .clone();
+        let tx = pair.stores[1].db.transaction().unwrap();
+        crate::store::hosted::snapshot::restore(&tx, &checkpoint, &anchor, child.id()).unwrap();
+        tx.execute(
+            "INSERT INTO hosted_nodes VALUES(?1,?2,?3)",
+            params![
+                child.id(),
+                new_home.path().to_str().unwrap(),
+                hash(&new_gateway)
+            ],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO hosted_checkpoints VALUES(?1,?2,?2,?3)",
+            params![child.id(), checkpoint.revision, now() + 20],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    owner(
+        &mut pair.stores[0],
+        pair.homes[0].path(),
+        OwnerOp::Configure {
+            request_id: Uuid::new_v4().to_string(),
+            edit: ConfigurationEdit::HostNode {
+                node_id: child.id().into(),
+                parent: remote.clone(),
+            },
+        },
+    );
+    pair.pump();
+    pair.stores[1].reconcile_hosted_routes().unwrap();
+    pair.pump();
+    let state = pair.stores[0].identity.state(&pair.stores[0].db).unwrap();
+    let old = pair.stores[0].network_session(&pair.stores[0].db, state);
+    assert_eq!(
+        old.stored_registration(&original).unwrap().name,
+        committed_identity["agent"]["name"]
+    );
+    let next = |store: &mut Store, action| {
+        store.execute(Request::HostedAgent {
+            node_id: child.id().into(),
+            gateway_credential: new_gateway.clone(),
+            credential: key.clone(),
+            action,
+        })
+    };
+    assert_eq!(
+        next(&mut pair.stores[1], AgentOp::Identity).unwrap()["agent"]["id"],
+        original
+    );
+    assert!(call(&mut pair.stores[0], AgentOp::Identity).is_err());
+    let result = next(
+        &mut pair.stores[1],
+        AgentOp::RelayTurnStatus {
+            turn_id: turn.clone(),
+            after_message_id: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(result["responses"][0]["id"], reply["message_id"]);
+    assert_eq!(
+        next(&mut pair.stores[1], pending).unwrap()["message_id"],
+        turn
+    );
 }

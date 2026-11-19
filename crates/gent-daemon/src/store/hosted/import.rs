@@ -124,7 +124,7 @@ pub(super) fn import(
     );
     parent_tx.execute_batch("SAVEPOINT hosted_state_import")?;
     let result = (|| {
-        agents(parent_tx, &snapshot, child_id)?;
+        agents(parent_tx, &snapshot, child_id, parent_state.anchor())?;
         for table in TABLES.split_whitespace() {
             copy(parent_tx, &snapshot, table, child_id)
                 .with_context(|| format!("hosted migration table {table}"))?;
@@ -161,7 +161,7 @@ fn metadata(db: &Connection, key: &str, expected: &str) -> Result<()> {
     Ok(())
 }
 
-fn capacity(db: &Connection) -> Result<()> {
+pub(super) fn capacity(db: &Connection) -> Result<()> {
     // The union must fit the same durable limits as normal admission. Pending
     // work reserves future events, so counting only current rows is unsafe.
     let full: Option<String> = db.query_row(
@@ -214,15 +214,18 @@ fn origin(db: &Connection, id: &Value) -> Result<Vec<Value>> {
             "hosted migration requires an existing chat origin; unbound legacy chat is unsupported",
         )?;
     ensure!(
-        values[1] == Value::Null
-            && (1..=gent_protocol::MAX_REGISTRATION_GENERATION as i64)
-                .contains(&integer(&values[2])?),
-        "hosted migration requires a nonce-bound chat with a valid generation"
+        (1..=gent_protocol::MAX_REGISTRATION_GENERATION as i64).contains(&integer(&values[2])?),
+        "hosted migration requires a valid chat generation"
     );
     Ok(values)
 }
 
-fn agents(parent: &Connection, source: &Connection, child: &str) -> Result<()> {
+pub(super) fn agents(
+    parent: &Connection,
+    source: &Connection,
+    child: &str,
+    anchor: &gent_crypto::TrustAnchor,
+) -> Result<()> {
     let mut query = source
         .prepare("SELECT id,credential_hash,node_id,name,provider,last_seen,revoked FROM agents")?;
     for incoming in query.query_map([], row)? {
@@ -230,11 +233,19 @@ fn agents(parent: &Connection, source: &Connection, child: &str) -> Result<()> {
         let id = incoming[0].clone();
         let binding = origin(source, &id)?;
         let node = text(&incoming[2])?;
-        ensure!(
-            gent_crypto::agent_id(node, uuid::Uuid::parse_str(text(&binding[0])?)?)? == text(&id)?,
-            "hosted chat origin does not match its ID"
-        );
         let local = node == child;
+        match (&binding[0], &binding[1]) {
+            (Value::Text(nonce), Value::Null) => ensure!(
+                gent_crypto::agent_id(node, uuid::Uuid::parse_str(nonce)?)? == text(&id)?,
+                "hosted chat origin does not match its ID"
+            ),
+            (Value::Null, Value::Blob(bytes)) if !local => {
+                let certificate: gent_crypto::SignedLegacyAgentBinding =
+                    serde_json::from_slice(bytes)?;
+                certificate.verify(anchor, text(&id)?, node)?;
+            }
+            _ => anyhow::bail!("hosted migration requires a nonce-bound local chat"),
+        }
         let placeholder = Value::Text(format!("remote:{}", text(&id)?));
         let credential = text(&incoming[1])?;
         ensure!(
@@ -319,7 +330,12 @@ fn columns(db: &Connection, table: &str) -> Result<Vec<(String, bool)>> {
 
 // Only primary-key matches can merge. Other UNIQUE/CHECK/FK failures propagate;
 // INSERT OR IGNORE/REPLACE would silently discard retries or unrelated records.
-fn copy(parent: &Connection, source: &Connection, table: &str, child: &str) -> Result<()> {
+pub(super) fn copy(
+    parent: &Connection,
+    source: &Connection,
+    table: &str,
+    child: &str,
+) -> Result<()> {
     let columns = columns(source, table)?;
     ensure!(
         !columns.is_empty()

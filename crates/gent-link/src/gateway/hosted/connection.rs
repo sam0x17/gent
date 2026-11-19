@@ -29,11 +29,17 @@ pub(super) async fn run(
     app: Router,
     connected: Arc<AtomicBool>,
     shutdown: tokio_util::sync::CancellationToken,
+    session: Option<Arc<crate::web::failover::Session>>,
 ) -> Result<()> {
     let mut request = endpoint.socket.clone().into_client_request()?;
     request
         .headers_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
+    if let Some(session) = &session {
+        request
+            .headers_mut()
+            .insert("x-gent-web-epoch", session.epoch.to_string().parse()?);
+    }
     let config = WebSocketConfig::default()
         .max_message_size(Some(protocol::MAX_WIRE_BYTES))
         .max_frame_size(Some(protocol::MAX_WIRE_BYTES));
@@ -95,9 +101,15 @@ pub(super) async fn run(
                 let app=app.clone();
                 let host=endpoint.host.clone();
                 let sender=responses.clone();
+                let session=session.clone();
                 tasks.spawn(async move {
                     let id=request.id.clone();
-                    let response=match timeout(Duration::from_secs(protocol::REQUEST_SECONDS-2),dispatch(app,&host,request)).await {
+                    let operation=async {
+                        let response=dispatch(app,&host,request).await?;
+                        if let Some(session)=session { session.flush().await?; }
+                        Ok::<_,anyhow::Error>(response)
+                    };
+                    let response=match timeout(Duration::from_secs(protocol::REQUEST_SECONDS-2),operation).await {
                         Ok(Ok(response))=>response,
                         _=>failure(id,502,"Gent could not return this result; retain the original request ID and check status before repeating work"),
                     };

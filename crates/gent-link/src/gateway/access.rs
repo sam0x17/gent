@@ -14,7 +14,7 @@ impl AccessRoute {
                 "Remote route: user-controlled gateway. Plaintext tool calls terminate on the owner's node and at the model provider. Gent's central relay receives encrypted node traffic. This is not encryption against the model provider."
             }
             Self::Hosted => {
-                "Remote route: Gent-hosted web bridge. The model provider, Gent's hosted endpoint (including Cloudflare), and your gateway node can read connector messages and files, even when you use a phone. This connector path is not end-to-end encrypted. Other node-to-node messages remain encrypted."
+                "Remote route: Gent-hosted web bridge. The model provider, Gent's hosted endpoint (including Cloudflare), and the native node carrying this connector can read its messages and files, even when you use a phone. Gent stores web-connector checkpoints so another authorized cluster node can take over. This connector path is not end-to-end encrypted. Other node-to-node messages remain encrypted."
             }
         }
     }

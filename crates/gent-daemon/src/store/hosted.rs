@@ -2,6 +2,10 @@
 //! Hosting authenticates a chat carrier, never a configuration signer.
 use super::*;
 mod import;
+mod portable;
+#[cfg(test)]
+mod portable_tests;
+pub(crate) mod snapshot;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -10,12 +14,83 @@ mod tests;
 pub(super) fn schema(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS hosted_nodes (
-        node TEXT PRIMARY KEY,home TEXT NOT NULL UNIQUE,gateway_hash TEXT NOT NULL);",
+        node TEXT PRIMARY KEY,home TEXT NOT NULL UNIQUE,gateway_hash TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS hosted_checkpoints (
+        node TEXT PRIMARY KEY,revision INTEGER NOT NULL,durable INTEGER NOT NULL,
+        lease_until INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS hosted_event_gates (id TEXT PRIMARY KEY,node TEXT NOT NULL,revision INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS hosted_directory (
+        agent TEXT NOT NULL,node TEXT NOT NULL,revision INTEGER NOT NULL,payload BLOB NOT NULL,
+        PRIMARY KEY(agent,revision));
+        CREATE TABLE IF NOT EXISTS hosted_message_gates (id TEXT PRIMARY KEY,node TEXT NOT NULL,revision INTEGER NOT NULL);",
     )?;
     Ok(())
 }
 
 impl Store {
+    pub(super) fn restore_web_node(
+        &mut self,
+        node: &str,
+        home: &Path,
+        checkpoint: &Path,
+    ) -> Result<Value> {
+        let home = std::fs::canonicalize(home)?;
+        ensure!(home != self.home, "invalid web home");
+        config::private_dir(&home)?;
+        let child = config::load_for_runtime(&home)?;
+        ensure!(
+            child.node.id == node && child.cluster.id == self.config.cluster.id,
+            "web restore identity mismatch"
+        );
+        let snapshot = snapshot::read(checkpoint)?;
+        let gateway = hash(&config::read_private(&home.join("owner.key"))?);
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state = self.identity.state(&tx)?;
+        state.require_fresh(now() as u64)?;
+        ensure!(
+            self.identity.can_administer(&state),
+            "web restore requires configuration authority"
+        );
+        ensure!(
+            state
+                .state()
+                .nodes
+                .get(node)
+                .is_some_and(|n| n.hosted_by.is_some()),
+            "web node unavailable"
+        );
+        snapshot::restore(&tx, &snapshot, state.anchor(), node)?;
+        tx.execute(
+            "INSERT INTO hosted_nodes VALUES(?1,?2,?3) ON CONFLICT(node)
+            DO UPDATE SET home=excluded.home,gateway_hash=excluded.gateway_hash",
+            params![node, home.to_str().context("invalid web home")?, gateway],
+        )?;
+        tx.execute(
+            "INSERT INTO hosted_checkpoints VALUES(?1,?2,?2,0) ON CONFLICT(node)
+            DO UPDATE SET revision=excluded.revision,durable=excluded.durable,lease_until=0",
+            params![node, snapshot.revision],
+        )?;
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT value FROM metadata WHERE key='hosted_routes'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(previous) = previous {
+            let mut routes: BTreeMap<String, String> = serde_json::from_str(&previous)?;
+            routes.remove(node);
+            tx.execute(
+                "UPDATE metadata SET value=?1 WHERE key='hosted_routes'",
+                [serde_json::to_string(&routes)?],
+            )?;
+        }
+        tx.commit()?;
+        Ok(json!({"restored":true,"revision":snapshot.revision}))
+    }
+
     pub(crate) fn reconcile_hosted_routes(&mut self) -> Result<()> {
         let tx = self
             .db
@@ -43,6 +118,12 @@ impl Store {
         if previous.as_deref() == Some(&fingerprint) {
             return Ok(());
         }
+        let previous: BTreeMap<String, String> = previous
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        let changed = |node: &str| routes.get(node) != previous.get(node);
         state.require_fresh(now() as u64)?;
         let session = StoreSession {
             db: &tx,
@@ -80,6 +161,16 @@ impl Store {
                 && !session.local_node(&recipient.node_id)
                 && !message.acknowledged
             {
+                if changed(&sender.node_id) || changed(&recipient.node_id) {
+                    let id = gent_crypto::scoped_id(
+                        b"gent/message-event/v1\0",
+                        &[
+                            session.state.transport_host(&recipient.node_id)?.as_bytes(),
+                            message.id.as_bytes(),
+                        ],
+                    );
+                    tx.execute("DELETE FROM network_sent WHERE id=?1", [id.to_string()])?;
+                }
                 session.queue_message(
                     session.state.transport_host(&recipient.node_id)?,
                     &request,
@@ -89,6 +180,17 @@ impl Store {
                 && !session.local_node(&sender.node_id)
                 && message.acknowledged
             {
+                if changed(&sender.node_id) || changed(&recipient.node_id) {
+                    let id = gent_crypto::scoped_id(
+                        b"gent/receipt-event/v1\0",
+                        &[
+                            session.state.transport_host(&sender.node_id)?.as_bytes(),
+                            message.id.as_bytes(),
+                            &[1],
+                        ],
+                    );
+                    tx.execute("DELETE FROM network_sent WHERE id=?1", [id.to_string()])?;
+                }
                 session.receipt(
                     session.state.transport_host(&sender.node_id)?,
                     &id,
@@ -210,6 +312,20 @@ impl StoreSession<'_> {
             saved.as_deref() == Some(hash(gateway).as_str()),
             "hosted node unavailable"
         );
+        if let Some(until) = self
+            .db
+            .query_row(
+                "SELECT lease_until FROM hosted_checkpoints WHERE node=?1",
+                [node],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            ensure!(
+                until > self.timestamp,
+                "web carrier lease expired; retry the same request"
+            );
+        }
         Ok(())
     }
 

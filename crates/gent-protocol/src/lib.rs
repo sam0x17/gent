@@ -12,6 +12,7 @@ pub mod permissions;
 pub mod service;
 pub mod transport_batch;
 pub mod wake;
+pub mod web_failover;
 pub mod work;
 
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -596,6 +597,27 @@ pub enum ConfigurationEdit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOp {
+    /// Scoped proof for the hosted checkpoint service; never exports a signing key.
+    WebAdmission {
+        node_id: String,
+        body_hash: [u8; 32],
+    },
+    WebCheckpoint {
+        node_id: String,
+    },
+    WebCommit {
+        node_id: String,
+        revision: u64,
+    },
+    WebLease {
+        node_id: String,
+        seconds: u64,
+    },
+    RestoreWebNode {
+        node_id: String,
+        home: std::path::PathBuf,
+        checkpoint: std::path::PathBuf,
+    },
     PreparePeerConfiguration,
     Groups {
         name: Option<String>,

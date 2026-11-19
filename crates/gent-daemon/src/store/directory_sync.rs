@@ -54,7 +54,9 @@ impl StoreSession<'_> {
             if self.local_node(&chat.node_id) {
                 self.ensure_local_origin(&chat.id)?;
             }
-            chats.push(self.stored_registration(&chat.id)?);
+            if let Some(registration) = self.published_registration(&chat.id, &chat.node_id)? {
+                chats.push(registration);
+            }
         }
         tree::Tree::new(chats)
     }

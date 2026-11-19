@@ -30,7 +30,7 @@ mod directory_sync;
 mod files;
 pub(crate) mod handoff;
 mod history;
-mod hosted;
+pub(crate) mod hosted;
 pub mod invitations;
 mod mesh;
 mod network;
@@ -154,6 +154,7 @@ impl Store {
         wire::schema(&db)?;
         directory_sync::schema(&db)?;
         hosted::schema(&db)?;
+        db.execute("UPDATE hosted_checkpoints SET lease_until=0", [])?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -260,6 +261,18 @@ impl Store {
     fn execute_step(&mut self, request: Request, export_step: files::ExportStep) -> Result<Value> {
         if let Request::Owner { credential, .. } = &request {
             ensure!(hash(credential) == self.owner_hash, "unauthorized");
+        }
+        if let Request::Owner {
+            action:
+                OwnerOp::RestoreWebNode {
+                    node_id,
+                    home,
+                    checkpoint,
+                },
+            ..
+        } = &request
+        {
+            return self.restore_web_node(node_id, home, checkpoint);
         }
         if let Request::Owner {
             action: OwnerOp::PrepareHostedNode { node_id, home },
@@ -372,6 +385,7 @@ impl Store {
                 action,
             } => {
                 session.check_hosted(&node_id, &gateway_credential)?;
+                session.dirty_web(&node_id, &action)?;
                 ensure!(
                     !matches!(
                         action,
@@ -666,6 +680,11 @@ impl StoreSession<'_> {
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
+            OwnerOp::WebAdmission { node_id, body_hash } => self.web_admission(&node_id, body_hash),
+            OwnerOp::WebCheckpoint { node_id } => self.web_checkpoint(&node_id),
+            OwnerOp::WebLease { node_id, seconds } => self.web_lease(&node_id, seconds),
+            OwnerOp::WebCommit { node_id, revision } => self.web_commit(&node_id, revision),
+            OwnerOp::RestoreWebNode { .. } => unreachable!("handled before session"),
             OwnerOp::NodeInvite {
                 request_id,
                 name,
@@ -1287,6 +1306,9 @@ impl StoreSession<'_> {
         Ok(message)
     }
     fn deliverable(&self, message: &Message) -> Result<bool> {
+        if !self.web_message_ready(message)? {
+            return Ok(false);
+        }
         if message.expires_at <= self.timestamp {
             return Ok(false);
         }
@@ -1435,6 +1457,7 @@ impl StoreSession<'_> {
         tx.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES (?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
         self.bind_attachments(&message, &attachments)?;
         self.record_relay_message(&message)?;
+        self.gate_web_message(&message)?;
         self.save_activity(&sender.id, message.created_at)?;
         if remote {
             self.queue_message(

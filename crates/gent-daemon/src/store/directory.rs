@@ -55,7 +55,20 @@ impl StoreSession<'_> {
 
     pub(super) fn directory(&self, who: Option<&Agent>) -> Result<Vec<Entry>> {
         let mut entries = Vec::new();
-        for agent in self.all_agents()? {
+        for mut agent in self.all_agents()? {
+            if self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM hosted_checkpoints WHERE node=?1)",
+                [&agent.node_id],
+                |r| r.get::<_, bool>(0),
+            )? {
+                let Some(registration) = self.published_registration(&agent.id, &agent.node_id)?
+                else {
+                    continue;
+                };
+                agent.name = registration.name;
+                agent.provider = registration.provider;
+                agent.revoked = registration.revoked;
+            }
             if who.is_some_and(|who| !self.config.policy.visible(who, &agent)) {
                 continue;
             }

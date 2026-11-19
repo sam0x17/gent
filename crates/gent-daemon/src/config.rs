@@ -344,6 +344,9 @@ pub fn save(home: &Path, config: &Config) -> Result<()> {
         if let Some(recovery) = previous.host_recovery()? {
             next.set_host_recovery(recovery)?;
         }
+        if previous.portable_web()? {
+            next.enable_portable_web()?;
+        }
         // Update preferences are node-local and direct TOML edits take effect
         // without config apply. Never replace them with a stale projection.
         for name in ["updates", "discovery"] {
@@ -537,7 +540,22 @@ impl Config {
         if self.hosted_parent()?.is_some() {
             features.push("hosted_parent".into());
         }
+        if self.portable_web()? {
+            features.push("portable_web".into());
+        }
         Ok(features)
+    }
+    pub fn portable_web(&self) -> Result<bool> {
+        match self.extra.get("portable_web") {
+            None => Ok(false),
+            Some(toml::Value::Boolean(true)) => Ok(true),
+            _ => anyhow::bail!("invalid portable web metadata"),
+        }
+    }
+    pub fn enable_portable_web(&mut self) -> Result<()> {
+        self.extra
+            .insert("portable_web".into(), toml::Value::Boolean(true));
+        self.update_local_version()
     }
     fn update_local_version(&mut self) -> Result<()> {
         let features = self.local_features()?;
@@ -546,6 +564,7 @@ impl Config {
             || self.gateway_registry()?.is_some()
             || self.host_recovery()?.is_some()
             || self.hosted_parent()?.is_some()
+            || self.portable_web()?
         {
             self.version = 3;
             self.extra

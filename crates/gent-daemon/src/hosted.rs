@@ -1,5 +1,6 @@
 //! A web node's local socket carries scoped RPCs to its native hosting daemon.
 //! It owns no replicated store, sync loop, notification socket or updater.
+pub use crate::store::hosted::snapshot::{Snapshot, export as checkpoint};
 use crate::{config, connection};
 use anyhow::{Context, Result, ensure};
 use gent_protocol::{AgentOp, MAX_FRAME_BYTES, OwnerOp, Request, Response};

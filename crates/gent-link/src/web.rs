@@ -1,5 +1,6 @@
 //! Named hosted nodes belong to the machine's one cluster. Their private
 //! runtimes are supervised by its daemon; they are never selectable profiles.
+pub(crate) mod failover;
 mod runtime;
 mod storage;
 use crate::{auth, gateway, managed_file, node_home, owner};
@@ -211,6 +212,29 @@ pub(crate) async fn execute(parent: &Path, command: Command) -> Result<Value> {
                 "host_node_id":parent_config.node.id,"host_node_name":parent_config.node.name,
                 "revoked":record.revoked,"ready":!record.revoked && runtime::ready(&home).await}));
         }
+        let directory = owner(parent, OwnerOp::Nodes).await?;
+        if let Some(directory) = directory.as_array() {
+            for node in directory.iter().filter(|n| n["hosted_by"].is_string()) {
+                let host = &node["hosted_by"];
+                let host_name = directory
+                    .iter()
+                    .find(|n| n["id"] == *host)
+                    .map(|n| n["name"].clone())
+                    .unwrap_or(Value::Null);
+                if let Some(saved) = nodes.iter_mut().find(|n| n["node_id"] == node["id"]) {
+                    saved["host_node_id"] = host.clone();
+                    saved["host_node_name"] = host_name;
+                    if host.as_str() != Some(parent_config.node.id.as_str()) {
+                        saved["ready"] = Value::Null;
+                    }
+                } else {
+                    nodes.push(
+                        json!({"name":node["name"],"node_id":node["id"],"host_node_id":host,
+                        "host_node_name":host_name,"revoked":false,"ready":null}),
+                    );
+                }
+            }
+        }
         return Ok(json!({"web_nodes":nodes}));
     }
     let (name, out, rotate, revoke) = match command {
@@ -224,14 +248,41 @@ pub(crate) async fn execute(parent: &Path, command: Command) -> Result<Value> {
     }
     let directory = storage::directory(parent)?;
     let _lock = managed_file::lock(&directory.join("setup.lock"))?;
-    let home = storage::home(parent, &name);
-    let mut record = storage::read(parent, &home)?.context("unknown web node name")?;
+    let mut matches = storage::list(parent)?
+        .into_iter()
+        .filter(|(_, record)| record.name == name || record.node.as_deref() == Some(&name))
+        .collect::<Vec<_>>();
     ensure!(
-        record.name == name && record.node.is_some(),
+        matches.len() <= 1,
+        "web node name is ambiguous; use its node ID"
+    );
+    let (home, mut record) = matches.pop().context("unknown web node name")?;
+    ensure!(
+        record.node.is_some(),
         "web node setup is incomplete; repeat node add"
     );
+    let portable = node_home::inspect(&home)?.portable_web()?;
+    if portable
+        && revoke
+        && failover::status(parent, record.node.as_deref().unwrap())
+            .await?
+            .is_some_and(|status| status.revoked)
+    {
+        record.revoked = true;
+        storage::save(&home, &record)?;
+        return Ok(json!({"web_node":true,"name":name,"revoked":true}));
+    }
+    if portable {
+        ensure!(
+            runtime::ready(&home).await,
+            "run this command on the web node's current hosting machine; use gent nodes to find it"
+        );
+    }
     if revoke {
         gateway::registry::capability::revoke(&home)?;
+        if portable {
+            failover::management(parent, &home, record.node.as_deref().unwrap(), true).await?;
+        }
         record.revoked = true;
         storage::save(&home, &record)?;
         return Ok(json!({"web_node":true,"name":name,"revoked":true}));
@@ -239,6 +290,9 @@ pub(crate) async fn execute(parent: &Path, command: Command) -> Result<Value> {
     ensure!(!record.revoked, "web node is revoked");
     let cfg = node_home::inspect(&home)?;
     let url = connection(&home, &cfg, rotate)?;
+    if portable && rotate {
+        failover::management(parent, &home, record.node.as_deref().unwrap(), false).await?;
+    }
     output_url(
         json!({"name":name,"node_id":cfg.node.id,"rotated":rotate}),
         &url,
@@ -257,6 +311,8 @@ pub(crate) fn print(value: &Value) {
                     "revoked"
                 } else if node["ready"] == true {
                     "connected"
+                } else if node["ready"].is_null() {
+                    "hosted elsewhere"
                 } else {
                     "offline"
                 },

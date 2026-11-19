@@ -5,7 +5,9 @@ use super::*;
 pub(super) fn next_id(db: &Connection, peer: &str) -> Result<Option<String>> {
     let oldest: Option<(String, usize, bool)> = db
         .query_row(
-            "SELECT id,offset,cancelled FROM network_events WHERE peer=?1 ORDER BY rowid LIMIT 1",
+            "SELECT id,offset,cancelled FROM network_events e WHERE peer=?1 AND NOT EXISTS(
+             SELECT 1 FROM hosted_event_gates g JOIN hosted_checkpoints c ON c.node=g.node
+             WHERE g.id=e.id AND c.durable<g.revision) ORDER BY rowid LIMIT 1",
             [peer],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -26,7 +28,9 @@ pub(super) fn next_id(db: &Connection, peer: &str) -> Result<Option<String>> {
     }
     Ok(db
         .query_row(
-            "SELECT e.id FROM network_events e WHERE e.peer=?1 ORDER BY
+            "SELECT e.id FROM network_events e WHERE e.peer=?1 AND NOT EXISTS(
+             SELECT 1 FROM hosted_event_gates g JOIN hosted_checkpoints c ON c.node=g.node
+             WHERE g.id=e.id AND c.durable<g.revision) ORDER BY
              CASE WHEN e.offset>0 OR EXISTS(
                  SELECT 1 FROM transport_requests r JOIN network_links l ON l.outgoing=r.group_id
                  WHERE l.peer=e.peer AND r.event=e.id) THEN 0
