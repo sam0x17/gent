@@ -76,7 +76,7 @@ def main():
             cli("permission", "deny", hid, "*", "--permission", "enumerate")
             cli("permission", "deny", bid, aid, "--permission", "send")
             attempt = {"recipient": bid, "request_id": a.request_id(), "text": "review", "files": [{"name": "pixel.png", "media_type": "image/png", "data_base64": PNG}]}
-            a.call("gent_send", dict(attempt, recipient=hid), error=True)
+            a.call("gent_send_non_blocking", dict(attempt, recipient=hid), error=True)
             assert {agent["id"] for agent in a.call("gent_agents")[0]} == {aid, bid}
             assert {chat["chat_id"] for chat in a.call("gent_chats")[0]} == {aid, bid}
             a.call("gent_chats", {"credential": "forged"}, error=True)
@@ -104,11 +104,11 @@ def main():
                 daemon = start_daemon()
 
             exercise_turns(a, b, attachment_id, attempt["files"], wait_for, restart_relay_daemon)
-            a.call("gent_send", dict(attempt, sender=bid), error=True)
+            a.call("gent_send_non_blocking", dict(attempt, sender=bid), error=True)
             a.call("gent_register", {"name": "a", "provider": "a", "node_id": "forged"}, error=True)
-            sent = a.call("gent_send", attempt)[0]
-            assert a.call("gent_send", attempt)[0]["duplicate"] is True
-            a.call("gent_send", dict(attempt, text="different"), error=True)
+            sent = a.call("gent_send_non_blocking", attempt)[0]
+            assert a.call("gent_send_non_blocking", attempt)[0]["duplicate"] is True
+            a.call("gent_send_non_blocking", dict(attempt, text="different"), error=True)
             outsider.call("gent_ack", {"message_id": sent["message_id"]}, error=True)
             inbox, raw = b.call("gent_inbox")
             assert len(inbox) == 1 and inbox[0]["id"] == sent["message_id"]
@@ -118,7 +118,7 @@ def main():
             assert b.call("gent_inbox")[0] == []
             reply = b.call("gent_reply", {"message_id": sent["message_id"], "request_id": b.request_id(), "text": "make it blue"})[0]
             assert a.call("gent_inbox")[0][0]["id"] == reply["message_id"]
-            b.call("gent_send", {"recipient": aid, "request_id": b.request_id(), "text": "unsolicited"}, error=True)
+            b.call("gent_send_non_blocking", {"recipient": aid, "request_id": b.request_id(), "text": "unsolicited"}, error=True)
 
             for client in clients:
                 client.close()

@@ -208,7 +208,7 @@ def main():
         cli('permission', 'allow', host_id, peer_id, '--permission', 'enumerate', 'receive')
         marker = 'synthetic-' + uuid.uuid4().hex
         file = {'name': 'pixel.png', 'media_type': 'image/png', 'data_base64': generic.PNG}
-        sent = peer.call('gent_send', {'recipient': host_id, 'request_id': peer.request_id(),
+        sent = peer.call('gent_send_non_blocking', {'recipient': host_id, 'request_id': peer.request_id(),
                                      'text': marker, 'files': [file]})[0]
         peer.close()
         peer = None
@@ -242,7 +242,7 @@ def main():
         assert peer.call('gent_message_status', {'message_id': sent['message_id']})[0]['state'] == 'delivered'
         fork_id = None
         if compare_chats:
-            peer.call('gent_send', {'recipient': host_id, 'request_id': peer.request_id(), 'text': 'parent-only-' + uuid.uuid4().hex})
+            peer.call('gent_send_non_blocking', {'recipient': host_id, 'request_id': peer.request_id(), 'text': 'parent-only-' + uuid.uuid4().hex})
             fork_session, fork_events = turn(registration('forked-chat') + ' Also call gent_inbox.', 'fork', session, fork=True)
             fork_results = results(fork_events)
             fork_id = fork_results['gent_identity'][0]['agent']['id']

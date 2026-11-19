@@ -75,7 +75,7 @@ def main():
             request = {'request_id': a.request_id(), 'name': staged.name, 'media_type': 'application/octet-stream'}
             imported = a.call('gent_file_import', request)[0]
             assert imported['cleanup_after'] > time.time()
-            sent = a.call('gent_send', {'request_id': a.request_id(), 'recipient': bid,
+            sent = a.call('gent_send_non_blocking', {'request_id': a.request_id(), 'recipient': bid,
                 'text': 'retention proof', 'file_ids': [imported['file']['id']]})[0]
             received = b.call('gent_inbox')[0][0]
             exported = b.call('gent_file_export', {'file_id': received['attachments'][0]['id']})[0]

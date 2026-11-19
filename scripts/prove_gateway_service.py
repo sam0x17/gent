@@ -206,7 +206,7 @@ def main():
         cli("permission", "allow", aid, bid, "--permission", "enumerate", "send")
         cli("permission", "allow", bid, aid, "--permission", "enumerate", "receive")
         sent = call(
-            "gent_send",
+            "gent_send_non_blocking",
             {
                 "recipient": bid,
                 "request_id": call("gent_request_ids")[0]["request_ids"][0],

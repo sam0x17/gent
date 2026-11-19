@@ -34,7 +34,7 @@ def exercise(a, b, aid, bid, owner, restart, wait_for):
     assert not {'writer', 'revision', 'config_saved', 'config_error'} & result.keys()
     b.call('gent_permission_request', {'request_id': request['request_id']}, error=True)
     wait_for(lambda: owner('permission', 'explain', aid, bid)['policy']['send_unsolicited']['allowed'])
-    sent = a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'delegated permission proof'})[0]
+    sent = a.call('gent_send_non_blocking', {'recipient': bid, 'request_id': a.request_id(), 'text': 'delegated permission proof'})[0]
     wait_for(lambda: any(m['id'] == sent['message_id'] for m in b.call('gent_inbox')[0]))
     b.call('gent_ack', {'message_id': sent['message_id']})
     reply = b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': b.request_id(), 'text': 'accepted delegated exchange'})[0]
@@ -84,7 +84,7 @@ def exercise_rules(a, b, aid, bid, owner, restart, wait_for):
     a.call('gent_permission_rule_apply', request)
     wait_for(lambda: a.call('gent_permission_request', {'request_id': request['request_id']})[0]['state'] == 'applied')
     wait_for(lambda: not a.call('gent_permission_check', {'peer': bid})[0]['policy']['send_unsolicited']['allowed'])
-    a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'blocked by node rule'}, error=True)
+    a.call('gent_send_non_blocking', {'recipient': bid, 'request_id': a.request_id(), 'text': 'blocked by node rule'}, error=True)
     result = a.call('gent_permission_request', {'request_id': request['request_id']})[0]
     assert not {'revision', 'writer', 'config_saved', 'config_error'} & result.keys()
     a.call('gent_permission_apply', {'request_id': request['request_id'], 'changes': [
@@ -96,7 +96,7 @@ def exercise_rules(a, b, aid, bid, owner, restart, wait_for):
         a.call('gent_permission_rule_apply', changed)
         wait_for(lambda: a.call('gent_permission_request', {'request_id': changed['request_id']})[0]['state'] == 'applied')
         wait_for(lambda: a.call('gent_permission_check', {'peer': bid})[0]['policy']['send_unsolicited']['allowed'])
-        sent = a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'node rule ' + decision})[0]
+        sent = a.call('gent_send_non_blocking', {'recipient': bid, 'request_id': a.request_id(), 'text': 'node rule ' + decision})[0]
         wait_for(lambda: any(m['id'] == sent['message_id'] for m in b.call('gent_inbox')[0]))
         b.call('gent_ack', {'message_id': sent['message_id']})
     owner('permission', 'admin', 'revoke', grant)

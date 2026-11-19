@@ -90,7 +90,7 @@ def main():
             staged.chmod(0o600)
             imported = a.call('gent_file_import', {'request_id': a.request_id(), 'name': staged.name,
                                                   'media_type': 'application/octet-stream'})[0]
-            a.call('gent_send', {'request_id': a.request_id(), 'recipient': bid,
+            a.call('gent_send_non_blocking', {'request_id': a.request_id(), 'recipient': bid,
                                 'text': 'pending visual review', 'file_ids': [imported['file']['id']],
                                 'files': [{'name': 'pixel.png', 'media_type': 'image/png', 'data_base64': PNG}]})
             assert b.call('gent_inbox')[0][0]['text'] == 'pending visual review'

@@ -108,10 +108,10 @@ def main():
             staged.chmod(0o600)
             imported = source.call('gent_file_import', {'request_id': source.request_id(), 'name': staged.name,
                                                        'media_type': 'application/octet-stream'})[0]
-            sent = source.call('gent_send', {'request_id': source.request_id(), 'recipient': peer_id,
+            sent = source.call('gent_send_non_blocking', {'request_id': source.request_id(), 'recipient': peer_id,
                                             'text': 'archived visual request', 'file_ids': [imported['file']['id']],
                                             'files': [{'name': 'pixel.png', 'media_type': 'image/png', 'data_base64': PNG}]})[0]
-            hidden_a.call('gent_send', {'request_id': hidden_a.request_id(), 'recipient': hidden_b_id,
+            hidden_a.call('gent_send_non_blocking', {'request_id': hidden_a.request_id(), 'recipient': hidden_b_id,
                                        'text': 'UNRELATED PRIVATE EXCHANGE'})
             for client in list(clients):
                 close(client)

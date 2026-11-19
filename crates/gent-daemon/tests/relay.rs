@@ -7,6 +7,8 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt};
 use uuid::Uuid;
+#[path = "relay/request_reply.rs"]
+mod request_reply;
 
 fn ok(response: Response) -> Value {
     match response {

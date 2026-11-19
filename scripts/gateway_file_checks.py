@@ -54,7 +54,7 @@ class FileChecks:
                 part = self.local.call('gent_file_read', {'file_id': file['id'], 'chunk_index': 0})[0]
                 assert base64.b64decode(part['data_base64'], validate=True) == data[:256 * 1024]
                 self.ids.append(file['id'])
-            self.local.call('gent_send', {'recipient': first['agent']['id'],
+            self.local.call('gent_send_non_blocking', {'recipient': first['agent']['id'],
                 'request_id': self.local.request_id(), 'text': 'file read proof', 'file_ids': self.ids})
         finally:
             self.local.close()
@@ -112,7 +112,7 @@ class FileChecks:
         self.call('gent_file_view', {'file_id': self.files[1]['id']}, error=True)
         self.call('gent_file_view', {'file_id': self.files[2]['id']}, error=True)
         request = self.call('gent_request_ids', {})[0]['request_ids'][0]
-        self.call('gent_send', {'recipient': self.second['agent']['id'], 'request_id': request,
+        self.call('gent_send_non_blocking', {'recipient': self.second['agent']['id'], 'request_id': request,
                   'text': 'forwarded image', 'file_ids': [self.files[0]['id']]})
         incoming = self.call('gent_inbox', {}, chat='two')[0][0]['attachments'][0]
         assert incoming['id'] != self.files[0]['id']

@@ -157,6 +157,15 @@ impl StoreSession<'_> {
             return Ok(());
         };
         if relay.kind == RelayMessageKind::Request {
+            // An isolated request/reply uses its own root ID as attachment ID.
+            // It never creates, detaches or borrows a persistent selection.
+            if relay.attachment_id == relay.turn_id {
+                ensure!(
+                    relay.turn_id == message.id && relay.grant_id.is_none(),
+                    "invalid response-required request"
+                );
+                return Ok(());
+            }
             let who = self.get_agent(&message.sender)?;
             let attachment = self.relay_attachment(&who, &relay.attachment_id)?;
             ensure!(
@@ -291,6 +300,36 @@ impl StoreSession<'_> {
         let mut result = self.send(
             who,
             &attachment.target,
+            request,
+            content.0,
+            content.1,
+            SendContext {
+                parent: None,
+                relay: Some(relay),
+                file_ids: content.2,
+            },
+        )?;
+        result["turn_id"] = json!(turn_id);
+        Ok(result)
+    }
+
+    pub(super) fn request_reply(
+        &mut self,
+        who: &Agent,
+        recipient: &str,
+        request: &str,
+        content: (String, Vec<FilePart>, Vec<String>),
+    ) -> Result<Value> {
+        let turn_id = crate::messages::message_id(&who.id, request)?;
+        let relay = RelayMessage {
+            attachment_id: turn_id.clone(),
+            grant_id: None,
+            turn_id: turn_id.clone(),
+            kind: RelayMessageKind::Request,
+        };
+        let mut result = self.send(
+            who,
+            recipient,
             request,
             content.0,
             content.1,

@@ -449,7 +449,7 @@ def main():
                 f'Call gent_identity and gent_agents. Render a card with red left. Send both files to visual-reviewer using gent_send with a UUIDv7 from gent_request_ids. '
                 f'Text: "{marker}: Please inspect this card and send visual feedback with a reference image." Do nothing else.'})
             assert initial['tools']['gent_identity'][0]['agent']['id'] == aid
-            first_id = initial['tools']['gent_send'][0]['message_id']
+            first_id = initial['tools']['gent_send_non_blocking'][0]['message_id']
             first = wait_for(lambda: message_at(True, first_id), 'initial image delivery')
             assert first['sender'] == aid and first['recipient'] == bid and marker in first['text']
             assert_files(first, render('red', 'left'))

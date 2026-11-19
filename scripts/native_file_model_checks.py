@@ -226,7 +226,7 @@ def exercise(aid, bid, local, remote, owner, local_state, remote_state, offline,
     identity(first, aid)
     imports = [result['file'] for result in first['tools']['gent_file_import']]
     assert len(imports) == 2
-    first_id = one(first, 'gent_send')['message_id']
+    first_id = one(first, 'gent_send_non_blocking')['message_id']
     initial = received(remote_state, first_id)
     assert initial['sender'] == aid and initial['recipient'] == bid
     first_files = attachments(initial, imports)
@@ -274,7 +274,7 @@ def exercise(aid, bid, local, remote, owner, local_state, remote_state, offline,
         'Copy this JSON text value unchanged, including whitespace: ' + json.dumps(user_text) +
         '. Check the turn once and report pending. Do not resubmit or convert files to base64.')
     identity(forward, aid)
-    turn_id = one(forward, 'gent_relay_send')['turn_id']
+    turn_id = one(forward, 'gent_relay_send_non_blocking')['turn_id']
     request = received(remote_state, turn_id)
     assert request['text'] == user_text
     relay_files = attachments(request, revised_files)
@@ -299,7 +299,7 @@ def exercise(aid, bid, local, remote, owner, local_state, remote_state, offline,
     identity(presentation, aid)
     exported(presentation, local_state, final_files)
     assert presentation['final_text'] == final['text']
-    assert not presentation['tools'].get('gent_relay_send')
+    assert not presentation['tools'].get('gent_relay_send_non_blocking')
     assert one(presentation, 'gent_relay_turn_status')['state'] == 'completed'
     assert one(presentation, 'gent_relay_detach')['state'] == 'detached'
     wait_for(lambda: message(remote_state, response_id)['acknowledged'], 'native relay receipt')

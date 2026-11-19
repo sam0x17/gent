@@ -84,7 +84,7 @@ def main():
             outsider, _ = connect('outsider')
             cli('permission', 'allow', source_id, target_id, '--permission', 'enumerate', 'send')
             cli('permission', 'allow', target_id, source_id, '--permission', 'enumerate', 'receive')
-            sent = source.call('gent_send', {'recipient': target_id, 'request_id': source.request_id(),
+            sent = source.call('gent_send_non_blocking', {'recipient': target_id, 'request_id': source.request_id(),
                                             'text': 'create the disposable proof output'})[0]
             message = sent['message_id']
             begin = {'message_id': message, 'expect_revision': 0, 'description': 'create synthetic host output'}

@@ -21,6 +21,87 @@ pub(super) fn tool() -> Tool {
     })).expect("relay wait schema")
 }
 
+pub(super) fn message_tool() -> Tool {
+    let mut value = serde_json::to_value(tool()).expect("wait tool serializes");
+    value["name"] = json!("gent_wait");
+    value["description"] = json!(
+        "Continue waiting for a response-required gent_send using its message_id. This only reads; it never sends or repeats work. If pending, call again in this turn without asking the user to check. Stop on completion, failure, cancellation, user disengagement, or a host limit. Acknowledgment is not a response. Use gent_relay_turns to recover the ID after reconnecting."
+    );
+    value["inputSchema"]["required"] = json!(["message_id"]);
+    let properties = value["inputSchema"]["properties"].as_object_mut().unwrap();
+    let id = properties.remove("turn_id").unwrap();
+    properties.insert("message_id".into(), id);
+    serde_json::from_value(value).expect("message wait schema")
+}
+
+pub(super) async fn send(
+    home: &Path,
+    credential: String,
+    mut arguments: serde_json::Map<String, Value>,
+    relay: bool,
+    remote: Option<Remote<'_>>,
+) -> Result<Value> {
+    let started = Instant::now();
+    arguments.insert(
+        "op".into(),
+        json!(if relay { "relay_send" } else { "request_reply" }),
+    );
+    let action: AgentOp =
+        serde_json::from_value(Value::Object(arguments)).context("invalid send arguments")?;
+    let submitted = gent_daemon::request(
+        home,
+        Request::Agent {
+            credential: credential.clone(),
+            action,
+        },
+    )
+    .await?;
+    let id = submitted["turn_id"]
+        .as_str()
+        .context("missing response turn ID")?;
+    // Once admitted, preserve the ID even if the subsequent read fails. A
+    // transport failure is not permission to create another request.
+    // Leave headroom below the hosted gateway's 28-second dispatch limit even
+    // when local admission took most of its own 15-second timeout.
+    let wait_seconds = Duration::from_secs(24)
+        .saturating_sub(started.elapsed())
+        .as_secs()
+        .min(20);
+    let mut result = match run(
+        home,
+        credential,
+        json!({"turn_id":id,"wait_seconds":wait_seconds}),
+        remote,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => continuation(
+            json!({"turn_id":id,"state":"pending","responses":[]}),
+            "Response lookup unavailable. Continue waiting on the same message; do not resend.",
+        ),
+    };
+    result["message_id"] = submitted["message_id"].clone();
+    result["duplicate"] = submitted["duplicate"].clone();
+    Ok(result)
+}
+
+fn continuation(mut result: Value, instruction: &str) -> Value {
+    result["message_id"] = result["turn_id"].clone();
+    result["next_action"] = json!({"tool":"gent_wait", "arguments":{
+        "message_id": result["turn_id"], "after_message_id": result["next_after"],
+    }});
+    // Omit an absent cursor: tool schemas use optional strings, not nulls.
+    if result["next_after"].is_null() {
+        result["next_action"]["arguments"]
+            .as_object_mut()
+            .unwrap()
+            .remove("after_message_id");
+    }
+    result["instruction"] = json!(instruction);
+    result
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
@@ -74,7 +155,14 @@ pub(super) async fn run(
             || input.wait_seconds == 0
             || Instant::now() + Duration::from_millis(500) >= deadline
         {
-            return Ok(result);
+            return Ok(if result["state"] == "pending" {
+                continuation(
+                    result,
+                    "The request is still awaiting an answer. Continue with next_action now; do not resend or ask the user to check again. A receipt alone is not an answer.",
+                )
+            } else {
+                result
+            });
         }
         tokio::time::sleep_until((Instant::now() + Duration::from_millis(500)).min(deadline)).await;
     }

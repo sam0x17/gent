@@ -67,13 +67,13 @@ def main():
             reader = sqlite3.connect(home / 'state.sqlite3')
             reader.execute('BEGIN')
             before = reader.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
-            result = a.call('gent_send', request, error=True)
+            result = a.call('gent_send_non_blocking', request, error=True)
             assert 'database is locked' in json.dumps(result), result
             assert reader.execute('SELECT COUNT(*) FROM messages').fetchone()[0] == before
             reader.close()
             reader = None
             assert not (home / 'state.sqlite3-wal').exists()
-            sent = a.call('gent_send', request)[0]
+            sent = a.call('gent_send_non_blocking', request)[0]
             assert any(m['id'] == sent['message_id'] for m in b.call('gent_inbox')[0])
             b.call('gent_ack', {'message_id': sent['message_id']})
             for client in clients:
@@ -94,7 +94,7 @@ os._exit(0)
             assert (home / 'state.sqlite3-wal').stat().st_size > 0
             start()
             a, b = connect()
-            assert a.call('gent_send', request)[0]['message_id'] == sent['message_id']
+            assert a.call('gent_send_non_blocking', request)[0]['message_id'] == sent['message_id']
             assert a.call('gent_message_status', {'message_id': sent['message_id']})[0]['state'] == 'delivered'
             with sqlite3.connect(home / 'state.sqlite3') as db:
                 assert db.execute('PRAGMA user_version').fetchone()[0] == 26

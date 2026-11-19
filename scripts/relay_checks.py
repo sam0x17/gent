@@ -4,9 +4,9 @@
 def exercise_turns(intermediary, target, attachment_id, files, wait_for, restart):
     first = {"attachment_id": attachment_id, "request_id": intermediary.request_id(),
              "text": "  preserve this relay turn exactly\n", "files": files}
-    sent = intermediary.call("gent_relay_send", first)[0]
+    sent = intermediary.call("gent_relay_send_non_blocking", first)[0]
     first_id = sent["turn_id"]
-    second_id = intermediary.call("gent_relay_send", {
+    second_id = intermediary.call("gent_relay_send_non_blocking", {
         "attachment_id": attachment_id, "request_id": intermediary.request_id(),
         "text": "a separate follow-up turn", "files": []})[0]["turn_id"]
     wait_for(lambda: (target.call("gent_relay_next")[0] or {}).get("request", {}).get("id") == first_id)
@@ -28,7 +28,7 @@ def exercise_turns(intermediary, target, attachment_id, files, wait_for, restart
     restart()
     assert status(first_id)["state"] == "pending"
     assert target.call("gent_relay_next")[0]["request"]["id"] == first_id
-    assert intermediary.call("gent_relay_send", first)[0]["duplicate"] is True
+    assert intermediary.call("gent_relay_send_non_blocking", first)[0]["duplicate"] is True
     history = intermediary.call("gent_relay_turns")[0]["turns"]
     assert [turn["turn_id"] for turn in history] == [first_id, second_id]
     assert all(turn["relay"]["attachment_id"] == attachment_id for turn in history)

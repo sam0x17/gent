@@ -45,6 +45,23 @@ impl GentMcp {
             Some("Compatibility alias for gent_chats. Use gent_chats for new calls.".into());
         tools.push(legacy);
         tools.push(relay_wait::tool());
+        tools.push(relay_wait::message_tool());
+        let mut non_blocking = tools
+            .iter()
+            .find(|t| t.name == "gent_send")
+            .unwrap()
+            .clone();
+        non_blocking.name = "gent_send_non_blocking".into();
+        non_blocking.description = Some("Send a notification without waiting or requiring a response. Use for status updates and messages where no answer is needed. Returns durable submission, not delivery. Keep request_id for exact retries.".into());
+        tools.push(non_blocking);
+        let mut relay_non_blocking = tools
+            .iter()
+            .find(|t| t.name == "gent_relay_send")
+            .unwrap()
+            .clone();
+        relay_non_blocking.name = "gent_relay_send_non_blocking".into();
+        relay_non_blocking.description = Some("Submit a response-required relay turn without waiting here. Use only when the caller will retrieve its answer later. Keep the returned turn_id; never send again to check progress.".into());
+        tools.push(relay_non_blocking);
         if matches!(self.credentials, Credentials::Remote(_)) {
             tools.retain(|t| {
                 !matches!(
@@ -275,7 +292,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_send",
-            "Send to the recipient chat ID returned by gent_chats. Get a UUIDv7 request_id from gent_request_ids for new work; reuse it only for an identical retry. Optional files contain actual bytes.",
+            "Send a response-required message and wait for the target's answer. Use for questions and talking to another chat. Select recipient from gent_chats or gent_resolve. Use a fresh request_id; identical retries never resend. If a host time limit returns pending, immediately continue with gent_wait using message_id until an answer or terminal error; do not ask the user to check again. For notifications needing no answer use gent_send_non_blocking.",
             json!({"recipient":{"type":"string","format":"uuid"},"request_id":{"type":"string","format":"uuid","description":"UUIDv7 from gent_request_ids; reuse only for an identical retry"},"text":text,"files":{"type":"array","maxItems":4,"items":file},"file_ids":file_ids}),
             vec!["recipient", "request_id", "text"],
         ),
@@ -699,7 +716,7 @@ impl ServerHandler for GentMcp {
                 json!(registration_name.resolve(&credential, provider).await),
             );
         }
-        let result = if operation == "relay_wait" {
+        let result = if matches!(operation, "relay_wait" | "wait" | "send" | "relay_send") {
             let remote = match &self.credentials {
                 Credentials::Remote(registry) => Some(relay_wait::Remote {
                     registry,
@@ -708,9 +725,35 @@ impl ServerHandler for GentMcp {
                 }),
                 _ => None,
             };
-            relay_wait::run(&self.home, credential, Value::Object(arguments), remote).await
+            if matches!(operation, "send" | "relay_send") {
+                relay_wait::send(
+                    &self.home,
+                    credential,
+                    arguments,
+                    operation == "relay_send",
+                    remote,
+                )
+                .await
+            } else {
+                if operation == "wait"
+                    && let Some(id) = arguments.remove("message_id")
+                {
+                    arguments.insert("turn_id".into(), id);
+                }
+                relay_wait::run(&self.home, credential, Value::Object(arguments), remote).await
+            }
         } else {
-            arguments.insert("op".into(), Value::String(operation.into()));
+            arguments.insert(
+                "op".into(),
+                Value::String(
+                    match operation {
+                        "send_non_blocking" => "send",
+                        "relay_send_non_blocking" => "relay_send",
+                        _ => operation,
+                    }
+                    .into(),
+                ),
+            );
             let action = match serde_json::from_value::<AgentOp>(Value::Object(arguments)) {
                 Ok(action) => action,
                 Err(_) => {
@@ -754,15 +797,23 @@ impl ServerHandler for GentMcp {
                 content.extend(viewed_image);
                 if matches!(
                     operation,
-                    "inbox" | "relay_next" | "relay_turn_status" | "relay_wait"
+                    "inbox"
+                        | "relay_next"
+                        | "relay_turn_status"
+                        | "relay_wait"
+                        | "wait"
+                        | "send"
+                        | "relay_send"
                 ) {
                     let messages: Vec<&Value> = match operation {
                         "relay_next" => value.get("request").into_iter().collect(),
-                        "relay_turn_status" | "relay_wait" => value["responses"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .collect(),
+                        "relay_turn_status" | "relay_wait" | "wait" | "send" | "relay_send" => {
+                            value["responses"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .collect()
+                        }
                         _ => value.as_array().into_iter().flatten().collect(),
                     };
                     for message in messages {

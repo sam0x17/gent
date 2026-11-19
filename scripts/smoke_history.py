@@ -77,17 +77,17 @@ def main():
             imported_request = {'request_id': a.request_id(), 'name': source.name, 'media_type': 'application/octet-stream'}
             imported = a.call('gent_file_import', imported_request)[0]
             request = {'request_id': a.request_id(), 'recipient': bid, 'text': 'old request', 'file_ids': [imported['file']['id']]}
-            sent = a.call('gent_send', request)[0]
+            sent = a.call('gent_send_non_blocking', request)[0]
             reply = {'message_id': sent['message_id'], 'request_id': b.request_id(), 'text': 'old reply'}
             response = b.call('gent_reply', reply)[0]
             advance(started + 25 * 3600)
-            assert a.call('gent_send', request)[0]['message_id'] == sent['message_id']
+            assert a.call('gent_send_non_blocking', request)[0]['message_id'] == sent['message_id']
             assert b.call('gent_reply', reply)[0]['message_id'] == response['message_id']
             assert a.call('gent_file_import', imported_request)[0]['file'] == imported['file']
-            retired(a, 'gent_send', {'request_id': unused, 'recipient': bid, 'text': 'never admitted'})
+            retired(a, 'gent_send_non_blocking', {'request_id': unused, 'recipient': bid, 'text': 'never admitted'})
             advance(started + 9 * 86400)
             live = {'request_id': a.request_id(), 'recipient': bid, 'text': 'live work'}
-            live_id = a.call('gent_send', live)[0]['message_id']
+            live_id = a.call('gent_send_non_blocking', live)[0]['message_id']
             assert cli('history')['messages'] == 3
             human = cli('history', structured=False)
             assert 'Gent messages: 3 / 8192' in human
@@ -100,19 +100,19 @@ def main():
             assert cli('history')['messages'] == 3
             cleaned = cli('history', 'clean')
             assert cleaned['messages_removed'] == 2 and cleaned['exchanges_removed'] == 1
-            retired(a, 'gent_send', request)
+            retired(a, 'gent_send_non_blocking', request)
             retired(b, 'gent_reply', reply)
             source.write_bytes(bytes(range(256)) * 8192)
             retired(a, 'gent_file_import', imported_request)
-            a.call('gent_send', dict(live, request_id=str(uuid.uuid4())), error=True)
+            a.call('gent_send_non_blocking', dict(live, request_id=str(uuid.uuid4())), error=True)
             for client in clients:
                 client.close()
             clients.clear()
             stop()
             start()
             a, b = connect()
-            retired(a, 'gent_send', request)
-            assert a.call('gent_send', live)[0]['message_id'] == live_id
+            retired(a, 'gent_send_non_blocking', request)
+            assert a.call('gent_send_non_blocking', live)[0]['message_id'] == live_id
             assert cli('history')['messages'] == 1
             # Startup maintenance must use the same persisted admission floor.
             advance(started + 18 * 86400)
@@ -126,7 +126,7 @@ def main():
                 assert time.monotonic() < deadline, 'startup history maintenance did not finish'
                 time.sleep(.05)
             a, b = connect()
-            retired(a, 'gent_send', live)
+            retired(a, 'gent_send_non_blocking', live)
             # Fill only this disposable database with synthetic reservations.
             # Real verification evidence is never deleted to make quota space.
             known_id = str(uuid.uuid4())
@@ -152,7 +152,7 @@ def main():
             cli('transport', 'clean')
             assert cli('transport')['authority_history']['accepted_revisions'] == limit
             assert 'Accepted revisions: 1048576 / 1048576' in cli('transport', structured=False)
-            admitted = a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'existing authority at capacity'})[0]
+            admitted = a.call('gent_send_non_blocking', {'recipient': bid, 'request_id': a.request_id(), 'text': 'existing authority at capacity'})[0]
             assert any(m['id'] == admitted['message_id'] for m in b.call('gent_inbox')[0])
             b.call('gent_ack', {'message_id': admitted['message_id']})
             assert a.call('gent_message_status', {'message_id': admitted['message_id']})[0]['state'] == 'delivered'

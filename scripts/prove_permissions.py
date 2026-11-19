@@ -78,7 +78,7 @@ def main():
             assert check(a, bid)['policy']['send_unsolicited']['allowed'] is True
             assert check(a, bid)['policy']['receive_unsolicited']['allowed'] is True
             for sender, recipient, receiver in ((a, bid, b), (b, aid, a)):
-                sent = sender.call('gent_send', {'recipient': recipient, 'request_id': sender.request_id(), 'text': 'no grants needed'})[0]
+                sent = sender.call('gent_send_non_blocking', {'recipient': recipient, 'request_id': sender.request_id(), 'text': 'no grants needed'})[0]
                 assert any(m['id'] == sent['message_id'] for m in receiver.call('gent_inbox')[0])
                 receiver.call('gent_ack', {'message_id': sent['message_id']})
             cli('permission', 'deny', '*', hid, '--permission', 'enumerate')
@@ -102,8 +102,8 @@ def main():
             assert explained['traces']['actor_to_peer'][1]['decision'] == 'allow'
             assert explained['traces']['peer_to_actor'][2]['decision'] == 'explicit_deny'
             assert [r['index'] for r in explained['matching_rules']] == [0, 1, 2, 5, 6]
-            sent = a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'review'})[0]
-            b.call('gent_send', {'recipient': aid, 'request_id': b.request_id(), 'text': 'unsolicited'}, error=True)
+            sent = a.call('gent_send_non_blocking', {'recipient': bid, 'request_id': a.request_id(), 'text': 'review'})[0]
+            b.call('gent_send_non_blocking', {'recipient': aid, 'request_id': b.request_id(), 'text': 'unsolicited'}, error=True)
             b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': b.request_id(), 'text': 'reviewed'})
             assert a.call('gent_inbox')[0][0]['text'] == 'reviewed'
             stop()
@@ -117,7 +117,7 @@ def main():
             explained = cli('permission', 'explain', aid, bid)
             assert explained['policy'] == blocked['policy']
             assert explained['traces']['actor_to_peer'][1]['decision'] == 'explicit_deny'
-            a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(), 'text': 'blocked'}, error=True)
+            a.call('gent_send_non_blocking', {'recipient': bid, 'request_id': a.request_id(), 'text': 'blocked'}, error=True)
             b.call('gent_reply', {'message_id': sent['message_id'], 'request_id': b.request_id(), 'text': 'blocked'}, error=True)
             cli('permission', 'deny', aid, bid, '--permission', 'enumerate')
             assert unavailable(a, bid) == unavailable(a, hid)

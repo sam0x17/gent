@@ -294,7 +294,7 @@ def main():
                     {"name": "pixel.png", "media_type": "image/png", "data_base64": PNG}
                 ],
             }
-            sent = sender.call("gent_send", attempt)[0]
+            sent = sender.call("gent_send_non_blocking", attempt)[0]
             tag(b)
             wait(lambda: phase("building"), "successful build B")
             during = []
@@ -304,7 +304,7 @@ def main():
                 if len(during) < 16:
                     during.append(
                         sender.call(
-                            "gent_send",
+                            "gent_send_non_blocking",
                             {
                                 "recipient": identity,
                                 "request_id": sender.request_id(),
@@ -351,7 +351,7 @@ def main():
             image = next(m for m in inbox if m["id"] == sent["message_id"])
             assert image["files"][0]["data_base64"] == PNG
             assert receiver.call("gent_identity")[0]["agent"]["id"] == identity
-            assert sender.call("gent_send", attempt)[0]["duplicate"] is True
+            assert sender.call("gent_send_non_blocking", attempt)[0]["duplicate"] is True
             reply = receiver.call(
                 "gent_reply",
                 {

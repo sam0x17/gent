@@ -147,7 +147,9 @@ The host invokes `gent_register` with a display `name` and arbitrary `provider` 
 | `gent_permission_admin_check` | Inspect this chat's editing grants for one visible pair. |
 | `gent_permission_preview` / `gent_permission_apply` | Preview or atomically submit scoped exact-pair changes under separate delegation. See [chat administration](administration.md). |
 | `gent_permission_request` | Inspect this chat's own queued, applied or rejected edit request. |
-| `gent_send` | Open an authorized exchange with text and optional file bytes. |
+| `gent_send` | Send a response-required request and wait for the answer, with text and optional file bytes. |
+| `gent_send_non_blocking` | Submit a notification without requiring or waiting for an answer. |
+| `gent_wait` | Continue waiting for the same response-required message without sending again. |
 | `gent_reply` | Reply to a received message within its bounded exchange. |
 | `gent_inbox` | Retrieve pending permitted messages and files. |
 | `gent_ack` | Record receipt of a message; this does not claim work is complete. |
@@ -155,7 +157,8 @@ The host invokes `gent_register` with a display `name` and arbitrary `provider` 
 | `gent_relay_attach` | Save a selected target under an owner grant and ordinary message permissions. |
 | `gent_relay_status` | Inspect the current selection or a specific saved attachment. |
 | `gent_relay_detach` | Detach a specific attachment without cancelling messages. |
-| `gent_relay_send` | Forward one turn to the explicitly selected attachment. |
+| `gent_relay_send` | Forward one turn to the selected attachment and wait for its answer. |
+| `gent_relay_send_non_blocking` | Submit a relay turn whose answer will be retrieved later. |
 | `gent_relay_turns` | Recover this intermediary's turn IDs across all attachments. |
 | `gent_relay_turn_status` | Retrieve status and paged responses with files without resending. |
 | `gent_relay_next` | Retrieve the target's first unfinished relay turn. |
@@ -169,6 +172,21 @@ Relay is available wherever ordinary messaging permissions allow it. New cluster
 The intermediary calls `gent_relay_attach` with `target` and a new UUIDv7 `request_id` from `gent_request_ids`. Selection persists across daemon and MCP restarts until detached or replaced. Selecting a different target detaches the previous attachment atomically. Retrying an older selection returns its saved state and does not reactivate it. Detach names an attachment ID, so delayed control calls cannot detach a later selection. Status hides target details if enumeration is revoked. The CLI shows the newest 100 local records.
 
 Upgrade both nodes before sending grant-free relay turns. Existing selections created by an older daemon retain their grant and expiry; select the target again with a new request ID to use ordinary permissions. Existing turns preserve their original restrictions and retry identity.
+
+`gent_send` requires a response by default. Native wake adapters return the target's
+final answer automatically; a manually served target can use `gent_reply` or
+`gent_relay_respond` to complete it. Receipt acknowledgment alone does not finish
+the request. These isolated requests do not change a persistent relay selection.
+Use `gent_send_non_blocking` for notifications that need no answer; replies do not
+create another response requirement.
+
+Each MCP wait lasts at most 20 seconds to fit web host request limits. A pending
+result includes the original `message_id` and `next_action` for `gent_wait`.
+Continue waiting in the same model turn without asking the user to prompt again.
+No new message is created by waiting. Host turn limits, unavailable targets and
+revoked access still prevent indefinite blocking; recover saved IDs through
+`gent_relay_turns` after reconnecting. The connector cannot force a model provider
+to keep a voice or text turn running after the provider ends it.
 
 Attaching sends nothing. Tool results report `supports_turns: true`. `gent_relay_send` forwards text and files under a stable request ID and returns a `turn_id`. Status checks never resubmit work. `gent_relay_turns` recovers saved turn IDs, including those from detached or replaced attachments. Its pages contain 50 entries; use `next_after` as `after_turn_id` to continue. `gent_relay_turn_status` returns responses with a bounded page size; continue with `after_message_id` when `has_more` is true. Both IDs and replies retain the original target after a switch.
 

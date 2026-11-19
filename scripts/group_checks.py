@@ -27,7 +27,7 @@ def exercise_groups(a, b, aid, bid, owner, restart, wait_for):
     restart()
     assert a.call('gent_group_apply', request)[0] == result
     wait_for(lambda: a.call('gent_permission_check', {'peer': bid})[0]['policy']['send_unsolicited']['allowed'])
-    sent = a.call('gent_send', {'request_id': a.request_id(), 'recipient': bid, 'text': 'group membership enabled delivery'})[0]
+    sent = a.call('gent_send_non_blocking', {'request_id': a.request_id(), 'recipient': bid, 'text': 'group membership enabled delivery'})[0]
     wait_for(lambda: any(m['id'] == sent['message_id'] for m in b.call('gent_inbox')[0]))
     b.call('gent_ack', {'message_id': sent['message_id']})
     for action in ('add', 'remove'):

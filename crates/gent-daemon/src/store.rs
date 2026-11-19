@@ -1160,6 +1160,13 @@ impl StoreSession<'_> {
                     ..Default::default()
                 },
             ),
+            AgentOp::RequestReply {
+                recipient,
+                request_id,
+                text,
+                files,
+                file_ids,
+            } => self.request_reply(&who, &recipient, &request_id, (text, files, file_ids)),
             AgentOp::Reply {
                 message_id,
                 request_id,
@@ -1169,6 +1176,17 @@ impl StoreSession<'_> {
             } => {
                 let parent = self.message(&message_id)?;
                 ensure!(parent.recipient == who.id, UNAVAILABLE);
+                if parent.relay.as_ref().is_some_and(|r| {
+                    r.kind == RelayMessageKind::Request && r.attachment_id == r.turn_id
+                }) {
+                    return self.relay_respond(
+                        &who,
+                        &message_id,
+                        &request_id,
+                        (text, files, file_ids),
+                        RelayResponseKind::Complete,
+                    );
+                }
                 ensure!(parent.relay.is_none(), "use relay_respond for a relay turn");
                 self.send(
                     &who,

@@ -229,7 +229,7 @@ def main():
                     peer_id = peer.call("gent_register", {"name":"archive-peer", "provider":"synthetic"})[0]["agent"]["id"]
                     cli("permission", "allow", peer_id, first, "--permission", "enumerate", "send")
                     cli("permission", "allow", first, peer_id, "--permission", "enumerate", "receive")
-                    historical = peer.call("gent_send", {"recipient":first, "request_id":peer.request_id(), "text":"historical image", "files":[{"name":"pixel.png", "media_type":"image/png", "data_base64":PNG}]})[0]
+                    historical = peer.call("gent_send_non_blocking", {"recipient":first, "request_id":peer.request_id(), "text":"historical image", "files":[{"name":"pixel.png", "media_type":"image/png", "data_base64":PNG}]})[0]
                 finally:
                     peer.close()
                 stop(gateway)

@@ -98,7 +98,7 @@ def main():
             peer_id = peer.call('gent_register', {'name': 'peer', 'provider': 'generic'})[0]['agent']['id']
             cli(old, 'permission', 'allow', source_id, peer_id, '--permission', 'enumerate', 'send')
             cli(old, 'permission', 'allow', peer_id, source_id, '--permission', 'enumerate', 'receive')
-            sent = source.call('gent_send', {'recipient': peer_id, 'request_id': source.request_id(),
+            sent = source.call('gent_send_non_blocking', {'recipient': peer_id, 'request_id': source.request_id(),
                                             'text': 'historical visual request',
                                             'files': [{'name': 'pixel.png', 'media_type': 'image/png', 'data_base64': PNG}]})[0]
             old_credential = (old / 'bindings/source.key').read_bytes()

@@ -244,7 +244,7 @@ def main():
             proof['sent'] = {}
             for name in ('parent', 'child-a'):
                 marker = 'private-' + uuid.uuid4().hex
-                sent = peer.call('gent_send', {'recipient': proof['ids'][name], 'request_id': peer.request_id(), 'text': marker,
+                sent = peer.call('gent_send_non_blocking', {'recipient': proof['ids'][name], 'request_id': peer.request_id(), 'text': marker,
                                              'files': [{'name': 'pixel.png', 'media_type': 'image/png', 'data_base64': PNG}]})[0]
                 proof['sent'][name] = {'marker': marker, 'id': sent['message_id']}
             proof['phase'] = 2

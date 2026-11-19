@@ -17,6 +17,7 @@ mod files;
 mod mtls;
 mod oauth;
 mod permissions;
+mod request_reply;
 
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -302,7 +303,7 @@ async fn http_boundary_rejects_wrong_authority_origin_auth_proxy_and_oversized_p
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"gent_send"));
+    assert!(names.contains(&"gent_send_non_blocking"));
     for hidden in ["gent_file_paths", "gent_file_import", "gent_file_export"] {
         assert!(!names.contains(&hidden));
         let result = server
@@ -437,7 +438,7 @@ async fn agents_exchange_images_receipts_and_relay_turns_across_gateway_and_daem
         },
     )
     .await;
-    let denied=server.rpc(&client,&f.token,"tools/call",json!({"name":"gent_send","arguments":{
+    let denied=server.rpc(&client,&f.token,"tools/call",json!({"name":"gent_send_non_blocking","arguments":{
         "recipient":b_id,"request_id":request_id(),"text":"denied"},"_meta":{"test/conversation":"a"}})).await;
     assert_eq!(denied["result"]["isError"], true);
     let mut policy = Policy::default();
@@ -454,9 +455,17 @@ async fn agents_exchange_images_receipts_and_relay_turns_across_gateway_and_daem
         "data_base64":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1cAAAAASUVORK5CYII="});
     let args = json!({"recipient":b_id,"request_id":request_id(),"text":"review image","files":[png.clone()]});
     let sent = server
-        .call(&client, &f.token, "a", "gent_send", args.clone())
+        .call(
+            &client,
+            &f.token,
+            "a",
+            "gent_send_non_blocking",
+            args.clone(),
+        )
         .await;
-    let duplicate = server.call(&client, &f.token, "a", "gent_send", args).await;
+    let duplicate = server
+        .call(&client, &f.token, "a", "gent_send_non_blocking", args)
+        .await;
     assert_eq!(sent["message_id"], duplicate["message_id"]);
     assert_eq!(duplicate["duplicate"], true);
     let inbox = server
@@ -508,7 +517,7 @@ async fn agents_exchange_images_receipts_and_relay_turns_across_gateway_and_daem
             &client,
             &f.token,
             "a",
-            "gent_relay_send",
+            "gent_relay_send_non_blocking",
             json!({"attachment_id":attachment_id,
         "request_id":request_id(),"text":"make it blue","files":[png.clone()]}),
         )

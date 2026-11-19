@@ -365,6 +365,17 @@ pub enum AgentOp {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         file_ids: Vec<String>,
     },
+    /// Response-required send; uses an isolated relay turn without changing the
+    /// chat's persistent relay selection. MCP waits outside the daemon lock.
+    RequestReply {
+        recipient: String,
+        request_id: String,
+        text: String,
+        #[serde(default)]
+        files: Vec<FilePart>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        file_ids: Vec<String>,
+    },
     Reply {
         message_id: String,
         request_id: String,

@@ -39,7 +39,7 @@ def exercise_relay(aid, bid, local, remote, owner, local_state, remote_state,
         values = result['tools'].get('gent_relay_turn_status', [])
         assert values and all(value['turn_id'] == turn_id for value in values)
         assert values[-1]['state'] == state, values[-1]['state']
-        assert not result['tools'].get('gent_relay_send'), 'checking status submitted new work'
+        assert not result['tools'].get('gent_relay_send_non_blocking'), 'checking status submitted new work'
         return values[-1]
 
     def faithful(result, turn_id, response, state):
@@ -58,7 +58,7 @@ def exercise_relay(aid, bid, local, remote, owner, local_state, remote_state,
     verify_identity(initial, aid)
     attachment = sent(initial, 'gent_relay_attach')['attachment']
     assert attachment['target'] == bid and attachment['security_mode'] == 'encrypted_daemon_link'
-    first = sent(initial, 'gent_relay_send')['turn_id']
+    first = sent(initial, 'gent_relay_send_non_blocking')['turn_id']
     assert initial['tools']['gent_relay_turn_status'][-1]['state'] == 'pending'
     message = wait_for(lambda: at(remote_state, first), 'forwarded user turn')
     assert message['sender'] == aid and message['recipient'] == bid and message['text'] == user_text
@@ -116,7 +116,7 @@ def exercise_relay(aid, bid, local, remote, owner, local_state, remote_state,
         'Call gent_identity. Forward one new user turn to the currently attached target, with this exact text and no files: '
         + json.dumps(followup_text) + '. Check it once and return pending.')
     verify_identity(followup, aid)
-    second = sent(followup, 'gent_relay_send')['turn_id']
+    second = sent(followup, 'gent_relay_send_non_blocking')['turn_id']
     second_message = wait_for(lambda: at(remote_state, second), 'follow-up turn')
     assert second != first and second_message['text'] == followup_text
     assert second_message['relay']['attachment_id'] == attachment['id']
@@ -126,7 +126,7 @@ def exercise_relay(aid, bid, local, remote, owner, local_state, remote_state,
     verify_identity(cancelled, aid)
     cancel_id = sent(cancelled, 'gent_relay_cancel')['message_id']
     assert sent(cancelled, 'gent_relay_detach')['state'] == 'detached'
-    assert not cancelled['tools'].get('gent_relay_send')
+    assert not cancelled['tools'].get('gent_relay_send_non_blocking')
     wait_for(lambda: at(remote_state, cancel_id), 'cancellation request')
     accepted = remote('relay-cancelled',
         'Call gent_identity and gent_relay_next. Handle the cancellation of the current turn without starting its requested work. '

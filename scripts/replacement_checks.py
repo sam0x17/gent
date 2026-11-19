@@ -78,7 +78,7 @@ def exercise(binary, old_home, join, old_agent, peer, peer_id, owner, restart_ow
             granted = owner('permission', 'allow', peer_id, new_agent, '--permission', 'enumerate', 'receive')
             wait_for(lambda: cli(home, 'config')['applied_revision'] >= granted['revision'])
             wait_for(lambda: any(agent['id'] == peer_id for agent in client.call('gent_agents')[0]))
-            sent = client.call('gent_send', {'recipient': peer_id, 'request_id': client.request_id(),
+            sent = client.call('gent_send_non_blocking', {'recipient': peer_id, 'request_id': client.request_id(),
                 'text': 'fresh identity image', 'files': [{'name': 'fresh.png', 'media_type': 'image/png', 'data_base64': PNG}]})[0]
             wait_for(lambda: any(m['id'] == sent['message_id'] for m in peer.call('gent_inbox')[0]))
             inbox, raw = peer.call('gent_inbox')
@@ -91,12 +91,12 @@ def exercise(binary, old_home, join, old_agent, peer, peer_id, owner, restart_ow
             source.chmod(0o600)
             file = client.call('gent_file_import', {'name': source.name, 'media_type': 'application/octet-stream', 'request_id': client.request_id()})[0]['file']
             request = {'recipient': peer_id, 'request_id': client.request_id(), 'text': 'fresh file', 'file_ids': [file['id']]}
-            sent_file = client.call('gent_send', request)[0]
+            sent_file = client.call('gent_send_non_blocking', request)[0]
             stop(daemon)
             daemon = None
             restart_owner()
             daemon = start()
-            assert client.call('gent_send', request)[0]['message_id'] == sent_file['message_id']
+            assert client.call('gent_send_non_blocking', request)[0]['message_id'] == sent_file['message_id']
             def remote_file():
                 return next((m for m in peer.call('gent_inbox')[0] if m['id'] == sent_file['message_id']), None)
             wait_for(remote_file)

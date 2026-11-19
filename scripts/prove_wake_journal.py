@@ -78,7 +78,7 @@ def main():
         declared = receiver.rpc('tools/list', {})['result']['tools']
         assert not any(tool['name'].startswith('gent_wake_') for tool in declared)
         receiver.call('gent_wake_pending', error=True)
-        message = sender.call('gent_send', {'recipient': b, 'request_id': sender.request_id(),
+        message = sender.call('gent_send_non_blocking', {'recipient': b, 'request_id': sender.request_id(),
                                           'text': 'synthetic wake request'})[0]['message_id']
         credential = (home / 'receiver.key').read_text().strip()
         pending = rpc(credential, {'op': 'wake_pending'})
@@ -119,7 +119,7 @@ def main():
         assert cli('wake', 'status')['submitted_and_observed'] == 1
         assert cli('wake', 'clean', '--dry-run')['records_removed'] == 0
         advance(5)
-        second = sender.call('gent_send', {'recipient': b, 'request_id': sender.request_id(),
+        second = sender.call('gent_send_non_blocking', {'recipient': b, 'request_id': sender.request_id(),
                                           'text': 'keep uncertain delivery'})[0]['message_id']
         second_claim = dict(claim, message_id=second, attempt_id=str(uuid.uuid4()))
         assert rpc(credential, second_claim)['may_submit'] is True

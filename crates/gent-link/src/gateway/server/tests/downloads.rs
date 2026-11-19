@@ -234,7 +234,7 @@ async fn download_links_follow_message_permissions_agent_and_host_revocation() {
         },
     )
     .await;
-    server.call(&client,&f.token,"a","gent_send",json!({"recipient":b["agent"]["id"],"request_id":request_id(),"text":"file","file_ids":[file["id"]]})).await;
+    server.call(&client,&f.token,"a","gent_send_non_blocking",json!({"recipient":b["agent"]["id"],"request_id":request_id(),"text":"file","file_ids":[file["id"]]})).await;
     let messages = server
         .call(&client, &f.token, "b", "gent_inbox", json!({}))
         .await;

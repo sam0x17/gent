@@ -17,7 +17,7 @@ def exercise_storage(a, b, target, cli, owner_cli, restore, restart, wait_for):
     first = None
     for index in range(70):
         request = {'recipient': target, 'request_id': a.request_id(), 'text': f'transport storage {index}'}
-        sent = a.call('gent_send', request)[0]
+        sent = a.call('gent_send_non_blocking', request)[0]
         if first is None:
             first = (request, sent['message_id'])
 
@@ -53,7 +53,7 @@ def exercise_storage(a, b, target, cli, owner_cli, restore, restart, wait_for):
     restart()
     for command in (cli, owner_cli):
         wait_for(lambda: command('transport')['duplicate_copies'] == 0)
-    assert a.call('gent_send', first[0])[0]['message_id'] == first[1]
+    assert a.call('gent_send_non_blocking', first[0])[0]['message_id'] == first[1]
     assert not a.call('gent_inbox')[0] and not b.call('gent_inbox')[0]
     print('PASS: 70 two-machine exchanges, authenticated packet and retry-metadata retirement, bounded replay evidence, CLI preview/compaction, startup cleanup, and exact agent retry after restart', flush=True)
 

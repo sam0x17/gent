@@ -66,7 +66,7 @@ def main():
                         for client, name in zip(clients, ('a', 'b'))]
             command(home, 'permission', 'allow', aid, bid, '--permission', 'enumerate', 'send')
             command(home, 'permission', 'allow', bid, aid, '--permission', 'enumerate', 'receive')
-            a.call('gent_send', {'recipient': bid, 'request_id': a.request_id(),
+            a.call('gent_send_non_blocking', {'recipient': bid, 'request_id': a.request_id(),
                                 'text': 'retained offline', 'files': [
                                     {'name': 'pixel.png', 'media_type': 'image/png', 'data_base64': PNG}]})
             assert b.call('gent_inbox')[0][0]['text'] == 'retained offline'

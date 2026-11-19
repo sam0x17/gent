@@ -106,8 +106,22 @@ async fn explicit_http_chats_relay_without_metadata_and_recover_after_restart() 
     )
     .await;
     let args = json!({"conversation":a,"attachment_id":attached["attachment"]["id"],"request_id":request_id(),"text":"Hello from the phone"});
-    let sent = invoke(&server, &client, token, "gent_relay_send", args.clone()).await;
-    let duplicate = invoke(&server, &client, token, "gent_relay_send", args.clone()).await;
+    let sent = invoke(
+        &server,
+        &client,
+        token,
+        "gent_relay_send_non_blocking",
+        args.clone(),
+    )
+    .await;
+    let duplicate = invoke(
+        &server,
+        &client,
+        token,
+        "gent_relay_send_non_blocking",
+        args.clone(),
+    )
+    .await;
     assert_eq!(sent["turn_id"], duplicate["turn_id"]);
     let pending = invoke(
         &server,
@@ -142,7 +156,14 @@ async fn explicit_http_chats_relay_without_metadata_and_recover_after_restart() 
     )
     .await;
     assert_eq!(identity["agent"]["id"], agent["agent"]["id"]);
-    let repeated = invoke(&server, &client, token, "gent_relay_send", args).await;
+    let repeated = invoke(
+        &server,
+        &client,
+        token,
+        "gent_relay_send_non_blocking",
+        args,
+    )
+    .await;
     assert_eq!(repeated["turn_id"], sent["turn_id"]);
     let turn = server
         .call(&client, &f.token, "target", "gent_relay_next", json!({}))
@@ -173,7 +194,7 @@ async fn explicit_http_chats_relay_without_metadata_and_recover_after_restart() 
     })).await;
     assert_eq!(after["state"], "completed");
     assert_eq!(after["responses"], json!([]));
-    let second = invoke(&server, &client, token, "gent_relay_send", json!({
+    let second = invoke(&server, &client, token, "gent_relay_send_non_blocking", json!({
         "conversation":a,"attachment_id":attached["attachment"]["id"],"request_id":request_id(),"text":"Follow-up"
     })).await;
     let pending = invoke(

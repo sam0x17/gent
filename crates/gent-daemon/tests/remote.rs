@@ -25,6 +25,67 @@ use uuid::Uuid;
 struct Task(JoinHandle<()>);
 
 #[tokio::test]
+async fn response_required_request_crosses_nodes_and_replies_complete_the_original_turn() {
+    let relay = relay::RelayServer::start().await;
+    let pair = Pair::new(&relay).await;
+    pair.allow().await;
+    let send = AgentOp::RequestReply {
+        recipient: pair.agents[1].clone(),
+        request_id: Uuid::now_v7().to_string(),
+        text: "hello across nodes".into(),
+        files: vec![],
+        file_ids: vec![],
+    };
+    let sent = ok(pair.agent(0, send.clone()));
+    let id = sent["message_id"].as_str().unwrap().to_owned();
+    pair.wait(|| {
+        !ok(pair.agent(1, AgentOp::Inbox))
+            .as_array()
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    ok(pair.agent(
+        1,
+        AgentOp::Ack {
+            message_id: id.clone(),
+        },
+    ));
+    let reply = AgentOp::Reply {
+        message_id: id.clone(),
+        request_id: Uuid::now_v7().to_string(),
+        text: "remote answer".into(),
+        files: vec![],
+        file_ids: vec![],
+    };
+    let response = ok(pair.agent(1, reply.clone()));
+    pair.wait(|| {
+        ok(pair.agent(
+            0,
+            AgentOp::RelayTurnStatus {
+                turn_id: id.clone(),
+                after_message_id: None,
+            },
+        ))["state"]
+            == "completed"
+    })
+    .await;
+    let status = ok(pair.agent(
+        0,
+        AgentOp::RelayTurnStatus {
+            turn_id: id.clone(),
+            after_message_id: None,
+        },
+    ));
+    assert_eq!(status["responses"][0]["text"], "remote answer");
+    assert_eq!(ok(pair.agent(0, send))["message_id"], id);
+    assert_eq!(
+        ok(pair.agent(1, reply))["message_id"],
+        response["message_id"]
+    );
+}
+
+#[tokio::test]
 async fn diagnostics_distinguish_relay_contact_failed_streams_and_recovery() {
     use std::sync::atomic::Ordering;
     let relay = relay::RelayServer::start().await;
