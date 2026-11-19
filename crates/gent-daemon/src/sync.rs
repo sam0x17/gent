@@ -247,10 +247,12 @@ async fn run(
     let _files = files.start(store.clone());
     let mut retries = BTreeMap::<Vec<u8>, Retry>::new();
     let mut transferred = BTreeMap::<Vec<u8>, u64>::new();
+    let mut checkpoints = BTreeMap::<Vec<u8>, transfer::State>::new();
     let mut cursor = 0usize;
     let mut previous_error = None;
     let configuration = crate::configuration_log::ConfigurationRelay::from_relay(relay.clone());
     loop {
+        let cycle_started = Instant::now();
         let configuration_result = configuration.sync_once(store.clone()).await;
         let bootstrap_result = bootstrap::sync(store.clone(), &relay).await;
         let result = local(store.clone(), |store| {
@@ -298,6 +300,7 @@ async fn run(
                 }
                 retries.retain(|group, _| streams.iter().any(|s| &s.group == group));
                 transferred.retain(|group, _| streams.iter().any(|s| &s.group == group));
+                checkpoints.retain(|group, _| streams.iter().any(|s| &s.group == group));
                 health.retain(&streams, mesh_pending);
                 let begin = cursor.min(streams.len());
                 let end = (begin + 32).min(streams.len());
@@ -313,10 +316,16 @@ async fn run(
                         let store = store.clone();
                         let relay = relay.clone();
                         let health = health.clone();
-                        async move { (group, transfer::run(store, relay, entry, health).await) }
+                        let mut checkpoint = checkpoints.remove(&group).unwrap_or_default();
+                        async move {
+                            let result =
+                                transfer::run(store, relay, entry, health, &mut checkpoint).await;
+                            (group, checkpoint, result)
+                        }
                     })
                     .buffer_unordered(4);
-                while let Some((group, result)) = work.next().await {
+                let mut completed = Vec::new();
+                while let Some((group, checkpoint, result)) = work.next().await {
                     match result {
                         Ok(position) => {
                             successes += 1;
@@ -325,6 +334,7 @@ async fn run(
                                     transferred.insert(group.clone(), position) != Some(position);
                             }
                             retries.remove(&group);
+                            completed.push((group, checkpoint));
                         }
                         Err(e) => {
                             failures += 1;
@@ -342,6 +352,8 @@ async fn run(
                         }
                     }
                 }
+                drop(work);
+                checkpoints.extend(completed);
                 // Large clusters advance through a bounded fair batch without
                 // holding the RPC mutex over network I/O.
                 progressed |= cursor != 0;
@@ -359,6 +371,7 @@ async fn run(
             local_error,
             control_error,
         );
+        health.cycle_completed(cycle_started.elapsed());
         if let Some(error) = &error {
             if previous_error.as_ref() != Some(error) {
                 eprintln!("Gent encrypted sync waiting: {error}");

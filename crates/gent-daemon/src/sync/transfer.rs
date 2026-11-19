@@ -1,5 +1,7 @@
 //! Bounded ordered bursts amortize relay bookkeeping without starving peers.
 use super::*;
+mod checkpoints;
+pub(super) use checkpoints::State;
 
 const PACKETS: usize = 16;
 const TIME_SLICE: Duration = Duration::from_secs(2);
@@ -9,11 +11,15 @@ pub(super) async fn run(
     relay: Relay,
     entry: Stream,
     health: Arc<health::Health>,
+    state: &mut State,
 ) -> Result<Option<u64>> {
     let group = entry.group;
     let mut last = None;
     if entry.outgoing {
-        let received = relay.checkpoint(&group).await?;
+        // Both reads are independent. A position is only a service hint; the
+        // endpoint still verifies receipts and refuses positions ahead of history.
+        let (received, mut next) =
+            tokio::try_join!(relay.checkpoint(&group), relay.position(&group))?;
         let g = group.clone();
         let confirmed = local(store.clone(), move |store| {
             store.transport_confirm(&g, entry.configuration, received.as_ref())
@@ -22,9 +28,15 @@ pub(super) async fn run(
         if let Some(receipt) = confirmed {
             // Only verified receiver evidence permits retirement. Restore it
             // before preparing packets so full queues can recover.
-            relay.put_checkpoint(&receipt, true).await?;
+            let restore = next <= receipt.sequence();
+            state.publish(&relay, &receipt, true, restore).await?;
+            if restore {
+                next = receipt
+                    .sequence()
+                    .checked_add(1)
+                    .context("relay position overflow")?;
+            }
         }
-        let mut next = relay.position(&group).await?;
         let deadline = Instant::now() + TIME_SLICE;
         for _ in 0..PACKETS {
             let g = group.clone();
@@ -75,7 +87,7 @@ pub(super) async fn run(
             Ok((next, store.transport_receipt(&g, entry.configuration)?))
         })
         .await?;
-        relay.put_checkpoint(&receipt, false).await?;
+        state.publish(&relay, &receipt, false, false).await?;
         let mut latest = None;
         let deadline = Instant::now() + TIME_SLICE;
         // Commit each packet separately. On a later failure, publish the last
@@ -113,7 +125,7 @@ pub(super) async fn run(
         }
         .await;
         if let Some(receipt) = latest {
-            relay.put_checkpoint(&receipt, false).await?;
+            state.publish(&relay, &receipt, false, false).await?;
         }
         result?;
     }

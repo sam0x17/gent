@@ -25,10 +25,18 @@ struct Pass {
     packets_sent: u64,
     packets_received: u64,
     last_progress_at: Option<i64>,
+    cycle_duration_ms: Option<u64>,
     #[serde(skip)]
     transferring: BTreeSet<Vec<u8>>,
 }
 impl Health {
+    pub(super) fn cycle_completed(&self, elapsed: std::time::Duration) {
+        self.pass
+            .lock()
+            .expect("sync health lock poisoned")
+            .cycle_duration_ms = Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    }
+
     pub(super) fn retain(&self, streams: &[super::Stream], connecting: bool) {
         let mut pass = self.pass.lock().expect("sync health lock poisoned");
         pass.transferring
