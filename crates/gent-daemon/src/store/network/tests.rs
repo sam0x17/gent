@@ -6,6 +6,8 @@ use std::os::unix::fs::PermissionsExt;
 mod administration_tests;
 #[path = "configuration_storage_tests.rs"]
 mod configuration_storage_tests;
+#[path = "directory_tests.rs"]
+mod directory_tests;
 #[path = "group_administration_tests.rs"]
 mod group_administration_tests;
 #[path = "hosted_tests.rs"]
@@ -60,6 +62,9 @@ impl Pair {
             .into()
     }
     async fn new() -> Self {
+        Self::with_preexisting_chat(false).await
+    }
+    async fn with_preexisting_chat(before_join: bool) -> Self {
         let homes = std::array::from_fn(|_| {
             let home = tempfile::tempdir().unwrap();
             std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -77,6 +82,18 @@ impl Pair {
         .unwrap();
         config::save(homes[0].path(), &cfg).unwrap();
         let mut owner = Store::open(homes[0].path()).unwrap();
+        let keys: [String; 2] = std::array::from_fn(|_| config::secret());
+        if before_join {
+            owner
+                .execute(Request::Agent {
+                    credential: keys[0].clone(),
+                    action: AgentOp::Register {
+                        name: "coordinator".into(),
+                        provider: "test".into(),
+                    },
+                })
+                .unwrap();
+        }
         let credential = config::read_private(&homes[0].path().join("owner.key")).unwrap();
         pairing::join(
             homes[1].path(),
@@ -92,7 +109,6 @@ impl Pair {
         .unwrap();
         let joined = Store::open(homes[1].path()).unwrap();
         let mut stores = [owner, joined];
-        let keys = std::array::from_fn(|_| config::secret());
         let agents = std::array::from_fn(|i| {
             stores[i]
                 .execute(Request::Agent {

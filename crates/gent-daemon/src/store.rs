@@ -26,6 +26,7 @@ pub(crate) use configuration::pending::schema as pending_configuration_schema;
 pub(crate) use configuration::routing::schema as configuration_routing_schema;
 mod diagnostics;
 pub(crate) mod directory;
+mod directory_sync;
 mod files;
 pub(crate) mod handoff;
 mod history;
@@ -151,6 +152,7 @@ impl Store {
         directory::schema(&db)?;
         activity::schema(&db)?;
         wire::schema(&db)?;
+        directory_sync::schema(&db)?;
         hosted::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {

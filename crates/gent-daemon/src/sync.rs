@@ -260,15 +260,17 @@ async fn run(
             let preparation = store.owner_preparation_tick();
             let transfer = store.owner_transfer_tick();
             let presence = store.presence_tick();
-            let pending = match (mesh, preparation, transfer, presence, hosted) {
-                (Ok(mesh), Ok(preparation), Ok(transfer), Ok(presence), Ok(())) => {
-                    Ok(mesh || preparation || transfer || presence)
+            let directory = store.directory_tick();
+            let pending = match (mesh, preparation, transfer, presence, hosted, directory) {
+                (Ok(mesh), Ok(preparation), Ok(transfer), Ok(presence), Ok(()), Ok(directory)) => {
+                    Ok(mesh || preparation || transfer || presence || directory)
                 }
-                (Err(error), _, _, _, _)
-                | (_, Err(error), _, _, _)
-                | (_, _, Err(error), _, _)
-                | (_, _, _, Err(error), _)
-                | (_, _, _, _, Err(error)) => Err(error),
+                (Err(error), _, _, _, _, _)
+                | (_, Err(error), _, _, _, _)
+                | (_, _, Err(error), _, _, _)
+                | (_, _, _, Err(error), _, _)
+                | (_, _, _, _, Err(error), _)
+                | (_, _, _, _, _, Err(error)) => Err(error),
             };
             Ok((store.sync_streams()?, pending))
         })

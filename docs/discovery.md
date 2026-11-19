@@ -57,6 +57,35 @@ node. Use `gent_resolve` (or CLI `gent resolve`) to select the most recently act
 exact match, then send by its returned ID. Native title changes do not overwrite
 a name the user already set in Gent.
 
+## Directory reconciliation
+
+Registration publishes a chat immediately. Installing an encrypted link to a new
+node also publishes every existing local registration, including manually
+registered chats. Native discovery normally scans once a minute; a chat found by
+that scan uses the same registration and publication path.
+
+Nodes with wire version 3 also compare Merkle roots once a minute. Each root
+covers one native node's registrations and the web nodes it hosts. A matching
+root needs no chat payload. Differences are narrowed through a 16-way tree, with
+at most 16 registrations per leaf response. Missing registrations, newer names,
+and revocations pass through the normal identity and generation checks.
+
+Checks are encrypted, persist across restarts, and keep one outstanding request
+per peer. An offline peer does not accumulate periodic inventories. A changed
+source snapshot ends the current pass and schedules another check. Older peers
+continue ordinary announcements until both ends support reconciliation.
+
+`gent sync` reports directory comparisons separately from transport progress,
+including the time and chat count of the last match. This is evidence about
+registered metadata; it does not prove native discovery has indexed every chat
+or that a model can receive a turn. Activity and polling timestamps do not change
+directory roots. Existing activity synchronization remains separate.
+
+Revocations remain in the tree even when hidden from the local listing. An
+unexplained extra entry is reported as a remaining difference, never deleted
+solely because it is absent from a peer's response. Reconciliation does not
+change chat visibility rules, permissions, messages, or wake state.
+
 ## Conversation activity
 
 The daemon stores `last_activity_at` separately from `last_seen`. Discovery

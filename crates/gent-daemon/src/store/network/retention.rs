@@ -98,7 +98,7 @@ impl StoreSession<'_> {
             }
             _ => ("control", None, None),
         };
-        let deadline = if matches!(event, Event::Presence { .. }) {
+        let deadline = if matches!(event, Event::Presence { .. } | Event::Directory { .. }) {
             // Probe ownership lives in one persistent row per peer. These
             // transport retry IDs need only a short deduplication window;
             // forgotten replies can never match a later random challenge.
@@ -143,6 +143,8 @@ impl StoreSession<'_> {
         }
         let version = if matches!(&event, Event::Presence { .. }) {
             1
+        } else if matches!(&event, Event::Directory { .. }) {
+            3
         } else {
             self.wire_version(peer)?
         };

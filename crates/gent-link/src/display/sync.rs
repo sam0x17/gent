@@ -48,6 +48,36 @@ pub(super) fn render(output: &mut String, value: &Value) -> std::fmt::Result {
             &value[field].as_u64().unwrap_or(0).to_string(),
         )?;
     }
+    if let Some(peers) = value["directory"]["peers"]
+        .as_array()
+        .filter(|p| !p.is_empty())
+    {
+        writeln!(output, "\n  Chat directories (checked every minute)")?;
+        for peer in peers {
+            let state = match peer["state"].as_str() {
+                Some("checking") => "comparing roots",
+                Some("repairing") => "repairing differences",
+                Some("matched") => "matched at last check",
+                Some("changed") => "changed during check; retry scheduled",
+                Some("different") => "differences remain; retry scheduled",
+                _ if peer["supported"] != true => "waiting for peer capability",
+                _ => "awaiting first check",
+            };
+            row(
+                output,
+                peer["node_name"].as_str().unwrap_or("unknown"),
+                state,
+            )?;
+            if let Some(timestamp) = peer["verified_at"].as_u64() {
+                writeln!(
+                    output,
+                    "    Last match: {} ({} chats)",
+                    date(timestamp),
+                    peer["verified_chats"].as_u64().unwrap_or(0)
+                )?;
+            }
+        }
+    }
     for (label, field) in [
         ("Last progress", "last_progress_at"),
         ("Last relay contact", "last_success_at"),

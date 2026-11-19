@@ -139,6 +139,9 @@ impl StoreSession<'_> {
     }
     pub(super) fn registration(&self, id: &str) -> Result<Registration> {
         self.ensure_local_origin(id)?;
+        self.stored_registration(id)
+    }
+    pub(super) fn stored_registration(&self, id: &str) -> Result<Registration> {
         let agent = self.get_agent(id)?;
         let (nonce, legacy, generation): (Option<String>, Option<Vec<u8>>, u64) =
             self.db.query_row(
@@ -386,6 +389,7 @@ impl StoreSession<'_> {
     fn import_event(&mut self, peer: &str, event: Event) -> Result<()> {
         self.timestamp = requests::clock(self.db, self.timestamp)?;
         match event {
+            Event::Directory { envelope } => self.receive_directory(peer, *envelope),
             Event::NodeInvite { envelope } => self.receive_node_invite(peer, *envelope),
             Event::Presence { challenge, reply } => self.presence_receive(peer, challenge, reply),
             Event::OwnerPreparation { envelope } => self.import_owner_preparation(peer, &envelope),

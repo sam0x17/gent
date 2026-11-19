@@ -35,7 +35,7 @@ async fn negotiated_codecs_preserve_old_queue_new_messages_files_and_restarts() 
                 .db
                 .query_row("SELECT version FROM wire_peers", [], |r| r.get::<_, u8>(0))
                 .unwrap(),
-            2
+            crate::messages::wire::CURRENT
         );
     }
     let file = FilePart {
@@ -46,7 +46,7 @@ async fn negotiated_codecs_preserve_old_queue_new_messages_files_and_restarts() 
     let new = pair.send(vec![file.clone()]).unwrap();
     let id = new["message_id"].as_str().unwrap();
     let wire = queued(&pair, id);
-    assert_eq!(wire["version"], 2);
+    assert_eq!(wire["version"], crate::messages::wire::CURRENT);
     assert_eq!(wire["event"]["sender_chat"]["chat_id"], pair.agents[0]);
     assert_eq!(
         wire["event"]["message"]["recipient_chat_id"],

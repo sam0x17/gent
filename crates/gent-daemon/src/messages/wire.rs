@@ -6,8 +6,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser};
 use serde_json::Value;
 mod value;
 
-pub const CURRENT: u8 = 2;
-pub const NEGOTIATED: &[u8] = &[2];
+pub const CURRENT: u8 = 3;
+pub const NEGOTIATED: &[u8] = &[2, 3];
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +65,18 @@ fn v2(event: &mut Value, encode: bool) -> Result<(), String> {
                 rename(&mut event["message"], from, to)?;
             }
         }
+        "directory" => {
+            if let Some(chats) = event
+                .get_mut("envelope")
+                .and_then(|e| e.get_mut("result"))
+                .and_then(|r| r.get_mut("chats"))
+                .and_then(Value::as_array_mut)
+            {
+                for chat in chats {
+                    registration(chat, encode)?;
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -73,9 +85,14 @@ fn v2(event: &mut Value, encode: bool) -> Result<(), String> {
 impl Serialize for Record {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut event = serde_json::to_value(&self.event).map_err(ser::Error::custom)?;
+        if self.version < 3 && matches!(self.event, Event::Directory { .. }) {
+            return Err(ser::Error::custom(
+                "directory reconciliation requires node record version 3",
+            ));
+        }
         match self.version {
             1 => {}
-            2 => v2(&mut event, true).map_err(ser::Error::custom)?,
+            2 | 3 => v2(&mut event, true).map_err(ser::Error::custom)?,
             _ => return Err(ser::Error::custom("unsupported node record version")),
         }
         Envelope {
@@ -90,9 +107,14 @@ impl Serialize for Record {
 impl<'de> Deserialize<'de> for Record {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut envelope = Envelope::deserialize(deserializer)?;
+        if envelope.version < 3 && envelope.event["kind"] == "directory" {
+            return Err(de::Error::custom(
+                "directory reconciliation requires node record version 3",
+            ));
+        }
         match envelope.version {
             1 => {}
-            2 => v2(&mut envelope.event, false).map_err(de::Error::custom)?,
+            2 | 3 => v2(&mut envelope.event, false).map_err(de::Error::custom)?,
             _ => return Err(de::Error::custom("unsupported node record version")),
         }
         let event: Event = serde_json::from_value(envelope.event).map_err(de::Error::custom)?;
@@ -110,6 +132,29 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn directory_records_require_v3_and_preserve_probe_and_chat_shapes() {
+        let probe = json!({"version":3,"authority":{"revision":1,"state_hash":vec![0;32]},"event":{
+            "kind":"directory","envelope":{"step":"probe","round":"00000000-0000-4000-8000-000000000001",
+            "prefix":"","root":null,"summary":{"hash":vec![0;32],"count":0}}}});
+        let leaves = json!({"version":3,"authority":{"revision":1,"state_hash":vec![0;32]},"event":{
+            "kind":"directory","envelope":{"step":"reply","round":"00000000-0000-4000-8000-000000000001",
+            "prefix":"","root":{"hash":vec![0;32],"count":1},"result":{"kind":"leaves","chats":[{
+                "chat_id":"chat","node_id":"node","nonce":null,"legacy":null,"generation":1,
+                "name":"coordinator","provider":"test","revoked":false}]}}}});
+        for value in [probe, leaves] {
+            let mut record: Record = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&record).unwrap(), value);
+            for version in [1, 2] {
+                record.version = version;
+                assert!(serde_json::to_value(&record).is_err());
+                let mut old = value.clone();
+                old["version"] = json!(version);
+                assert!(serde_json::from_value::<Record>(old).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn codecs_are_explicit_and_reject_unknown_or_mixed_shapes() {
         let legacy = json!({"version":1,"authority":{"revision":1,"state_hash":vec![0;32]},"event":{
             "kind":"registration","agent":{"id":"chat","node":"node","nonce":null,
@@ -124,7 +169,7 @@ mod tests {
         let mut decoded: Record = serde_json::from_value(current.clone()).unwrap();
         decoded.version = 1;
         assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
-        for version in [0, 3, 255] {
+        for version in [0, 4, 255] {
             let mut unsupported = current.clone();
             unsupported["version"] = json!(version);
             assert!(serde_json::from_value::<Record>(unsupported).is_err());
@@ -135,7 +180,7 @@ mod tests {
         let mut mislabeled = legacy;
         mislabeled["version"] = json!(2);
         assert!(serde_json::from_value::<Record>(mislabeled).is_err());
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             let input = format!(
                 r#"{{"version":{version},"authority":{{"revision":1,"state_hash":{}}},"event":{{"kind":"presence","reply":true,"reply":false,"challenge":"00000000-0000-4000-8000-000000000001"}}}}"#,
                 json!(vec![0; 32])

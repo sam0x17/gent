@@ -8,7 +8,9 @@ Encrypted node records carry an explicit `version`. Version 2 uses `chat`,
 `chat_id` and `node_id` in registrations, plus `sender_chat`, `sender_chat_id`
 and `recipient_chat_id` in message records. The decoder maps each supported
 version into the same internal model before checking authority and permissions.
-Unknown versions and mixed v1/v2 shapes are rejected. User text and file bytes
+Version 3 adds [Merkle directory reconciliation](discovery.md#directory-reconciliation)
+with the same chat field names. Directory records require version 3; they cannot
+be encoded as v1 or v2. Unknown versions and mixed field shapes are rejected. User text and file bytes
 are never rewritten by a codec.
 
 Nodes negotiate the highest mutually supported record version through encrypted
@@ -19,8 +21,8 @@ by older proofs and the ordinary reply. Presence itself uses the v1 control
 envelope, allowing peers to negotiate before exchanging newer data formats.
 `gent nodes --json` reports the selected `wire_version` for each peer.
 
-Queued records retain the version and exact bytes chosen at admission. Both v1
-and v2 decoders remain available across restarts and rolling upgrades. Existing
+Queued records retain the version and exact bytes chosen at admission. The v1,
+v2 and v3 decoders remain available across restarts and rolling upgrades. Existing
 v1 activity-capable peers keep receiving v1 records. Upgrades need no new chat
 identities or cluster enrollment.
 

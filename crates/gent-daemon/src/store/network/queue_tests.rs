@@ -1,6 +1,33 @@
 use super::*;
 
 #[tokio::test]
+async fn directory_reconciliation_bypasses_unstarted_inventory_backlog() {
+    let mut pair = Pair::new().await;
+    for store in &mut pair.stores {
+        store.presence_tick().unwrap();
+    }
+    pair.pump();
+    for i in 0..24 {
+        pair.stores[0]
+            .execute(Request::Agent {
+                credential: config::secret(),
+                action: AgentOp::Register {
+                    name: format!("backlog-{i}"),
+                    provider: "test".into(),
+                },
+            })
+            .unwrap();
+    }
+    assert!(pair.stores[0].directory_tick().unwrap());
+    let selected = queue::next_id(&pair.stores[0].db, pair.stores[1].identity.node.id())
+        .unwrap()
+        .unwrap();
+    let kind: String = pair.stores[0].db.query_row("SELECT json_extract(CAST(body AS TEXT),'$.event.kind') FROM network_events WHERE id=?1", [&selected], |r|r.get(0)).unwrap();
+    assert_eq!(kind, "directory");
+    pair.pump();
+}
+
+#[tokio::test]
 async fn presence_bypasses_unstarted_directory_records() {
     let mut pair = Pair::new().await;
     for i in 0..24 {
@@ -35,6 +62,10 @@ async fn presence_bypasses_unstarted_directory_records() {
 async fn presence_never_interleaves_a_fragmented_record_even_after_cursor_failure() {
     for fail_cursor in [false, true] {
         let mut pair = Pair::new().await;
+        for store in &mut pair.stores {
+            store.presence_tick().unwrap();
+        }
+        pair.pump();
         pair.send(vec![FilePart {
             name: "sample.png".into(),
             media_type: "image/png".into(),
@@ -55,7 +86,12 @@ async fn presence_never_interleaves_a_fragmented_record_even_after_cursor_failur
             pair.stores[0].data_prepare(&group).unwrap();
         }
         pair.reopen(0);
+        pair.stores[0]
+            .db
+            .execute("UPDATE node_presence SET next_probe_at=0", [])
+            .unwrap();
         pair.stores[0].presence_tick().unwrap();
+        pair.stores[0].directory_tick().unwrap();
         assert_eq!(
             queue::next_id(&pair.stores[0].db, &peer)
                 .unwrap()

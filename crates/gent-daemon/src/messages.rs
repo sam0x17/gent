@@ -5,6 +5,7 @@ use gent_crypto::{Checkpoint, SignedLegacyAgentBinding, VerifiedState, agent_id,
 use gent_protocol::Message;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub mod directory;
 pub mod owner_preparation;
 pub mod wire;
 
@@ -51,6 +52,9 @@ impl Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
+    Directory {
+        envelope: Box<directory::Envelope>,
+    },
     NodeInvite {
         envelope: Box<crate::store::node_invites::Envelope>,
     },

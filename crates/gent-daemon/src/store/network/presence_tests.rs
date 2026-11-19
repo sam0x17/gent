@@ -7,7 +7,7 @@ async fn wire_capabilities_require_fresh_matching_proofs() {
     let first = challenge(&pair, 0);
     reply(&pair, 0, wire::acknowledgement(Uuid::new_v4(), 2)).unwrap();
     assert_eq!(count(&pair, 0, "wire_peers"), 0);
-    reply(&pair, 0, wire::acknowledgement(first, 3)).unwrap();
+    reply(&pair, 0, wire::acknowledgement(first, 4)).unwrap();
     assert_eq!(count(&pair, 0, "wire_peers"), 0);
     advance(&pair, 0, 31);
     reply(&pair, 0, wire::acknowledgement(first, 2)).unwrap();

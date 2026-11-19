@@ -25,10 +25,14 @@ impl Store {
                 queued = queued.saturating_add(count);
             }
         }
-        Ok(self.sync_health.status(
+        let mut value = self.sync_health.status(
             self.config.relay.is_some(),
             state.require_fresh(timestamp as u64).is_ok(),
             queued,
-        ))
+        );
+        value["directory"] = self
+            .network_session(&self.db, state)
+            .directory_sync_status()?;
+        Ok(value)
     }
 }

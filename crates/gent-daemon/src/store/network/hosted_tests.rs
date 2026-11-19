@@ -89,6 +89,25 @@ async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_id
     );
     pair.stores[0].reconcile_hosted_routes().unwrap();
     pair.pump();
+    // The native parent's Merkle directory also repairs a lost web chat.
+    for store in &mut pair.stores {
+        store.presence_tick().unwrap();
+    }
+    pair.pump();
+    pair.stores[1]
+        .db
+        .execute("DELETE FROM network_origins WHERE agent=?1", [&original])
+        .unwrap();
+    pair.stores[1]
+        .db
+        .execute("DELETE FROM agents WHERE id=?1", [&original])
+        .unwrap();
+    pair.stores[1].directory_tick().unwrap();
+    pair.pump();
+    assert_eq!(
+        pair.stores[1].synchronization_status().unwrap()["directory"]["peers"][0]["state"],
+        "matched"
+    );
     let gateway = config::read_private(&child_home.path().join("owner.key")).unwrap();
     let call = |store: &mut Store, action| {
         store.execute(Request::HostedAgent {
