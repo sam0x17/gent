@@ -61,13 +61,24 @@ async fn retired_wake_claim_cannot_return_through_remote_replay_or_timestamp_rew
         1
     );
     let state = pair.stores[1].identity.state(&pair.stores[1].db).unwrap();
+    // retire_history advances the durable clock once. Using a later wall-clock
+    // read here can issue authority one second ahead of that frozen clock on
+    // a slower runner, failing before the replay check is reached.
+    let timestamp: i64 = pair.stores[1]
+        .db
+        .query_row(
+            "SELECT floor FROM request_clock WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     let renewal = state
         .renew(
             &pair.stores[0]
                 .identity
                 .signing_owner(&pair.stores[0].db)
                 .unwrap(),
-            (now() + 9 * 86400) as u64,
+            timestamp as u64,
         )
         .unwrap();
     pair.stores[1]
@@ -82,7 +93,7 @@ async fn retired_wake_claim_cannot_return_through_remote_replay_or_timestamp_rew
             let Event::Message { message, .. } = &mut record.event else {
                 panic!()
             };
-            message.created_at = now() + 9 * 86400;
+            message.created_at = timestamp;
             message.expires_at = message.created_at + EXCHANGE_TTL_SECONDS;
         }
         let store = &pair.stores[1];
