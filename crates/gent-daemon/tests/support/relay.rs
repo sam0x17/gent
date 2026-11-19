@@ -113,7 +113,7 @@ async fn serve(
             authorized = value.trim() == format!("Bearer {token}");
         }
     }
-    assert!(length <= gent_protocol::transport_batch::MAX_BYTES);
+    assert!(length <= gent_protocol::transport_exchange::MAX_BYTES);
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await.unwrap();
     drop(reader);
@@ -173,6 +173,13 @@ async fn serve(
                 &body,
                 mode.load(Ordering::SeqCst),
             )
+        } else if parts.get(1) != Some(&"v1")
+            || parts.get(2) != Some(&"mailboxes")
+            || parts.get(4) == Some(&"state")
+        {
+            // This fixture deliberately models the legacy API. New optional
+            // routes must return 404 so native fallback is exercised.
+            (404, vec![])
         } else if parts.len() == 6 && parts[4] == "batch" {
             batch::handle(
                 &mut data,
