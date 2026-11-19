@@ -92,6 +92,7 @@ impl Tree {
         }
         frontier.sort_by(|a, b| a.prefix.cmp(&b.prefix));
         Ok(Snapshot {
+            incarnation: None,
             sequence,
             root,
             frontier,
@@ -208,10 +209,13 @@ pub(super) fn validate_snapshot(snapshot: &Snapshot) -> Result<()> {
         snapshot.sequence > 0
             && snapshot.sequence <= i64::MAX as u64
             && snapshot.root.count <= MAX_CHATS
-            && !snapshot.frontier.is_empty()
+            && (!snapshot.frontier.is_empty() || snapshot.incarnation.is_some())
             && snapshot.frontier.len() <= MAX_FRONTIER,
         "invalid directory snapshot bounds"
     );
+    if snapshot.frontier.is_empty() {
+        return Ok(());
+    }
     let mut summaries = BTreeMap::new();
     for branch in &snapshot.frontier {
         validate_prefix(&branch.prefix)?;

@@ -6,6 +6,10 @@ use std::os::unix::fs::PermissionsExt;
 mod administration_tests;
 #[path = "configuration_storage_tests.rs"]
 mod configuration_storage_tests;
+#[path = "direct_tests.rs"]
+mod direct_tests;
+#[path = "directory_compact_tests.rs"]
+mod directory_compact_tests;
 #[path = "directory_push_tests.rs"]
 mod directory_push_tests;
 #[path = "directory_tests.rs"]

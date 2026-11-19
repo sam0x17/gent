@@ -7,9 +7,27 @@ const REFRESH: Duration = Duration::from_secs(30);
 #[derive(Default)]
 pub(in crate::sync) struct State {
     published: Option<(u64, gent_crypto::Digest, Instant)>,
+    direct_retired: Option<(Instant, JoinHandle<Result<()>>)>,
 }
 
 impl State {
+    pub(super) fn retire_direct(&mut self, relay: &Relay, receipt: &Receipt) {
+        // Direct traffic does not need a cloud write per batch. Periodically
+        // retire old cloud packets; lost writes remain retryable and cannot
+        // invalidate a verified direct delivery.
+        if self
+            .direct_retired
+            .as_ref()
+            .is_none_or(|(at, task)| task.is_finished() && at.elapsed() >= Duration::from_secs(300))
+        {
+            let relay = relay.clone();
+            let receipt = receipt.clone();
+            self.direct_retired = Some((
+                Instant::now(),
+                tokio::spawn(async move { relay.put_checkpoint(&receipt, true).await }),
+            ));
+        }
+    }
     fn due(&self, receipt: &Receipt, now: Instant) -> bool {
         self.published
             .as_ref()
@@ -82,6 +100,9 @@ mod tests {
             origin: format!("http://{address}/").parse().unwrap(),
             authorization: header::HeaderValue::from_static("Bearer test"),
             batches: Arc::default(),
+            states: Arc::default(),
+            exchange: None,
+            cluster: None,
         };
         let node = gent_crypto::NodeIdentity::generate().unwrap();
         let receipt = node.sign_stream_receipt(b"stream", 1, [1; 32]).unwrap();

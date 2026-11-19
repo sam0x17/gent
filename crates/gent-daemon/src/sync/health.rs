@@ -12,6 +12,8 @@ use std::sync::{
 pub(crate) struct Health {
     pub(crate) connected: Arc<AtomicBool>,
     pass: Mutex<Pass>,
+    exchange: Mutex<Option<Arc<super::exchange::Exchange>>>,
+    direct: Mutex<Option<Arc<super::direct::Metrics>>>,
 }
 #[derive(Default, Serialize)]
 struct Pass {
@@ -26,10 +28,25 @@ struct Pass {
     packets_received: u64,
     last_progress_at: Option<i64>,
     cycle_duration_ms: Option<u64>,
+    watch_reconnects: u64,
+    watch_last_error: Option<String>,
+    watch_last_connection_ms: Option<u64>,
     #[serde(skip)]
     transferring: BTreeSet<Vec<u8>>,
 }
 impl Health {
+    pub(super) fn set_direct(&self, metrics: Arc<super::direct::Metrics>) {
+        *self.direct.lock().expect("direct metrics poisoned") = Some(metrics);
+    }
+    pub(super) fn set_exchange(&self, exchange: Option<Arc<super::exchange::Exchange>>) {
+        *self.exchange.lock().expect("sync metrics poisoned") = exchange;
+    }
+    pub(super) fn watch_ended(&self, reason: Option<&str>, elapsed: std::time::Duration) {
+        let mut pass = self.pass.lock().expect("sync health lock poisoned");
+        pass.watch_reconnects = pass.watch_reconnects.saturating_add(1);
+        pass.watch_last_error = reason.map(str::to_owned);
+        pass.watch_last_connection_ms = Some(elapsed.as_millis().try_into().unwrap_or(u64::MAX));
+    }
     pub(super) fn cycle_completed(&self, elapsed: std::time::Duration) {
         self.pass
             .lock()
@@ -89,6 +106,22 @@ impl Health {
         let mut value = json!(*pass);
         value["transferring_streams"] = json!(pass.transferring.len());
         value["notifications_connected"] = json!(self.connected.load(Ordering::SeqCst));
+        if let Some(direct) = self
+            .direct
+            .lock()
+            .expect("direct metrics poisoned")
+            .as_ref()
+        {
+            value["direct_traffic"] = direct.snapshot();
+        }
+        if let Some(exchange) = self
+            .exchange
+            .lock()
+            .expect("sync metrics poisoned")
+            .as_ref()
+        {
+            value["relay_traffic"] = exchange.snapshot();
+        }
         value
     }
 

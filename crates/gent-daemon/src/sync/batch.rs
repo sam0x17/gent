@@ -5,13 +5,13 @@ use gent_protocol::transport_batch::{Batch, MAX_BYTES};
 #[derive(Default)]
 pub(super) struct Support(Mutex<Option<Instant>>);
 impl Support {
-    fn enabled(&self) -> bool {
+    pub(super) fn enabled(&self) -> bool {
         self.0
             .lock()
             .expect("batch support lock poisoned")
             .is_none_or(|at| at.elapsed() >= Duration::from_secs(300))
     }
-    fn unavailable(&self) {
+    pub(super) fn unavailable(&self) {
         *self.0.lock().expect("batch support lock poisoned") = Some(Instant::now());
     }
 }
@@ -25,8 +25,9 @@ impl Relay {
     }
     pub(super) async fn get_batch(&self, group: &[u8], first: u64) -> Result<Vec<Packet>> {
         if self.batches.enabled() {
-            let response =
-                network_error::send(self.client.get(self.batch_route(group, first)?)).await?;
+            let response = self
+                .mailbox("GET", self.batch_route(group, first)?, vec![])
+                .await?;
             if response.status() == StatusCode::NOT_FOUND {
                 // Old relays lack this route. A current relay represents an
                 // empty mailbox with a successful empty envelope, never 404.
@@ -37,7 +38,7 @@ impl Relay {
                     "relay batch fetch failed ({})",
                     response.status()
                 );
-                let batch = Batch::decode(&bounded(response, MAX_BYTES).await?)?;
+                let batch = Batch::decode(&response.bytes(MAX_BYTES)?)?;
                 return batch
                     .packets()
                     .iter()
@@ -58,13 +59,9 @@ impl Relay {
     pub(super) async fn put_batch(&self, group: &[u8], first: u64, batch: &Batch) -> Result<usize> {
         ensure!(!batch.packets().is_empty(), "cannot publish an empty batch");
         if self.batches.enabled() {
-            let response = network_error::send(
-                self.client
-                    .put(self.batch_route(group, first)?)
-                    .header(header::CONTENT_TYPE, "application/octet-stream")
-                    .body(batch.encode()),
-            )
-            .await?;
+            let response = self
+                .mailbox("PUT", self.batch_route(group, first)?, batch.encode())
+                .await?;
             if response.status() == StatusCode::NOT_FOUND {
                 self.batches.unavailable();
             } else {
@@ -80,7 +77,7 @@ impl Relay {
                     next: u64,
                     count: usize,
                 }
-                let stored: StoredBatch = serde_json::from_slice(&bounded(response, 1024).await?)?;
+                let stored: StoredBatch = serde_json::from_slice(&response.bytes(1024)?)?;
                 ensure!(
                     stored.stored
                         && stored.count == batch.packets().len()

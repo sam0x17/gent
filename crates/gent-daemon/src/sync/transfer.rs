@@ -1,7 +1,7 @@
 //! Bounded ordered bursts amortize relay bookkeeping without starving peers.
 use super::*;
 mod checkpoints;
-mod outgoing;
+pub(super) mod outgoing;
 pub(super) use checkpoints::State;
 
 const TIME_SLICE: Duration = Duration::from_secs(2);
@@ -13,14 +13,31 @@ pub(super) async fn run(
     health: Arc<health::Health>,
     wakeup: Arc<Notify>,
     state: &mut State,
+    direct: Option<Arc<super::direct::Direct>>,
 ) -> Result<Option<u64>> {
+    if let Some(direct) = direct
+        && let Some(result) = direct
+            .transfer(store.clone(), &entry, &health, wakeup.clone())
+            .await
+    {
+        if result.is_ok() {
+            let group = entry.group.clone();
+            if let Ok(Some(receipt)) = local(store.clone(), move |s| {
+                s.transport_confirm(&group, false, None)
+            })
+            .await
+            {
+                state.retire_direct(&relay, &receipt);
+            }
+        }
+        return result;
+    }
     let group = entry.group;
     let mut last = None;
     if entry.outgoing {
         // Both reads are independent. A position is only a service hint; the
         // endpoint still verifies receipts and refuses positions ahead of history.
-        let (received, mut next) =
-            tokio::try_join!(relay.checkpoint(&group), relay.position(&group))?;
+        let (received, mut next) = relay.state(&group).await?;
         let g = group.clone();
         let confirmed = local(store.clone(), move |store| {
             store.transport_confirm(&g, entry.configuration, received.as_ref())

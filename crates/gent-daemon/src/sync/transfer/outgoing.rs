@@ -13,7 +13,26 @@ pub(super) async fn run(
     health: &health::Health,
     wakeup: Arc<Notify>,
 ) -> Result<Option<u64>> {
-    let batch = collect(first, wakeup, |next| {
+    let batch = prepare(store, group, configuration, first, wakeup).await?;
+    if batch.packets().is_empty() {
+        health.idle(group);
+        return Ok(None);
+    }
+    let count = relay.put_batch(group, first, &batch).await?;
+    for _ in 0..count {
+        health.progress(group, true, crate::store::now());
+    }
+    Ok(Some(first + count as u64 - 1))
+}
+
+pub(in crate::sync) async fn prepare(
+    store: SharedStore,
+    group: &[u8],
+    configuration: bool,
+    first: u64,
+    wakeup: Arc<Notify>,
+) -> Result<Batch> {
+    collect(first, wakeup, |next| {
         let g = group.to_vec();
         let store = store.clone();
         async move {
@@ -48,16 +67,7 @@ pub(super) async fn run(
                 .transpose()
         }
     })
-    .await?;
-    if batch.packets().is_empty() {
-        health.idle(group);
-        return Ok(None);
-    }
-    let count = relay.put_batch(group, first, &batch).await?;
-    for _ in 0..count {
-        health.progress(group, true, crate::store::now());
-    }
-    Ok(Some(first + count as u64 - 1))
+    .await
 }
 
 async fn collect<F, Fut>(first: u64, wakeup: Arc<Notify>, mut prepare: F) -> Result<Batch>

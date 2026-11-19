@@ -9,6 +9,7 @@ use crate::messages::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 mod cache;
+mod compact;
 mod push;
 mod tree;
 
@@ -24,6 +25,7 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
     )?;
     cache::schema(db)?;
     push::schema(db)?;
+    compact::schema(db)?;
     Ok(())
 }
 

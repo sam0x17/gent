@@ -19,7 +19,7 @@ impl StoreSession<'_> {
     pub(in crate::store) fn receive_directory_snapshot(
         &self,
         peer: &str,
-        remote: Snapshot,
+        mut remote: Snapshot,
     ) -> Result<()> {
         tree::validate_snapshot(&remote)?;
         let member = self
@@ -42,10 +42,17 @@ impl StoreSession<'_> {
                 // Prioritized records can carry an older snapshot after a new
                 // one. Its records still merge, but its view cannot restart an
                 // already newer repair. Equal sequences never prove equality.
-                if remote.sequence < saved.sequence {
+                if remote.incarnation.is_none() && remote.sequence < saved.sequence {
                     return Ok(());
                 }
-                saved.root == remote.root
+                // V5 roots remain actionable after a DB restore even when the
+                // sequence decreases. MLS ordering authenticates new arrivals;
+                // a sequence is not authority over registration generations.
+                let same = saved.root == remote.root && saved.incarnation == remote.incarnation;
+                if same && remote.frontier.is_empty() {
+                    remote.frontier = saved.frontier.clone();
+                }
+                same && (remote.frontier.is_empty() || !saved.frontier.is_empty())
             }
             _ => false,
         };
@@ -132,7 +139,13 @@ impl StoreSession<'_> {
         if queued {
             return Ok(false);
         }
-        let records = self.replica_tree()?.differing(&remote, &cursor)?;
+        // An unknown short root triggers one advertisement of our own frontier.
+        // Receipt of the peer's full frontier resets this progress below.
+        let records = if remote.frontier.is_empty() {
+            Vec::new()
+        } else {
+            self.replica_tree()?.differing(&remote, &cursor)?
+        };
         let complete = records.len() <= PUSH_LIMIT;
         let records: Vec<_> = records.into_iter().take(PUSH_LIMIT).collect();
         let after = records

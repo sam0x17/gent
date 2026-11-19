@@ -11,6 +11,8 @@ pub mod owner_transfer;
 pub mod permissions;
 pub mod service;
 pub mod transport_batch;
+pub mod transport_exchange;
+pub mod transport_watch;
 pub mod wake;
 pub mod web_failover;
 pub mod work;

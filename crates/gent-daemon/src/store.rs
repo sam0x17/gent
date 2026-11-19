@@ -25,6 +25,7 @@ mod wire;
 pub(crate) use configuration::pending::schema as pending_configuration_schema;
 pub(crate) use configuration::routing::schema as configuration_routing_schema;
 mod diagnostics;
+pub mod direct;
 pub(crate) mod directory;
 mod directory_sync;
 mod files;
@@ -154,6 +155,7 @@ impl Store {
         wire::schema(&db)?;
         hosted::schema(&db)?;
         directory_sync::schema(&db)?;
+        direct::schema(&db)?;
         db.execute("UPDATE hosted_checkpoints SET lease_until=0", [])?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
@@ -517,6 +519,12 @@ impl Store {
                 .collect();
         streams.extend(self.data_streams()?);
         Ok(streams)
+    }
+    pub(crate) fn sync_pending_groups(&self) -> Result<std::collections::BTreeSet<Vec<u8>>> {
+        Ok(self.db.prepare("SELECT DISTINCT l.outgoing FROM network_links l JOIN network_events e ON e.peer=l.peer
+            UNION SELECT o.group_id FROM stream_outbox o LEFT JOIN stream_confirmed c ON c.group_id=o.group_id
+            WHERE length(o.packet)>0 AND (c.sequence IS NULL OR o.sequence>c.sequence)")?
+            .query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
     pub(crate) fn sync_prepare(&self, group: &[u8]) -> Result<()> {
         let mut endpoint =

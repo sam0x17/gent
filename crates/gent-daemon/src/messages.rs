@@ -52,6 +52,9 @@ impl Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
+    Direct {
+        address: crate::store::direct::Address,
+    },
     Directory {
         envelope: Box<directory::Envelope>,
     },

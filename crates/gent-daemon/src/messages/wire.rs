@@ -4,10 +4,11 @@ use super::{Event, Record};
 use gent_crypto::Checkpoint;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser};
 use serde_json::Value;
+mod compact;
 mod value;
 
-pub const CURRENT: u8 = 4;
-pub const NEGOTIATED: &[u8] = &[2, 3, 4];
+pub const CURRENT: u8 = 5;
+pub const NEGOTIATED: &[u8] = &[2, 3, 4, 5];
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,7 +16,7 @@ struct Envelope {
     version: u8,
     authority: Checkpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    directory: Option<super::directory::Snapshot>,
+    directory: Option<Value>,
     #[serde(deserialize_with = "value::deserialize")]
     event: Value,
 }
@@ -96,6 +97,11 @@ fn v2(event: &mut Value, encode: bool) -> Result<(), String> {
 impl Serialize for Record {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut event = serde_json::to_value(&self.event).map_err(ser::Error::custom)?;
+        if self.version < 5 && matches!(self.event, Event::Direct { .. }) {
+            return Err(ser::Error::custom(
+                "direct transport requires node record version 5",
+            ));
+        }
         if self.version < 4 && (self.directory.is_some() || event["envelope"]["step"] == "push") {
             return Err(ser::Error::custom(
                 "directory push requires node record version 4",
@@ -108,13 +114,18 @@ impl Serialize for Record {
         }
         match self.version {
             1 => {}
-            2..=4 => v2(&mut event, true).map_err(ser::Error::custom)?,
+            2..=5 => v2(&mut event, true).map_err(ser::Error::custom)?,
             _ => return Err(ser::Error::custom("unsupported node record version")),
         }
         Envelope {
             version: self.version,
             authority: self.authority.clone(),
-            directory: self.directory.clone(),
+            directory: self
+                .directory
+                .as_ref()
+                .map(|snapshot| compact::encode(snapshot, self.version))
+                .transpose()
+                .map_err(ser::Error::custom)?,
             event,
         }
         .serialize(serializer)
@@ -124,6 +135,11 @@ impl Serialize for Record {
 impl<'de> Deserialize<'de> for Record {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut envelope = Envelope::deserialize(deserializer)?;
+        if envelope.version < 5 && envelope.event["kind"] == "direct" {
+            return Err(de::Error::custom(
+                "direct transport requires node record version 5",
+            ));
+        }
         if envelope.version < 4
             && (envelope.directory.is_some() || envelope.event["envelope"]["step"] == "push")
         {
@@ -138,14 +154,18 @@ impl<'de> Deserialize<'de> for Record {
         }
         match envelope.version {
             1 => {}
-            2..=4 => v2(&mut envelope.event, false).map_err(de::Error::custom)?,
+            2..=5 => v2(&mut envelope.event, false).map_err(de::Error::custom)?,
             _ => return Err(de::Error::custom("unsupported node record version")),
         }
         let event: Event = serde_json::from_value(envelope.event).map_err(de::Error::custom)?;
         Ok(Self {
             version: envelope.version,
             authority: envelope.authority,
-            directory: envelope.directory,
+            directory: envelope
+                .directory
+                .map(|value| compact::decode(value, envelope.version))
+                .transpose()
+                .map_err(de::Error::custom)?,
             event,
         })
     }
@@ -159,7 +179,7 @@ mod tests {
     #[test]
     fn snapshots_and_pushes_require_v4_and_round_trip_chat_fields() {
         let value = json!({"version":4,"authority":{"revision":1,"state_hash":vec![0;32]},
-            "directory":{"sequence":1,"root":{"hash":vec![0;32],"count":0},"frontier":[]},
+            "directory":{"sequence":1,"root":{"hash":vec![0;32],"count":0},"frontier":[{"prefix":"","summary":{"hash":vec![0;32],"count":0}}]},
             "event":{"kind":"directory","envelope":{"step":"push","chats":[{
                 "chat_id":"chat","node_id":"node","nonce":null,"legacy":null,"generation":1,
                 "name":"coordinator","provider":"test","revoked":false}]}}});
@@ -212,7 +232,7 @@ mod tests {
         let mut decoded: Record = serde_json::from_value(current.clone()).unwrap();
         decoded.version = 1;
         assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
-        for version in [0, 5, 255] {
+        for version in [0, CURRENT + 1, 255] {
             let mut unsupported = current.clone();
             unsupported["version"] = json!(version);
             assert!(serde_json::from_value::<Record>(unsupported).is_err());
@@ -223,7 +243,7 @@ mod tests {
         let mut mislabeled = legacy;
         mislabeled["version"] = json!(2);
         assert!(serde_json::from_value::<Record>(mislabeled).is_err());
-        for version in [1, 2, 3, 4] {
+        for version in 1..=CURRENT {
             let input = format!(
                 r#"{{"version":{version},"authority":{{"revision":1,"state_hash":{}}},"event":{{"kind":"presence","reply":true,"reply":false,"challenge":"00000000-0000-4000-8000-000000000001"}}}}"#,
                 json!(vec![0; 32])

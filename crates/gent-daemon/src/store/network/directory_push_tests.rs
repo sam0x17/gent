@@ -1,7 +1,7 @@
 use super::*;
 use crate::messages::directory::Snapshot;
 
-fn snapshot(store: &Store) -> Snapshot {
+pub(super) fn snapshot(store: &Store) -> Snapshot {
     let tx = store.db.unchecked_transaction().unwrap();
     let value = store
         .network_session(&tx, store.identity.state(&tx).unwrap())
@@ -11,7 +11,7 @@ fn snapshot(store: &Store) -> Snapshot {
     value
 }
 
-fn forget(store: &Store, id: &str) {
+pub(super) fn forget(store: &Store, id: &str) {
     for table in ["agent_activity", "network_origins"] {
         store
             .db
@@ -24,7 +24,7 @@ fn forget(store: &Store, id: &str) {
         .unwrap();
 }
 
-fn negotiate(pair: &mut Pair) {
+pub(super) fn negotiate(pair: &mut Pair) {
     for store in &mut pair.stores {
         store.presence_tick().unwrap();
     }
@@ -162,7 +162,7 @@ async fn ordinary_traffic_pushes_a_missing_manual_chat_without_a_probe() {
         )
         .unwrap();
     let record: Record = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(record.version, 4);
+    assert_eq!(record.version, crate::messages::wire::CURRENT);
     assert!(record.directory.is_some());
     assert!(matches!(record.event, Event::Registration { .. }));
     pair.pump();

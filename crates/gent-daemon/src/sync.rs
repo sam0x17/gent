@@ -15,10 +15,15 @@ use std::{
 use tokio::{sync::Notify, task::JoinHandle, time::Instant};
 mod batch;
 mod bootstrap;
+pub(crate) mod direct;
+mod exchange;
 mod files;
 pub(crate) mod health;
 mod network_error;
 mod notifications;
+mod schedule;
+#[cfg(test)]
+mod test_http;
 mod transfer;
 
 const MAX_FRAME: usize = 1024 * 1024;
@@ -37,6 +42,9 @@ pub(crate) struct Relay {
     pub(crate) origin: Url,
     authorization: header::HeaderValue,
     batches: Arc<batch::Support>,
+    states: Arc<batch::Support>,
+    exchange: Option<Arc<exchange::Exchange>>,
+    cluster: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,18 +69,69 @@ impl Relay {
         let mut headers = header::HeaderMap::new();
         headers.insert("X-Gent-Authority", header::HeaderValue::from_static("3"));
         headers.insert(header::AUTHORIZATION, value.clone());
+        let cluster = config::load(home).ok().map(|config| config.cluster.id);
+        if let Some(cluster) = &cluster {
+            headers.insert("X-Gent-Cluster", cluster.parse()?);
+        }
         let client = Client::builder()
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(15))
             .build()?;
+        let exchange = tokio::runtime::Handle::try_current()
+            .ok()
+            .map(|_| exchange::Exchange::start(client.clone(), origin.clone()));
         Ok(Self {
             client,
             origin,
             authorization: value,
             batches: Arc::default(),
+            states: Arc::default(),
+            exchange,
+            cluster,
         })
+    }
+    async fn state(&self, group: &[u8]) -> Result<(Option<Receipt>, u64)> {
+        if self.states.enabled() {
+            let response = self
+                .mailbox("GET", self.checkpoint_route(group, "state")?, vec![])
+                .await?;
+            if response.status() == StatusCode::NOT_FOUND {
+                self.states.unavailable();
+            } else {
+                ensure!(
+                    response.status() == StatusCode::OK,
+                    "relay state request failed ({})",
+                    response.status()
+                );
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct State {
+                    next: u64,
+                    checkpoint: Option<String>,
+                }
+                let state: State = serde_json::from_slice(&response.bytes(8192)?)?;
+                ensure!(
+                    state.next <= gent_crypto::stream::MAX_SEQUENCE,
+                    "invalid relay position"
+                );
+                let receipt = state
+                    .checkpoint
+                    .map(|s| -> Result<_> {
+                        let bytes = base64::engine::general_purpose::STANDARD.decode(s)?;
+                        let receipt = Receipt::decode(&bytes)?;
+                        ensure!(
+                            receipt.group() == group,
+                            "relay returned another stream checkpoint"
+                        );
+                        Ok(receipt)
+                    })
+                    .transpose()?;
+                return Ok((receipt, state.next));
+            }
+        }
+        tokio::try_join!(self.checkpoint(group), self.position(group))
     }
     fn route(&self, group: &[u8], sequence: Option<u64>) -> Result<Url> {
         let mut path = format!("v1/mailboxes/{}", URL_SAFE_NO_PAD.encode(group));
@@ -82,13 +141,15 @@ impl Relay {
         Ok(self.origin.join(&path)?)
     }
     async fn position(&self, group: &[u8]) -> Result<u64> {
-        let response = network_error::send(self.client.get(self.route(group, None)?)).await?;
+        let response = self
+            .mailbox("GET", self.route(group, None)?, vec![])
+            .await?;
         ensure!(
             response.status() == StatusCode::OK,
             "relay position request failed ({})",
             response.status()
         );
-        let position: Position = serde_json::from_slice(&bounded(response, 1024).await?)?;
+        let position: Position = serde_json::from_slice(&response.bytes(1024)?)?;
         ensure!(
             position.next <= gent_crypto::stream::MAX_SEQUENCE,
             "invalid relay position"
@@ -101,19 +162,19 @@ impl Relay {
             bytes.len() <= MAX_FRAME,
             "encrypted packet exceeds relay frame limit"
         );
-        let response = network_error::send(
-            self.client
-                .put(self.route(packet.group(), Some(packet.sequence()))?)
-                .header(header::CONTENT_TYPE, "application/octet-stream")
-                .body(bytes),
-        )
-        .await?;
+        let response = self
+            .mailbox(
+                "PUT",
+                self.route(packet.group(), Some(packet.sequence()))?,
+                bytes,
+            )
+            .await?;
         ensure!(
             response.status() == StatusCode::OK,
             "relay storage request failed ({})",
             response.status()
         );
-        let stored: Stored = serde_json::from_slice(&bounded(response, 1024).await?)?;
+        let stored: Stored = serde_json::from_slice(&response.bytes(1024)?)?;
         ensure!(
             stored.stored && stored.sequence == packet.sequence(),
             "invalid relay storage acknowledgment"
@@ -123,8 +184,9 @@ impl Relay {
         Ok(())
     }
     async fn get(&self, group: &[u8], sequence: u64) -> Result<Option<Packet>> {
-        let response =
-            network_error::send(self.client.get(self.route(group, Some(sequence))?)).await?;
+        let response = self
+            .mailbox("GET", self.route(group, Some(sequence))?, vec![])
+            .await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -133,7 +195,7 @@ impl Relay {
             "relay fetch failed ({})",
             response.status()
         );
-        let packet = Packet::decode(&bounded(response, MAX_FRAME).await?)?;
+        let packet = Packet::decode(&response.bytes(MAX_FRAME)?)?;
         ensure!(
             packet.group() == group && packet.sequence() == sequence,
             "relay returned another stream position"
@@ -148,9 +210,9 @@ impl Relay {
         ))?)
     }
     async fn checkpoint(&self, group: &[u8]) -> Result<Option<Receipt>> {
-        let response =
-            network_error::send(self.client.get(self.checkpoint_route(group, "checkpoint")?))
-                .await?;
+        let response = self
+            .mailbox("GET", self.checkpoint_route(group, "checkpoint")?, vec![])
+            .await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -159,7 +221,7 @@ impl Relay {
             "relay checkpoint fetch failed ({})",
             response.status()
         );
-        let receipt = Receipt::decode(&bounded(response, MAX_RECEIPT_BYTES).await?)?;
+        let receipt = Receipt::decode(&response.bytes(MAX_RECEIPT_BYTES)?)?;
         ensure!(
             receipt.group() == group,
             "relay returned another stream checkpoint"
@@ -168,13 +230,13 @@ impl Relay {
     }
     async fn put_checkpoint(&self, receipt: &Receipt, retire: bool) -> Result<()> {
         let action = if retire { "retire" } else { "checkpoint" };
-        let response = network_error::send(
-            self.client
-                .put(self.checkpoint_route(receipt.group(), action)?)
-                .header(header::CONTENT_TYPE, "application/octet-stream")
-                .body(receipt.encode()?),
-        )
-        .await?;
+        let response = self
+            .mailbox(
+                "PUT",
+                self.checkpoint_route(receipt.group(), action)?,
+                receipt.encode()?,
+            )
+            .await?;
         ensure!(
             matches!(response.status(), StatusCode::OK | StatusCode::NO_CONTENT),
             "relay checkpoint storage failed ({})",
@@ -245,18 +307,55 @@ async fn run(
     files: files::Scheduler,
     health: Arc<health::Health>,
 ) {
-    let push =
-        notifications::Listener::start(relay.clone(), wakeup.clone(), health.connected.clone());
+    health.set_exchange(relay.exchange.clone());
+    let direct = match direct::Direct::start(store.clone(), health.clone()).await {
+        Ok(direct) => direct,
+        Err(_) => {
+            eprintln!("Gent direct transport unavailable; encrypted relay remains active");
+            None
+        }
+    };
+    let hints = Arc::new(schedule::Hints::default());
+    let push = notifications::Listener::start(
+        relay.clone(),
+        wakeup.clone(),
+        health.connected.clone(),
+        hints.clone(),
+        health.clone(),
+    );
     let _files = files.start(store.clone());
     let mut retries = BTreeMap::<Vec<u8>, Retry>::new();
     let mut transferred = BTreeMap::<Vec<u8>, u64>::new();
     let mut checkpoints = BTreeMap::<Vec<u8>, transfer::State>::new();
-    let mut cursor = 0usize;
+    let mut schedule = schedule::Schedule::default();
     let mut previous_error = None;
     let configuration = crate::configuration_log::ConfigurationRelay::from_relay(relay.clone());
+    let mut next_control = Instant::now();
     loop {
         let cycle_started = Instant::now();
-        let configuration_result = configuration.sync_once(store.clone()).await;
+        if let Some(direct) = &direct {
+            let _ = direct.advertise(store.clone()).await;
+        }
+        let pending_configuration = local(store.clone(), |s| {
+            s.queue_configuration_renewal()?;
+            Ok(!s.configuration_proposals()?.is_empty()
+                || s.configuration_log_migration()?.is_some())
+        })
+        .await
+        .unwrap_or(true);
+        let configuration_result =
+            if hints.control() || pending_configuration || Instant::now() >= next_control {
+                let result = configuration.sync_once(store.clone()).await;
+                next_control = Instant::now()
+                    + Duration::from_secs(if result.as_ref().is_ok_and(|p| !p) {
+                        30
+                    } else {
+                        1
+                    });
+                result
+            } else {
+                Ok(false)
+            };
         let bootstrap_result = bootstrap::sync(store.clone(), &relay).await;
         let result = local(store.clone(), |store| {
             let mesh = store.mesh_tick();
@@ -277,7 +376,7 @@ async fn run(
                 | (_, _, _, _, Err(error), _)
                 | (_, _, _, _, _, Err(error)) => Err(error),
             };
-            Ok((store.sync_streams()?, pending))
+            Ok((store.sync_streams()?, pending, store.sync_pending_groups()?))
         })
         .await;
         let mut progressed = configuration_result.as_ref().copied().unwrap_or(false)
@@ -290,7 +389,7 @@ async fn run(
         let control_error = error.is_some();
         let (mut successes, mut failures, mut local_error) = (0, 0, false);
         match result {
-            Ok((streams, pending)) => {
+            Ok((streams, pending, queued)) => {
                 match pending {
                     Ok(pending) => mesh_pending = pending,
                     Err(e) => {
@@ -305,14 +404,14 @@ async fn run(
                 transferred.retain(|group, _| streams.iter().any(|s| &s.group == group));
                 checkpoints.retain(|group, _| streams.iter().any(|s| &s.group == group));
                 health.retain(&streams, mesh_pending);
-                let begin = cursor.min(streams.len());
-                let end = (begin + 32).min(streams.len());
-                let selected: Vec<_> = streams[begin..end]
-                    .iter()
-                    .filter(|s| retries.get(&s.group).is_none_or(|r| r.at <= Instant::now()))
-                    .cloned()
-                    .collect();
-                cursor = if end == streams.len() { 0 } else { end };
+                hints.subscribe(&streams);
+                let selected = schedule.select(
+                    &streams,
+                    &hints,
+                    queued,
+                    &retries,
+                    health.connected.load(std::sync::atomic::Ordering::SeqCst),
+                );
                 let mut work = stream::iter(selected)
                     .map(|entry| {
                         let group = entry.group.clone();
@@ -320,11 +419,19 @@ async fn run(
                         let relay = relay.clone();
                         let health = health.clone();
                         let wakeup = wakeup.clone();
+                        let direct = direct.clone();
                         let mut checkpoint = checkpoints.remove(&group).unwrap_or_default();
                         async move {
-                            let result =
-                                transfer::run(store, relay, entry, health, wakeup, &mut checkpoint)
-                                    .await;
+                            let result = transfer::run(
+                                store,
+                                relay,
+                                entry,
+                                health,
+                                wakeup,
+                                &mut checkpoint,
+                                direct,
+                            )
+                            .await;
                             (group, checkpoint, result)
                         }
                     })
@@ -335,6 +442,7 @@ async fn run(
                         Ok(position) => {
                             successes += 1;
                             if let Some(position) = position {
+                                schedule.again(group.clone());
                                 progressed |=
                                     transferred.insert(group.clone(), position) != Some(position);
                             }
@@ -361,7 +469,6 @@ async fn run(
                 checkpoints.extend(completed);
                 // Large clusters advance through a bounded fair batch without
                 // holding the RPC mutex over network I/O.
-                progressed |= cursor != 0;
             }
             Err(e) => {
                 local_error = true;

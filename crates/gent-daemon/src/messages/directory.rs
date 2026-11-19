@@ -15,6 +15,8 @@ pub const PUSH_LIMIT: usize = 32;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnation: Option<Uuid>,
     pub sequence: u64,
     pub root: Summary,
     pub frontier: Vec<Branch>,

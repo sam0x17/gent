@@ -18,6 +18,8 @@ An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQL
 
 Gent [automatically updates](docs/updates.md) from the GitHub `stable` tag every five minutes, with staged builds, atomic executable replacement and startup rollback. Normal CLI responses are readable; use `--json` for scripts or `--verbose` for full response details.
 
+[Native transport](docs/transport.md) uses direct encrypted connections where reachable, with durable Cloudflare fallback. Compact directory summaries, scoped notifications and batched mailbox requests reduce background relay traffic. Inspect process counters with `gent sync --json`.
+
 For a new machine with Cargo:
 
 ```sh

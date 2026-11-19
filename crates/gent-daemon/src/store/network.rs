@@ -401,6 +401,7 @@ impl StoreSession<'_> {
     fn import_event(&mut self, peer: &str, event: Event) -> Result<()> {
         self.timestamp = requests::clock(self.db, self.timestamp)?;
         match event {
+            Event::Direct { address } => self.receive_direct(peer, address),
             Event::Directory { envelope } => self.receive_directory(peer, *envelope),
             Event::NodeInvite { envelope } => self.receive_node_invite(peer, *envelope),
             Event::Presence { challenge, reply } => self.presence_receive(peer, challenge, reply),
@@ -1018,7 +1019,7 @@ impl Store {
                             session.import_event(&peer, record.event)?;
                         }
                         if let Some(snapshot) = record.directory {
-                            session.confirm_wire_version(&peer, 4)?;
+                            session.confirm_wire_version(&peer, record.version)?;
                             session.receive_directory_snapshot(&peer, snapshot)?;
                         }
                         tx.execute("DELETE FROM network_partial WHERE group_id=?1", [group])?;

@@ -93,6 +93,7 @@ impl StoreSession<'_> {
                 None,
             ),
             Event::ConversationActivity { .. } => ("control", Some(timestamp + 86400), None),
+            Event::Direct { address } => ("control", Some(address.expires_at), None),
             Event::Registration { agent } => {
                 ("control", None, Some((agent.id.clone(), agent.generation)))
             }
@@ -145,7 +146,7 @@ impl StoreSession<'_> {
         let version = if matches!(&event, Event::Directory { envelope } if matches!(envelope.as_ref(), crate::messages::directory::Envelope::Push { .. }))
         {
             ensure!(negotiated >= 4, "directory push requires a version 4 peer");
-            4
+            negotiated
         } else if matches!(&event, Event::Presence { .. }) && negotiated < 4 {
             1
         } else if matches!(&event, Event::Directory { .. }) {
@@ -153,12 +154,15 @@ impl StoreSession<'_> {
         } else {
             negotiated
         };
+        let directory = (version >= 4)
+            .then(|| {
+                self.outgoing_directory(peer, version, matches!(&event, Event::Directory { .. }))
+            })
+            .transpose()?;
         let body = serde_json::to_vec(&Record {
             version,
             authority: self.state.checkpoint().clone(),
-            directory: (version >= 4)
-                .then(|| self.directory_snapshot())
-                .transpose()?,
+            directory: directory.clone(),
             event,
         })?;
         ensure!(
@@ -169,6 +173,9 @@ impl StoreSession<'_> {
         capacity(self.db, traffic, body.len(), announcement.is_some())?;
         self.db.execute("INSERT INTO network_events(id,peer,body,subject,traffic,retire_after,announcement) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![id,peer,body,subject,traffic,deadline,announcement.is_some()])?;
+        if let Some(snapshot) = directory {
+            self.directory_admitted(peer, &snapshot)?;
+        }
         if let Some((agent, generation)) = announcement {
             // The durable queue and its greatest admitted generation commit
             // together. A failed enqueue never suppresses a future retry.

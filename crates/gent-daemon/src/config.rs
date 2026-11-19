@@ -12,7 +12,9 @@ use std::{
 mod host_recovery;
 pub use host_recovery::{HostRecovery, MAX_RECOVERY_AGENTS, RecoveryAgent, RecoveryHost};
 mod discovery;
+mod transport;
 pub use discovery::Discovery;
+pub use transport::{Direct, Transport};
 mod hosted;
 pub use hosted::HostedParent;
 
@@ -349,7 +351,7 @@ pub fn save(home: &Path, config: &Config) -> Result<()> {
         }
         // Update preferences are node-local and direct TOML edits take effect
         // without config apply. Never replace them with a stale projection.
-        for name in ["updates", "discovery"] {
+        for name in ["updates", "discovery", "transport"] {
             match previous.extra.get(name) {
                 Some(value) => {
                     next.extra.insert(name.into(), value.clone());
@@ -587,6 +589,7 @@ impl Config {
     pub fn validate_local(&self) -> Result<()> {
         self.updates()?;
         self.discovery()?;
+        self.transport()?;
         ensure!(
             matches!(self.version, 1..=3),
             "unsupported configuration version"
