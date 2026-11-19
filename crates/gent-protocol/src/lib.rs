@@ -10,6 +10,7 @@ pub mod hosted_mcp;
 pub mod owner_transfer;
 pub mod permissions;
 pub mod service;
+pub mod transport_batch;
 pub mod wake;
 pub mod work;
 

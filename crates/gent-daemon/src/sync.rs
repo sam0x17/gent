@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Notify, task::JoinHandle, time::Instant};
+mod batch;
 mod bootstrap;
 mod files;
 pub(crate) mod health;
@@ -35,6 +36,7 @@ pub(crate) struct Relay {
     pub(crate) client: Client,
     pub(crate) origin: Url,
     authorization: header::HeaderValue,
+    batches: Arc<batch::Support>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +71,7 @@ impl Relay {
             client,
             origin,
             authorization: value,
+            batches: Arc::default(),
         })
     }
     fn route(&self, group: &[u8], sequence: Option<u64>) -> Result<Url> {
@@ -316,10 +319,12 @@ async fn run(
                         let store = store.clone();
                         let relay = relay.clone();
                         let health = health.clone();
+                        let wakeup = wakeup.clone();
                         let mut checkpoint = checkpoints.remove(&group).unwrap_or_default();
                         async move {
                             let result =
-                                transfer::run(store, relay, entry, health, &mut checkpoint).await;
+                                transfer::run(store, relay, entry, health, wakeup, &mut checkpoint)
+                                    .await;
                             (group, checkpoint, result)
                         }
                     })

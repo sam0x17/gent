@@ -18,6 +18,8 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
 };
+#[path = "relay/batch.rs"]
+mod batch;
 struct Task(JoinHandle<()>);
 impl Drop for Task {
     fn drop(&mut self) {
@@ -111,7 +113,7 @@ async fn serve(
             authorized = value.trim() == format!("Bearer {token}");
         }
     }
-    assert!(length <= 1024 * 1024);
+    assert!(length <= gent_protocol::transport_batch::MAX_BYTES);
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await.unwrap();
     drop(reader);
@@ -165,6 +167,14 @@ async fn serve(
             (503, vec![])
         } else if parts.get(2) == Some(&"objects") {
             object(
+                &mut data,
+                &parts,
+                &request[0],
+                &body,
+                mode.load(Ordering::SeqCst),
+            )
+        } else if parts.len() == 6 && parts[4] == "batch" {
+            batch::handle(
                 &mut data,
                 &parts,
                 &request[0],

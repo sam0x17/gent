@@ -81,6 +81,7 @@ mod tests {
                 .unwrap(),
             origin: format!("http://{address}/").parse().unwrap(),
             authorization: header::HeaderValue::from_static("Bearer test"),
+            batches: Arc::default(),
         };
         let node = gent_crypto::NodeIdentity::generate().unwrap();
         let receipt = node.sign_stream_receipt(b"stream", 1, [1; 32]).unwrap();
