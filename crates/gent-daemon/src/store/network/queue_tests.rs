@@ -24,6 +24,20 @@ async fn directory_reconciliation_bypasses_unstarted_inventory_backlog() {
         .unwrap();
     let kind: String = pair.stores[0].db.query_row("SELECT json_extract(CAST(body AS TEXT),'$.event.kind') FROM network_events WHERE id=?1", [&selected], |r|r.get(0)).unwrap();
     assert_eq!(kind, "directory");
+    // Repair traffic must yield to actual chat delivery even if queued first.
+    let sent = pair.send(vec![]).unwrap();
+    let selected = queue::next_id(&pair.stores[0].db, pair.stores[1].identity.node.id())
+        .unwrap()
+        .unwrap();
+    let subject: String = pair.stores[0]
+        .db
+        .query_row(
+            "SELECT subject FROM network_events WHERE id=?1",
+            [&selected],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(subject, sent["message_id"].as_str().unwrap());
     pair.pump();
 }
 

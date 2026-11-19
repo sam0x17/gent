@@ -1,5 +1,5 @@
-//! Prefer presence and directory checks between complete records, preserving
-//! interrupted fragments. Reconciliation must not wait behind inventory churn.
+//! Prefer presence, chat delivery and directory checks between complete records,
+//! preserving interrupted fragments. Inventory churn cannot delay those checks.
 use super::*;
 
 pub(super) fn next_id(db: &Connection, peer: &str) -> Result<Option<String>> {
@@ -33,8 +33,10 @@ pub(super) fn next_id(db: &Connection, peer: &str) -> Result<Option<String>> {
              WHEN CASE WHEN json_valid(CAST(e.body AS TEXT))
                  THEN json_extract(CAST(e.body AS TEXT),'$.event.kind')='presence' ELSE 0 END THEN 1
              WHEN CASE WHEN json_valid(CAST(e.body AS TEXT))
-                 THEN json_extract(CAST(e.body AS TEXT),'$.event.kind')='directory' ELSE 0 END THEN 2
-             ELSE 3 END,e.rowid LIMIT 1",
+                 THEN json_extract(CAST(e.body AS TEXT),'$.event.kind') IN ('message','receipt') ELSE 0 END THEN 2
+             WHEN CASE WHEN json_valid(CAST(e.body AS TEXT))
+                 THEN json_extract(CAST(e.body AS TEXT),'$.event.kind')='directory' ELSE 0 END THEN 3
+             ELSE 4 END,e.rowid LIMIT 1",
             [peer],
             |r| r.get(0),
         )
