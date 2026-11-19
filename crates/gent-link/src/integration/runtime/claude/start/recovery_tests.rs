@@ -182,7 +182,7 @@ async fn changed_binding_cwd_or_installation_refuses_automatic_attachment() {
         );
         assert!(f.calls().is_empty());
     }
-    f.fixture.install(false);
+    f.fixture.uninstall();
     assert!(
         scheduler::recover(&f.fixture.home, &f.agent, &selected)
             .await

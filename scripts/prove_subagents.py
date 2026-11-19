@@ -131,7 +131,11 @@ def main():
     save()
     observed = [str(script.with_name('prove_interactive.py')), 'proxy', str(root / 'mcp.jsonl'),
                 binary, '--home', str(home), 'mcp', 'serve', '--host', args.host]
-    settings = cli('integration', 'config', args.host, '--no-wake').get('settings', {})
+    settings = {}
+    if args.host == 'claude-code':
+        directory = home / 'proof-host-config'
+        cli('integration', 'install', args.host, '--config-dir', str(directory))
+        settings = json.loads((directory / 'settings.json').read_text())
     observer = shlex.join([sys.executable, str(script), 'hook', str(root)])
     if args.host == 'claude-code':
         settings['hooks']['PreToolUse'][0]['hooks'][0]['command'] = observer

@@ -26,6 +26,19 @@ pub(crate) fn create(home: &Path) -> Result<()> {
 }
 
 impl Registry {
+    pub(crate) async fn url_only_remote(&self) -> Result<bool> {
+        self.blocking(|registry| {
+            let state = registry.read()?;
+            Ok(!state.clients.is_empty()
+                && state.clients.values().all(|client| {
+                    client.conversation_key == conversations::URL_KEY
+                        && client.oauth.is_none()
+                        && client.mtls.is_none()
+                }))
+        })
+        .await
+    }
+
     pub(crate) async fn authenticate_url_remote(&self, token: String) -> Result<Permit> {
         self.blocking(move |registry| {
             let permit = registry.authenticate_peer(&token, None, Peer::default())?;

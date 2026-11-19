@@ -34,13 +34,28 @@ impl Fixture {
                 host: Host::ClaudeCode,
                 config_dir: Some(self.directory.clone()),
                 wake,
-                no_wake: !wake,
                 wake_socket: None,
                 vscode: false,
                 no_vscode: false,
                 vscode_settings: None,
             },
             true,
+        )
+        .unwrap();
+    }
+    pub(super) fn uninstall(&self) {
+        install::change(
+            &self.home,
+            install::Args {
+                host: Host::ClaudeCode,
+                config_dir: Some(self.directory.clone()),
+                wake: false,
+                wake_socket: None,
+                vscode: false,
+                no_vscode: false,
+                vscode_settings: None,
+            },
+            false,
         )
         .unwrap();
     }

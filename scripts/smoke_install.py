@@ -69,10 +69,11 @@ def main():
                 custom = root / 'custom.sock'
                 assert json.loads(cli('integration', 'install', *suffix, '--wake-socket', str(custom)).stdout)['wake_socket'] == str(custom)
                 assert json.loads(cli('integration', 'install', *suffix).stdout)['wake_socket'] == str(custom)
-                assert json.loads(cli('integration', 'install', *suffix, '--no-wake').stdout)['wake_socket'] is None
+                assert cli('integration', 'install', *suffix, '--no-wake', check=False).returncode != 0
+                assert json.loads(cli('integration', 'status', *suffix).stdout)['wake_socket'] == str(custom)
                 cli('integration', 'install', *suffix, '--wake')
                 assert json.loads(cli('integration', 'status', *suffix).stdout)['wake_socket'] == str(endpoint)
-                print('PASS: Codex default socket selection, explicit directory precedence, pinned arguments, opt-out and invalid-option preservation', flush=True)
+                print('PASS: Codex default socket selection, explicit directory precedence, pinned arguments and invalid-option preservation', flush=True)
             else:
                 server_path, settings_path = directory / '.claude.json', directory / 'settings.json'
                 ordinary = json.loads(server_path.read_text())['mcpServers']['gent']
@@ -99,15 +100,9 @@ def main():
                 assert json.loads(cli('integration', 'status', *suffix).stdout)['claude_wake'] == installed['claude_wake']
                 assert cli('integration', 'config', host, '--wake', check=False).returncode != 0
                 assert all(p.read_bytes() == data for p, data in before.items())
-                disabled = json.loads(cli('integration', 'install', *suffix, '--no-wake').stdout)
-                assert disabled['claude_wake'] is None and not module.exists()
-                assert json.loads(server_path.read_text())['mcpServers']['gent'] == ordinary
-                after_opt_out = json.loads(settings_path.read_text())
-                assert after_opt_out['hooks'].pop('UserPromptSubmit', []) == []
-                assert after_opt_out == identity_settings
-                restored = json.loads(cli('integration', 'install', *suffix, '--wake').stdout)
-                assert restored['claude_wake'] not in (None, installed['claude_wake'])
-                print('PASS: Claude default delivery, installed command guard, idempotence, opt-out and ordinary MCP preservation', flush=True)
+                assert cli('integration', 'install', *suffix, '--no-wake', check=False).returncode != 0
+                assert all(p.read_bytes() == data for p, data in before.items())
+                print('PASS: Claude automatic delivery, command guard, idempotence and rejected delivery opt-out', flush=True)
             command = [executable, 'mcp', 'get', 'gent']
             if host == 'codex':
                 command += ['--json']

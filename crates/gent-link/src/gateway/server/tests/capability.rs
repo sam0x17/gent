@@ -1,5 +1,44 @@
 use super::*;
 
+#[tokio::test]
+async fn named_connectors_never_advertise_oauth_or_challenge_a_missing_url() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("web");
+    config::initialize(&home, "web").unwrap();
+    registry::capability::create(&home).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let origin = format!("http://{address}");
+    let server = Running::start(&home, listener, origin.clone(), address.to_string(), None).await;
+    let client = client();
+    for path in [
+        "/mcp",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-authorization-server",
+        "/oauth/authorize",
+        "/oauth/token",
+    ] {
+        let response = client.get(format!("{origin}{path}")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert!(!response.headers().contains_key("www-authenticate"));
+    }
+    let url = registry::capability::url(&home, &origin, false).unwrap();
+    let response = rpc(
+        &client,
+        &url,
+        "initialize",
+        json!({
+            "protocolVersion":"2026-07-28", "capabilities":{},
+            "clientInfo":{"name":"connector-probe","version":"1"}
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("www-authenticate"));
+    server.close().await;
+}
+
 async fn rpc(
     client: &reqwest::Client,
     url: &str,

@@ -12,7 +12,7 @@ fn args(directory: &Path) -> Args {
 }
 
 #[tokio::test]
-async fn runtime_checks_refuse_absent_polling_foreign_and_conflicting_installs_without_launch() {
+async fn runtime_checks_refuse_absent_foreign_and_conflicting_installs_without_launch() {
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let root = root.path().canonicalize().unwrap();
     let home = root.join("gent");
@@ -30,20 +30,11 @@ async fn runtime_checks_refuse_absent_polling_foreign_and_conflicting_installs_w
         host: Host::Codex,
         config_dir: Some(dir.clone()),
         wake,
-        no_wake: !wake && socket.is_none(),
         wake_socket: socket,
         vscode: false,
         no_vscode: false,
         vscode_settings: None,
     };
-    install::change(&home, options(false, None), true).unwrap();
-    assert!(
-        start(&home, args(&dir))
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("not enabled")
-    );
     install::change(&home, options(false, Some(root.join("custom.sock"))), true).unwrap();
     assert!(
         start(&home, args(&dir))
@@ -79,7 +70,6 @@ async fn existing_codex_is_only_probed_and_invalid_responses_never_launch_a_repl
                 host: Host::Codex,
                 config_dir: Some(dir.clone()),
                 wake: true,
-                no_wake: false,
                 wake_socket: None,
                 vscode: false,
                 no_vscode: false,

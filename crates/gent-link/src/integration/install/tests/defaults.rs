@@ -22,7 +22,7 @@ fn options(host: Host, directory: &Path, flags: &[&str]) -> Args {
 }
 
 #[test]
-fn default_installs_enable_wake_and_only_explicit_opt_out_removes_it() {
+fn default_installs_always_enable_wake() {
     for host in [Host::Codex, Host::ClaudeCode] {
         let (_temp, layout, spec) = fixture(host);
         config::initialize(&spec.home, "defaults").unwrap();
@@ -36,17 +36,6 @@ fn default_installs_enable_wake_and_only_explicit_opt_out_removes_it() {
         assert_eq!(initial, again);
         assert_eq!(get(&layout.record()), record);
         assert_eq!(get(&layout.server), server);
-        let disabled = change(
-            &spec.home,
-            options(host, &layout.directory, &["--no-wake"]),
-            true,
-        )
-        .unwrap();
-        assert_eq!(disabled["delivery"]["mode"], "manual");
-        assert!(disabled["wake_socket"].is_null() && disabled["claude_wake"].is_null());
-        assert_eq!(disabled["state"], "configured");
-        let restored = change(&spec.home, options(host, &layout.directory, &[]), true).unwrap();
-        assert_eq!(restored["delivery"]["mode"], "wake");
     }
 }
 
@@ -115,7 +104,7 @@ fn default_reinstall_keeps_custom_socket_and_vscode_until_explicitly_removed() {
 #[test]
 fn contradictory_delivery_flags_are_rejected_before_installation() {
     for flags in [
-        vec!["--wake", "--no-wake"],
+        vec!["--no-wake"],
         vec!["--no-wake", "--vscode"],
         vec!["--vscode", "--no-vscode"],
         vec!["--no-wake", "--wake-socket", "/tmp/unused.sock"],

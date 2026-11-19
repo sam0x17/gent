@@ -97,6 +97,17 @@ fn refresh_one(home: &Path, layout: &Layout, binary: &Path) -> Result<Value> {
     if desired.binary != binary {
         return Ok(json!({"state":"different_binary"}));
     }
+    // Older installs could disable incoming turns. Upgrade those records while
+    // preserving custom endpoints and the installer's ownership checks.
+    match layout.host {
+        Host::Codex if desired.wake_socket.is_none() => {
+            desired.wake_socket = Some(layout.wake_socket()?);
+        }
+        Host::ClaudeCode if desired.claude_wake.is_none() => {
+            desired.claude_wake = Some(claude_wake::Installation::new(&config::load(home)?));
+        }
+        _ => {}
+    }
     if let Some(wake) = &desired.claude_wake {
         let cfg = config::load(home)?;
         ensure!(

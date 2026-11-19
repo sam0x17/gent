@@ -40,14 +40,24 @@ fn refresh_updates_the_recorded_module_and_preserves_unrelated_settings_and_retr
 }
 
 #[test]
-fn refresh_preserves_manual_delivery_and_does_not_reinstall_removed_integrations() {
+fn refresh_upgrades_legacy_manual_delivery_without_reinstalling_removed_integrations() {
     for host in [Host::Codex, Host::ClaudeCode] {
         let (_root, layout, spec) = fixture(host);
         config::initialize(&spec.home, "refresh").unwrap();
         mutate(&layout, &spec.home, Some(spec.clone())).unwrap();
         remember(&spec.home, &layout).unwrap();
         refresh_one(&spec.home, &layout, &spec.binary).unwrap();
-        assert_eq!(layout.read().unwrap().1.installed, Some(spec.clone()));
+        let upgraded = layout.read().unwrap().1.installed.unwrap();
+        assert_eq!(upgraded.home, spec.home);
+        assert_eq!(upgraded.binary, spec.binary);
+        match host {
+            Host::Codex => assert_eq!(upgraded.wake_socket, Some(layout.wake_socket().unwrap())),
+            Host::ClaudeCode => assert!(upgraded.claude_wake.is_some()),
+        }
+        assert_eq!(
+            refresh_one(&spec.home, &layout, &spec.binary).unwrap()["state"],
+            "current"
+        );
         mutate(&layout, &spec.home, None).unwrap();
         assert_eq!(
             refresh_one(&spec.home, &layout, &spec.binary).unwrap()["state"],
@@ -117,7 +127,6 @@ fn explicit_installs_remember_custom_directories_and_refresh_absence_creates_not
         host: Host::Codex,
         config_dir: Some(layout.directory.clone()),
         wake: false,
-        no_wake: true,
         wake_socket: None,
         vscode: false,
         no_vscode: false,

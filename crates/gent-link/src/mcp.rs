@@ -52,7 +52,7 @@ impl GentMcp {
             .unwrap()
             .clone();
         non_blocking.name = "gent_send_non_blocking".into();
-        non_blocking.description = Some("Send a notification without waiting or requiring a response. Use for status updates and messages where no answer is needed. Returns durable submission, not delivery. Keep request_id for exact retries.".into());
+        non_blocking.description = Some("Send a notification that wakes the recipient without waiting or requiring a response. Use for status updates and messages where no answer is needed. Returns durable submission, not delivery. Keep request_id for exact retries.".into());
         tools.push(non_blocking);
         let mut relay_non_blocking = tools
             .iter()

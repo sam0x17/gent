@@ -148,8 +148,8 @@ fn remember_at(
             "chat already belongs to another native endpoint"
         );
         // A connection without a native endpoint cannot revoke another
-        // connection's attachment. Explicit --no-wake disables the adapter at
-        // installation; merely checking an inbox must never downgrade it.
+        // connection's attachment. Checking an inbox must never downgrade
+        // automatic delivery.
         if endpoint.is_none() || current == desired {
             return Ok(());
         }

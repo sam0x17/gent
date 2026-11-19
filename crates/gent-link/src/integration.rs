@@ -55,7 +55,7 @@ impl Host {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Refresh installed Gent fragments, preserving paths, opt-outs and host settings.
+    /// Refresh installed Gent fragments, preserving paths and host settings.
     Refresh,
     /// Inspect user-scope installation without changing settings.
     Status {
@@ -86,11 +86,8 @@ pub enum Command {
     Config {
         host: Host,
         /// Enable queued delivery (the default; retained for compatibility).
-        #[arg(long, conflicts_with_all = ["wake_socket", "no_wake"])]
+        #[arg(long, conflicts_with = "wake_socket")]
         wake: bool,
-        /// Print a manual-inbox configuration without a wake adapter.
-        #[arg(long, conflicts_with_all = ["wake", "wake_socket"])]
-        no_wake: bool,
         /// Codex config directory for its default wake socket (defaults to CODEX_HOME).
         #[arg(long)]
         config_dir: Option<PathBuf>,
@@ -141,18 +138,16 @@ pub fn execute(home: &Path, command: Command) -> Result<Value> {
         Command::Config {
             host,
             wake: _,
-            no_wake,
             config_dir,
             wake_socket,
         } => {
             ensure!(
-                host == Host::Codex || no_wake,
-                "Claude automatic delivery includes a managed plugin; use gent integration install claude-code, or --no-wake for a manual-inbox fragment"
+                host == Host::Codex,
+                "Claude automatic delivery includes a managed plugin; use gent integration install claude-code"
             );
             let socket = match wake_socket {
                 Some(socket) => Some(socket),
-                None if !no_wake => Some(install::default_wake_socket(host, config_dir)?),
-                None => None,
+                None => Some(install::default_wake_socket(host, config_dir)?),
             };
             configuration(home, host, socket.as_deref())
         }
@@ -185,7 +180,6 @@ pub(crate) fn setup_install(home: &Path, host: Host, vscode: bool) -> Result<Val
             host,
             config_dir: None,
             wake: false,
-            no_wake: false,
             wake_socket: None,
             vscode,
             no_vscode: false,

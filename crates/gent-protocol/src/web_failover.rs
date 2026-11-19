@@ -71,6 +71,12 @@ pub enum Control {
         epoch: u64,
         checkpoint: Checkpoint,
     },
+    /// Publish a complete small checkpoint in one atomic storage operation.
+    Publish {
+        epoch: u64,
+        checkpoint: Checkpoint,
+        chunks: Vec<String>,
+    },
     Release {
         epoch: u64,
     },

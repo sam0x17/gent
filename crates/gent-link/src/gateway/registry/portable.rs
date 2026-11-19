@@ -9,6 +9,17 @@ pub(crate) struct Checkpoint {
     pub(crate) management: Option<String>,
 }
 
+impl Checkpoint {
+    /// Authentication advances a local rollback-detection clock, but does not
+    /// change a connector, handle or binding. Keep the real clock in persisted
+    /// snapshots without uploading an otherwise identical registry on reads.
+    pub(crate) fn change_hash(&self) -> Result<String> {
+        let mut value = serde_json::to_value(self)?;
+        value["state"]["clock"] = serde_json::json!(0);
+        Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&value)?)))
+    }
+}
+
 pub(crate) fn capture(home: &Path) -> Result<Checkpoint> {
     let registry = Registry::open(home)?;
     let _lock = managed_file::lock(&registry.directory().join("state.lock"))?;
@@ -133,6 +144,10 @@ mod tests {
             .await
             .unwrap();
         let mut checkpoint = capture(&a).unwrap();
+        let fingerprint = checkpoint.change_hash().unwrap();
+        checkpoint.state.clock += 1;
+        assert_eq!(checkpoint.change_hash().unwrap(), fingerprint);
+        checkpoint.state.clock -= 1;
         config::private_dir(&b).unwrap();
         config::save(&b, &cfg).unwrap();
         restore(&b, &mut checkpoint).unwrap();
@@ -147,6 +162,7 @@ mod tests {
         );
         capability::url(&a, "https://example.invalid", true).unwrap();
         let mut rotated = capture(&a).unwrap();
+        assert_ne!(rotated.change_hash().unwrap(), fingerprint);
         restore(&b, &mut rotated).unwrap();
         assert!(second.authenticate_url_remote(token).await.is_err());
         let new_token = capability::read_export(&b.join("web-connector.json"))

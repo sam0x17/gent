@@ -150,7 +150,7 @@ Shell hooks must use a clearly marked managed block or dedicated sourced file. R
 | `gent integration recovery list` | Inspect selected chats and their persisted recovery budget without contacting a host. |
 | `gent integration recovery inspect AGENT_ID` | Check a selection's native readiness without startup; Claude reports why an uncertain history or job needs owner review. |
 | `gent integration recovery disable AGENT_ID` | Remove a recovery selection while leaving native hosts and ordinary MCP delivery running. |
-| `gent integration install <host>` | Install MCP, identity binding and automatic host delivery by default. Codex VS Code adds `--vscode`; repeated installs retain that route. `--no-wake` disables automatic delivery; `--no-vscode` removes only the editor route. See [host setup](wake.md). |
+| `gent integration install <host>` | Install MCP, identity binding and automatic host delivery by default. Codex VS Code adds `--vscode`; repeated installs retain that route. `--no-vscode` removes only the editor route; incoming messages always queue a turn. See [host setup](wake.md). |
 | `gent integration uninstall <host>` | Remove Gent-managed integration entries while preserving unrelated host configuration. |
 | `gent integration remove <host>` | Alias for `gent integration uninstall`. |
 | `gent mcp serve` | Serve the shared MCP interface over stdio, connecting the host's registered chats to the local daemon. |

@@ -21,13 +21,10 @@ pub struct Args {
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
     /// Enable native queued delivery (the default; retained for compatibility).
-    #[arg(long, conflicts_with_all = ["wake_socket", "no_wake"])]
+    #[arg(long, conflicts_with = "wake_socket")]
     pub wake: bool,
-    /// Disable automatic host delivery and use manual inbox checks.
-    #[arg(long, conflicts_with_all = ["wake", "wake_socket", "vscode"])]
-    pub no_wake: bool,
     /// Use an existing custom Codex app-server socket for queued delivery.
-    #[arg(long, conflicts_with = "no_wake")]
+    #[arg(long)]
     pub wake_socket: Option<PathBuf>,
     /// Experimental Codex VS Code connection to the selected shared server.
     #[arg(long)]
@@ -632,7 +629,6 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
     ensure!(
         install
             || (!args.wake
-                && !args.no_wake
                 && args.wake_socket.is_none()
                 && !args.vscode
                 && !args.no_vscode
@@ -653,7 +649,7 @@ pub fn change(home: &Path, args: Args, install: bool) -> Result<Value> {
         .pending
         .map(|pending| pending.after)
         .unwrap_or(saved.installed);
-    let wake_enabled = install && !args.no_wake;
+    let wake_enabled = install;
     let wake_socket = if wake_enabled && args.host == Host::Codex {
         Some(
             args.wake_socket
@@ -837,8 +833,8 @@ fn inspect(layout: &Layout, home: &Path) -> Result<Value> {
         result["claude_wake"] = json!(spec.claude_wake.as_ref().map(|w| &w.id));
         let enabled = spec.wake_socket.is_some() || spec.claude_wake.is_some();
         result["delivery"] = json!({
-            "mode": if enabled { "wake" } else { "manual" },
-            "state": if !exact || disabled { "blocked" } else if enabled { "configured_unverified" } else { "manual" },
+            "mode": "wake",
+            "state": if !exact || disabled { "blocked" } else if enabled { "configured_unverified" } else { "upgrade_required" },
             "conversation_verified": false,
             "detail": "Installation does not prove that a conversation is loaded or can receive automatic input."
         });
@@ -848,8 +844,8 @@ fn inspect(layout: &Layout, home: &Path) -> Result<Value> {
 }
 
 fn delivery_next(host: Host, status: &Value) -> &'static str {
-    if status["delivery"]["mode"] == "manual" {
-        return "Automatic delivery is disabled. Ask the chat to check gent_inbox, or reinstall without --no-wake.";
+    if status["delivery"]["state"] == "upgrade_required" {
+        return "This legacy installation needs automatic delivery. Run gent integration refresh, then reconnect the host.";
     }
     match host {
         Host::Codex if status["vscode"]["transport"] == "provider_switcher" => {

@@ -119,6 +119,15 @@ async fn guard(
         if request.uri().path().starts_with("/mcp/") && url_token.is_none() {
             return StatusCode::NOT_FOUND.into_response();
         }
+        if url_token.is_none() {
+            match boundary.registry.url_only_remote().await {
+                // Named connectors authenticate only with their complete URL.
+                // Discovery probes must not advertise an unusable OAuth flow.
+                Ok(true) => return StatusCode::NOT_FOUND.into_response(),
+                Ok(false) => {}
+                Err(_) => return oauth::busy(),
+            }
+        }
         if request.uri().path() != "/mcp" && url_token.is_none() {
             return oauth::handle(&boundary, request).await;
         }

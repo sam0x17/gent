@@ -6,7 +6,7 @@ Native input submission is not assumed idempotent. Gent never repeats a submissi
 
 For remote use, leave the receiving machine awake and the intended conversation loaded. Installing a connector or seeing a node connection marked ready does not verify automatic input to that conversation. Installation reports `delivery.state: configured_unverified`; `status codex --live` checks the host endpoint, not a particular chat. Verify one authorized message and reply in the intended chat before relying on unattended delivery. Codex receives ordinary new-message input during active work without an interrupt command. Claude retains native plugin-input scheduling. [Selected recovery](host-recovery.md) can separately reopen eligible stopped conversations.
 
-Repeated installation preserves an existing Codex custom socket and VS Code route. Use `--wake` to explicitly select the default socket, `--no-vscode` to remove only the IDE route, or `--no-wake` to disable automatic delivery. Old `--wake` commands remain accepted.
+Repeated installation preserves an existing Codex custom socket and VS Code route. Use `--wake` to explicitly select the default socket or `--no-vscode` to remove only the IDE route. Old `--wake` commands remain accepted.
 
 ## Enable Codex queued delivery
 
@@ -54,7 +54,7 @@ A separate native check loses a successful queue response, retrieves the message
 
 Unloaded threads, missing sockets, unsupported host APIs and unavailable registrations leave messages pending. A lost response after a claim leaves an uncertain journal record and never triggers a repeated submission. Other attached conversations remain eligible when one fails.
 
-To disable queued delivery, run `gent integration install codex --no-wake`, then reconnect the host's Gent MCP connections so the old watchers exit. This removes the managed socket option while preserving the ordinary MCP integration. A connection without a wake endpoint preserves an existing attachment. Other still-running wake connections can continue until they exit; reconnect all affected MCP processes after an explicit opt-out. No Codex service or model setting is changed.
+Incoming messages always queue a normal host turn. `gent_send_non_blocking` skips waiting for the reply; it still wakes the recipient. Busy hosts retain queued input, and Gent never forces an active-turn interruption. Web providers without a wake API still require a user turn to retrieve incoming messages.
 
 `gent_identity` reports `delivery: host_dependent` and an `inbox_delivery` snapshot: waiting for host submission, submitted without observed intake, uncertain, and the latest dispatch. `gent wake` distinguishes `submitted_not_seen`, `submission_uncertain` and `seen`. None of these claims live host availability or completed work. Use `gent integration status codex --live` for endpoint connectivity. Discovery of custom endpoints, OS-restart recovery and broader GUI delivery acceptance remain unfinished.
 
@@ -66,7 +66,7 @@ Use the managed installer, then start or restart Claude Code and register the co
 gent integration install claude-code
 ```
 
-This adapter is enabled by default in ordinary builds. Use `--no-wake` only for manual inbox access. Gent selects the Claude configuration directory from `--config-dir`, then `CLAUDE_CONFIG_DIR`, then `~/.claude`. `gent integration status claude-code` reports the recorded `claude_wake` installation ID, not live host connectivity. `gent integration config claude-code --wake` cannot produce this managed installation; use `install` instead. The adapter requires Claude's native function hooks and plugin-input API, tested on Linux Claude 2.1.323 and macOS Claude 2.1.311. It does not start a stopped host or load another conversation.
+This adapter is enabled by default in ordinary builds. Gent selects the Claude configuration directory from `--config-dir`, then `CLAUDE_CONFIG_DIR`, then `~/.claude`. `gent integration status claude-code` reports the recorded `claude_wake` installation ID, not live host connectivity. `gent integration config claude-code --wake` cannot produce this managed installation; use `install` instead. The adapter requires Claude's native function hooks and plugin-input API, tested on Linux Claude 2.1.323 and macOS Claude 2.1.311. It does not start a stopped host or load another conversation.
 
 The installer manages a native plugin under the host configuration directory's `skills/gent-wake` and a separate `UserPromptSubmit` command hook in user settings. Version 3 installation records require both and set the command hook's `onFailure` to `block`. Version 1 and 2 records can be upgraded or removed, but cannot dispatch through the new bridge. The installer records the installed module bytes, an installation ID, node and cluster, and checks ownership before upgrading or removing files. Interrupted updates accept the recorded before/after versions; edited files and unrelated hooks are preserved. A pending update, disabled hook, old installation ID or changed binding prevents the Rust bridge from granting a usable response.
 
@@ -82,7 +82,7 @@ Linux and Mac native tests demonstrate idle delivery, busy boundaries, interrupt
 
 Direct module reload drops a held notification, and restoring the installed bytes restores automatic polling without a human prompt. Two actual host restarts exercise a held Rust claim response and a notification already queued by Claude. Resuming the exact session processes a fresh message without registration or a human model turn, while the old claim stays uncertain.
 
-Actual installer replacement with a different executable path creates a new installation ID, blocks old queued input and restores fresh delivery without restarting the host. Reinstalling with `--no-wake` removes the plugin and command guard while retaining ordinary MCP access and the same chat identity. Re-enabling creates another installation ID and delivers an unclaimed message that arrived while disabled; previously claimed input remains uncertain without replay. The tested host retains the old executable for its existing MCP process and hooks. Restart Claude before removing that executable.
+Actual installer replacement with a different executable path creates a new installation ID, blocks old queued input and restores fresh delivery without restarting the host. The tested host retains the old executable for its existing MCP process and hooks. Restart Claude before removing that executable.
 
 Native stream observation also confirms that Escape during a partial text response aborts that exact turn. Both an already queued notification and a new arrival cause no further model request. Explicit human input rearms delivery, and a fresh notification runs without replaying either old attempt. These lifecycle proofs use isolated native hosts and a loopback model.
 
@@ -134,7 +134,7 @@ Native Linux/macOS checks retain the original chat through live reuse, concurren
 
 ## VS Code delivery
 
-Linux VS Code 1.146.0 with Claude Code extension 2.1.325 now passes automatic inbox/acknowledgment delivery through the installed user-scope `--wake` integration. The actual UI shows the plugin prompt and completed response. A notification waits through a held model stream; clicking Stop holds both queued and new notifications. Explicit human input permits fresh delivery without replaying old claims. Editor reload plus Gent daemon restart preserves the session and chat, and another message runs without registration or human input. Reinstalling with `--no-wake` stops automatic delivery while retaining ordinary MCP access.
+Linux VS Code 1.146.0 with Claude Code extension 2.1.325 now passes automatic inbox/acknowledgment delivery through the installed user-scope `--wake` integration. The actual UI shows the plugin prompt and completed response. A notification waits through a held model stream; clicking Stop holds both queued and new notifications. Explicit human input permits fresh delivery without replaying old claims. Editor reload plus Gent daemon restart preserves the session and chat, and another message runs without registration or human input. Managed installations always include automatic delivery.
 
 These lifecycle checks use an isolated profile, owner-approved Gent tools and a loopback model. Separate real-model checks with Sonnet 4.6 now pass three automatic exact replies and acknowledgments: initial delivery, after a Gent daemon restart, and after editor reload. All three retain the same session and chat, with one initial registration and no additional human model turn. Native transcripts and stored message results agree; the final exchange also has an independently matched native submission receipt. macOS IDE wake and standalone desktop wake still need acceptance checks.
 
