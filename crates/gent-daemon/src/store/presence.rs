@@ -233,6 +233,10 @@ impl StoreSession<'_> {
         let mut queued = 0;
         for (peer, key) in peers {
             if peer == self.identity.node.id()
+                || !self
+                    .state
+                    .transport_host(&peer)
+                    .is_ok_and(|host| host == peer)
                 || self
                     .state
                     .authorize_node(&peer, &key, self.timestamp as u64)
@@ -296,8 +300,10 @@ impl StoreSession<'_> {
             )
             .is_ok();
         for (id, member) in &self.state.state().nodes {
-            let paired = links.get(id).is_some_and(|key| *key == member.signing_key);
-            let saved = evidence(self.db, id)?.filter(|saved| saved.key == member.signing_key);
+            let host = self.state.transport_host(id)?;
+            let host_key = self.state.state().nodes[host].signing_key;
+            let paired = links.get(host).is_some_and(|key| *key == host_key);
+            let saved = evidence(self.db, host)?.filter(|saved| saved.key == host_key);
             let verified = saved.as_ref().and_then(|saved| saved.verified_at);
             let issued = saved.as_ref().and_then(|saved| saved.issued_at);
             let failed = saved.as_ref().and_then(|saved| saved.failed_at);
@@ -307,6 +313,8 @@ impl StoreSession<'_> {
                 .is_some_and(|at| at <= self.timestamp && self.timestamp - at > RESPONSE_WINDOW);
             let (status, reason) = if id == self.identity.node.id() {
                 ("local", "local_daemon")
+            } else if host == self.identity.node.id() && local_authorized {
+                ("hosted", "local_hosting_daemon")
             } else if !paired {
                 ("unknown", "not_paired")
             } else if self.state.require_fresh(self.timestamp as u64).is_err() {
@@ -326,8 +334,9 @@ impl StoreSession<'_> {
             };
             nodes.push(
                 json!({"id":id,"name":member.name,"can_configure":member.can_configure,
+                "hosted_by":member.hosted_by,
                 "is_owner":owner.as_ref().map(|owner| owner == id),
-                "wire_version":if id==self.identity.node.id() {crate::messages::wire::CURRENT} else {self.wire_version(id)?},
+                "wire_version":if host==self.identity.node.id() {crate::messages::wire::CURRENT} else {self.wire_version(host)?},
                 "data_link":paired,"status":status,"revision":self.state.checkpoint().revision,
                 "last_seen":verified,"presence":{"reason":reason,"observed_at":self.timestamp,
                 "probe_started_at":issued,"last_timeout_at":failed,"response_window_seconds":RESPONSE_WINDOW,

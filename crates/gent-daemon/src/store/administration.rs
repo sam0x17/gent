@@ -132,7 +132,10 @@ impl StoreSession<'_> {
         validate_changes(changes)?;
         self.state.require_fresh(self.timestamp as u64)?;
         let admin = self.get_agent(administrator)?;
-        ensure!(!admin.revoked && admin.node_id == origin, UNAVAILABLE);
+        ensure!(
+            !admin.revoked && self.state.transport_host(&admin.node_id)? == origin,
+            UNAVAILABLE
+        );
         // Validate ALL scope/visibility checks against the pre-edit policy.
         // An earlier change in this batch cannot authorize a later one.
         for change in changes {
@@ -167,8 +170,11 @@ impl StoreSession<'_> {
         administrator: &Agent,
         changes: &[PermissionChange],
     ) -> Result<Value> {
-        let policy =
-            self.agent_permission_policy(&administrator.node_id, &administrator.id, changes)?;
+        let policy = self.agent_permission_policy(
+            self.state.transport_host(&administrator.node_id)?,
+            &administrator.id,
+            changes,
+        )?;
         let pairs: std::collections::BTreeSet<_> =
             changes.iter().map(|c| (&c.actor, &c.peer)).collect();
         let mut relationships = Vec::new();

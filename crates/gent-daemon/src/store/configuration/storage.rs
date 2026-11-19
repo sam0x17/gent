@@ -36,6 +36,10 @@ enum Summary {
         node_id: String,
         allow: bool,
     },
+    HostNode {
+        node_id: String,
+        parent: String,
+    },
     CreateGroup {
         name: String,
     },
@@ -98,6 +102,10 @@ impl From<&ConfigurationEdit> for Summary {
             ConfigurationEdit::DelegateNode { node_id, allow } => Self::DelegateNode {
                 node_id: node_id.clone(),
                 allow: *allow,
+            },
+            ConfigurationEdit::HostNode { node_id, parent } => Self::HostNode {
+                node_id: node_id.clone(),
+                parent: parent.clone(),
             },
             ConfigurationEdit::CreateGroup { name } => Self::CreateGroup { name: name.clone() },
             ConfigurationEdit::DeleteGroup { name } => Self::DeleteGroup { name: name.clone() },

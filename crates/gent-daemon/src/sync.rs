@@ -16,6 +16,7 @@ use tokio::{sync::Notify, task::JoinHandle, time::Instant};
 mod bootstrap;
 mod files;
 pub(crate) mod health;
+mod network_error;
 mod notifications;
 mod transfer;
 
@@ -62,7 +63,7 @@ impl Relay {
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
             .build()?;
         Ok(Self {
             client,
@@ -78,7 +79,7 @@ impl Relay {
         Ok(self.origin.join(&path)?)
     }
     async fn position(&self, group: &[u8]) -> Result<u64> {
-        let response = self.client.get(self.route(group, None)?).send().await?;
+        let response = network_error::send(self.client.get(self.route(group, None)?)).await?;
         ensure!(
             response.status() == StatusCode::OK,
             "relay position request failed ({})",
@@ -97,13 +98,13 @@ impl Relay {
             bytes.len() <= MAX_FRAME,
             "encrypted packet exceeds relay frame limit"
         );
-        let response = self
-            .client
-            .put(self.route(packet.group(), Some(packet.sequence()))?)
-            .header(header::CONTENT_TYPE, "application/octet-stream")
-            .body(bytes)
-            .send()
-            .await?;
+        let response = network_error::send(
+            self.client
+                .put(self.route(packet.group(), Some(packet.sequence()))?)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes),
+        )
+        .await?;
         ensure!(
             response.status() == StatusCode::OK,
             "relay storage request failed ({})",
@@ -119,11 +120,8 @@ impl Relay {
         Ok(())
     }
     async fn get(&self, group: &[u8], sequence: u64) -> Result<Option<Packet>> {
-        let response = self
-            .client
-            .get(self.route(group, Some(sequence))?)
-            .send()
-            .await?;
+        let response =
+            network_error::send(self.client.get(self.route(group, Some(sequence))?)).await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -147,11 +145,9 @@ impl Relay {
         ))?)
     }
     async fn checkpoint(&self, group: &[u8]) -> Result<Option<Receipt>> {
-        let response = self
-            .client
-            .get(self.checkpoint_route(group, "checkpoint")?)
-            .send()
-            .await?;
+        let response =
+            network_error::send(self.client.get(self.checkpoint_route(group, "checkpoint")?))
+                .await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -169,13 +165,13 @@ impl Relay {
     }
     async fn put_checkpoint(&self, receipt: &Receipt, retire: bool) -> Result<()> {
         let action = if retire { "retire" } else { "checkpoint" };
-        let response = self
-            .client
-            .put(self.checkpoint_route(receipt.group(), action)?)
-            .header(header::CONTENT_TYPE, "application/octet-stream")
-            .body(receipt.encode()?)
-            .send()
-            .await?;
+        let response = network_error::send(
+            self.client
+                .put(self.checkpoint_route(receipt.group(), action)?)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(receipt.encode()?),
+        )
+        .await?;
         ensure!(
             matches!(response.status(), StatusCode::OK | StatusCode::NO_CONTENT),
             "relay checkpoint storage failed ({})",
@@ -259,18 +255,20 @@ async fn run(
         let bootstrap_result = bootstrap::sync(store.clone(), &relay).await;
         let result = local(store.clone(), |store| {
             let mesh = store.mesh_tick();
+            let hosted = store.reconcile_hosted_routes();
             store.reconcile_configuration()?;
             let preparation = store.owner_preparation_tick();
             let transfer = store.owner_transfer_tick();
             let presence = store.presence_tick();
-            let pending = match (mesh, preparation, transfer, presence) {
-                (Ok(mesh), Ok(preparation), Ok(transfer), Ok(presence)) => {
+            let pending = match (mesh, preparation, transfer, presence, hosted) {
+                (Ok(mesh), Ok(preparation), Ok(transfer), Ok(presence), Ok(())) => {
                     Ok(mesh || preparation || transfer || presence)
                 }
-                (Err(error), _, _, _)
-                | (_, Err(error), _, _)
-                | (_, _, Err(error), _)
-                | (_, _, _, Err(error)) => Err(error),
+                (Err(error), _, _, _, _)
+                | (_, Err(error), _, _, _)
+                | (_, _, Err(error), _, _)
+                | (_, _, _, Err(error), _)
+                | (_, _, _, _, Err(error)) => Err(error),
             };
             Ok((store.sync_streams()?, pending))
         })

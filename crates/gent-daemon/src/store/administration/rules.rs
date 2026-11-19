@@ -64,7 +64,10 @@ impl StoreSession<'_> {
         validate_changes(changes)?;
         self.state.require_fresh(self.timestamp as u64)?;
         let admin = self.get_agent(administrator)?;
-        ensure!(!admin.revoked && admin.node_id == origin, UNAVAILABLE);
+        ensure!(
+            !admin.revoked && self.state.transport_host(&admin.node_id)? == origin,
+            UNAVAILABLE
+        );
         let grants: Vec<_> = self
             .config
             .policy
@@ -139,7 +142,11 @@ impl StoreSession<'_> {
         admin: &Agent,
         changes: &[PermissionRuleChange],
     ) -> Result<Value> {
-        self.agent_permission_rule_policy(&admin.node_id, &admin.id, changes)?;
+        self.agent_permission_rule_policy(
+            self.state.transport_host(&admin.node_id)?,
+            &admin.id,
+            changes,
+        )?;
         Ok(json!({"administrator":admin.id,"changes":changes,
             "scope":"preview only; replaces rules with these exact selectors and permission; other overlapping rules still apply; hidden and future chats can be affected; no reservation"}))
     }

@@ -323,12 +323,12 @@ impl StoreSession<'_> {
         ensure!(self.deliverable(&message)?, FILE_UNAVAILABLE);
         let sender = self.get_agent(&message.sender)?;
         let recipient = self.get_agent(&message.recipient)?;
-        let upload = sender.node_id == self.identity.node.id();
-        if sender.node_id == recipient.node_id {
+        let upload = self.local_node(&sender.node_id);
+        if upload && self.local_node(&recipient.node_id) {
             return Ok(None);
         }
         ensure!(
-            upload || recipient.node_id == self.identity.node.id(),
+            upload || self.local_node(&recipient.node_id),
             FILE_UNAVAILABLE
         );
         let objects = self.objects()?;

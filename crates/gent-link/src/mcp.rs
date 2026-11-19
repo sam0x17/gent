@@ -215,7 +215,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_chats",
-            "List registered chats visible across this cluster, including chat_id, name, node_id, node_name and provider. Use gent_resolve for a name: it selects the most recently active exact match when timestamps are known and distinct. last_activity_at is conversation activity; last_seen is Gent contact and must not rank chats. Send and attach by the selected ID. Offline entries may be stale; this directory does not discover unregistered native chats or prove wake readiness.",
+            "List permitted chats from the serving native node's synchronized cluster directory, including chat_id, name, node_id, node_name and provider. Use gent_resolve for a name: it selects the most recently active exact match when timestamps are known and distinct. last_activity_at is conversation activity; last_seen is Gent contact and must not rank chats. Send and attach by the selected ID. Absence alone does not prove a different cluster or require re-registration; synchronization may be pending. Listing does not scan native hosts or prove wake readiness.",
             json!({}),
             vec![],
         ),

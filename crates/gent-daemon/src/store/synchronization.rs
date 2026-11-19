@@ -19,7 +19,9 @@ impl Store {
         })? {
             let (peer, key, count) = row?;
             let key = key.as_slice().try_into().context("invalid peer key")?;
-            if state.authorize_node(&peer, &key, timestamp as u64).is_ok() {
+            if state.authorize_node(&peer, &key, timestamp as u64).is_ok()
+                && state.transport_host(&peer).is_ok_and(|host| host == peer)
+            {
                 queued = queued.saturating_add(count);
             }
         }

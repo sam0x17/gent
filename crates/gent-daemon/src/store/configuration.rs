@@ -7,6 +7,8 @@ use uuid::Uuid;
 pub(super) mod pending;
 pub(super) mod routing;
 pub(super) mod storage;
+#[cfg(test)]
+mod tests;
 
 pub(super) fn schema(db: &Connection) -> Result<()> {
     storage::schema(db)
@@ -32,6 +34,14 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
             ensure!(
                 gent_protocol::configuration_log::valid_id(node_id),
                 "invalid node identity"
+            );
+        }
+        ConfigurationEdit::HostNode { node_id, parent } => {
+            ensure!(
+                gent_protocol::configuration_log::valid_id(node_id)
+                    && gent_protocol::configuration_log::valid_id(parent)
+                    && node_id != parent,
+                "hosting requires distinct valid node identities"
             );
         }
         ConfigurationEdit::CreateGroup { name } | ConfigurationEdit::DeleteGroup { name } => {
@@ -187,7 +197,7 @@ impl StoreSession<'_> {
                 .state()
                 .nodes
                 .iter()
-                .find(|(_, n)| n.can_configure)
+                .find(|(_, n)| n.can_configure && n.hosted_by.is_none())
                 .map(|(id, _)| id.clone())
                 .context("no configuration administrator");
         }
@@ -408,6 +418,9 @@ impl StoreSession<'_> {
             ConfigurationEdit::DelegateNode { node_id, allow } => self
                 .state
                 .delegate_configuration(owner, node_id, *allow, timestamp),
+            ConfigurationEdit::HostNode { node_id, parent } => {
+                self.state.host_node(owner, node_id, parent, timestamp)
+            }
             ConfigurationEdit::CreateGroup { name } => {
                 let mut policy = self.config.policy.clone();
                 ensure!(!policy.groups.contains_key(name), "group already exists");
@@ -600,7 +613,9 @@ impl StoreSession<'_> {
             // Do not attribute audit records or charge an agent's quota to a
             // proposal from a different hosting node, even when rejecting it.
             ensure!(
-                self.get_agent(administrator)?.node_id == origin,
+                self.state
+                    .transport_host(&self.get_agent(administrator)?.node_id)?
+                    == origin,
                 UNAVAILABLE
             );
             ensure!(

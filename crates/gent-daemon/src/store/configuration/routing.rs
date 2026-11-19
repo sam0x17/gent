@@ -129,7 +129,7 @@ impl StoreSession<'_> {
     ) -> Result<()> {
         if self.state.state().peer.is_some() {
             for (target, member) in &self.state.state().nodes {
-                if !member.can_configure || target == origin {
+                if !member.can_configure || member.hosted_by.is_some() || target == origin {
                     continue;
                 }
                 let linked: bool = self.db.query_row(

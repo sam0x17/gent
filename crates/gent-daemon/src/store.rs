@@ -29,6 +29,7 @@ pub(crate) mod directory;
 mod files;
 pub(crate) mod handoff;
 mod history;
+mod hosted;
 pub mod invitations;
 mod mesh;
 mod network;
@@ -117,6 +118,10 @@ impl Store {
 
     pub fn open(home: &Path) -> Result<Self> {
         let config = config::load_for_runtime(home)?;
+        ensure!(
+            config.hosted_parent()?.is_none(),
+            "this web node is served by its native host daemon"
+        );
         let replacement = crate::pairing::replacement::check_intent(home, &config, None)?;
         let owner_hash = hash(&config::read_private(&home.join("owner.key"))?);
         ensure!(
@@ -146,6 +151,7 @@ impl Store {
         directory::schema(&db)?;
         activity::schema(&db)?;
         wire::schema(&db)?;
+        hosted::schema(&db)?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {
                 r.get(0)
@@ -254,6 +260,13 @@ impl Store {
             ensure!(hash(credential) == self.owner_hash, "unauthorized");
         }
         if let Request::Owner {
+            action: OwnerOp::PrepareHostedNode { node_id, home },
+            ..
+        } = &request
+        {
+            return self.prepare_hosted_node(node_id, home);
+        }
+        if let Request::Owner {
             credential,
             action: OwnerOp::PreparePeerConfiguration,
         } = &request
@@ -295,7 +308,7 @@ impl Store {
         // Idle service probes and removal polling must not force a disk flush
         // or wake the encrypted transport on every observation. Pending config
         // projection retains its usual repair path.
-        let read_only = matches!(
+        let read_only = (matches!(
             &request,
             Request::Owner {
                 action: OwnerOp::Status
@@ -304,7 +317,8 @@ impl Store {
                     | OwnerOp::WakePendingAgents { .. },
                 ..
             }
-        ) && !runtime::projection_pending(&self.db)?;
+        ) || matches!(&request, Request::HostedStatus { .. }))
+            && !runtime::projection_pending(&self.db)?;
         let tx = self.db.transaction_with_behavior(if read_only {
             TransactionBehavior::Deferred
         } else {
@@ -347,7 +361,32 @@ impl Store {
                     &self.identity.node.public_key(),
                     timestamp as u64,
                 )?;
-                session.agent(&credential, action, export_step)?
+                session.agent(self.identity.node.id(), &credential, action, export_step)?
+            }
+            Request::HostedAgent {
+                node_id,
+                gateway_credential,
+                credential,
+                action,
+            } => {
+                session.check_hosted(&node_id, &gateway_credential)?;
+                ensure!(
+                    !matches!(
+                        action,
+                        AgentOp::FilePaths
+                            | AgentOp::FileImport { .. }
+                            | AgentOp::FileExport { .. }
+                    ),
+                    "local filesystem tools are unavailable to hosted chats"
+                );
+                session.agent(&node_id, &credential, action, export_step)?
+            }
+            Request::HostedStatus {
+                node_id,
+                gateway_credential,
+            } => {
+                session.check_hosted(&node_id, &gateway_credential)?;
+                session.hosted_status(&node_id)?
             }
         };
         tx.commit()?;
@@ -640,6 +679,7 @@ impl StoreSession<'_> {
                 provider,
             } => {
                 let registered = self.agent(
+                    self.identity.node.id(),
                     &agent_credential,
                     AgentOp::Register {
                         name: name.clone(),
@@ -844,13 +884,13 @@ impl StoreSession<'_> {
                 &uuid::Uuid::new_v4().to_string(),
                 ConfigurationEdit::RenameNode { name },
             ),
+            OwnerOp::PrepareHostedNode { .. } => unreachable!("handled before session"),
             OwnerOp::Revoke { agent_id } => {
                 self.ensure_local_origin(&agent_id)?;
                 ensure!(
-                    self.db.execute(
-                        "UPDATE agents SET revoked=1 WHERE id=?1 AND node_id=?2",
-                        params![agent_id, self.identity.node.id()]
-                    )? == 1,
+                    self.db
+                        .execute("UPDATE agents SET revoked=1 WHERE id=?1", params![agent_id])?
+                        == 1,
                     "unknown chat"
                 );
                 self.db.execute(
@@ -865,6 +905,7 @@ impl StoreSession<'_> {
 
     fn agent(
         &mut self,
+        node: &str,
         credential: &str,
         action: AgentOp,
         export_step: files::ExportStep,
@@ -883,8 +924,8 @@ impl StoreSession<'_> {
                 |r| r.get::<_, bool>(0),
             )? {
                 let nonce = uuid::Uuid::new_v4();
-                let agent = gent_crypto::agent_id(self.identity.node.id(), nonce)?;
-                self.db.execute("INSERT INTO agents(id,credential_hash,node_id,name,provider,last_seen) VALUES (?1,?2,?3,?4,?5,?6)",params![agent,digest,self.config.node.id,name,provider,self.timestamp])?;
+                let agent = gent_crypto::agent_id(node, nonce)?;
+                self.db.execute("INSERT INTO agents(id,credential_hash,node_id,name,provider,last_seen) VALUES (?1,?2,?3,?4,?5,?6)",params![agent,digest,node,name,provider,self.timestamp])?;
                 self.db.execute("INSERT INTO network_origins(agent,nonce,legacy,generation) VALUES(?1,?2,NULL,1)",params![agent,nonce.to_string()])?;
                 self.announce(&agent)?;
             }
@@ -892,7 +933,7 @@ impl StoreSession<'_> {
         let who=self.db.query_row("SELECT id,node_id,name,provider,last_seen,revoked FROM agents WHERE credential_hash=?1",[&digest],Self::decode_agent).optional()?.context("register this connection first")?;
         ensure!(!who.revoked, "registration revoked");
         ensure!(
-            who.node_id == self.identity.node.id(),
+            who.node_id == node && self.local_node(node),
             "credential belongs to another node"
         );
         if !matches!(
@@ -1200,8 +1241,13 @@ impl StoreSession<'_> {
             [message_id],
         )?;
         let sender = self.get_agent(&message.sender)?;
-        if sender.node_id != self.identity.node.id() {
-            self.receipt(&sender.node_id, message_id, true, message.expires_at)?;
+        if !self.local_node(&sender.node_id) {
+            self.receipt(
+                self.state.transport_host(&sender.node_id)?,
+                message_id,
+                true,
+                message.expires_at,
+            )?;
         }
         Ok(json!({"acknowledged":true}))
     }
@@ -1282,7 +1328,7 @@ impl StoreSession<'_> {
         requests::admit(request_id, self.timestamp)?;
         let recipient = self.get_agent(recipient_id)?;
         ensure!(sender.id != recipient.id, UNAVAILABLE);
-        let remote = recipient.node_id != self.identity.node.id();
+        let remote = !self.local_node(&recipient.node_id);
         let message_id = crate::messages::message_id(&sender.id, request_id)?;
         let timestamp = self.timestamp;
         let (exchange_id, expires_at) = if let Some(parent) = parent {
@@ -1371,7 +1417,11 @@ impl StoreSession<'_> {
         self.record_relay_message(&message)?;
         self.save_activity(&sender.id, message.created_at)?;
         if remote {
-            self.queue_message(&recipient.node_id, request_id, &message)?;
+            self.queue_message(
+                self.state.transport_host(&recipient.node_id)?,
+                request_id,
+                &message,
+            )?;
         }
         Ok(json!({"message_id":message.id,"exchange_id":exchange_id,"duplicate":false}))
     }

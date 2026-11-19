@@ -501,6 +501,11 @@ pub enum ConfigurationEdit {
         node_id: String,
         allow: bool,
     },
+    /// Administrator-approved chat transport delegation; does not grant configuration access.
+    HostNode {
+        node_id: String,
+        parent: String,
+    },
     CreateGroup {
         name: String,
     },
@@ -612,6 +617,11 @@ pub enum OwnerOp {
         revision: u64,
     },
     Status,
+    /// Move a stopped, locally owned web node's retained state into this daemon.
+    PrepareHostedNode {
+        node_id: String,
+        home: std::path::PathBuf,
+    },
     /// Read-only local-owner diagnostics; never advances clocks or projects files.
     Diagnose,
     PermissionExplain {
@@ -794,8 +804,25 @@ pub enum PairingOp {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
-    Agent { credential: String, action: AgentOp },
-    Owner { credential: String, action: OwnerOp },
+    Agent {
+        credential: String,
+        action: AgentOp,
+    },
+    Owner {
+        credential: String,
+        action: OwnerOp,
+    },
+    /// Private gateway-to-daemon RPC. The node scope is never supplied by MCP.
+    HostedAgent {
+        node_id: String,
+        gateway_credential: String,
+        credential: String,
+        action: AgentOp,
+    },
+    HostedStatus {
+        node_id: String,
+        gateway_credential: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -15,6 +15,7 @@ mod groups;
 mod hooks;
 mod integration;
 mod invitations;
+mod lifecycle;
 mod managed_file;
 mod mcp;
 mod node;

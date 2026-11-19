@@ -6,6 +6,7 @@ mod connection;
 pub mod encrypted;
 pub mod file_objects;
 pub mod file_transport;
+pub mod hosted;
 pub mod invitation_transport;
 pub mod messages;
 pub mod pairing;
@@ -241,6 +242,9 @@ async fn serve(
             if matches!(
                 &request,
                 Request::Agent {
+                    action: gent_protocol::AgentOp::FileReceive { .. },
+                    ..
+                } | Request::HostedAgent {
                     action: gent_protocol::AgentOp::FileReceive { .. },
                     ..
                 }

@@ -71,7 +71,7 @@ impl Store {
             .query_map([], |r| Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,Vec<u8>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut packets = Vec::new();
         for (id, peer, bytes) in rows {
-            if state.state().nodes.contains_key(&peer) {
+            if state.transport_host(&peer).is_ok_and(|host| host == peer) {
                 packets.push(Packet::decode(&bytes)?);
             } else {
                 self.db.execute(
@@ -125,12 +125,10 @@ impl Store {
             return Ok(vec![]);
         }
         let mut groups = Vec::new();
-        for origin in state
-            .state()
-            .nodes
-            .keys()
-            .filter(|p| *p != self.identity.node.id())
-        {
+        for origin in state.state().nodes.keys().filter(|p| {
+            *p != self.identity.node.id()
+                && state.transport_host(p).is_ok_and(|host| host == p.as_str())
+        }) {
             let link = link_id(&state, origin, self.identity.node.id())?;
             for step in [b"offer".as_slice(), b"welcome".as_slice()] {
                 let id = scoped_id(

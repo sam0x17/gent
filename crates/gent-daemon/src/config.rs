@@ -13,6 +13,8 @@ mod host_recovery;
 pub use host_recovery::{HostRecovery, MAX_RECOVERY_AGENTS, RecoveryAgent, RecoveryHost};
 mod discovery;
 pub use discovery::Discovery;
+mod hosted;
+pub use hosted::HostedParent;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -532,6 +534,9 @@ impl Config {
         if self.host_recovery()?.is_some() {
             features.push("host_recovery".into());
         }
+        if self.hosted_parent()?.is_some() {
+            features.push("hosted_parent".into());
+        }
         Ok(features)
     }
     fn update_local_version(&mut self) -> Result<()> {
@@ -540,6 +545,7 @@ impl Config {
             || self.profile_setup()?.is_some()
             || self.gateway_registry()?.is_some()
             || self.host_recovery()?.is_some()
+            || self.hosted_parent()?.is_some()
         {
             self.version = 3;
             self.extra

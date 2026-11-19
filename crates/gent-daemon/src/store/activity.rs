@@ -25,6 +25,13 @@ pub(super) fn acknowledgement(challenge: Uuid) -> Uuid {
 
 impl StoreSession<'_> {
     pub(super) fn activity_supported(&self, peer: &str) -> Result<bool> {
+        if !self
+            .state
+            .transport_host(peer)
+            .is_ok_and(|host| host == peer)
+        {
+            return Ok(false);
+        }
         let Some(member) = self.state.state().nodes.get(peer) else {
             return Ok(false);
         };
@@ -38,7 +45,7 @@ impl StoreSession<'_> {
             for agent in self
                 .all_agents()?
                 .into_iter()
-                .filter(|a| a.node_id == self.identity.node.id() && !a.revoked)
+                .filter(|a| self.local_node(&a.node_id) && !a.revoked)
             {
                 self.announce_activity_to(&agent.id, peer)?;
             }

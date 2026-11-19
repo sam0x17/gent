@@ -74,24 +74,19 @@ pub(super) async fn serve(
     slots: Arc<Semaphore>,
     request: Request,
 ) -> Result<()> {
-    let Request::Agent {
-        credential,
-        action:
-            AgentOp::FileReceive {
-                file,
-                byte_length,
-                sha256,
-            },
-    } = &request
+    let action = match &request {
+        Request::Agent { action, .. } | Request::HostedAgent { action, .. } => action,
+        _ => unreachable!(),
+    };
+    let AgentOp::FileReceive {
+        file,
+        byte_length,
+        sha256,
+    } = action
     else {
         unreachable!()
     };
-    let (credential, file, byte_length, sha256) = (
-        credential.clone(),
-        file.clone(),
-        *byte_length,
-        sha256.clone(),
-    );
+    let (file, byte_length, sha256) = (file.clone(), *byte_length, sha256.clone());
     let Ok(slot) = slots.try_acquire_owned() else {
         return response(
             stream.get_mut(),
@@ -100,6 +95,8 @@ pub(super) async fn serve(
         .await;
     };
     let check_store = store.clone();
+    // Retain the exact hosted scope and gateway credential for commit.
+    let mut completed: Request = serde_json::from_value(serde_json::to_value(&request)?)?;
     let (check, slot) = access::run(check_store, "file admission", move |store| {
         Ok((store.handle(request), slot))
     })
@@ -125,10 +122,12 @@ pub(super) async fn serve(
         // Keep capacity occupied if the socket times out while the transaction
         // is running. Authentication and all quotas are checked again at commit.
         let _slot = slot;
-        Ok(store.handle(Request::Agent {
-            credential,
-            action: AgentOp::FileReceiveData { file, bytes },
-        }))
+        let action = match &mut completed {
+            Request::Agent { action, .. } | Request::HostedAgent { action, .. } => action,
+            _ => unreachable!(),
+        };
+        *action = AgentOp::FileReceiveData { file, bytes };
+        Ok(store.handle(completed))
     })
     .await?;
     response(stream.get_mut(), &result).await

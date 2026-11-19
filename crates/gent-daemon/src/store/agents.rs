@@ -21,7 +21,7 @@ impl StoreSession<'_> {
         // announced. Reading their labels must not require a signing key.
         let generation = match saved {
             Some(generation) => generation,
-            None if agent.node_id == self.identity.node.id() => 1,
+            None if self.local_node(&agent.node_id) => 1,
             None => anyhow::bail!("missing remote registration generation"),
         };
         ensure!(
@@ -42,8 +42,16 @@ impl StoreSession<'_> {
     pub(super) fn agent_identity(&self, id: &str) -> Result<Value> {
         let agent = self.get_agent(id)?;
         let generation = self.registration_generation(&agent)?;
+        let node_name = &self
+            .state
+            .state()
+            .nodes
+            .get(&agent.node_id)
+            .context("chat node unavailable")?
+            .name;
         Ok(json!({"agent":agent,"registration_generation":generation,
-            "cluster_id":self.config.cluster.id,"node_name":self.config.node.name,
+            "cluster_id":self.config.cluster.id,"node_name":node_name,
+            "transport_node":self.identity.node.id(),
             "delivery":"host_dependent","inbox_delivery":self.inbox_delivery(id)?,
             "remote_ready":self.remote_ready()?}))
     }
@@ -61,7 +69,7 @@ impl StoreSession<'_> {
         )?;
         let agent = self.get_agent(id)?;
         ensure!(
-            agent.node_id == self.identity.node.id(),
+            self.local_node(&agent.node_id),
             "rename on the chat's hosting node, or use gent_rename in that conversation"
         );
         ensure!(!agent.revoked, "registration revoked");
@@ -92,8 +100,7 @@ impl StoreSession<'_> {
         )?;
         // In particular, a legacy certificate from a retired owner epoch must
         // not turn a label edit into an invalid record blocking the peer stream.
-        self.registration(id)?
-            .verify(&self.state, self.identity.node.id())?;
+        self.registration(id)?.verify(&self.state, &agent.node_id)?;
         // Publication and both local updates share the enclosing transaction.
         self.announce(id)
     }

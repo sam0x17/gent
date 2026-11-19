@@ -25,6 +25,10 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
 }
 
 fn active_peer(state: &VerifiedState, peer: &str, key: &[u8], timestamp: i64) -> Result<()> {
+    ensure!(
+        state.transport_host(peer)? == peer,
+        "web node uses its hosting node's transport"
+    );
     state.authorize_node(
         peer,
         key.try_into().context("invalid peer key")?,
@@ -78,7 +82,7 @@ impl StoreSession<'_> {
     pub(super) fn ensure_local_origin(&self, id: &str) -> Result<()> {
         let agent = self.get_agent(id)?;
         ensure!(
-            agent.node_id == self.identity.node.id(),
+            self.local_node(&agent.node_id),
             "chat belongs to another node"
         );
         if self.db.query_row(
@@ -88,7 +92,7 @@ impl StoreSession<'_> {
         )? {
             return Ok(());
         }
-        let certificate = self.certify_legacy(id, self.identity.node.id())?;
+        let certificate = self.certify_legacy(id, &agent.node_id)?;
         self.db.execute(
             "INSERT INTO network_origins VALUES(?1,NULL,?2,1)",
             params![id, serde_json::to_vec(&certificate)?],
@@ -279,11 +283,13 @@ impl StoreSession<'_> {
         )
     }
     pub(super) fn import_registration(&self, node: &str, incoming: &Registration) -> Result<()> {
-        incoming.verify(&self.state, node)?;
-        ensure!(
-            node != self.identity.node.id(),
-            "remote node claimed local identity"
-        );
+        incoming.verify(&self.state, &incoming.node)?;
+        // Production imports pass data_peer's exact key and wall-clock
+        // freshness check in this transaction. The retention clock can be
+        // ahead; it must not be used to recheck authority freshness here.
+        self.state.authorize_chat_carrier(&incoming.node, node)?;
+        let node = incoming.node.as_str();
+        ensure!(!self.local_node(node), "remote node claimed local identity");
         if let Some(existing) = self
             .db
             .query_row(
@@ -421,8 +427,11 @@ impl StoreSession<'_> {
                 }
                 let message = self.message(&message_id)?;
                 ensure!(
-                    self.get_agent(&message.sender)?.node_id == self.identity.node.id()
-                        && self.get_agent(&message.recipient)?.node_id == peer,
+                    self.local_node(&self.get_agent(&message.sender)?.node_id)
+                        && self
+                            .state
+                            .transport_host(&self.get_agent(&message.recipient)?.node_id)?
+                            == peer,
                     "receipt belongs to another exchange"
                 );
                 if delivered {
@@ -461,7 +470,7 @@ impl StoreSession<'_> {
                 );
                 let recipient = self.get_agent(&message.recipient)?;
                 ensure!(
-                    recipient.node_id == self.identity.node.id() && sender.id != recipient.id,
+                    self.local_node(&recipient.node_id) && sender.id != recipient.id,
                     "message belongs to another recipient node"
                 );
                 let payload = serde_json::to_string(&message)?;
@@ -707,7 +716,7 @@ impl Store {
         for agent in session
             .all_agents()?
             .into_iter()
-            .filter(|a| a.node_id == self.identity.node.id())
+            .filter(|a| session.local_node(&a.node_id))
         {
             session.announce(&agent.id)?;
         }

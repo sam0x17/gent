@@ -12,15 +12,35 @@ The URL itself is the credential; no OAuth client ID, secret or approval step is
 needed. Keep it out of chat prompts, screenshots and public logs.
 
 Use another name for each provider account, for example `claude-work` or
-`chatgpt-personal`. Each web node has its own enrolled identity, encrypted node
-transport, message storage and conversations. The machine's current cluster
+`chatgpt-personal`. Each web node has its own enrolled identity and conversation
+bindings. Its native host provides the current chat directory, message storage
+and encrypted links to other machines. A web node does not join the transport
+mesh or maintain a separate directory replica. The machine's current cluster
 and native node identity stay the same. Web nodes have the usual open default
-permissions; use node/chat restrictions when needed.
+permissions; use node/chat restrictions when needed. Node restrictions and
+same-node rules continue to use the web node's own identity.
 
-The machine's Gent daemon starts and supervises these nodes automatically.
+The machine's Gent daemon starts and supervises their gateways automatically.
 Keep it online and signed in. It renews their service leases without copying
 GitHub credentials into them. Updates restart their runtimes using the new
-binary. Their messages, node identities and chat bindings persist.
+binary. Their messages, node identities and chat bindings persist. Upgrade all
+native cluster nodes with `gent update` for hosted-node routing. Existing web
+nodes migrate on their hosting machine and keep their connector URLs and chat
+IDs; there is no need to reenroll or register the conversation again.
+
+Migration reads a fixed snapshot while holding the child daemon lock, commits
+the imported application state in one parent transaction, then activates the
+signed hosting relationship. The original child database remains on disk as
+a retained snapshot; conversation bindings stay in the child filesystem. The
+parent becomes the live store. Interrupted preparation retries use its saved
+migration record without importing the child again.
+
+Migration refuses conflicting records or combined storage limits that would
+be exceeded. It also refuses unsupported legacy chat bindings, tracked
+plaintext file handoffs/exports, and retained child permission or group
+administration requests. Those requests retain their original configuration
+origin and cannot safely be reassigned. A refusal preserves the source state
+and rolls back the import; these cases need explicit migration support.
 
 This route is **not end-to-end encrypted**. The model provider, Gent/Cloudflare's
 web endpoint, and your hosting machine can read connector messages and files.
@@ -33,11 +53,12 @@ chat, enable Gent and ask:
 
 > Register this chat with Gent and let me talk to my target chat through you.
 
-`gent_chats` discovers registered chats across the cluster, with node names
-and stable IDs. A unique name such as `cit` is enough; duplicate or similar
-names require a choice before sending. A native conversation must use Gent
-once to establish its identity and wake binding. Waking an unknown chat does
-not register it.
+`gent_chats` lists permitted chats from the native host's synchronized directory,
+with node names and stable IDs. A unique name such as `cit` is enough. Exact
+duplicate names resolve to the most recently active chat when timestamps permit;
+remaining ambiguity requires a choice. Native discovery can also register
+supported conversations. An absent name alone does not establish a different
+cluster: the host may still be synchronizing, or a restriction may hide it.
 
 The connector opens a conversation handle, attaches to the selected chat,
 sends each turn once, and retrieves the reply. The target needs a working

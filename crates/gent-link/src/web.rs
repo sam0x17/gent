@@ -204,9 +204,11 @@ pub(crate) async fn add(parent: &Path, name: &str, out: Option<&Path>) -> Result
 
 pub(crate) async fn execute(parent: &Path, command: Command) -> Result<Value> {
     if let Command::List = command {
+        let parent_config = node_home::inspect(parent)?;
         let mut nodes = Vec::new();
         for (home, record) in storage::list(parent)? {
             nodes.push(json!({"name":record.name,"node_id":record.node,
+                "host_node_id":parent_config.node.id,"host_node_name":parent_config.node.name,
                 "revoked":record.revoked,"ready":!record.revoked && runtime::ready(&home).await}));
         }
         return Ok(json!({"web_nodes":nodes}));
@@ -249,7 +251,7 @@ pub(crate) fn print(value: &Value) {
         println!("gent  Web nodes");
         for node in nodes {
             println!(
-                "  {}  {}",
+                "  {}  {}  via {}",
                 crate::display::visible(node["name"].as_str().unwrap_or("")),
                 if node["revoked"] == true {
                     "revoked"
@@ -257,7 +259,8 @@ pub(crate) fn print(value: &Value) {
                     "connected"
                 } else {
                     "offline"
-                }
+                },
+                crate::display::visible(node["host_node_name"].as_str().unwrap_or("this machine"))
             );
         }
         return;

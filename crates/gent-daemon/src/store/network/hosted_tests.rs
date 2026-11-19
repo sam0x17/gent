@@ -1,0 +1,201 @@
+//! A logical web node uses only its parent's existing encrypted native link.
+use super::*;
+
+fn owner(store: &mut Store, home: &Path, action: OwnerOp) -> Value {
+    store
+        .execute(Request::Owner {
+            credential: config::read_private(&home.join("owner.key")).unwrap(),
+            action,
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_identity() {
+    let mut pair = Pair::new().await;
+    let parent = pair.stores[0].identity.node.id().to_owned();
+    let remote = pair.stores[1].identity.node.id().to_owned();
+    let policy = Policy {
+        rules: [Permission::Enumerate, Permission::Send, Permission::Receive]
+            .map(|permission| Rule {
+                actor: Selector::All,
+                peer: Selector::All,
+                permission,
+                effect: Effect::Allow,
+            })
+            .into(),
+        ..Default::default()
+    };
+    owner(
+        &mut pair.stores[0],
+        pair.homes[0].path(),
+        OwnerOp::SetPolicy { policy },
+    );
+    let child_home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(child_home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let child = gent_crypto::NodeIdentity::generate().unwrap();
+    {
+        let store = &pair.stores[0];
+        let tx = store.db.unchecked_transaction().unwrap();
+        let state = store.identity.state(&tx).unwrap();
+        let enrollment = child
+            .request_enrollment(state.anchor(), state.checkpoint(), "web", now() as u64)
+            .unwrap();
+        let signed = state
+            .enroll(
+                &*store.identity.signing_owner(&tx).unwrap(),
+                &enrollment,
+                enrollment.fingerprint().unwrap(),
+                now() as u64,
+            )
+            .unwrap();
+        let state = store.identity.apply(&tx, signed).unwrap();
+        tx.commit().unwrap();
+        Store::install_joined(child_home.path(), &child, &state).unwrap();
+    }
+    let key = config::secret();
+    let mut child_store = Store::open(child_home.path()).unwrap();
+    let original = child_store
+        .execute(Request::Agent {
+            credential: key.clone(),
+            action: AgentOp::Register {
+                name: "walking-web".into(),
+                provider: "claude.ai".into(),
+            },
+        })
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(child_store);
+    owner(
+        &mut pair.stores[0],
+        pair.homes[0].path(),
+        OwnerOp::PrepareHostedNode {
+            node_id: child.id().into(),
+            home: child_home.path().into(),
+        },
+    );
+    owner(
+        &mut pair.stores[0],
+        pair.homes[0].path(),
+        OwnerOp::Configure {
+            request_id: Uuid::new_v4().to_string(),
+            edit: ConfigurationEdit::HostNode {
+                node_id: child.id().into(),
+                parent: parent.clone(),
+            },
+        },
+    );
+    pair.stores[0].reconcile_hosted_routes().unwrap();
+    pair.pump();
+    let gateway = config::read_private(&child_home.path().join("owner.key")).unwrap();
+    let call = |store: &mut Store, action| {
+        store.execute(Request::HostedAgent {
+            node_id: child.id().into(),
+            gateway_credential: gateway.clone(),
+            credential: key.clone(),
+            action,
+        })
+    };
+    let identity = call(&mut pair.stores[0], AgentOp::Identity).unwrap();
+    assert_eq!(identity["agent"]["id"], original);
+    assert_eq!(identity["agent"]["node_id"], child.id());
+    assert_eq!(identity["transport_node"], parent);
+    let directory = call(&mut pair.stores[0], AgentOp::Agents).unwrap();
+    assert_eq!(directory.as_array().unwrap().len(), 3);
+    let remote_directory = pair.agent(1, AgentOp::Agents).unwrap();
+    assert!(
+        remote_directory
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == original && a["node_id"] == child.id())
+    );
+    assert!(
+        !pair.stores[0]
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM network_links WHERE peer=?1)",
+                [child.id()],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    let send = AgentOp::Send {
+        recipient: pair.agents[1].clone(),
+        request_id: Uuid::now_v7().to_string(),
+        text: "remote through native host".into(),
+        files: vec![FilePart {
+            name: "sample.txt".into(),
+            media_type: "text/plain".into(),
+            data_base64: STANDARD.encode(b"file bytes"),
+        }],
+        file_ids: vec![],
+    };
+    let message = call(&mut pair.stores[0], send.clone()).unwrap();
+    assert_eq!(
+        call(&mut pair.stores[0], send.clone()).unwrap()["message_id"],
+        message["message_id"]
+    );
+    pair.pump();
+    let inbox = pair.agent(1, AgentOp::Inbox).unwrap();
+    assert_eq!(inbox[0]["sender"], original);
+    assert_eq!(
+        inbox[0]["files"][0]["data_base64"],
+        STANDARD.encode(b"file bytes")
+    );
+    let message_id = message["message_id"].as_str().unwrap().to_owned();
+    pair.agent(
+        1,
+        AgentOp::Ack {
+            message_id: message_id.clone(),
+        },
+    )
+    .unwrap();
+    pair.agent(
+        1,
+        AgentOp::Reply {
+            message_id: message_id.clone(),
+            request_id: Uuid::now_v7().to_string(),
+            text: "reply through parent".into(),
+            files: vec![],
+            file_ids: vec![],
+        },
+    )
+    .unwrap();
+    pair.pump();
+    assert_eq!(
+        call(&mut pair.stores[0], AgentOp::Inbox).unwrap()[0]["text"],
+        "reply through parent"
+    );
+    assert_eq!(
+        call(&mut pair.stores[0], AgentOp::MessageStatus { message_id }).unwrap()["state"],
+        "delivered"
+    );
+    pair.reopen(0);
+    assert_eq!(
+        call(&mut pair.stores[0], send).unwrap()["message_id"],
+        message["message_id"]
+    );
+    assert!(Store::open(child_home.path()).is_err());
+    // The authenticated native peer cannot impersonate the hosted origin, nor
+    // can the child's old independent transport authenticate after delegation.
+    let state = pair.stores[1].identity.state(&pair.stores[1].db).unwrap();
+    let source = pair.stores[0].network_session(
+        &pair.stores[0].db,
+        pair.stores[0].identity.state(&pair.stores[0].db).unwrap(),
+    );
+    let registration = source.registration(&original).unwrap();
+    let destination = pair.stores[1].network_session(&pair.stores[1].db, state);
+    assert!(
+        destination
+            .import_registration(&remote, &registration)
+            .is_err()
+    );
+    assert!(
+        destination
+            .import_registration(child.id(), &registration)
+            .is_err()
+    );
+}

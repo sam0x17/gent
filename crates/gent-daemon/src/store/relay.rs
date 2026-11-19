@@ -425,7 +425,7 @@ impl StoreSession<'_> {
         Ok(
             json!({"turn_id":id,"relay":root.relay,"target":target,"state":state,
             "expires_at":root.expires_at,"received":root.acknowledged,
-            "security_mode":if who.node_id == target.node_id { RelaySecurityMode::LocalDaemon } else { RelaySecurityMode::EncryptedDaemonLink },
+            "security_mode":if self.state.transport_host(&who.node_id)? == self.state.transport_host(&target.node_id)? { RelaySecurityMode::LocalDaemon } else { RelaySecurityMode::EncryptedDaemonLink },
             "cancel_requested":cancelled.is_some(),"final_message_id":finished,
             "responses":replies,"next_after":next_after,"has_more":has_more}),
         )
@@ -564,7 +564,9 @@ impl StoreSession<'_> {
             intermediary: who.id.clone(),
             target: peer.id.clone(),
             grant_id: None,
-            security_mode: if who.node_id == peer.node_id {
+            security_mode: if self.state.transport_host(&who.node_id)?
+                == self.state.transport_host(&peer.node_id)?
+            {
                 RelaySecurityMode::LocalDaemon
             } else {
                 RelaySecurityMode::EncryptedDaemonLink

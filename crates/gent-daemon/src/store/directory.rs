@@ -130,7 +130,7 @@ impl StoreSession<'_> {
     pub(super) fn observe_activity(&self, id: &str, timestamp: i64) -> Result<Value> {
         let agent = self.get_agent(id)?;
         ensure!(
-            agent.node_id == self.identity.node.id() && !agent.revoked,
+            self.local_node(&agent.node_id) && !agent.revoked,
             "activity requires an active local chat"
         );
         if self.save_activity(id, timestamp)? {

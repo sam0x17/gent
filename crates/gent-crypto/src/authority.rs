@@ -7,6 +7,7 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 mod agents;
+mod hosting;
 #[cfg(feature = "invitation")]
 mod noise;
 pub mod peer;
@@ -63,6 +64,9 @@ pub struct NodeMember {
     /// Owner-approved configuration editing, independent of node membership.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_configure: bool,
+    /// Signed delegation of chat transport only; configuration authority is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_by: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -522,6 +526,7 @@ impl ClusterState {
         );
         for (node_id, member) in &self.nodes {
             id(node_id)?;
+            self.transport_host(node_id)?;
             label(&member.name)?;
             public_key(&member.signing_key)?;
             ensure!(
@@ -821,6 +826,7 @@ impl NodeIdentity {
             name: name.into(),
             signing_key: self.public_key(),
             can_configure: false,
+            hosted_by: None,
         })
     }
 
@@ -889,6 +895,10 @@ impl EnrollmentRequest {
         ensure!(
             !self.member.can_configure,
             "enrollment cannot self-grant administration"
+        );
+        ensure!(
+            self.member.hosted_by.is_none(),
+            "hosting requires a separate configuration edit"
         );
         public_key(&self.anchor.owner_key)?;
         public_key(&self.member.signing_key)?;
@@ -1103,6 +1113,7 @@ impl VerifiedState {
             let previous = next.state();
             peer::verify_step(&next, update)?;
             succession::verify_step(&next, update)?;
+            hosting::verify_step(previous, &update.state)?;
             ensure!(
                 checkpoint.revision == next.checkpoint.revision + 1
                     && update.state.previous == Some(next.checkpoint.state_hash),
@@ -1355,6 +1366,11 @@ impl VerifiedState {
             } else {
                 can_configure
             };
+            if rotation {
+                member
+                    .hosted_by
+                    .clone_from(&state.nodes[&request.node_id].hosted_by);
+            }
             state.nodes.insert(request.node_id.clone(), member);
             Ok(())
         })
@@ -1367,6 +1383,7 @@ impl VerifiedState {
         now: u64,
     ) -> Result<SignedState> {
         self.revise(owner, now, |state| {
+            state.require_no_hosted_children(node_id)?;
             let member = state.nodes.remove(node_id).context("node unavailable")?;
             state.retired_nodes.insert(node_id.into());
             state.retired_keys.insert(member.signing_key);
@@ -1414,7 +1431,9 @@ impl VerifiedState {
         );
         let mut member = request.member.clone();
         member.can_configure = previous.can_configure && can_configure;
+        member.hosted_by.clone_from(&previous.hosted_by);
         self.revise(owner, now, |state| {
+            state.require_no_hosted_children(&replaces.id)?;
             state.nodes.remove(&replaces.id);
             state.retired_nodes.insert(replaces.id.clone());
             state.retired_keys.insert(replaces.signing_key);

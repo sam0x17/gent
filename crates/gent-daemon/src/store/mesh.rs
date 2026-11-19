@@ -73,6 +73,9 @@ impl MeshEnvelope {
         if origin.signing_key != self.origin_key || target.signing_key != self.target_key {
             return Ok(false);
         }
+        if origin.hosted_by.is_some() || target.hosted_by.is_some() {
+            return Ok(false);
+        }
         ensure!(
             self.link == link_id(state, &self.origin, &self.target)?,
             "invalid mesh link identity"
@@ -170,12 +173,11 @@ impl Store {
                 return Ok(false);
             }
             let mut candidates = Vec::new();
-            for peer in state
-                .state()
-                .nodes
-                .keys()
-                .filter(|p| *p != self.identity.node.id() && *p != writer)
-            {
+            for peer in state.state().nodes.keys().filter(|p| {
+                *p != self.identity.node.id()
+                    && *p != writer
+                    && state.transport_host(p).is_ok_and(|host| host == p.as_str())
+            }) {
                 let known: bool = if state.state().peer.is_some() {
                     self.db.query_row("SELECT EXISTS(SELECT 1 FROM network_links WHERE peer=?1) OR EXISTS(SELECT 1 FROM mesh_direct_outbox WHERE peer=?1)", [peer], |r| r.get(0))?
                 } else {
@@ -215,7 +217,7 @@ impl Store {
                 .state()
                 .nodes
                 .get(peer)
-                .is_some_and(|n| n.signing_key.as_slice() == key)
+                .is_some_and(|n| n.signing_key.as_slice() == key && n.hosted_by.is_none())
         });
         for (peer, _, outgoing, incoming) in ready.by_ref().take(BATCH) {
             self.install_data_link(&peer, &outgoing, &incoming, &[])?;
