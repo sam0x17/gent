@@ -341,6 +341,16 @@ async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_id
         original
     );
     assert!(call(&mut pair.stores[0], AgentOp::Identity).is_err());
+    assert_eq!(
+        owner(
+            &mut pair.stores[0],
+            pair.homes[0].path(),
+            OwnerOp::WebCheckpoint {
+                node_id: child.id().into(),
+            }
+        )["hosting_here"],
+        false
+    );
     let result = next(
         &mut pair.stores[1],
         AgentOp::RelayTurnStatus {

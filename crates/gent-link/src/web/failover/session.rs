@@ -157,6 +157,13 @@ impl Session {
                 },
             )
             .await?;
+            // A delayed configuration proposal can arrive after takeover.
+            // Reacquire a new epoch and republish the route with a fresh retry
+            // identity instead of keeping a live lease on an unusable carrier.
+            ensure!(
+                state["hosting_here"] == true,
+                "web hosting route changed; reacquiring carrier lease"
+            );
             if state["revision"] != state["durable"]
                 || gateway::registry::portable::management(&self.home)? != self.management()
             {

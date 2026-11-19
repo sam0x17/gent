@@ -154,7 +154,13 @@ impl StoreSession<'_> {
             [node],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        Ok(json!({"revision":revision,"durable":durable,"lease_until":lease_until}))
+        let hosting_here = self
+            .state
+            .transport_host(node)
+            .is_ok_and(|host| host == self.identity.node.id());
+        Ok(
+            json!({"revision":revision,"durable":durable,"lease_until":lease_until,"hosting_here":hosting_here}),
+        )
     }
 
     pub(in crate::store) fn web_lease(&self, node: &str, seconds: u64) -> Result<Value> {
