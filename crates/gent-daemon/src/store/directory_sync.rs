@@ -8,6 +8,8 @@ use crate::messages::{
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+mod cache;
+mod push;
 mod tree;
 
 const INTERVAL: i64 = 60;
@@ -20,6 +22,8 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
         peer TEXT PRIMARY KEY,peer_key BLOB NOT NULL,next_check INTEGER NOT NULL,
         progress BLOB,state TEXT NOT NULL,verified_at INTEGER,verified_count INTEGER);",
     )?;
+    cache::schema(db)?;
+    push::schema(db)?;
     Ok(())
 }
 
@@ -118,6 +122,7 @@ impl StoreSession<'_> {
 
     pub(super) fn receive_directory(&self, peer: &str, envelope: Envelope) -> Result<()> {
         match envelope {
+            Envelope::Push { chats } => self.receive_directory_push(peer, chats),
             Envelope::Probe {
                 round,
                 prefix,
@@ -284,7 +289,7 @@ impl StoreSession<'_> {
         }
         let mut queued = 0;
         for (peer, key) in peers {
-            if self.wire_version(&peer)? < 3
+            if self.wire_version(&peer)? != 3
                 || !self
                     .state
                     .transport_host(&peer)
@@ -333,6 +338,10 @@ impl StoreSession<'_> {
             if peer == self.identity.node.id() || self.state.transport_host(peer)? != peer {
                 continue;
             }
+            if self.wire_version(peer)? >= 4 {
+                peers.push(self.push_directory_status(peer, &member.name, &member.signing_key)?);
+                continue;
+            }
             let saved: Option<(String, Option<i64>, Option<usize>)> = self.db.query_row(
                 "SELECT state,verified_at,verified_count FROM directory_sync WHERE peer=?1 AND peer_key=?2",
                 params![peer, member.signing_key.as_slice()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
@@ -341,8 +350,12 @@ impl StoreSession<'_> {
             peers.push(json!({"node_id":peer,"node_name":member.name,"state":status,
                 "supported":self.wire_version(peer)? >= 3,"verified_at":verified_at,"verified_chats":count}));
         }
-        Ok(json!({"interval_seconds":INTERVAL,"peers":peers,
-            "scope":"Each native node's registrations, including its hosted web nodes. A past match does not prove current host discovery or chat readiness."}))
+        let snapshot = self.cached_directory_snapshot()?;
+        Ok(
+            json!({"interval_seconds":INTERVAL,"peers":peers,"sequence":snapshot.as_ref().map(|s|s.sequence),
+            "known_chats":snapshot.as_ref().map(|s|s.root.count),"snapshot_pending":snapshot.is_none(),
+            "scope":"V4 peers compare all known committed registrations on ordinary traffic and push differences. Older peers compare their carrier directories. A match does not prove chat readiness."}),
+        )
     }
 }
 
@@ -364,7 +377,7 @@ impl Store {
         }
         let mut session = self.network_session(&tx, state);
         session.timestamp = timestamp;
-        let queued = session.queue_directory_checks()?;
+        let queued = session.queue_directory_checks()? | session.push_directory_tick()?;
         tx.commit()?;
         if queued {
             self.sync_wakeup.notify_one();

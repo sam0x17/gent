@@ -2,6 +2,8 @@ use super::*;
 use crate::pairing::{self, Peer};
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "directory_push_tests.rs"]
+mod directory_push_tests;
 #[path = "owner_activation_tests.rs"]
 mod owner_activation_tests;
 #[path = "owner_preparation_tests.rs"]

@@ -249,6 +249,14 @@ fn directory_publishes_only_committed_generations_and_restore_removes_orphans() 
             revision: snapshot.revision,
         },
     );
+    let tree = |pair: &Pair| {
+        let state = pair.parent.identity.state(&pair.parent.db).unwrap();
+        pair.parent
+            .network_session(&pair.parent.db, state)
+            .directory_snapshot()
+            .unwrap()
+    };
+    let committed_tree = tree(&pair);
     let old = call(&mut pair, 1, AgentOp::Identity).unwrap();
     call(
         &mut pair,
@@ -269,6 +277,7 @@ fn directory_publishes_only_committed_generations_and_restore_removes_orphans() 
     };
     assert_eq!(published.generation, 1);
     assert_eq!(published.name, old["agent"]["name"]);
+    assert_eq!(tree(&pair), committed_tree);
     let credential = config::secret();
     let extra = pair
         .parent
@@ -294,9 +303,11 @@ fn directory_publishes_only_committed_generations_and_restore_removes_orphans() 
             .unwrap()
             .is_none()
     );
+    assert_eq!(tree(&pair), committed_tree);
     let tx = pair.parent.db.transaction().unwrap();
     snapshot::restore(&tx, &snapshot, pair.state.anchor(), &node).unwrap();
     tx.commit().unwrap();
+    assert_eq!(tree(&pair), committed_tree);
     assert_eq!(
         pair.parent
             .db

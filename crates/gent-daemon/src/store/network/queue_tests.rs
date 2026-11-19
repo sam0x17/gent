@@ -7,6 +7,13 @@ async fn directory_reconciliation_bypasses_unstarted_inventory_backlog() {
         store.presence_tick().unwrap();
     }
     pair.pump();
+    // Keep coverage of the V3 periodic probe scheduler as well as V4 push tests.
+    for store in &pair.stores {
+        store
+            .db
+            .execute("UPDATE wire_peers SET version=3", [])
+            .unwrap();
+    }
     for i in 0..24 {
         pair.stores[0]
             .execute(Request::Agent {

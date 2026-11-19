@@ -64,19 +64,37 @@ node also publishes every existing local registration, including manually
 registered chats. Native discovery normally scans once a minute; a chat found by
 that scan uses the same registration and publication path.
 
-Nodes with wire version 3 also compare Merkle roots once a minute. Each root
-covers one native node's registrations and the web nodes it hosts. A matching
-root needs no chat payload. Differences are narrowed through a 16-way tree, with
-at most 16 registrations per leaf response. Missing registrations, newer names,
-and revocations pass through the normal identity and generation checks.
+Version 4 carries each replica's directory root, persistent local sequence and a
+bounded hash frontier on ordinary encrypted records, including heartbeats.
+The tree includes every known committed chat registration in the cluster. A
+receiver immediately pushes differing records, including records learned from
+other trusted enrolled nodes. The original node need not be online. No repair
+request or forwarding grant is required. Message senders still authenticate as
+their actual carrier, and chat permissions remain unchanged.
 
-Checks are encrypted, persist across restarts, and keep one outstanding request
-per peer. An offline peer does not accumulate periodic inventories. A changed
-source snapshot ends the current pass and schedules another check. Older peers
-continue ordinary announcements until both ends support reconciliation.
+The frontier covers the complete tree with at most 128 subtree summaries. It
+contains no individual chat records. Large trees keep some branches coarse;
+repair sends at most 32 registrations per page and retains one pending page per
+peer. Pages continue locally without requests for subsequent pages. Matching
+branches send no registrations. Chat messages and receipts take priority over
+repair pages. A full repair queue retains its cursor for retry without rejecting
+an incoming chat message.
+
+Each machine persists its own sequence and increments it when its known tree
+changes. Sequences from different machines are never compared. Older snapshots
+from the same node cannot restart newer repair work; equal sequences with
+different roots still reconcile. A sequence is not a claim that a replica is
+complete. Registration generations select newer records, and roots establish
+whether replicas actually agree. Normal heartbeat traffic supplies the idle
+fallback. Unchanged snapshots do not generate acknowledgement loops.
+
+Version 3 peers retain the once-a-minute request/reply comparison of a native
+carrier and its hosted web chats. Earlier peers continue ordinary announcements.
+Queued ciphertext and older codecs remain valid during rolling updates.
 
 `gent sync` reports directory comparisons separately from transport progress,
-including the time and chat count of the last match. This is evidence about
+including the time and chat count of the last match. Its JSON output also includes
+the local sequence, peer sequences and deferred repair errors. This is evidence about
 registered metadata; it does not prove native discovery has indexed every chat
 or that a model can receive a turn. Activity and polling timestamps do not change
 directory roots. Existing activity synchronization remains separate.
@@ -130,6 +148,6 @@ discovery does not answer native approval requests or authorize unrelated work.
 
 `gent node discovery disable` stops new indexing and discovery-driven recovery.
 Previously published registrations remain, and already loaded native chats keep
-their normal Gent integration. Use `gent chat revoke AGENT_ID` to remove an
-chat's access, or uninstall/disable the host's wake integration to stop native
+their normal Gent integration. Use `gent chat revoke AGENT_ID` to remove a
+chat's access, or uninstall the host's integration to stop native
 delivery. Disabling indexing cannot recall names already shared with peers.

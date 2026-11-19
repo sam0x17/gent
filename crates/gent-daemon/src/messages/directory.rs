@@ -7,6 +7,25 @@ use uuid::Uuid;
 pub const LEAF_LIMIT: usize = 16;
 pub const MAX_CHATS: usize = 16_384;
 pub const MAX_DEPTH: usize = 64;
+pub const MAX_FRONTIER: usize = 128;
+pub const PUSH_LIMIT: usize = 32;
+
+/// One replica's complete view, not an origin's claim of completeness.
+/// Sequence numbers are local to the authenticated sender; roots decide equality.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    pub sequence: u64,
+    pub root: Summary,
+    pub frontier: Vec<Branch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Branch {
+    pub prefix: String,
+    pub summary: Summary,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,6 +37,9 @@ pub struct Summary {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Envelope {
+    /// V4 replicas proactively send differing records. Empty pages advertise
+    /// our view when only the other replica has records to contribute.
+    Push { chats: Vec<Registration> },
     Probe {
         round: Uuid,
         prefix: String,

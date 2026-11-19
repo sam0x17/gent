@@ -102,7 +102,12 @@ async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_id
         .db
         .execute("DELETE FROM agents WHERE id=?1", [&original])
         .unwrap();
-    pair.stores[1].directory_tick().unwrap();
+    // V4 reconciles on ordinary traffic, including the periodic heartbeat.
+    pair.stores[1]
+        .db
+        .execute("UPDATE node_presence SET next_probe_at=0", [])
+        .unwrap();
+    pair.stores[1].presence_tick().unwrap();
     pair.pump();
     assert_eq!(
         pair.stores[1].synchronization_status().unwrap()["directory"]["peers"][0]["state"],

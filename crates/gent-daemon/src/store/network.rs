@@ -293,6 +293,15 @@ impl StoreSession<'_> {
         // freshness check in this transaction. The retention clock can be
         // ahead; it must not be used to recheck authority freshness here.
         self.state.authorize_chat_carrier(&incoming.node, node)?;
+        self.import_directory_registration(incoming)
+    }
+
+    /// Registration merging is shared by carrier announcements and V4 trusted
+    /// replica repair. Message senders still require their actual carrier.
+    pub(in crate::store) fn import_directory_registration(
+        &self,
+        incoming: &Registration,
+    ) -> Result<()> {
         let node = incoming.node.as_str();
         ensure!(!self.local_node(node), "remote node claimed local identity");
         self.retire_web_registration(&incoming.id, node)?;
@@ -1007,6 +1016,10 @@ impl Store {
                             record.authority.revision,
                         )? {
                             session.import_event(&peer, record.event)?;
+                        }
+                        if let Some(snapshot) = record.directory {
+                            session.confirm_wire_version(&peer, 4)?;
+                            session.receive_directory_snapshot(&peer, snapshot)?;
                         }
                         tx.execute("DELETE FROM network_partial WHERE group_id=?1", [group])?;
                     } else {

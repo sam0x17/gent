@@ -52,11 +52,18 @@ pub(super) fn render(output: &mut String, value: &Value) -> std::fmt::Result {
         .as_array()
         .filter(|p| !p.is_empty())
     {
-        writeln!(output, "\n  Chat directories (checked every minute)")?;
+        writeln!(
+            output,
+            "\n  Chat directories (compared on traffic; periodic fallback)"
+        )?;
+        if let Some(sequence) = value["directory"]["sequence"].as_u64() {
+            row(output, "Local tree sequence", &sequence.to_string())?;
+        }
         for peer in peers {
             let state = match peer["state"].as_str() {
                 Some("checking") => "comparing roots",
                 Some("repairing") => "repairing differences",
+                Some("awaiting_peer") => "differences sent; awaiting peer view",
                 Some("matched") => "matched at last check",
                 Some("changed") => "changed during check; retry scheduled",
                 Some("different") => "differences remain; retry scheduled",
@@ -68,6 +75,9 @@ pub(super) fn render(output: &mut String, value: &Value) -> std::fmt::Result {
                 peer["node_name"].as_str().unwrap_or("unknown"),
                 state,
             )?;
+            if let Some(error) = peer["error"].as_str() {
+                row(output, "Repair deferred", error)?;
+            }
             if let Some(timestamp) = peer["verified_at"].as_u64() {
                 writeln!(
                     output,

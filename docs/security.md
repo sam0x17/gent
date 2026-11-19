@@ -9,20 +9,25 @@ Encrypted node records carry an explicit `version`. Version 2 uses `chat`,
 and `recipient_chat_id` in message records. The decoder maps each supported
 version into the same internal model before checking authority and permissions.
 Version 3 adds [Merkle directory reconciliation](discovery.md#directory-reconciliation)
-with the same chat field names. Directory records require version 3; they cannot
-be encoded as v1 or v2. Unknown versions and mixed field shapes are rejected. User text and file bytes
+with the same chat field names. Version 4 adds directory snapshots on ordinary
+records and direct bounded repair pages between trusted enrolled replicas.
+These snapshots include a persistent per-replica sequence and subtree hashes.
+V3 probes cannot be encoded as v1/v2; V4 pushes and snapshots cannot be encoded
+as earlier versions. Unknown versions and mixed field shapes are rejected. User text and file bytes
 are never rewritten by a codec.
 
 Nodes negotiate the highest mutually supported record version through encrypted
 presence replies. A capability proof must match a fresh outstanding challenge
 and the peer's enrolled signing key. Support is cached for 90 seconds; stale or
 unknown support uses v1. Newest supported versions are advertised first, followed
-by older proofs and the ordinary reply. Presence itself uses the v1 control
-envelope, allowing peers to negotiate before exchanging newer data formats.
+by older proofs and the ordinary reply. Presence uses v1 until V4 support is
+known, then also carries the directory snapshot. An authenticated V4 record
+confirms the sender can use V4. Ordinary presence challenges still determine
+reachability; directory repair never claims a chat can receive a turn.
 `gent nodes --json` reports the selected `wire_version` for each peer.
 
 Queued records retain the version and exact bytes chosen at admission. The v1,
-v2 and v3 decoders remain available across restarts and rolling upgrades. Existing
+v2, v3 and v4 decoders remain available across restarts and rolling upgrades. Existing
 v1 activity-capable peers keep receiving v1 records. Upgrades need no new chat
 identities or cluster enrollment.
 

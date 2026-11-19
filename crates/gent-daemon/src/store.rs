@@ -152,8 +152,8 @@ impl Store {
         directory::schema(&db)?;
         activity::schema(&db)?;
         wire::schema(&db)?;
-        directory_sync::schema(&db)?;
         hosted::schema(&db)?;
+        directory_sync::schema(&db)?;
         db.execute("UPDATE hosted_checkpoints SET lease_until=0", [])?;
         let previous: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='cluster'", [], |r| {

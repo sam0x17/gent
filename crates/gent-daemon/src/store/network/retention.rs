@@ -141,16 +141,24 @@ impl StoreSession<'_> {
                 );
             }
         }
-        let version = if matches!(&event, Event::Presence { .. }) {
+        let negotiated = self.wire_version(peer)?;
+        let version = if matches!(&event, Event::Directory { envelope } if matches!(envelope.as_ref(), crate::messages::directory::Envelope::Push { .. }))
+        {
+            ensure!(negotiated >= 4, "directory push requires a version 4 peer");
+            4
+        } else if matches!(&event, Event::Presence { .. }) && negotiated < 4 {
             1
         } else if matches!(&event, Event::Directory { .. }) {
             3
         } else {
-            self.wire_version(peer)?
+            negotiated
         };
         let body = serde_json::to_vec(&Record {
             version,
             authority: self.state.checkpoint().clone(),
+            directory: (version >= 4)
+                .then(|| self.directory_snapshot())
+                .transpose()?,
             event,
         })?;
         ensure!(

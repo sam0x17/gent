@@ -109,6 +109,13 @@ fn negotiate(pair: &mut Pair) {
         store.presence_tick().unwrap();
     }
     pair.pump();
+    // Exercise V3 compatibility separately from the V4 push tests.
+    for store in &pair.stores {
+        store
+            .db
+            .execute("UPDATE wire_peers SET version=3", [])
+            .unwrap();
+    }
 }
 
 fn forget(pair: &Pair, index: usize, id: &str) {

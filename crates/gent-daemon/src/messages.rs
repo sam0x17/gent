@@ -161,6 +161,7 @@ pub enum EditResult {
 pub struct Record {
     pub version: u8,
     pub authority: Checkpoint,
+    pub directory: Option<directory::Snapshot>,
     pub event: Event,
 }
 #[derive(Serialize, Deserialize)]
