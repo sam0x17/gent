@@ -2,6 +2,7 @@ use super::*;
 mod defaults;
 mod provider_switcher;
 mod retirement;
+mod shared_permissions;
 use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},

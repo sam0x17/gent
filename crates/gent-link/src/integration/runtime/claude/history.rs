@@ -28,11 +28,8 @@ struct Stamp {
 
 fn stamp(meta: &Metadata) -> Result<Stamp> {
     ensure!(
-        meta.is_file()
-            && meta.nlink() == 1
-            && meta.uid() == rustix::process::geteuid().as_raw()
-            && meta.mode() & 0o022 == 0,
-        "native history must be an owned regular file without links or shared write access"
+        meta.is_file() && meta.nlink() == 1 && crate::managed_file::owned_not_world_writable(meta),
+        "native history must be an owned regular file without links or world write access"
     );
     ensure!(
         meta.len() <= MAX_BYTES,

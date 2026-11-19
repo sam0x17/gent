@@ -1,7 +1,7 @@
 //! Claude's local session files supply identities and explicit title metadata.
 //! Closed interactive sessions are indexed but require their native host to reopen.
 use super::*;
-use std::{collections::BTreeSet, os::unix::fs::MetadataExt};
+use std::collections::BTreeSet;
 
 pub(super) fn history(directory: &Path, chats: &mut Vec<hosts::Chat>) -> Result<bool> {
     let root = directory.join("projects");
@@ -50,8 +50,7 @@ pub(super) fn history(directory: &Path, chats: &mut Vec<hosts::Chat>) -> Result<
                 return Ok(true);
             }
             let metadata = file.metadata()?;
-            if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o022 != 0
-            {
+            if !crate::managed_file::owned_not_world_writable(&metadata) {
                 partial = true;
                 continue;
             }
@@ -80,9 +79,7 @@ pub(super) fn history(directory: &Path, chats: &mut Vec<hosts::Chat>) -> Result<
 fn owned_directory(path: &Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
     ensure!(
-        meta.is_dir()
-            && meta.uid() == rustix::process::geteuid().as_raw()
-            && meta.mode() & 0o022 == 0,
+        meta.is_dir() && crate::managed_file::owned_not_world_writable(&meta),
         "Claude project metadata is not an owned directory"
     );
     Ok(())
@@ -117,6 +114,14 @@ mod tests {
         )
         .unwrap();
         let mut chats = Vec::new();
+        for path in [project.parent().unwrap(), project.as_path()] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        std::fs::set_permissions(
+            project.join(format!("{first}.jsonl")),
+            std::fs::Permissions::from_mode(0o664),
+        )
+        .unwrap();
         assert!(!history(root.path(), &mut chats).unwrap());
         assert_eq!(chats.len(), 2);
         assert_eq!(

@@ -47,6 +47,12 @@ pub fn normalize(path: &Path) -> Result<PathBuf> {
     anyhow::bail!("cannot resolve configuration path")
 }
 
+/// Host configuration may use a shared group. Gent still requires the current
+/// user's ownership and refuses world writes; secret records also call private().
+pub(crate) fn owned_not_world_writable(meta: &fs::Metadata) -> bool {
+    meta.uid() == rustix::process::geteuid().as_raw() && meta.mode() & 0o002 == 0
+}
+
 pub fn directory(path: &Path) -> Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
@@ -54,10 +60,8 @@ pub fn directory(path: &Path) -> Result<()> {
         .create(path)?;
     let meta = fs::symlink_metadata(path)?;
     ensure!(
-        meta.is_dir()
-            && meta.uid() == rustix::process::geteuid().as_raw()
-            && meta.mode() & 0o022 == 0,
-        "configuration directory must be owned by this user and not writable by others: {}",
+        meta.is_dir() && owned_not_world_writable(&meta),
+        "configuration directory must be owned by this user and not world-writable: {}",
         path.display()
     );
     Ok(())
@@ -65,11 +69,8 @@ pub fn directory(path: &Path) -> Result<()> {
 
 fn regular(meta: &fs::Metadata, path: &Path) -> Result<()> {
     ensure!(
-        meta.is_file()
-            && meta.nlink() == 1
-            && meta.uid() == rustix::process::geteuid().as_raw()
-            && meta.mode() & 0o022 == 0,
-        "configuration must be a regular file owned by this user, without links or shared write access: {}",
+        meta.is_file() && meta.nlink() == 1 && owned_not_world_writable(meta),
+        "configuration must be a regular file owned by this user, without links or world write access: {}",
         path.display()
     );
     Ok(())

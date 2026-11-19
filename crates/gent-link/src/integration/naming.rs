@@ -90,10 +90,7 @@ pub(super) fn open_metadata(path: &Path) -> Result<std::fs::File> {
         .open(path)?;
     let meta = file.metadata()?;
     ensure!(
-        meta.is_file()
-            && meta.nlink() == 1
-            && meta.uid() == rustix::process::geteuid().as_raw()
-            && meta.mode() & 0o022 == 0,
+        meta.is_file() && meta.nlink() == 1 && crate::managed_file::owned_not_world_writable(&meta),
         "native title metadata is not an owned regular file"
     );
     Ok(file)

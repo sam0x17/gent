@@ -31,7 +31,7 @@ All commands support `--json`. Challenge and witness commands honor normal live 
 
 The challenge expires after 15 minutes. Every observation binds to that exact challenge, its cluster trust anchor and baseline checkpoint. If collection takes longer, create a new challenge and collect fresh reports. This is a collection deadline, not a guarantee that no configuration changed while reports were being collected.
 
-Files contain full signed private cluster configuration and public node keys. They contain no private signing keys, but they are plaintext and must remain private. Inputs must be regular, single-link files owned by the current user with no group or other permissions. New files use mode 0600; newly created parent directories use 0700. Existing parent directories must be owned by the current user and not writable by others. Existing destinations, symlinks and hard links are refused. CLI summaries omit the full configuration.
+Files contain full signed private cluster configuration and public node keys. They contain no private signing keys, but they are plaintext and must remain private. Inputs must be regular, single-link files owned by the current user with no group or other permissions. New files use mode 0600; newly created parent directories use 0700. Existing parent directories must be owned by the current user and not world-writable; group write access is allowed. Existing destinations, symlinks and hard links are refused. CLI summaries omit the full configuration.
 
 ## Interpret the review
 

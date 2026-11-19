@@ -83,6 +83,14 @@ fn stable_owned_history_is_required_without_creating_or_modifying_files() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     let evidence = read(&path, &session, Path::new("/work")).unwrap();
     evidence.verify().unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
+    read(&path, &session, Path::new("/work"))
+        .unwrap()
+        .verify()
+        .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(read(&path, &session, Path::new("/work")).is_err());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
     let alias = root.path().join("alias");
     fs::hard_link(&path, &alias).unwrap();
     assert!(evidence.verify().is_err());

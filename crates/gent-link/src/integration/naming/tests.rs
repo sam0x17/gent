@@ -72,7 +72,7 @@ fn claude_titles_use_only_bound_metadata_and_prefer_custom_titles() {
 }
 
 #[test]
-fn claude_title_reads_are_bounded_and_reject_links_shared_files_and_partial_records() {
+fn claude_title_reads_allow_groups_but_reject_world_writes_links_and_partial_records() {
     let root = temp();
     let session = uuid::Uuid::now_v7().to_string();
     let path = transcript(root.path(), &session, &[]);
@@ -81,6 +81,8 @@ fn claude_title_reads_are_bounded_and_reject_links_shared_files_and_partial_reco
     let mut bytes = vec![b'x'; TAIL_BYTES as usize + 10];
     bytes.extend(format!("\n{record}\n{{\"type\":\"custom-title\"").bytes());
     config::write_private(&path, &bytes).unwrap();
+    assert_eq!(claude_title(&event).as_deref(), Some("fresh"));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
     assert_eq!(claude_title(&event).as_deref(), Some("fresh"));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
     assert!(claude_title(&event).is_none());

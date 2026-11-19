@@ -25,7 +25,7 @@ gent backup history ~/gent-backups/node.age --identity ~/gent-recovery.key --lis
 
 Close MCP connections using bindings inside the selected node directory before creating an archive. Busy locks or database readers make creation fail without publishing an archive. Gent does not stop or restart services itself. `create` honors the selected cluster and `--cluster`; all other backup commands work without initialized node state and reject `--cluster`. All commands support `--json`.
 
-Archive, key and extraction destinations must be new paths with existing parent directories owned by the current user and not writable by others. Creation refuses keys or archives inside the selected node directory. It never overwrites an existing archive or key. Extraction never overwrites an existing path, including an empty directory, and performs no service, provider or enrollment requests.
+Archive, key and extraction destinations must be new paths with existing parent directories owned by the current user and not world-writable. Group write access to these parent directories is allowed. Creation refuses keys or archives inside the selected node directory. It never overwrites an existing archive or key. Extraction never overwrites an existing path, including an empty directory, and performs no service, provider or enrollment requests.
 
 ## Why a database copy cannot resume a node
 
