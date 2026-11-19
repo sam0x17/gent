@@ -1,6 +1,49 @@
 use super::*;
 
 #[tokio::test]
+async fn negotiated_peers_reply_once_and_expired_capabilities_restore_compatibility() {
+    let mut pair = Pair::new().await;
+    pair.stores[0].presence_tick().unwrap();
+    let first = challenge(&pair, 0);
+    reply(
+        &pair,
+        0,
+        wire::acknowledgement(first, crate::messages::wire::CURRENT),
+    )
+    .unwrap();
+    let peer = pair.stores[1].identity.node.id().to_owned();
+    let request = |pair: &Pair, nonce: Uuid| {
+        let store = &pair.stores[0];
+        let tx = store.db.unchecked_transaction().unwrap();
+        store
+            .network_session(&tx, store.identity.state(&tx).unwrap())
+            .import_event(
+                &peer,
+                Event::Presence {
+                    challenge: nonce,
+                    reply: false,
+                },
+            )
+            .unwrap();
+        tx.commit().unwrap();
+    };
+    let queued = |pair: &Pair| {
+        pair.stores[0].db.query_row(
+        "SELECT COUNT(*) FROM network_events WHERE json_extract(CAST(body AS TEXT),'$.event.kind')='presence' AND json_extract(CAST(body AS TEXT),'$.event.reply')=1", [], |r|r.get::<_,usize>(0)).unwrap()
+    };
+    let before = queued(&pair);
+    request(&pair, Uuid::new_v4());
+    assert_eq!(queued(&pair) - before, 1);
+    advance(&pair, 0, 91);
+    let before = queued(&pair);
+    request(&pair, Uuid::new_v4());
+    assert_eq!(
+        queued(&pair) - before,
+        crate::messages::wire::NEGOTIATED.len() + 2
+    );
+}
+
+#[tokio::test]
 async fn wire_capabilities_require_fresh_matching_proofs() {
     let mut pair = Pair::new().await;
     pair.stores[0].presence_tick().unwrap();

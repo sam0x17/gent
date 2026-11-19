@@ -110,6 +110,21 @@ impl StoreSession<'_> {
             "presence peer must be remote"
         );
         if !reply {
+            if self.wire_version(peer)? == crate::messages::wire::CURRENT {
+                // A freshly negotiated peer understands this single proof,
+                // which confirms presence, wire version and activity together.
+                // Unknown/expired peers still receive every compatible reply.
+                let supported = wire::acknowledgement(challenge, crate::messages::wire::CURRENT);
+                return self.queue(
+                    peer,
+                    event_id(peer, supported, true),
+                    Event::Presence {
+                        challenge: supported,
+                        reply: true,
+                    },
+                    None,
+                );
+            }
             // Send supported codecs newest first. Older peers ignore proofs
             // they do not recognize, then consume their own supported reply.
             for &version in crate::messages::wire::NEGOTIATED.iter().rev() {
