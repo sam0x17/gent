@@ -286,3 +286,44 @@ fn old_member_encoding_is_unchanged_and_enrollment_cannot_request_hosting() {
             .contains("separate configuration edit")
     );
 }
+
+#[test]
+fn bound_owner_and_owner_candidates_must_remain_native() {
+    let mut f = Fixture::new();
+    f.host(2, 3);
+    let next = OwnerKey::generate().unwrap();
+    assert!(
+        f.nodes[2]
+            .prepare_owner_candidate(&f.state, &next, &uuid::Uuid::new_v4().to_string(), NOW)
+            .unwrap_err()
+            .to_string()
+            .contains("native node")
+    );
+    let candidate = f.nodes[1]
+        .prepare_owner_candidate(&f.state, &next, &uuid::Uuid::new_v4().to_string(), NOW)
+        .unwrap();
+    let authorization = f
+        .state
+        .authorize_owner_candidate(&f.owner, &candidate, NOW)
+        .unwrap();
+    let update = f
+        .state
+        .accept_owner_authorization(&next, &candidate, &authorization, NOW)
+        .unwrap();
+    f.state.apply_chain(&[update], NOW).unwrap();
+    assert!(
+        f.state
+            .host_node(&next, f.nodes[1].id(), f.nodes[0].id(), NOW)
+            .unwrap_err()
+            .to_string()
+            .contains("active owner node")
+    );
+    assert!(
+        f.state
+            .host_node(&next, f.nodes[0].id(), f.nodes[1].id(), NOW)
+            .is_ok()
+    );
+    let mut malformed = f.state.renew(&next, NOW).unwrap().state;
+    malformed.nodes.get_mut(f.nodes[1].id()).unwrap().hosted_by = Some(f.nodes[0].id().into());
+    assert!(next.sign_revision(&f.state, malformed).is_err());
+}

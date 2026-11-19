@@ -3,6 +3,9 @@ use anyhow::Result;
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+mod signal_tests;
+
 enum Exit {
     Service(Result<()>),
     Dependent(Result<()>),

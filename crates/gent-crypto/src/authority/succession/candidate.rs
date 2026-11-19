@@ -63,7 +63,13 @@ impl SignedOwnerCandidate {
             proposal.issued_at >= state.state().issued_at,
             "candidate predates its state"
         );
-        state.authorize_node(&proposal.node.id, &proposal.node.signing_key, now)?;
+        ensure!(
+            state
+                .authorize_node(&proposal.node.id, &proposal.node.signing_key, now)?
+                .hosted_by
+                .is_none(),
+            "owner candidate must be a native node"
+        );
         public_key(&proposal.owner_key)?;
         ensure!(
             !owner_keys(&state.state().owner_transitions, state.state().owner_key)

@@ -64,8 +64,11 @@ impl Authority {
             "peer authority does not match configuration sequence"
         );
         ensure!(
-            state.nodes.values().any(|n| n.can_configure),
-            "cluster requires an administrator"
+            state
+                .nodes
+                .values()
+                .any(|n| n.can_configure && n.hosted_by.is_none()),
+            "cluster requires a native configuration administrator"
         );
         Ok(())
     }

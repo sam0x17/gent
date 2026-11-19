@@ -496,10 +496,10 @@ impl ClusterState {
             .filter(|_| self.peer.is_none())
         {
             ensure!(
-                self.nodes
-                    .get(&successor.node.id)
-                    .is_some_and(|n| n.signing_key == successor.node.signing_key),
-                "active owner node cannot be removed or replaced before another handoff"
+                self.nodes.get(&successor.node.id).is_some_and(|n| {
+                    n.signing_key == successor.node.signing_key && n.hosted_by.is_none()
+                }),
+                "active owner node must remain enrolled and native until another handoff"
             );
         }
         ensure!(

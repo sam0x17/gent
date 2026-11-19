@@ -419,6 +419,12 @@ impl StoreSession<'_> {
                 .state
                 .delegate_configuration(owner, node_id, *allow, timestamp),
             ConfigurationEdit::HostNode { node_id, parent } => {
+                // Epoch-zero owner state has no signed owner/node binding.
+                // Its runtime writer must reject hosting itself before signing.
+                ensure!(
+                    self.state.state().peer.is_some() || node_id != self.identity.node.id(),
+                    "active owner node must remain native until another handoff"
+                );
                 self.state.host_node(owner, node_id, parent, timestamp)
             }
             ConfigurationEdit::CreateGroup { name } => {

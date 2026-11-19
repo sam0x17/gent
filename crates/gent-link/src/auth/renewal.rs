@@ -129,6 +129,7 @@ pub async fn run_daemon(
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let home = lock.home().to_owned();
+    let shutdown = gent_daemon::shutdown::with_signals(shutdown)?;
     let native_stop = tokio_util::sync::CancellationToken::new();
     let web_stop = tokio_util::sync::CancellationToken::new();
     let maintenance = async {
@@ -141,7 +142,7 @@ pub async fn run_daemon(
         anyhow::bail!("{stopped} stopped unexpectedly")
     };
     crate::lifecycle::run(
-        gent_daemon::run_locked(lock, native_stop.clone().cancelled_owned()),
+        gent_daemon::run_locked_until(lock, native_stop.clone().cancelled_owned()),
         async {
             crate::web::maintain(&home, web_stop.clone()).await;
             ensure!(

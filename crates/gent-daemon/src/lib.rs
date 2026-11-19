@@ -14,6 +14,7 @@ mod receive;
 pub mod recovery;
 pub mod replica;
 mod runtime;
+pub mod shutdown;
 mod storage;
 pub use receive::receive_file;
 pub mod store;
@@ -124,6 +125,15 @@ pub async fn run_locked(
     lock: DaemonLock,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
+    run_locked_until(lock, shutdown::with_signals(shutdown)?).await
+}
+
+/// Run until the caller requests shutdown, without installing signal handlers.
+/// Supervisors use this to drain dependent services before stopping native RPC.
+pub async fn run_locked_until(
+    lock: DaemonLock,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
     tokio::pin!(shutdown);
     let home = lock.home();
     let build_info = Arc::new(lock.build_info.clone());
@@ -146,13 +156,10 @@ pub async fn run_locked(
     busy.push(b'\n');
     let sync_task = sync::start(store.clone())?;
     let invitation_task = invitation_transport::owner::start(store.clone());
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     eprintln!("Gent daemon listening at {}", socket.display());
     loop {
         tokio::select! {
             _=&mut shutdown=>break,
-            _=tokio::signal::ctrl_c()=>break,
-            _=terminate.recv()=>break,
             _=maintenance.tick(), if maintenance_tasks.is_empty()=> {
                 let store = store.clone();
                 maintenance_tasks.spawn(access::run(store, "maintenance", |store| store.maintain()));

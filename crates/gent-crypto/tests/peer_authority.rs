@@ -9,6 +9,9 @@ use uuid::Uuid;
 
 const NOW: u64 = 1_800_000_000;
 
+#[path = "peer_authority/hosting.rs"]
+mod hosting;
+
 fn header(
     state: &VerifiedState,
     head: &Head,

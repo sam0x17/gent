@@ -30,6 +30,29 @@ fn hosting_uses_existing_configuration_authority_and_persists_exact_retries() {
         node_id: child.id().into(),
         parent: parent.clone(),
     };
+    let checkpoint = store
+        .identity
+        .state(&store.db)
+        .unwrap()
+        .checkpoint()
+        .clone();
+    let rejected = store
+        .execute(Request::Owner {
+            credential: credential.clone(),
+            action: OwnerOp::Configure {
+                request_id: Uuid::new_v4().to_string(),
+                edit: ConfigurationEdit::HostNode {
+                    node_id: parent.clone(),
+                    parent: child.id().into(),
+                },
+            },
+        })
+        .unwrap();
+    assert_eq!(rejected["state"], "rejected");
+    assert_eq!(
+        store.identity.state(&store.db).unwrap().checkpoint(),
+        &checkpoint
+    );
     {
         let tx = store.db.unchecked_transaction().unwrap();
         let state = store.identity.state(&tx).unwrap();
