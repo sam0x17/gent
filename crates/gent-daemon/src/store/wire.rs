@@ -37,6 +37,12 @@ impl StoreSession<'_> {
             crate::messages::wire::NEGOTIATED.contains(&version),
             "unsupported wire capability"
         );
+        // A new capability proof may arrive inside an older queued envelope.
+        // Keep the stronger evidence until it expires. In particular, lower
+        // records must not extend its freshness and prevent a later downgrade.
+        if self.wire_version(peer)? > version {
+            return Ok(());
+        }
         let member = self.state.state().nodes.get(peer).context("unknown peer")?;
         self.db.execute("INSERT INTO wire_peers VALUES(?1,?2,?3,?4) ON CONFLICT(peer) DO UPDATE SET peer_key=excluded.peer_key,version=excluded.version,confirmed_at=excluded.confirmed_at",params![peer,member.signing_key.as_slice(),version,self.timestamp])?;
         Ok(())
