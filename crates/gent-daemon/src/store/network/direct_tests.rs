@@ -3,6 +3,30 @@ use crate::sync::direct::Direct;
 use std::sync::Mutex;
 
 #[tokio::test]
+async fn bootstrap_can_stop_only_after_a_verified_receipt_for_the_current_link() {
+    let pair = Pair::new().await;
+    let peer = pair.stores[1].identity.node.id();
+    let group = pair.group();
+    assert!(!pair.stores[0].mesh_link_confirmed(peer).unwrap());
+    assert!(!pair.stores[0].mesh_link_confirmed("absent").unwrap());
+    let receipt = pair.stores[1].transport_receipt(&group, false).unwrap();
+    assert!(receipt.sequence() > 0);
+    pair.stores[0]
+        .transport_confirm(&group, false, Some(&receipt))
+        .unwrap();
+    assert!(pair.stores[0].mesh_link_confirmed(peer).unwrap());
+    // A corrupt saved receipt is never accepted as evidence for cancelling work.
+    pair.stores[0]
+        .db
+        .execute(
+            "UPDATE stream_confirmed SET receipt=x'00' WHERE group_id=?1",
+            [&group],
+        )
+        .unwrap();
+    assert!(pair.stores[0].mesh_link_confirmed(peer).is_err());
+}
+
+#[tokio::test]
 async fn direct_delivers_with_signed_receipts_and_disabled_path_preserves_cloud_retry() {
     let mut pair = Pair::new().await;
     super::directory_push_tests::negotiate(&mut pair);

@@ -71,7 +71,9 @@ impl Store {
             .query_map([], |r| Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,Vec<u8>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut packets = Vec::new();
         for (id, peer, bytes) in rows {
-            if state.transport_host(&peer).is_ok_and(|host| host == peer) {
+            if state.transport_host(&peer).is_ok_and(|host| host == peer)
+                && !self.mesh_link_confirmed(&peer)?
+            {
                 packets.push(Packet::decode(&bytes)?);
             } else {
                 self.db.execute(
@@ -85,6 +87,26 @@ impl Store {
             )?;
         }
         Ok(packets)
+    }
+
+    pub(in crate::store) fn mesh_link_confirmed(&self, peer: &str) -> Result<bool> {
+        // Enrollment and mesh setup can race. An installed local link alone
+        // cannot cancel a Welcome the remote node still needs. A verified
+        // receipt for application-stream traffic proves the peer has that link.
+        let group: Option<Vec<u8>> = self
+            .db
+            .query_row(
+                "SELECT outgoing FROM network_links WHERE peer=?1",
+                [peer],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(group) = group else {
+            return Ok(false);
+        };
+        Ok(self
+            .transport_confirm(&group, false, None)?
+            .is_some_and(|r| r.sequence() > 0))
     }
 
     pub(crate) fn direct_mesh_confirm(&self, receipt: &Receipt) -> Result<()> {
