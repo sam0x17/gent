@@ -290,6 +290,12 @@ pub(in crate::store) fn restore(
         )?;
         ensure!(!outside, "checkpoint contains unrelated native records");
     }
+    // A completed object may be older than its original download window.
+    // Give the replacement time to fetch ciphertext without extending retention.
+    source.execute(
+        "UPDATE file_objects SET incomplete_until=MIN(expires_at,?1) WHERE complete=0",
+        [now() + crate::file_objects::INCOMPLETE_TTL_SECONDS as i64],
+    )?;
     let finals=parent.prepare("SELECT t.id,t.final_message FROM relay_turns t JOIN messages m ON m.id=t.final_message
         JOIN agents a ON a.id=m.sender WHERE a.node_id!=?1 AND t.intermediary IN (SELECT id FROM agents WHERE node_id=?1)")?
         .query_map([node],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;

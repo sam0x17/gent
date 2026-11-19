@@ -208,6 +208,13 @@ fn file_checkpoint_waits_for_upload_and_retains_grant_without_native_bytes() {
         .db
         .execute("UPDATE file_chunks SET uploaded=1 WHERE object_id=?1", [id])
         .unwrap();
+    pair.parent
+        .db
+        .execute(
+            "UPDATE file_objects SET incomplete_until=?2 WHERE id=?1",
+            params![id, now() - 1],
+        )
+        .unwrap();
     let checkpoint = snapshot::export(pair.homes[0].path(), &node).unwrap();
     let encoded = serde_json::to_string(&checkpoint).unwrap();
     assert!(!encoded.contains("synthetic portable file"));
@@ -215,6 +222,8 @@ fn file_checkpoint_waits_for_upload_and_retains_grant_without_native_bytes() {
     let tx = pair.parent.db.transaction().unwrap();
     snapshot::restore(&tx, &checkpoint, pair.state.anchor(), &node).unwrap();
     tx.commit().unwrap();
+    assert!(pair.parent.db.query_row("SELECT incomplete_until>?2 AND incomplete_until<=expires_at FROM file_objects WHERE id=?1",
+        params![id,now()], |r|r.get::<_,bool>(0)).unwrap());
     assert_eq!(
         pair.parent
             .db
