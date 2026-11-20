@@ -240,6 +240,121 @@ impl Pair {
 }
 
 #[tokio::test]
+async fn tcp_only_peer_watch_retries_exact_ciphertext_until_a_signed_receipt() {
+    let mut pair = Pair::new().await;
+    let group = pair.group();
+    let baseline = pair.stores[1].transport_receipt(&group, false).unwrap();
+    pair.stores[0]
+        .transport_confirm(&group, false, Some(&baseline))
+        .unwrap();
+    let sent = pair.send(vec![]).unwrap();
+    let stores = pair.stores.map(|s| Arc::new(std::sync::Mutex::new(s)));
+    let stream = crate::sync::Stream {
+        group,
+        outgoing: true,
+        configuration: false,
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        crate::sync::exercise_peer_watch(&stores, stream),
+    )
+    .await
+    .unwrap();
+    let inbox = stores[1]
+        .lock()
+        .unwrap()
+        .execute(Request::Agent {
+            credential: pair.keys[1].clone(),
+            action: AgentOp::Inbox,
+        })
+        .unwrap();
+    assert_eq!(inbox.as_array().unwrap().len(), 1);
+    assert_eq!(inbox[0]["id"], sent["message_id"]);
+}
+
+#[tokio::test]
+async fn uploaded_packets_wait_offline_and_replay_until_the_reader_signs() {
+    let mut pair = Pair::new().await;
+    let group = pair.group();
+    let baseline = pair.stores[1].transport_receipt(&group, false).unwrap();
+    let first = baseline.sequence() + 1;
+    pair.stores[0]
+        .transport_confirm(&group, false, Some(&baseline))
+        .unwrap();
+    let dirty = |store: &Store| store.sync_pending_groups().unwrap().contains(&group);
+    assert!(!dirty(&pair.stores[0]));
+    let sent = pair.send(vec![]).unwrap();
+    assert!(dirty(&pair.stores[0]));
+    pair.stores[0].data_prepare(&group).unwrap();
+    let packet = pair.stores[0]
+        .data_outgoing(&group, first)
+        .unwrap()
+        .unwrap();
+    let next = first + 1;
+    // The relay stored the packet, but the sender did not get the PUT response.
+    assert_eq!(
+        pair.stores[0]
+            .relay_upload_start(&group, next, first)
+            .unwrap(),
+        first
+    );
+    assert!(dirty(&pair.stores[0]));
+    pair.stores[0].record_relay_upload(&group, next).unwrap();
+    pair.reopen(0);
+    assert!(!dirty(&pair.stores[0]));
+    assert!(
+        pair.stores[0]
+            .relay_upload_start(&group, next + 1, first)
+            .is_err()
+    );
+    assert!(!dirty(&pair.stores[0]));
+
+    // Relay rollback makes the suffix runnable even across a sender restart.
+    assert_eq!(
+        pair.stores[0]
+            .relay_upload_start(&group, first, first)
+            .unwrap(),
+        first
+    );
+    pair.reopen(0);
+    assert!(dirty(&pair.stores[0]));
+    let replay = pair.stores[0]
+        .data_outgoing(&group, first)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.encode().unwrap(), packet.encode().unwrap());
+    pair.stores[0].record_relay_upload(&group, next).unwrap();
+    pair.stores[1].data_receive(&replay).unwrap();
+    // Lose the receiver's checkpoint before the sender sees it.
+    let lost = pair.stores[1].transport_receipt(&group, false).unwrap();
+    assert_eq!(
+        pair.stores[0]
+            .transport_confirm(&group, false, None)
+            .unwrap(),
+        Some(baseline)
+    );
+    assert_eq!(
+        pair.stores[0]
+            .data_outgoing(&group, first)
+            .unwrap()
+            .unwrap()
+            .encode()
+            .unwrap(),
+        replay.encode().unwrap()
+    );
+    pair.reopen(1);
+    let recovered = pair.stores[1].transport_receipt(&group, false).unwrap();
+    assert_eq!(recovered, lost);
+    pair.stores[0]
+        .transport_confirm(&group, false, Some(&recovered))
+        .unwrap();
+    assert!(pair.stores[0].data_outgoing(&group, first).is_err());
+    let inbox = pair.agent(1, AgentOp::Inbox).unwrap();
+    assert_eq!(inbox.as_array().unwrap().len(), 1);
+    assert_eq!(inbox[0]["id"], sent["message_id"]);
+}
+
+#[tokio::test]
 async fn retired_partial_message_cancels_after_restart_even_if_fragment_cursor_rolled_back() {
     for failed_cursor in [false, true] {
         let mut pair = Pair::new().await;

@@ -181,6 +181,100 @@ async fn automatic_sync_catches_up_after_outage_and_peer_restart() {
 }
 
 #[tokio::test]
+async fn offline_relay_rollback_replays_ciphertext_and_an_idle_reader_repairs_a_lost_receipt() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    async fn wait_for<T>(mut read: impl FnMut() -> Option<T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(value) = read() {
+                    return value;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("mailbox repair did not finish")
+    }
+
+    let relay = RelayServer::start().await;
+    let f = Fixture::new(&relay.endpoint, &relay.token);
+    let source = f.start(0);
+    let revision = f.set(policy("sleeping-reader"));
+    let db = rusqlite::Connection::open(f.homes[0].path().join("state.sqlite3")).unwrap();
+    let group: Vec<u8> = db
+        .query_row("SELECT group_id FROM configuration_streams", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mailbox = URL_SAFE_NO_PAD.encode(&group);
+    wait_for(|| {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM configuration_streams c JOIN streams s USING(group_id)
+         JOIN stream_relay_upload u USING(group_id) WHERE c.group_id=?1 AND c.revision=?2
+         AND u.next_sequence=s.head+1)",
+            rusqlite::params![group, revision],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap()
+        .then_some(())
+    })
+    .await;
+    let original = relay.data.lock().unwrap()[&mailbox].clone();
+    assert!(original.len() > 1);
+    relay
+        .data
+        .lock()
+        .unwrap()
+        .get_mut(&mailbox)
+        .unwrap()
+        .truncate(1);
+    wait_watchers(&relay, 1).await;
+    relay.notices.send(relay::Notice::Close).unwrap();
+    wait_for(|| (relay.data.lock().unwrap()[&mailbox] == original).then_some(())).await;
+
+    drop(source);
+    wait_watchers(&relay, 0).await;
+    let _receiver = f.start(1);
+    f.wait_revision(revision).await;
+    let key = format!("checkpoint/{mailbox}");
+    let signed = wait_for(|| {
+        let data = relay.data.lock().unwrap();
+        let wire = data.get(&key)?.first()?;
+        let receipt = gent_crypto::stream::Receipt::decode(wire).unwrap();
+        (receipt.sequence() + 1 == original.len() as u64).then(|| wire.clone())
+    })
+    .await;
+    // Keep the reader and its successful-publication cache alive. Lose only
+    // the remote receipt, with no new packet to advance the local head.
+    relay.data.lock().unwrap().remove(&key);
+    wait_watchers(&relay, 1).await;
+    relay.notices.send(relay::Notice::Close).unwrap();
+    wait_for(|| {
+        relay
+            .data
+            .lock()
+            .unwrap()
+            .get(&key)?
+            .first()
+            .filter(|wire| **wire == signed)
+            .map(|_| ())
+    })
+    .await;
+    let _source = f.start(0);
+    wait_for(|| {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM stream_confirmed WHERE group_id=?1 AND receipt=?2)",
+            rusqlite::params![group, signed],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap()
+        .then_some(())
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn receiver_checkpoints_retire_only_verified_history_and_restore_lost_relay_storage() {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use gent_crypto::stream::Packet;

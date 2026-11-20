@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -137,7 +137,11 @@ impl Store {
           CREATE TABLE IF NOT EXISTS exchanges (id TEXT PRIMARY KEY, a TEXT NOT NULL REFERENCES agents(id), b TEXT NOT NULL REFERENCES agents(id), expires_at INTEGER NOT NULL, count INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL REFERENCES agents(id), recipient TEXT NOT NULL REFERENCES agents(id), request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0, UNIQUE(sender,request_id));
           CREATE INDEX IF NOT EXISTS messages_inbox ON messages(recipient,acknowledged);
-          CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
+          CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS stream_relay_upload (
+            group_id BLOB PRIMARY KEY REFERENCES streams(group_id) ON DELETE CASCADE,
+            next_sequence INTEGER NOT NULL CHECK(next_sequence >= 0)
+          );")?;
         network::schema(&db)?;
         configuration::schema(&db)?;
         peer_configuration::schema(&db)?;
@@ -520,11 +524,79 @@ impl Store {
         streams.extend(self.data_streams()?);
         Ok(streams)
     }
-    pub(crate) fn sync_pending_groups(&self) -> Result<std::collections::BTreeSet<Vec<u8>>> {
-        Ok(self.db.prepare("SELECT DISTINCT l.outgoing FROM network_links l JOIN network_events e ON e.peer=l.peer
-            UNION SELECT o.group_id FROM stream_outbox o LEFT JOIN stream_confirmed c ON c.group_id=o.group_id
-            WHERE length(o.packet)>0 AND (c.sequence IS NULL OR o.sequence>c.sequence)")?
-            .query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    pub(crate) fn sync_pending_groups(&self) -> Result<BTreeSet<Vec<u8>>> {
+        let mut groups = self
+            .db
+            .prepare(
+                "SELECT l.outgoing FROM network_events e JOIN network_links l ON l.peer=e.peer
+             UNION SELECT s.group_id FROM streams s
+               LEFT JOIN stream_relay_upload u USING(group_id)
+               LEFT JOIN stream_confirmed c USING(group_id)
+               WHERE s.writer=?1 AND s.head>=COALESCE(u.next_sequence,0)
+                 AND s.head>COALESCE(c.sequence,-1)
+             UNION SELECT group_id FROM owner_deliveries WHERE next<parts
+             UNION SELECT s.group_id FROM streams s JOIN stream_pending p
+               ON p.group_id=s.group_id AND p.sequence=s.head+1",
+            )?
+            .query_map([self.identity.node.id()], |r| r.get(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+
+        // An unpublished legacy configuration revision is work even before
+        // its first fragment has a stream position. Old owner epochs stop at
+        // their signed handoff baseline.
+        let mut query = self.db.prepare(
+            "SELECT c.group_id,c.grant,h.revision FROM configuration_streams c
+             JOIN streams s USING(group_id) JOIN authority_history h ON h.revision=c.revision+1
+             WHERE s.writer=?1",
+        )?;
+        let mut rows = query.query([self.identity.node.id()])?;
+        let mut state = None;
+        while let Some(row) = rows.next()? {
+            let grant = gent_crypto::SignedConfigurationGrant::decode(&row.get::<_, Vec<u8>>(1)?)?;
+            let state = match &mut state {
+                Some(state) => state,
+                empty => empty.insert(self.identity.state(&self.db)?),
+            };
+            let limit = encrypted::ordered::configuration::publication_limit(&grant, state);
+            let revision: u64 = row.get(2)?;
+            if limit.is_none_or(|last| revision <= last) {
+                groups.insert(row.get(0)?);
+            }
+        }
+        Ok(groups)
+    }
+
+    /// A relay can roll back its queue or lose a successful PUT response.
+    /// Replay from the lower position, excluding only the verified prefix.
+    pub(crate) fn relay_upload_start(
+        &self,
+        group: &[u8],
+        relay_next: u64,
+        confirmed_next: u64,
+    ) -> Result<u64> {
+        let (local_next, uploaded): (u64, u64) = self.db.query_row(
+            "SELECT s.head+1,COALESCE(u.next_sequence,0) FROM streams s
+             LEFT JOIN stream_relay_upload u USING(group_id) WHERE s.group_id=?1 AND s.writer=?2",
+            params![group, self.identity.node.id()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        ensure!(
+            relay_next <= local_next,
+            "relay position exceeds local history"
+        );
+        if relay_next < uploaded {
+            self.record_relay_upload(group, relay_next)?;
+        }
+        Ok(uploaded.min(relay_next).max(confirmed_next))
+    }
+
+    pub(crate) fn record_relay_upload(&self, group: &[u8], next: u64) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO stream_relay_upload(group_id,next_sequence) VALUES(?1,?2)
+             ON CONFLICT(group_id) DO UPDATE SET next_sequence=excluded.next_sequence",
+            params![group, next],
+        )?;
+        Ok(())
     }
     pub(crate) fn sync_prepare(&self, group: &[u8]) -> Result<()> {
         let mut endpoint =

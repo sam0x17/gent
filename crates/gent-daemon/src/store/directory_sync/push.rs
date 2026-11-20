@@ -36,7 +36,7 @@ impl StoreSession<'_> {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let unchanged = match previous {
+        let (unchanged, reset_frontier) = match previous {
             Some((key, bytes)) if key == member.signing_key => {
                 let saved: Snapshot = serde_json::from_slice(&bytes)?;
                 // Prioritized records can carry an older snapshot after a new
@@ -48,20 +48,28 @@ impl StoreSession<'_> {
                 // V5 roots remain actionable after a DB restore even when the
                 // sequence decreases. MLS ordering authenticates new arrivals;
                 // a sequence is not authority over registration generations.
-                let same = saved.root == remote.root && saved.incarnation == remote.incarnation;
+                let reset =
+                    saved.incarnation != remote.incarnation || remote.sequence < saved.sequence;
+                let same = !reset && saved.root == remote.root;
                 if same && remote.frontier.is_empty() {
                     remote.frontier = saved.frontier.clone();
                 }
-                same && (remote.frontier.is_empty() || !saved.frontier.is_empty())
+                (
+                    same && (remote.frontier.is_empty() || !saved.frontier.is_empty()),
+                    reset,
+                )
             }
-            _ => false,
+            Some(_) => (false, true),
+            None => (false, false),
         };
         self.db.execute("INSERT INTO directory_push(peer,peer_key,remote) VALUES(?1,?2,?3)
             ON CONFLICT(peer) DO UPDATE SET peer_key=excluded.peer_key,remote=excluded.remote,
             local_hash=CASE WHEN ?4 THEN local_hash ELSE NULL END,
             cursor=CASE WHEN ?4 THEN cursor ELSE '' END,complete=CASE WHEN ?4 THEN complete ELSE 0 END",
             params![peer, member.signing_key.as_slice(), serde_json::to_vec(&remote)?, unchanged])?;
-        if self.directory_snapshot()?.root == remote.root {
+        let local = self.directory_snapshot()?;
+        self.observe_frontier(peer, &member.signing_key, &local, &remote, reset_frontier)?;
+        if local.root == remote.root {
             self.db.execute(
                 "UPDATE directory_push SET verified_at=?2,verified_count=?3 WHERE peer=?1",
                 params![peer, self.timestamp, remote.root.count],

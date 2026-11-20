@@ -1,8 +1,11 @@
-//! Untrusted relay hints wake reconciliation; they never advance local history.
-use super::{Relay, health::Health, schedule::Hints};
+//! The outbound watch carries mailbox hints and, after negotiation, peer
+//! sessions. Only verified endpoint receipts advance confirmed history.
+pub(super) mod wss;
+use super::{Relay, SharedStore, health::Health, schedule::Hints};
 use anyhow::{Context, Result, ensure};
 use futures_util::{SinkExt, StreamExt};
 use gent_protocol::transport_watch::{MAX_BYTES, Notice, Subscription};
+use gent_protocol::transport_wss as wire;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -23,6 +26,7 @@ const PONG: &str = "gent-pong-v1";
 const COALESCE: Duration = Duration::from_millis(50);
 
 pub(super) struct Listener {
+    pub(super) wss: wss::Wss,
     connected: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
@@ -35,11 +39,15 @@ impl Drop for Listener {
 impl Listener {
     pub(super) fn start(
         relay: Relay,
+        store: SharedStore,
         wakeup: Arc<Notify>,
         connected: Arc<AtomicBool>,
         hints: Arc<Hints>,
         health: Arc<Health>,
     ) -> Self {
+        let wss = wss::Wss::default();
+        health.set_wss(wss.metrics.clone());
+        let route = wss.clone();
         let flag = connected.clone();
         let task = tokio::spawn(async move {
             let mut delay = Duration::from_secs(1);
@@ -47,7 +55,7 @@ impl Listener {
                 let started = Instant::now();
                 // Errors contain no application state and are not logged with
                 // request headers, which carry the transport credential.
-                let result = listen(&relay, &wakeup, &flag, &hints).await;
+                let result = listen(&relay, &wakeup, &flag, &hints, &route, &store).await;
                 health.watch_ended(
                     result.as_ref().err().map(|e| safe_reason(e)),
                     started.elapsed(),
@@ -61,7 +69,11 @@ impl Listener {
                 delay = (delay * 2).min(Duration::from_secs(30));
             }
         });
-        Self { connected, task }
+        Self {
+            connected,
+            task,
+            wss,
+        }
     }
     pub(super) fn reconcile_after(&self) -> Duration {
         Duration::from_secs(5)
@@ -95,6 +107,8 @@ async fn listen(
     wakeup: &Notify,
     connected: &AtomicBool,
     hints: &Hints,
+    route: &wss::Wss,
+    store: &SharedStore,
 ) -> Result<()> {
     let mut url = relay.origin.join("v1/watch")?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
@@ -113,20 +127,41 @@ async fn listen(
     request
         .headers_mut()
         .insert("Authorization", relay.authorization.clone());
+    let offered = scheme == "wss"
+        && super::local(store.clone(), |s| {
+            Ok(matches!(
+                s.direct_settings()?.direct,
+                crate::config::Direct::Auto
+            ))
+        })
+        .await
+        .unwrap_or(false);
+    if offered {
+        request
+            .headers_mut()
+            .insert(wire::HEADER, wire::OFFER.parse()?);
+    }
+    let limit = if offered { wire::MAX_FRAME } else { MAX_BYTES };
     let config = WebSocketConfig::default()
         .read_buffer_size(4096)
         .write_buffer_size(0)
-        .max_write_buffer_size(MAX_BYTES * 2)
-        .max_message_size(Some(MAX_BYTES))
-        .max_frame_size(Some(MAX_BYTES));
+        .max_write_buffer_size(limit * 2)
+        .max_message_size(Some(limit))
+        .max_frame_size(Some(limit));
     // This API performs one handshake and does not follow redirects. The same
     // origin validation and TLS trust as HTTP apply; credentials stay on origin.
-    let (mut socket, _) = tokio::time::timeout(
+    let (mut socket, response) = tokio::time::timeout(
         Duration::from_secs(5),
         connect_async_with_config(request, Some(config), true),
     )
     .await
     .context("push connection timed out")??;
+    let negotiated = offered
+        && response
+            .headers()
+            .get(wire::HEADER)
+            .is_some_and(|value| value == wire::OFFER);
+    let mut peer: Option<wss::Connection> = None;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut ready = false;
@@ -139,6 +174,12 @@ async fn listen(
     subscribe.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            frame = async { peer.as_mut().expect("peer watch ready").next_send().await }, if peer.is_some() => {
+                let frame = frame?;
+                let bytes = frame.len();
+                tokio::time::timeout(Duration::from_secs(3), socket.send(Message::Binary(frame.into()))).await??;
+                peer.as_ref().expect("peer watch ready").sent(bytes);
+            }
             _ = subscribe.tick(), if ready && version == 2 => {
                 let interests = hints.interests();
                 if subscription.as_ref() != Some(&interests) {
@@ -161,14 +202,21 @@ async fn listen(
                     Message::Text(text) if ready && text == PONG => {
                         deadline = Instant::now() + Duration::from_secs(45);
                     }
+                    Message::Binary(bytes) => {
+                        peer.as_mut().context("unnegotiated peer frame")?.received(&bytes, store)?;
+                    }
                     Message::Text(text) => {
+                        ensure!(text.len() <= MAX_BYTES, "oversized notification");
                         let notice: Notice = serde_json::from_str(&text)?;
                         ensure!((1..=2).contains(&notice.version) && notice.streams.len() <= gent_protocol::transport_watch::MAX_INTERESTS && notice.streams.iter().all(|s|s.valid()), "unsupported push version or bounds");
                         match notice.event.as_str() {
                             "ready" if !ready => {
                                 ready = true;
                                 version = notice.version;
-                                hints.all();
+                                if version == 2 && negotiated {
+                                    peer = Some(wss::Connection::open(route));
+                                }
+                                hints.reconnected();
                                 deadline = Instant::now() + Duration::from_secs(45);
                                 connected.store(true, Ordering::SeqCst);
                                 // Reconcile after subscription to close the race

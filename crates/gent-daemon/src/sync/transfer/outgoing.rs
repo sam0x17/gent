@@ -13,16 +13,19 @@ pub(super) async fn run(
     health: &health::Health,
     wakeup: Arc<Notify>,
 ) -> Result<Option<u64>> {
-    let batch = prepare(store, group, configuration, first, wakeup).await?;
+    let batch = prepare(store.clone(), group, configuration, first, wakeup).await?;
     if batch.packets().is_empty() {
         health.idle(group);
         return Ok(None);
     }
     let count = relay.put_batch(group, first, &batch).await?;
+    let next = first + count as u64;
+    let g = group.to_vec();
+    local(store, move |s| s.record_relay_upload(&g, next)).await?;
     for _ in 0..count {
         health.progress(group, true, crate::store::now());
     }
-    Ok(Some(first + count as u64 - 1))
+    Ok(Some(next - 1))
 }
 
 pub(in crate::sync) async fn prepare(

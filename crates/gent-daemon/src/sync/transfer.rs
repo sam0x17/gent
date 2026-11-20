@@ -6,20 +6,34 @@ pub(super) use checkpoints::State;
 
 const TIME_SLICE: Duration = Duration::from_secs(2);
 
-pub(super) async fn run(
-    store: SharedStore,
-    relay: Relay,
-    entry: Stream,
-    health: Arc<health::Health>,
-    wakeup: Arc<Notify>,
-    state: &mut State,
-    direct: Option<Arc<super::direct::Direct>>,
-) -> Result<Option<u64>> {
-    if let Some(direct) = direct
-        && let Some(result) = direct
-            .transfer(store.clone(), &entry, &health, wakeup.clone())
-            .await
-    {
+#[derive(Clone)]
+pub(super) struct Peers {
+    pub(super) direct: Option<Arc<direct::Direct>>,
+    pub(super) wss: notifications::wss::Wss,
+}
+
+impl Peers {
+    pub(super) async fn transfer(
+        &self,
+        store: &SharedStore,
+        relay: &Relay,
+        entry: &Stream,
+        health: &health::Health,
+        wakeup: &Arc<Notify>,
+        state: &mut State,
+    ) -> Option<Result<Option<u64>>> {
+        let direct = match &self.direct {
+            Some(direct) => {
+                direct
+                    .transfer(store.clone(), entry, health, wakeup.clone())
+                    .await
+            }
+            None => None,
+        };
+        let result = match direct {
+            Some(result) => result,
+            None => self.wss.transfer(store, entry, health, wakeup).await?,
+        };
         if result.is_ok() {
             let group = entry.group.clone();
             if let Ok(Some(receipt)) = local(store.clone(), move |s| {
@@ -27,40 +41,47 @@ pub(super) async fn run(
             })
             .await
             {
-                state.retire_direct(&relay, &receipt);
+                state.retire_direct(relay, &receipt);
             }
         }
-        return result;
+        Some(result)
     }
+}
+
+pub(super) async fn run(
+    store: SharedStore,
+    relay: Relay,
+    entry: Stream,
+    health: Arc<health::Health>,
+    wakeup: Arc<Notify>,
+    state: &mut State,
+) -> Result<Option<u64>> {
     let group = entry.group;
     let mut last = None;
     if entry.outgoing {
-        // Both reads are independent. A position is only a service hint; the
-        // endpoint still verifies receipts and refuses positions ahead of history.
-        let (received, mut next) = relay.state(&group).await?;
+        let mut remote = relay.state(&group).await?;
+        let received = remote.receipt.take();
+        let relay_next = remote.next;
         let g = group.clone();
-        let confirmed = local(store.clone(), move |store| {
-            store.transport_confirm(&g, entry.configuration, received.as_ref())
+        let (confirmed, first) = local(store.clone(), move |store| {
+            let confirmed = store.transport_confirm(&g, entry.configuration, received.as_ref())?;
+            let floor = confirmed.as_ref().map_or(0, |r| r.sequence() + 1);
+            let first = store.relay_upload_start(&g, relay_next, floor)?;
+            Ok((confirmed, first))
         })
         .await?;
         if let Some(receipt) = confirmed {
             // Only verified receiver evidence permits retirement. Restore it
             // before preparing packets so full queues can recover.
-            let restore = next <= receipt.sequence();
+            let restore = remote.restore_floor(&receipt);
             state.publish(&relay, &receipt, true, restore).await?;
-            if restore {
-                next = receipt
-                    .sequence()
-                    .checked_add(1)
-                    .context("relay position overflow")?;
-            }
         }
         return outgoing::run(
             store,
             &relay,
             &group,
             entry.configuration,
-            next,
+            first,
             &health,
             wakeup,
         )
@@ -76,6 +97,7 @@ pub(super) async fn run(
             Ok((next, store.transport_receipt(&g, entry.configuration)?))
         })
         .await?;
+        let was_published = state.matches(&receipt);
         state.publish(&relay, &receipt, false, false).await?;
         let mut latest = None;
         let deadline = Instant::now() + TIME_SLICE;
@@ -85,6 +107,12 @@ pub(super) async fn run(
             let packets = relay.get_batch(&group, next).await?;
             if packets.is_empty() {
                 health.idle(&group);
+                // Bulk sweeps skip current streams before reaching this path.
+                // A legacy relay or a single idle stream still needs to detect
+                // loss of just the checkpoint, with no new packets or hints.
+                if was_published && relay.checkpoint(&group).await?.as_ref() != Some(&receipt) {
+                    state.publish(&relay, &receipt, false, true).await?;
+                }
             }
             for packet in packets {
                 let g = group.clone();

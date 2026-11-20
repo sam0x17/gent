@@ -21,7 +21,10 @@ mod files;
 pub(crate) mod health;
 mod network_error;
 mod notifications;
+#[cfg(test)]
+pub(crate) use notifications::wss::tests::exercise_peer_watch;
 mod schedule;
+mod sweep;
 #[cfg(test)]
 mod test_http;
 mod transfer;
@@ -50,6 +53,20 @@ pub(crate) struct Relay {
 #[serde(deny_unknown_fields)]
 struct Position {
     next: u64,
+}
+struct MailboxState {
+    receipt: Option<Receipt>,
+    next: u64,
+    retired_next: Option<u64>,
+}
+
+impl MailboxState {
+    fn restore_floor(&self, receipt: &Receipt) -> bool {
+        self.next <= receipt.sequence()
+            || self
+                .retired_next
+                .is_some_and(|next| next <= receipt.sequence())
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,7 +109,7 @@ impl Relay {
             cluster,
         })
     }
-    async fn state(&self, group: &[u8]) -> Result<(Option<Receipt>, u64)> {
+    async fn state(&self, group: &[u8]) -> Result<MailboxState> {
         if self.states.enabled() {
             let response = self
                 .mailbox("GET", self.checkpoint_route(group, "state")?, vec![])
@@ -110,12 +127,23 @@ impl Relay {
                 struct State {
                     next: u64,
                     checkpoint: Option<String>,
+                    retired_sequence: Option<i64>,
                 }
                 let state: State = serde_json::from_slice(&response.bytes(8192)?)?;
                 ensure!(
                     state.next <= gent_crypto::stream::MAX_SEQUENCE,
                     "invalid relay position"
                 );
+                let retired_next = state
+                    .retired_sequence
+                    .map(|floor| {
+                        ensure!(
+                            (-1..state.next as i64).contains(&floor),
+                            "invalid relay retirement floor"
+                        );
+                        Ok::<_, anyhow::Error>((floor + 1) as u64)
+                    })
+                    .transpose()?;
                 let receipt = state
                     .checkpoint
                     .map(|s| -> Result<_> {
@@ -128,10 +156,19 @@ impl Relay {
                         Ok(receipt)
                     })
                     .transpose()?;
-                return Ok((receipt, state.next));
+                return Ok(MailboxState {
+                    receipt,
+                    next: state.next,
+                    retired_next,
+                });
             }
         }
-        tokio::try_join!(self.checkpoint(group), self.position(group))
+        let (receipt, next) = tokio::try_join!(self.checkpoint(group), self.position(group))?;
+        Ok(MailboxState {
+            receipt,
+            next,
+            retired_next: None,
+        })
     }
     fn route(&self, group: &[u8], sequence: Option<u64>) -> Result<Url> {
         let mut path = format!("v1/mailboxes/{}", URL_SAFE_NO_PAD.encode(group));
@@ -228,7 +265,7 @@ impl Relay {
         );
         Ok(Some(receipt))
     }
-    async fn put_checkpoint(&self, receipt: &Receipt, retire: bool) -> Result<()> {
+    async fn put_checkpoint(&self, receipt: &Receipt, retire: bool) -> Result<Retirement> {
         let action = if retire { "retire" } else { "checkpoint" };
         let response = self
             .mailbox(
@@ -242,10 +279,31 @@ impl Relay {
             "relay checkpoint storage failed ({})",
             response.status()
         );
-        // Service replies are availability hints; only a locally verified
-        // receiver signature authorizes retirement in the endpoint database.
-        Ok(())
+        if !retire {
+            return Ok(Retirement::Drained);
+        }
+        let body = response.bytes(128)?;
+        if body.is_empty() {
+            return Ok(Retirement::Legacy);
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Progress {
+            more: bool,
+        }
+        Ok(if serde_json::from_slice::<Progress>(&body)?.more {
+            Retirement::More
+        } else {
+            Retirement::Drained
+        })
     }
+}
+
+#[derive(Clone, Copy)]
+enum Retirement {
+    More,
+    Drained,
+    Legacy,
 }
 
 pub(crate) async fn bounded(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
@@ -318,16 +376,23 @@ async fn run(
     let hints = Arc::new(schedule::Hints::default());
     let push = notifications::Listener::start(
         relay.clone(),
+        store.clone(),
         wakeup.clone(),
         health.connected.clone(),
         hints.clone(),
         health.clone(),
     );
+    let peers = transfer::Peers {
+        direct: direct.clone(),
+        wss: push.wss.clone(),
+    };
     let _files = files.start(store.clone());
     let mut retries = BTreeMap::<Vec<u8>, Retry>::new();
     let mut transferred = BTreeMap::<Vec<u8>, u64>::new();
     let mut checkpoints = BTreeMap::<Vec<u8>, transfer::State>::new();
     let mut schedule = schedule::Schedule::default();
+    let mut was_connected = false;
+    let sweep_support = Arc::new(batch::Support::default());
     let mut previous_error = None;
     let configuration = crate::configuration_log::ConfigurationRelay::from_relay(relay.clone());
     let mut next_control = Instant::now();
@@ -388,6 +453,7 @@ async fn run(
             .map(|error| error.to_string());
         let control_error = error.is_some();
         let (mut successes, mut failures, mut local_error) = (0, 0, false);
+        let mut next_sweep = None;
         match result {
             Ok((streams, pending, queued)) => {
                 match pending {
@@ -405,49 +471,74 @@ async fn run(
                 checkpoints.retain(|group, _| streams.iter().any(|s| &s.group == group));
                 health.retain(&streams, mesh_pending);
                 hints.subscribe(&streams);
-                let selected = schedule.select(
-                    &streams,
-                    &hints,
-                    queued,
-                    &retries,
-                    health.connected.load(std::sync::atomic::Ordering::SeqCst),
-                );
-                let mut work = stream::iter(selected)
-                    .map(|entry| {
-                        let group = entry.group.clone();
-                        let store = store.clone();
-                        let relay = relay.clone();
-                        let health = health.clone();
-                        let wakeup = wakeup.clone();
-                        let direct = direct.clone();
-                        let mut checkpoint = checkpoints.remove(&group).unwrap_or_default();
-                        async move {
-                            let result = transfer::run(
-                                store,
-                                relay,
-                                entry,
-                                health,
-                                wakeup,
-                                &mut checkpoint,
-                                direct,
-                            )
-                            .await;
-                            (group, checkpoint, result)
+                let connected = health.connected.load(std::sync::atomic::Ordering::SeqCst);
+                if was_connected && !connected {
+                    // Start the five-second disconnected cadence immediately.
+                    hints.all();
+                }
+                was_connected = connected;
+                if hints.take_reconnected() {
+                    retries.clear();
+                }
+                let selected =
+                    schedule.select(&streams, &hints, queued.clone(), &retries, connected);
+                progressed |= schedule.has_ready(&retries);
+                next_sweep = Some(schedule.next_full());
+                let mut work = sweep::select(
+                    selected,
+                    schedule.timed_repair,
+                    sweep_support.clone(),
+                    store.clone(),
+                    relay.clone(),
+                    health.clone(),
+                )
+                .map(|(entry, check)| {
+                    let group = entry.group.clone();
+                    let store = store.clone();
+                    let relay = relay.clone();
+                    let health = health.clone();
+                    let wakeup = wakeup.clone();
+                    let peers = peers.clone();
+                    let outgoing = entry.outgoing;
+                    let peer_work = outgoing && !entry.configuration && queued.contains(&group);
+                    let mut checkpoint = checkpoints.remove(&group).unwrap_or_default();
+                    async move {
+                        if matches!(check, sweep::Check::Current) {
+                            health.idle(&group);
+                            return (group, outgoing, checkpoint, Ok(None));
                         }
-                    })
-                    .buffer_unordered(4);
+                        if matches!(check, sweep::Check::RestoreCheckpoint) {
+                            checkpoint.forget_publication();
+                        }
+                        checkpoint.collect_direct().await;
+                        if peer_work
+                            && let Some(result) = peers
+                                .transfer(&store, &relay, &entry, &health, &wakeup, &mut checkpoint)
+                                .await
+                            && !matches!(result, Ok(None))
+                        {
+                            return (group, outgoing, checkpoint, result);
+                        }
+                        let result =
+                            transfer::run(store, relay, entry, health, wakeup, &mut checkpoint)
+                                .await;
+                        (group, outgoing, checkpoint, result)
+                    }
+                })
+                .buffer_unordered(4);
                 let mut completed = Vec::new();
-                while let Some((group, checkpoint, result)) = work.next().await {
+                while let Some((group, outgoing, checkpoint, result)) = work.next().await {
                     match result {
                         Ok(position) => {
                             successes += 1;
-                            if let Some(position) = position {
+                            if checkpoint.more() || (!outgoing && position.is_some()) {
                                 schedule.again(group.clone());
+                            }
+                            if let Some(position) = position {
                                 progressed |=
                                     transferred.insert(group.clone(), position) != Some(position);
                             }
                             retries.remove(&group);
-                            completed.push((group, checkpoint));
                         }
                         Err(e) => {
                             failures += 1;
@@ -455,7 +546,7 @@ async fn run(
                                 (r.delay * 2).min(Duration::from_secs(30))
                             });
                             retries.insert(
-                                group,
+                                group.clone(),
                                 Retry {
                                     at: Instant::now() + delay,
                                     delay,
@@ -464,6 +555,7 @@ async fn run(
                             error.get_or_insert_with(|| e.to_string());
                         }
                     }
+                    completed.push((group, checkpoint));
                 }
                 drop(work);
                 checkpoints.extend(completed);
@@ -497,6 +589,9 @@ async fn run(
         };
         if mesh_pending {
             pause = pause.min(Duration::from_secs(1));
+        }
+        if let Some(at) = next_sweep {
+            pause = pause.min(at.saturating_duration_since(Instant::now()));
         }
         if let Some(retry) = retries
             .values()

@@ -1,48 +1,55 @@
-//! Opportunistic QUIC delivery of the exact durable MLS packets. Cloud fallback
-//! remains authoritative for availability; only signed receipts retire history.
+//! Opportunistic peer delivery of the same durable MLS history as the mailbox.
 use super::*;
-use base64::engine::general_purpose::STANDARD;
 use gent_protocol::transport_batch::Batch;
 use iroh::{
     Endpoint, EndpointId, RelayMap, RelayMode, SecretKey,
-    endpoint::{Connection, presets},
+    endpoint::{Connection, QuicTransportConfig, presets},
 };
-use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::{sync::Semaphore, task::JoinSet};
 
-const ALPN: &[u8] = b"gent/mls-stream/1";
-const LIMIT: usize = 3 * 1024 * 1024;
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    version: u8,
-    group: String,
-    batch: String,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Response {
-    version: u8,
-    receipt: String,
-}
+mod legacy;
+mod quic;
+pub(crate) mod session;
+
+const DIAL: Duration = Duration::from_millis(250);
+const OPERATION: Duration = Duration::from_secs(3);
+const BACKOFF: Duration = Duration::from_secs(30);
+
 #[derive(Default)]
-pub(super) struct Metrics {
+pub(crate) struct Metrics {
     sent: AtomicU64,
     received: AtomicU64,
     deliveries: AtomicU64,
     fallbacks: AtomicU64,
     connections: AtomicU64,
+    reused: AtomicU64,
+    streams: AtomicU64,
+    dial_failures: AtomicU64,
+    receipt_failures: AtomicU64,
 }
 impl Metrics {
     pub(super) fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({"sent_packet_bytes":self.sent.load(Ordering::Relaxed),"received_packet_bytes":self.received.load(Ordering::Relaxed),"confirmed_batches":self.deliveries.load(Ordering::Relaxed),"fallbacks":self.fallbacks.load(Ordering::Relaxed),"connections_opened":self.connections.load(Ordering::Relaxed),"scope":"Authenticated native transport, process counters; packet bytes exclude QUIC and discovery overhead."})
+        serde_json::json!({
+            "sent_packet_bytes": self.sent.load(Ordering::Relaxed),
+            "received_packet_bytes": self.received.load(Ordering::Relaxed),
+            "confirmed_batches": self.deliveries.load(Ordering::Relaxed),
+            "fallbacks": self.fallbacks.load(Ordering::Relaxed),
+            "connections_opened": self.connections.load(Ordering::Relaxed),
+            "connections_reused": self.reused.load(Ordering::Relaxed),
+            "binary_send_streams_opened": self.streams.load(Ordering::Relaxed),
+            "dial_failures": self.dial_failures.load(Ordering::Relaxed),
+            "receipt_failures": self.receipt_failures.load(Ordering::Relaxed),
+            "scope": "Native QUIC process counters. Byte counts include binary batch framing on v2 and canonical packet bytes on v1. Excludes signed replies and QUIC overhead."
+        })
     }
 }
+
 pub(crate) struct Direct {
     endpoint: Endpoint,
-    connections: Mutex<BTreeMap<EndpointId, (Connection, Instant)>>,
+    connections: Arc<quic::Pool>,
     failed: Mutex<BTreeMap<EndpointId, Instant>>,
+    in_flight: Semaphore,
     listener: JoinHandle<()>,
     metrics: Arc<Metrics>,
 }
@@ -51,6 +58,7 @@ impl Drop for Direct {
         self.listener.abort();
     }
 }
+
 impl Direct {
     pub(crate) async fn start(
         store: SharedStore,
@@ -69,92 +77,64 @@ impl Direct {
         };
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::generate())
-            .alpns(vec![ALPN.to_vec()])
+            .alpns(vec![quic::ALPN.to_vec(), legacy::ALPN.to_vec()])
+            .transport_config(
+                QuicTransportConfig::builder()
+                    .max_concurrent_bidi_streams(1u32.into())
+                    .max_concurrent_uni_streams(0u32.into())
+                    .build(),
+            )
             .clear_address_lookup()
             .relay_mode(relay)
             .bind()
             .await?;
         let metrics = Arc::new(Metrics::default());
         health.set_direct(metrics.clone());
-        let acceptor = endpoint.clone();
-        let measured = metrics.clone();
-        let listener = tokio::spawn(async move {
-            let limit = Arc::new(Semaphore::new(16));
-            let mut tasks = JoinSet::new();
-            loop {
-                tokio::select! {
-                    Some(_)=tasks.join_next(),if !tasks.is_empty()=>{},
-                    incoming=acceptor.accept()=>{
-                        let Some(incoming)=incoming else {break;};
-                        let Ok(permit)=limit.clone().try_acquire_owned() else {incoming.refuse();continue;};
-                        let store=store.clone();let metrics=measured.clone();let health=health.clone();
-                        tasks.spawn(async move {
-                            let _permit=permit;
-                            if let Ok(Ok(conn))=tokio::time::timeout(Duration::from_secs(5),incoming).await {
-                                let id=conn.remote_id();
-                                if local(store.clone(),move|s|s.direct_allowed(id)).await.is_err() {conn.close(1u32.into(),b"unrecognized node");return;}
-                                let _=serve(&conn,store,metrics,health).await;
-                                conn.close(0u32.into(),b"direct session ended");
-                            }
-                        });
-                    }
-                }
-            }
-        });
+        let connections = Arc::new(quic::Pool::default());
+        let listener = tokio::spawn(listen(
+            endpoint.clone(),
+            connections.clone(),
+            store,
+            metrics.clone(),
+        ));
         Ok(Some(Arc::new(Self {
             endpoint,
-            connections: Mutex::new(BTreeMap::new()),
+            connections,
             failed: Mutex::new(BTreeMap::new()),
+            in_flight: Semaphore::new(quic::MAX_LINKS),
             listener,
             metrics,
         })))
     }
+
     pub(crate) async fn advertise(&self, store: SharedStore) -> Result<()> {
         let mut addr = self.endpoint.addr();
         addr.addrs = addr.addrs.into_iter().take(16).collect();
         local(store, move |s| s.advertise_direct(addr)).await
     }
-    async fn connection(&self, addr: iroh::EndpointAddr) -> Result<Connection> {
-        let id = addr.id;
-        {
-            let mut saved = self
-                .connections
-                .lock()
-                .expect("direct connections poisoned");
-            saved.retain(|_, (c, used)| {
-                let alive = c.close_reason().is_none() && used.elapsed() < Duration::from_secs(60);
-                if !alive {
-                    c.close(0u32.into(), b"idle");
-                }
-                alive
-            });
-            if let Some((conn, used)) = saved.get_mut(&id) {
-                *used = Instant::now();
-                return Ok(conn.clone());
-            }
+
+    async fn connection(
+        &self,
+        addr: iroh::EndpointAddr,
+        store: SharedStore,
+    ) -> Result<Arc<quic::Link>> {
+        if let Some(link) = self.connections.get(addr.id) {
+            self.metrics.reused.fetch_add(1, Ordering::Relaxed);
+            return Ok(link);
         }
-        let conn = tokio::time::timeout(
-            Duration::from_millis(250),
-            self.endpoint.connect(addr, ALPN),
-        )
-        .await??;
-        let mut saved = self
+        let conn = tokio::time::timeout(DIAL, quic::dial(&self.endpoint, addr)).await??;
+        Ok(self
             .connections
-            .lock()
-            .expect("direct connections poisoned");
-        if saved.len() >= 16
-            && let Some(old) = saved
-                .iter()
-                .min_by_key(|(_, (_, at))| *at)
-                .map(|(id, _)| *id)
-            && let Some((conn, _)) = saved.remove(&old)
-        {
-            conn.close(0u32.into(), b"connection limit");
-        }
-        saved.insert(id, (conn.clone(), Instant::now()));
-        self.metrics.connections.fetch_add(1, Ordering::Relaxed);
-        Ok(conn)
+            .install(self.endpoint.id(), conn, true, store, self.metrics.clone()))
     }
+
+    fn fallback(&self, id: EndpointId) {
+        self.metrics.fallbacks.fetch_add(1, Ordering::Relaxed);
+        let mut failed = self.failed.lock().expect("direct backoff poisoned");
+        failed.retain(|_, at| at.elapsed() < BACKOFF);
+        failed.insert(id, Instant::now());
+    }
+
     pub(crate) async fn transfer(
         &self,
         store: SharedStore,
@@ -166,152 +146,120 @@ impl Direct {
             return None;
         }
         let group = entry.group.clone();
-        let addr = local(store.clone(), move |s| {
-            if matches!(s.direct_settings()?.direct, config::Direct::Off) {
-                return Ok(None);
-            }
-            s.direct_target(&group)
-        })
-        .await
-        .ok()
-        .flatten()?;
+        let addr = local(store.clone(), move |s| s.direct_target(&group))
+            .await
+            .ok()
+            .flatten()?;
         let id = addr.id;
         if self
             .failed
             .lock()
             .expect("direct backoff poisoned")
             .get(&id)
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+            .is_some_and(|at| at.elapsed() < BACKOFF)
+            && self.connections.get(id).is_none()
         {
             return None;
         }
-        let operation = async {
-            let conn = self.connection(addr).await?;
-            let receipt = request(&conn, &entry.group, &Batch::default()).await?;
-            let group = entry.group.clone();
-            let next = local(store.clone(), move |s| {
-                let receipt = s
-                    .transport_confirm(&group, false, Some(&receipt))?
-                    .context("missing verified direct receipt")?;
-                Ok(receipt.sequence() + 1)
-            })
-            .await?;
-            let batch = super::transfer::outgoing::prepare(
-                store.clone(),
-                &entry.group,
-                false,
-                next,
-                wakeup,
-            )
-            .await?;
-            if batch.packets().is_empty() {
+        let _permit = self.in_flight.try_acquire().ok()?;
+        let deadline = Instant::now() + OPERATION;
+        let pending = match tokio::time::timeout_at(
+            deadline,
+            session::Pending::prepare(store.clone(), &entry.group, wakeup),
+        )
+        .await
+        {
+            Ok(Ok(Some(pending))) => pending,
+            Ok(Ok(None)) => {
                 health.idle(&entry.group);
-                return Ok(None);
-            }
-            let receipt = request(&conn, &entry.group, &batch).await?;
-            let last = next + batch.packets().len() as u64 - 1;
-            ensure!(
-                receipt.sequence() >= last,
-                "direct receiver did not commit batch"
-            );
-            let group = entry.group.clone();
-            local(store, move |s| {
-                s.transport_confirm(&group, false, Some(&receipt))?;
-                Ok(())
-            })
-            .await?;
-            for packet in batch.packets() {
-                self.metrics
-                    .sent
-                    .fetch_add(packet.len() as u64, Ordering::Relaxed);
-                health.progress(&entry.group, true, crate::store::now());
-            }
-            self.metrics.deliveries.fetch_add(1, Ordering::Relaxed);
-            Ok(Some(last))
-        };
-        match tokio::time::timeout(Duration::from_secs(3), operation).await {
-            Ok(Ok(result)) => {
-                self.failed
-                    .lock()
-                    .expect("direct backoff poisoned")
-                    .remove(&id);
-                Some(Ok(result))
+                return Some(Ok(None));
             }
             _ => {
                 self.metrics.fallbacks.fetch_add(1, Ordering::Relaxed);
-                let mut failed = self.failed.lock().expect("direct backoff poisoned");
-                failed.retain(|_, at| at.elapsed() < Duration::from_secs(30));
-                failed.insert(id, Instant::now());
-                if let Some((conn, _)) = self
-                    .connections
-                    .lock()
-                    .expect("direct connections poisoned")
-                    .remove(&id)
-                {
-                    conn.close(1u32.into(), b"retry through mailbox");
+                return None;
+            }
+        };
+        let link =
+            match tokio::time::timeout_at(deadline, self.connection(addr, store.clone())).await {
+                Ok(Ok(link)) => link,
+                _ => {
+                    self.metrics.dial_failures.fetch_add(1, Ordering::Relaxed);
+                    self.fallback(id);
+                    return None;
                 }
+            };
+        let lane = link.reserve()?;
+        let operation = async {
+            if link.conn.alpn() == legacy::ALPN {
+                let receipt = legacy::request(&link.conn, &entry.group, &pending.batch).await?;
+                let sent = pending.batch.packets().iter().map(Vec::len).sum::<usize>();
+                self.metrics.sent.fetch_add(sent as u64, Ordering::Relaxed);
+                link.touch();
+                pending.confirm(store, &entry.group, receipt).await
+            } else {
+                pending
+                    .exchange(store, &entry.group, |bytes| {
+                        link.exchange(lane, bytes, &self.metrics)
+                    })
+                    .await
+            }
+        };
+        match tokio::time::timeout_at(deadline, operation).await {
+            Ok(Ok(last)) => {
+                self.metrics.deliveries.fetch_add(1, Ordering::Relaxed);
+                Some(Ok(Some(last)))
+            }
+            _ => {
+                self.metrics
+                    .receipt_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                link.conn.close(1u32.into(), b"retry through mailbox");
+                self.fallback(id);
                 None
             }
         }
     }
 }
-async fn request(conn: &Connection, group: &[u8], batch: &Batch) -> Result<Receipt> {
-    let (mut send, mut recv) = conn.open_bi().await?;
-    let body = serde_json::to_vec(&Request {
-        version: 1,
-        group: URL_SAFE_NO_PAD.encode(group),
-        batch: STANDARD.encode(batch.encode()),
-    })?;
-    ensure!(body.len() <= LIMIT, "direct batch too large");
-    send.write_all(&body).await?;
-    send.finish()?;
-    let response: Response = serde_json::from_slice(&recv.read_to_end(8192).await?)?;
-    ensure!(response.version == 1, "unsupported direct response");
-    Receipt::decode(&STANDARD.decode(response.receipt)?)
-}
-async fn serve(
-    conn: &Connection,
+
+async fn listen(
+    endpoint: Endpoint,
+    pool: Arc<quic::Pool>,
     store: SharedStore,
     metrics: Arc<Metrics>,
-    health: Arc<health::Health>,
-) -> Result<()> {
+) {
+    let limit = Arc::new(Semaphore::new(quic::MAX_LINKS));
+    let mut tasks = JoinSet::new();
+    let mut prune = tokio::time::interval(Duration::from_secs(1));
     loop {
-        let (mut send, mut recv) =
-            tokio::time::timeout(Duration::from_secs(60), conn.accept_bi()).await??;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let body = recv.read_to_end(LIMIT).await?;
-            let request: Request = serde_json::from_slice(&body)?;
-            ensure!(
-                request.version == 1 && request.group.len() <= 384,
-                "invalid direct request"
-            );
-            let group = URL_SAFE_NO_PAD.decode(request.group)?;
-            let batch = Batch::decode(&STANDARD.decode(request.batch)?)?;
-            let bytes = batch.packets().iter().map(Vec::len).sum::<usize>();
-            let count = batch.packets().len();
-            let packets = batch
-                .packets()
-                .iter()
-                .map(|b| Packet::decode(b))
-                .collect::<Result<Vec<_>>>()?;
-            let remote = conn.remote_id();
-            let received_group = group.clone();
-            let receipt = local(store.clone(), move |s| {
-                s.direct_receive(remote, &received_group, packets)
-            })
-            .await?;
-            metrics.received.fetch_add(bytes as u64, Ordering::Relaxed);
-            for _ in 0..count {
-                health.progress(&group, false, crate::store::now());
+        tokio::select! {
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
+            _ = prune.tick() => pool.prune(),
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else { break };
+                let Ok(permit) = limit.clone().try_acquire_owned() else {
+                    incoming.refuse();
+                    continue;
+                };
+                let local_id = endpoint.id();
+                let store = store.clone();
+                let pool = pool.clone();
+                let metrics = metrics.clone();
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_secs(5), incoming).await else {
+                        return;
+                    };
+                    let id = conn.remote_id();
+                    if local(store.clone(), move |s| s.direct_allowed(id)).await.is_err() {
+                        conn.close(1u32.into(), b"unrecognized node");
+                    } else if conn.alpn() == quic::ALPN {
+                        pool.install(local_id, conn, false, store, metrics);
+                    } else {
+                        let _ = legacy::serve(&conn, store, metrics).await;
+                        conn.close(0u32.into(), b"legacy session ended");
+                    }
+                });
             }
-            let bytes = serde_json::to_vec(&Response {
-                version: 1,
-                receipt: STANDARD.encode(receipt.encode()?),
-            })?;
-            send.write_all(&bytes).await?;
-            send.finish()?;
-            Ok::<_, anyhow::Error>(())
-        })
-        .await??;
+        }
     }
 }

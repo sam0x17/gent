@@ -6,6 +6,9 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+mod compact;
+pub mod mailbox;
+
 pub const MAX_CIPHERTEXT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_PACKET_BYTES: usize = 3 * 1024 * 1024;
 pub const MAX_SEQUENCE: u64 = (1 << 53) - 1;
@@ -42,7 +45,7 @@ impl Receipt {
     pub fn digest(&self) -> Digest {
         self.digest
     }
-    pub(crate) fn signing_input(&self) -> Result<Vec<u8>> {
+    fn validate(&self) -> Result<()> {
         ensure!(
             self.version == 1
                 && !self.group.is_empty()
@@ -51,6 +54,10 @@ impl Receipt {
                 && self.digest != [0; 32],
             "invalid stream receipt"
         );
+        Ok(())
+    }
+    pub(crate) fn signing_input(&self) -> Result<Vec<u8>> {
+        self.validate()?;
         let mut input = b"gent/stream-receipt/v1\0".to_vec();
         input.extend_from_slice(&(self.group.len() as u16).to_be_bytes());
         input.extend_from_slice(&self.group);
@@ -68,7 +75,7 @@ impl Receipt {
         .context("invalid stream receipt signature")
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
-        self.signing_input()?;
+        self.validate()?;
         ensure!(
             self.signature.len() == 64,
             "invalid receipt signature length"
@@ -134,7 +141,7 @@ impl Packet {
         &self.ciphertext
     }
 
-    pub(crate) fn signing_input(&self) -> Result<Vec<u8>> {
+    fn validate(&self) -> Result<()> {
         ensure!(self.version == 1, "unsupported stream packet version");
         ensure!(
             !self.group.is_empty() && self.group.len() <= 256,
@@ -148,6 +155,10 @@ impl Packet {
             !self.ciphertext.is_empty() && self.ciphertext.len() <= MAX_CIPHERTEXT_BYTES,
             "invalid ciphertext size"
         );
+        Ok(())
+    }
+    pub(crate) fn signing_input(&self) -> Result<Vec<u8>> {
+        self.validate()?;
         let mut input = b"gent/stream-packet/v1\0".to_vec();
         input.push(self.version);
         input.extend_from_slice(&(self.group.len() as u16).to_be_bytes());
@@ -175,7 +186,7 @@ impl Packet {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
-        self.signing_input()?;
+        self.validate()?;
         ensure!(
             self.signature.len() == 64,
             "invalid stream signature length"

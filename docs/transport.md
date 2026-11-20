@@ -2,10 +2,16 @@
 
 Gent persists outgoing messages before choosing a network path. Native nodes
 try an authenticated QUIC connection when a peer has advertised a reachable
-address. Otherwise they use the encrypted Cloudflare mailbox. Both paths carry
-the same saved MLS packets and use the receiver's signed receipt to retire
-history. A lost response can therefore be retried without importing the message
-twice.
+address. Peers with a compatible relay watch can also exchange packets through
+Cloudflare over that WebSocket. A sleeping or unreachable peer can pick up
+messages from its durable Cloudflare mailbox. All three paths carry the same
+MLS ciphertext and use the receiver's signed receipt to retire history.
+
+On a negotiated binary session either peer can push over the open connection.
+The sender resumes from its last verified receipt and the receiver signs the
+committed head. A lost reply or route change can replay identical packet bytes.
+The receiver deduplicates them before chat delivery. Older peers use the
+original QUIC protocol or the mailbox.
 
 Direct setup has a 250 ms connection deadline and a three-second total attempt
 deadline. Failed endpoints back off for 30 seconds while mailbox delivery stays
@@ -55,7 +61,9 @@ path reuse the saved ciphertext, including after a restart.
 
 Wire version 5 sends compact directory hashes. Unchanged directories carry only
 the root, sequence, and database incarnation. First advertisements, changed
-roots, repairs, and periodic refreshes include the bounded branch summaries.
+roots, repairs, and periodic refreshes while awaiting agreement include the
+bounded branch summaries. After authenticated agreement the peers compare
+roots until the directory or replica changes.
 Missing records are pushed automatically. Version 4 peers retain their complete
 summary format; negotiation makes rolling upgrades possible. Registration
 generations remain authoritative across directory sequence rollback.
@@ -65,7 +73,14 @@ Notifications only schedule reconciliation; they never prove delivery or advance
 a cursor. Queued work runs immediately, and a periodic full scan recovers lost
 hints. Scheduling rotates between streams to prevent a busy peer starving others.
 
+An uploaded packet can wait for its signed receipt without triggering another
+upload on each scheduler pass. A timed repair sweep can compare several incoming
+mailbox heads and signed-checkpoint fingerprints in one read. A changed stream,
+reconnect, uncertain write or missed notification still triggers reconciliation.
+
 The client combines up to 16 mailbox operations into one bounded HTTP exchange.
+Clients and relays negotiate a binary envelope and a compact representation of
+canonical packets and receipts. Older relays continue to accept JSON exchanges.
 The service checks authorization once after its storage gate, preserves operation
 order within each mailbox, and returns individual results. Operations across
 mailboxes can run concurrently; an exchange is not an atomic transaction.
@@ -74,12 +89,12 @@ and lost responses do not cause an immediate replay through another route.
 
 ## Inspection
 
-`gent sync --json` includes `relay_traffic` and `direct_traffic` under transport
-status, alongside directory agreement and queue state. Counters reset with the
-daemon. Relay counters cover mailbox exchanges and their fallback requests;
-they exclude configuration, files, HTTP framing, and other services. Direct
-packet counters exclude QUIC framing and address discovery. Read the returned
-scope before treating either counter as a network bill.
+`gent sync --json` reports mailbox operations and empty batch reads under
+`relay_traffic`, QUIC traffic and dial/receipt failures under `direct_traffic`,
+and separate counters for bulk sweeps and relayed WebSocket sessions. Counters
+reset when the daemon starts. Include the WebSocket and sweep bytes when
+comparing Cloudflare traffic. These process counters exclude TLS, address
+discovery and other services.
 
 Web connectors still enter through Cloudflare and use the existing carrier and
 checkpoint system. A native carrier may use direct transport to another node.

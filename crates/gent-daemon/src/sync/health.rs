@@ -12,6 +12,7 @@ use std::sync::{
 pub(crate) struct Health {
     pub(crate) connected: Arc<AtomicBool>,
     pass: Mutex<Pass>,
+    wss: Mutex<Option<Arc<super::notifications::wss::Metrics>>>,
     exchange: Mutex<Option<Arc<super::exchange::Exchange>>>,
     direct: Mutex<Option<Arc<super::direct::Metrics>>>,
 }
@@ -28,6 +29,10 @@ struct Pass {
     packets_received: u64,
     last_progress_at: Option<i64>,
     cycle_duration_ms: Option<u64>,
+    sweep_http_requests: u64,
+    sweep_request_body_bytes: u64,
+    sweep_response_body_bytes: u64,
+    sweep_current_streams: u64,
     watch_reconnects: u64,
     watch_last_error: Option<String>,
     watch_last_connection_ms: Option<u64>,
@@ -35,6 +40,19 @@ struct Pass {
     transferring: BTreeSet<Vec<u8>>,
 }
 impl Health {
+    pub(super) fn sweep_request(&self, bytes: usize) {
+        let mut pass = self.pass.lock().expect("sync health lock poisoned");
+        pass.sweep_http_requests += 1;
+        pass.sweep_request_body_bytes += bytes as u64;
+    }
+    pub(super) fn sweep_reply(&self, bytes: usize, current: u32) {
+        let mut pass = self.pass.lock().expect("sync health lock poisoned");
+        pass.sweep_response_body_bytes += bytes as u64;
+        pass.sweep_current_streams += u64::from(current);
+    }
+    pub(super) fn set_wss(&self, metrics: Arc<super::notifications::wss::Metrics>) {
+        *self.wss.lock().expect("peer watch metrics poisoned") = Some(metrics);
+    }
     pub(super) fn set_direct(&self, metrics: Arc<super::direct::Metrics>) {
         *self.direct.lock().expect("direct metrics poisoned") = Some(metrics);
     }
@@ -106,6 +124,14 @@ impl Health {
         let mut value = json!(*pass);
         value["transferring_streams"] = json!(pass.transferring.len());
         value["notifications_connected"] = json!(self.connected.load(Ordering::SeqCst));
+        if let Some(wss) = self
+            .wss
+            .lock()
+            .expect("peer watch metrics poisoned")
+            .as_ref()
+        {
+            value["wss_traffic"] = wss.snapshot();
+        }
         if let Some(direct) = self
             .direct
             .lock()

@@ -137,8 +137,17 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Current, pinned data-link identity for an authenticated session route.
+    pub(crate) fn session_peer(&self, group: &[u8], outgoing: bool) -> Result<String> {
+        ensure!(
+            matches!(self.direct_settings()?.direct, config::Direct::Auto),
+            "direct transport disabled"
+        );
+        self.data_peer(&self.db, group, outgoing)
+    }
+
     pub(crate) fn direct_target(&self, group: &[u8]) -> Result<Option<EndpointAddr>> {
-        let peer = self.data_peer(&self.db, group, true)?;
+        let peer = self.session_peer(group, true)?;
         let address:Option<Vec<u8>>=self.db.query_row("SELECT d.address FROM direct_peers d JOIN network_links l ON l.peer=d.peer AND l.peer_key=d.peer_key WHERE d.peer=?1 AND d.expires_at>?2",params![peer,now()],|r|r.get(0)).optional()?;
         address
             .map(|bytes| {
@@ -154,13 +163,35 @@ impl Store {
         group: &[u8],
         packets: Vec<Packet>,
     ) -> Result<Receipt> {
-        ensure!(
-            matches!(self.direct_settings()?.direct, config::Direct::Auto),
-            "direct transport disabled"
-        );
-        let peer = self.data_peer(&self.db, group, false)?;
+        let peer = self.session_peer(group, false)?;
         let allowed:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM direct_peers d JOIN network_links l ON l.peer=d.peer AND l.peer_key=d.peer_key WHERE d.peer=?1 AND d.endpoint=?2 AND d.expires_at>?3)",params![peer,endpoint.to_string(),now()],|r|r.get(0))?;
         ensure!(allowed, "unrecognized direct endpoint");
+        self.receive_session_packets(group, packets)
+    }
+
+    pub(crate) fn node_session_receive(
+        &mut self,
+        peer: &str,
+        group: &[u8],
+        packets: Vec<Packet>,
+    ) -> Result<Receipt> {
+        ensure!(
+            self.session_peer(group, false)? == peer,
+            "session peer mismatch"
+        );
+        self.receive_session_packets(group, packets)
+    }
+
+    fn receive_session_packets(&mut self, group: &[u8], packets: Vec<Packet>) -> Result<Receipt> {
+        let next = self.data_next(group)?;
+        if let Some(first) = packets.first() {
+            // A restored reader cannot accept a suffix whose prefix it lost.
+            ensure!(first.group() == group, "session group mismatch");
+            ensure!(
+                first.sequence() <= next,
+                "session prefix missing; mailbox reconciliation required"
+            );
+        }
         for packet in packets {
             ensure!(
                 packet.group() == group,
@@ -168,7 +199,6 @@ impl Store {
             );
             self.data_receive(&packet)?;
         }
-        self.data_next(group)?;
         self.transport_receipt(group, false)
     }
 }

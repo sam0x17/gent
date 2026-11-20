@@ -1,8 +1,10 @@
 //! Bounded, versioned multiplexing of the existing idempotent mailbox operations.
 use serde::{Deserialize, Serialize};
+pub mod binary;
 pub const VERSION: u8 = 1;
 pub const MAX_OPERATIONS: usize = 16;
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PATH_BYTES: usize = 432;
 pub const ROUTE: &str = "/v2/exchange";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -15,43 +17,47 @@ pub struct Operation {
 }
 impl Operation {
     pub fn valid(&self) -> bool {
-        let parts: Vec<_> = self.path.split('/').collect();
-        if !(4..=6).contains(&parts.len())
-            || !parts[0].is_empty()
-            || parts[1..3] != ["v1", "mailboxes"]
-        {
-            return false;
+        valid_route(&self.method, &self.path, !self.body.is_empty())
+    }
+}
+fn valid_route(method: &str, path: &str, has_body: bool) -> bool {
+    if path.len() > MAX_PATH_BYTES {
+        return false;
+    }
+    let parts: Vec<_> = path.split('/').collect();
+    if !(4..=6).contains(&parts.len()) || !parts[0].is_empty() || parts[1..3] != ["v1", "mailboxes"]
+    {
+        return false;
+    }
+    let mailbox = parts[3];
+    if mailbox.is_empty()
+        || mailbox.len() > 384
+        || !mailbox
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return false;
+    }
+    if method != "GET" && method != "PUT" {
+        return false;
+    }
+    if method == "GET" && has_body {
+        return false;
+    }
+    let sequence = |s: &str| {
+        s.parse::<u64>()
+            .is_ok_and(|n| n <= (1 << 53) - 2 && n.to_string() == s)
+    };
+    match parts.len() {
+        4 => method == "GET",
+        5 => {
+            sequence(parts[4])
+                || parts[4] == "checkpoint"
+                || (parts[4] == "state" && method == "GET")
+                || (parts[4] == "retire" && method == "PUT")
         }
-        let mailbox = parts[3];
-        if mailbox.is_empty()
-            || mailbox.len() > 384
-            || !mailbox
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            return false;
-        }
-        if self.method != "GET" && self.method != "PUT" {
-            return false;
-        }
-        if self.method == "GET" && !self.body.is_empty() {
-            return false;
-        }
-        let sequence = |s: &str| {
-            s.parse::<u64>()
-                .is_ok_and(|n| n <= (1 << 53) - 2 && n.to_string() == s)
-        };
-        match parts.len() {
-            4 => self.method == "GET",
-            5 => {
-                sequence(parts[4])
-                    || parts[4] == "checkpoint"
-                    || (parts[4] == "state" && self.method == "GET")
-                    || (parts[4] == "retire" && self.method == "PUT")
-            }
-            6 => parts[4] == "batch" && sequence(parts[5]),
-            _ => false,
-        }
+        6 => parts[4] == "batch" && sequence(parts[5]),
+        _ => false,
     }
 }
 #[derive(Serialize, Deserialize)]

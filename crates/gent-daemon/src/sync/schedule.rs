@@ -11,6 +11,7 @@ struct State {
     dirty: BTreeSet<Vec<u8>>,
     full: bool,
     control: bool,
+    reconnected: bool,
 }
 impl Hints {
     pub(super) fn subscribe(&self, streams: &[Stream]) {
@@ -40,6 +41,15 @@ impl Hints {
         state.full = true;
         state.control = true;
     }
+    pub(super) fn reconnected(&self) {
+        let mut state = self.0.lock().expect("sync hints poisoned");
+        state.full = true;
+        state.control = true;
+        state.reconnected = true;
+    }
+    pub(super) fn take_reconnected(&self) -> bool {
+        std::mem::take(&mut self.0.lock().expect("sync hints poisoned").reconnected)
+    }
     pub(super) fn control(&self) -> bool {
         std::mem::take(&mut self.0.lock().expect("sync hints poisoned").control)
     }
@@ -68,6 +78,7 @@ pub(super) struct Schedule {
     next_full: Instant,
     pending: BTreeSet<Vec<u8>>,
     cursor: usize,
+    pub(super) timed_repair: bool,
 }
 impl Default for Schedule {
     fn default() -> Self {
@@ -75,6 +86,7 @@ impl Default for Schedule {
             next_full: Instant::now(),
             pending: BTreeSet::new(),
             cursor: 0,
+            timed_repair: false,
         }
     }
 }
@@ -89,14 +101,15 @@ impl Schedule {
     ) -> Vec<Stream> {
         let now = Instant::now();
         let (full, dirty) = hints.take();
+        // A reconnect, explicit hint or follow-up to an active transfer can
+        // carry a waiting message. Fetch those without a conditional preflight.
+        self.timed_repair = now >= self.next_full
+            && !full
+            && dirty.is_empty()
+            && self.pending.is_empty()
+            && retries.is_empty();
         self.pending.extend(dirty);
         self.pending.extend(queued);
-        self.pending.extend(
-            streams
-                .iter()
-                .filter(|s| s.configuration)
-                .map(|s| s.group.clone()),
-        );
         if full || now >= self.next_full {
             self.pending.extend(streams.iter().map(|s| s.group.clone()));
             // Small deterministic per-process jitter avoids synchronized scans.
@@ -138,11 +151,56 @@ impl Schedule {
     pub(super) fn again(&mut self, group: Vec<u8>) {
         self.pending.insert(group);
     }
+    pub(super) fn next_full(&self) -> Instant {
+        self.next_full
+    }
+    pub(super) fn has_ready(&self, retries: &BTreeMap<Vec<u8>, Retry>) -> bool {
+        let now = Instant::now();
+        self.pending
+            .iter()
+            .any(|g| retries.get(g).is_none_or(|r| r.at <= now))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn uploaded_streams_wait_for_work_receipt_hint_reconnect_or_safety_deadline() {
+        let streams = [Stream {
+            group: vec![1],
+            outgoing: true,
+            configuration: true,
+        }];
+        let hints = Hints::default();
+        hints.subscribe(&streams);
+        let mut schedule = Schedule::default();
+        let retries = BTreeMap::new();
+        let mut select = |queued, connected| {
+            schedule
+                .select(&streams, &hints, queued, &retries, connected)
+                .len()
+        };
+        assert_eq!(select(BTreeSet::new(), true), 1);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(select(BTreeSet::new(), true), 0);
+        assert_eq!(select(BTreeSet::from([vec![1]]), true), 1);
+        assert_eq!(select(BTreeSet::new(), true), 0);
+        assert!(hints.changed(&hints.interests()));
+        assert_eq!(select(BTreeSet::new(), true), 1);
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert_eq!(select(BTreeSet::new(), true), 1);
+        hints.all();
+        assert_eq!(select(BTreeSet::new(), false), 1);
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(select(BTreeSet::new(), false), 0);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(select(BTreeSet::new(), false), 1);
+        hints.reconnected();
+        assert!(hints.take_reconnected());
+        assert!(!hints.take_reconnected());
+        assert_eq!(select(BTreeSet::new(), true), 1);
+    }
     #[test]
     fn continuously_queued_peers_cannot_starve_later_streams() {
         let streams: Vec<_> = (0..100)

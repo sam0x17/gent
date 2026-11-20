@@ -3,11 +3,22 @@ use super::*;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 type Requests = Vec<(String, Vec<u8>)>;
 pub(super) async fn server(responses: Vec<(u16, Vec<u8>)>) -> (Relay, JoinHandle<Requests>) {
+    server_with_headers(
+        responses
+            .into_iter()
+            .map(|(status, body)| (status, body, ""))
+            .collect(),
+    )
+    .await
+}
+pub(super) async fn server_with_headers(
+    responses: Vec<(u16, Vec<u8>, &'static str)>,
+) -> (Relay, JoinHandle<Requests>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
         let mut requests = Vec::new();
-        for (status, response) in responses {
+        for (status, response, headers) in responses {
             let (socket, _) = listener.accept().await.unwrap();
             let mut socket = BufReader::new(socket);
             let mut line = String::new();
@@ -37,7 +48,7 @@ pub(super) async fn server(responses: Vec<(u16, Vec<u8>)>) -> (Relay, JoinHandle
             socket
                 .write_all(
                     format!(
-                        "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status} Test\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
                         response.len()
                     )
                     .as_bytes(),
