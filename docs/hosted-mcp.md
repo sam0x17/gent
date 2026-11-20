@@ -22,7 +22,12 @@ same-node rules continue to use the web node's own identity.
 
 Gent starts the gateway on the creating node and saves a portable checkpoint.
 After that, any online native node with configuration authority can serve it.
-The current carrier renews its service lease using its own credentials. Updates
+The carrier and eligible standby nodes keep silent connections to the bridge
+while the connector is idle. A connector request or a pending native delivery
+can trigger a reachability check. If the carrier disconnects or fails that
+check, the bridge invites a standby to restore the checkpoint. A request
+made during takeover can take longer while the replacement restores the chat.
+Older bridges and clients use periodic lease renewal and takeover checks. Updates
 restart the gateway and preserve its messages, node identity and chat bindings. Upgrade all
 native cluster nodes with `gent update` for hosted-node routing. Existing web
 nodes migrate on their hosting machine and keep their connector URLs and chat

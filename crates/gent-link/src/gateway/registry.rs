@@ -55,6 +55,9 @@ pub(crate) struct Registry {
     cluster: String,
     node: String,
     workers: Arc<tokio::sync::Semaphore>,
+    // A cancelled HTTP task can leave a registry write running on a blocking
+    // thread. Keep the local carrier lock until its last registry clone drops.
+    pub(super) carrier_lock: Option<Arc<std::fs::File>>,
     pub(crate) access: super::access::AccessRoute,
     pub(crate) files: Arc<super::files::Runtime>,
     pub(crate) downloads: Arc<super::downloads::Runtime>,
@@ -378,6 +381,7 @@ impl Registry {
             cluster: cfg.cluster.id,
             node: cfg.node.id,
             workers: Arc::new(tokio::sync::Semaphore::new(MAX_WORKERS)),
+            carrier_lock: None,
             files: Arc::new(super::files::Runtime::default()),
             downloads: Arc::new(super::downloads::Runtime::default()),
         };

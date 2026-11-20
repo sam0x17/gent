@@ -135,10 +135,19 @@ fn columns(db: &Connection, table: &str) -> Result<Vec<String>> {
 }
 
 pub fn export(home: &Path, node: &str) -> Result<Snapshot> {
+    export_scoped(home, node, None)
+}
+
+pub fn export_for_epoch(home: &Path, node: &str, epoch: u64) -> Result<Snapshot> {
+    export_scoped(home, node, Some(epoch))
+}
+
+fn export_scoped(home: &Path, node: &str, epoch: Option<u64>) -> Result<Snapshot> {
     let cfg = config::load_for_runtime(home)?;
     let mut db = encrypted::open_database(home, "state.sqlite3")?;
     db.execute_batch("PRAGMA query_only=ON;")?;
     let tx = db.transaction()?;
+    super::check_epoch(&tx, node, epoch)?;
     let revision = tx.query_row(
         "SELECT revision FROM hosted_checkpoints WHERE node=?1 AND lease_until>?2",
         params![node, now()],
@@ -226,6 +235,11 @@ pub fn export(home: &Path, node: &str) -> Result<Snapshot> {
                 rows,
             },
         );
+    }
+    // Recheck against a fresh read after capturing the stable snapshot.
+    tx.commit()?;
+    if epoch.is_some() {
+        super::check_epoch(&db, node, epoch)?;
     }
     Ok(Snapshot {
         version: 1,

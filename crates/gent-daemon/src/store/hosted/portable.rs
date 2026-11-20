@@ -68,12 +68,63 @@ impl StoreSession<'_> {
                 | AgentOp::WorkComplete { .. }
                 | AgentOp::FileReceiveData { .. }
         ) {
+            self.web_state_changed(node)?;
+        }
+        Ok(())
+    }
+
+    // Incoming messages and delivery receipts are native work. They can arrive
+    // after the local web grant expires and must wake checkpoint publication.
+    pub(in crate::store) fn web_state_changed(&self, node: &str) -> Result<()> {
+        if node != self.identity.node.id() && self.local_node(node) {
             self.db.execute(
                 "UPDATE hosted_checkpoints SET revision=revision+1 WHERE node=?1",
                 [node],
             )?;
         }
         Ok(())
+    }
+
+    pub(in crate::store) fn record_web_demand(&self, node: &str, message: &str) -> Result<()> {
+        if self
+            .state
+            .state()
+            .nodes
+            .get(node)
+            .is_some_and(|n| n.hosted_by.is_some())
+        {
+            self.db.execute(
+                "INSERT INTO web_delivery_demand (node,message) VALUES (?1,?2)
+                 ON CONFLICT(node) DO UPDATE SET message=excluded.message",
+                params![node, message],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::store) fn web_delivery_demand(&self, node: &str) -> Result<Value> {
+        let remote = self
+            .state
+            .state()
+            .nodes
+            .get(node)
+            .and_then(|n| n.hosted_by.as_deref())
+            .is_some_and(|host| host != self.identity.node.id());
+        let message: Option<String> = if remote {
+            self.db
+                .query_row(
+                    "SELECT m.id FROM web_delivery_demand d JOIN messages m ON m.id=d.message
+                 JOIN exchanges e ON e.id=json_extract(m.payload,'$.exchange_id')
+                 WHERE d.node=?1 AND m.acknowledged=0 AND e.expires_at>?2
+                 AND NOT EXISTS(SELECT 1 FROM network_rejections WHERE message=m.id)",
+                    params![node, self.timestamp],
+                    |r| r.get(0),
+                )
+                .optional()?
+        } else {
+            None
+        };
+        Ok(json!({"message_id":message}))
     }
 
     pub(in crate::store) fn gate_web_event(
@@ -149,22 +200,58 @@ impl StoreSession<'_> {
     }
 
     pub(in crate::store) fn web_checkpoint(&self, node: &str) -> Result<Value> {
-        let (revision, durable, lease_until): (u64, u64, i64) = self.db.query_row(
-            "SELECT revision,durable,lease_until FROM hosted_checkpoints WHERE node=?1",
-            [node],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+        let (revision, durable, lease_until, epoch): (u64, u64, i64, Option<u64>) =
+            self.db.query_row(
+                "SELECT c.revision,c.durable,c.lease_until,g.epoch FROM hosted_checkpoints c
+             LEFT JOIN hosted_work_grants g USING(node) WHERE c.node=?1",
+                [node],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
         let hosting_here = self
             .state
             .transport_host(node)
             .is_ok_and(|host| host == self.identity.node.id());
         Ok(
-            json!({"revision":revision,"durable":durable,"lease_until":lease_until,"hosting_here":hosting_here}),
+            json!({"revision":revision,"durable":durable,"lease_until":lease_until,"epoch":epoch,"hosting_here":hosting_here}),
         )
     }
 
     pub(in crate::store) fn web_lease(&self, node: &str, seconds: u64) -> Result<Value> {
+        super::check_epoch(self.db, node, None)?;
         ensure!(seconds <= 25, "invalid local web lease");
+        self.save_web_deadline(node, self.timestamp + seconds as i64)
+    }
+
+    pub(in crate::store) fn web_grant(
+        &self,
+        node: &str,
+        epoch: u64,
+        expires_at: u64,
+    ) -> Result<Value> {
+        ensure!(
+            (1..(1u64 << 53)).contains(&epoch),
+            "invalid web carrier epoch"
+        );
+        let deadline = i64::try_from(expires_at)?;
+        let current = super::grant_now().max(self.timestamp);
+        ensure!(
+            deadline == 0 || (deadline > current && deadline <= current.saturating_add(25)),
+            "web carrier grant expired or too long"
+        );
+        // Zero is a tombstone. A fresh signed grant may resume an idle epoch
+        // after natural expiry, but cannot reopen a released or restarted one.
+        ensure!(self.db.execute(
+            "INSERT INTO hosted_work_grants(node,epoch) VALUES(?1,?2)
+             ON CONFLICT(node) DO UPDATE SET epoch=excluded.epoch,
+             restored=CASE WHEN epoch=excluded.epoch THEN restored ELSE 0 END
+             WHERE excluded.epoch>epoch OR (excluded.epoch=epoch AND
+                 (?3=0 OR EXISTS(SELECT 1 FROM hosted_checkpoints WHERE node=?1 AND lease_until>0)))",
+            params![node, epoch, deadline],
+        )? == 1, "web carrier epoch changed or closed");
+        self.save_web_deadline(node, deadline)
+    }
+
+    fn save_web_deadline(&self, node: &str, deadline: i64) -> Result<Value> {
         ensure!(
             self.state
                 .state()
@@ -181,9 +268,9 @@ impl StoreSession<'_> {
         self.db.execute(
             "INSERT INTO hosted_checkpoints VALUES(?1,1,0,?2)
             ON CONFLICT(node) DO UPDATE SET lease_until=excluded.lease_until",
-            params![node, self.timestamp + seconds as i64],
+            params![node, deadline],
         )?;
-        if !exists {
+        if !exists && self.local_node(node) {
             for chat in self.all_agents()?.into_iter().filter(|a| a.node_id == node) {
                 self.record_web_registration(&self.registration(&chat.id)?)?;
             }
@@ -191,7 +278,17 @@ impl StoreSession<'_> {
         self.web_checkpoint(node)
     }
 
-    pub(in crate::store) fn web_commit(&self, node: &str, revision: u64) -> Result<Value> {
+    pub(in crate::store) fn web_commit(
+        &self,
+        node: &str,
+        revision: u64,
+        epoch: Option<u64>,
+    ) -> Result<Value> {
+        super::check_epoch(self.db, node, epoch)?;
+        ensure!(
+            epoch.is_none() || self.local_node(node),
+            "web hosting route changed"
+        );
         ensure!(
             self.db.execute(
                 "UPDATE hosted_checkpoints SET durable=MAX(durable,?2)
@@ -210,6 +307,9 @@ impl StoreSession<'_> {
         )?;
         self.db.execute("DELETE FROM hosted_directory AS old WHERE node=?1 AND revision < (
             SELECT MAX(new.revision) FROM hosted_directory new WHERE new.agent=old.agent AND new.revision<=?2)", params![node,revision])?;
+        if epoch.is_some() {
+            super::check_epoch(self.db, node, epoch)?;
+        }
         self.web_checkpoint(node)
     }
 

@@ -28,7 +28,7 @@ async fn run(
                 .iter()
                 .any(|n| n["id"] == child.node.id && n["hosted_by"] == host.node.id)
         });
-        return super::failover::run(
+        return Box::pin(super::failover::run(
             parent,
             home,
             &child.node.id,
@@ -36,7 +36,7 @@ async fn run(
             create,
             stop,
             budget,
-        )
+        ))
         .await;
     }
     owner(
@@ -102,7 +102,7 @@ async fn run(
     let daemon_stop = CancellationToken::new();
     let gateway_stop = CancellationToken::new();
     if host.service.is_some() {
-        return super::failover::run(
+        return Box::pin(super::failover::run(
             parent,
             home,
             &child.node.id,
@@ -110,12 +110,20 @@ async fn run(
             true,
             stop,
             budget,
-        )
+        ))
         .await;
     }
     crate::lifecycle::run(
-        gent_daemon::hosted::run_with_budget(home, daemon_stop.clone().cancelled_owned(), budget),
-        gateway::run_web(home.to_owned(), gateway_stop.clone(), None),
+        Box::pin(gent_daemon::hosted::run_with_budget(
+            home,
+            daemon_stop.clone().cancelled_owned(),
+            budget,
+        )),
+        Box::pin(gateway::run_web(
+            home.to_owned(),
+            gateway_stop.clone(),
+            None,
+        )),
         std::future::pending(),
         stop.cancelled(),
         daemon_stop,
@@ -184,8 +192,8 @@ pub(crate) async fn maintain(parent: &Path, stop: CancellationToken) {
                                 // HTTP errors can contain credentials. Keep
                                 // supervisor diagnostics independent of them.
                                 let result=if let Some((node,name))=discovered {
-                                    super::failover::run(&parent,&home,&node,&name,false,token,budget).await
-                                } else {run(&parent,&home,token,budget).await};
+                                    Box::pin(super::failover::run(&parent,&home,&node,&name,false,token,budget)).await
+                                } else {Box::pin(run(&parent,&home,token,budget)).await};
                                 if result.is_err() {
                                     eprintln!("Gent web node stopped; retrying its saved runtime.");
                                 }
@@ -208,4 +216,38 @@ pub(crate) async fn maintain(parent: &Path, stop: CancellationToken) {
         token.cancel();
     }
     while tasks.join_next().await.is_some() {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_supervisor_futures_fit_on_the_default_worker_stack() {
+        let path = Path::new("unused");
+        let stop = CancellationToken::new();
+        let budget = gent_daemon::hosted::ConnectionBudget::default();
+        let futures = [
+            (
+                "supervisor",
+                std::mem::size_of_val(&maintain(path, stop.clone())),
+            ),
+            (
+                "named web runtime",
+                std::mem::size_of_val(&run(path, path, stop.clone(), budget.clone())),
+            ),
+            (
+                "failover",
+                std::mem::size_of_val(&super::super::failover::run(
+                    path, path, "web", "web", false, stop, budget,
+                )),
+            ),
+        ];
+        // Crossing this threshold previously embedded ~250 KiB in each task,
+        // copied at several await boundaries before the first control request.
+        for (name, bytes) in futures {
+            eprintln!("{name} future: {bytes} bytes");
+            assert!(bytes <= 16 * 1024, "{name} future is {bytes} bytes");
+        }
+    }
 }

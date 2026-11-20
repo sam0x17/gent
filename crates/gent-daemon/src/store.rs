@@ -274,11 +274,12 @@ impl Store {
                     node_id,
                     home,
                     checkpoint,
+                    epoch,
                 },
             ..
         } = &request
         {
-            return self.restore_web_node(node_id, home, checkpoint);
+            return self.restore_web_node(node_id, home, checkpoint, *epoch);
         }
         if let Request::Owner {
             action: OwnerOp::PrepareHostedNode { node_id, home },
@@ -334,6 +335,8 @@ impl Store {
             Request::Owner {
                 action: OwnerOp::Status
                     | OwnerOp::Nodes
+                    | OwnerOp::WebCheckpoint { .. }
+                    | OwnerOp::WebDeliveryDemand { .. }
                     | OwnerOp::NodeRemovals { .. }
                     | OwnerOp::WakePendingAgents { .. },
                 ..
@@ -396,8 +399,11 @@ impl Store {
                 gateway_credential,
                 credential,
                 action,
+                epoch,
             } => {
                 session.check_hosted(&node_id, &gateway_credential)?;
+                hosted::check_epoch(&tx, &node_id, epoch)?;
+                session.require_web_lease(&node_id)?;
                 session.dirty_web(&node_id, &action)?;
                 ensure!(
                     !matches!(
@@ -408,7 +414,11 @@ impl Store {
                     ),
                     "local filesystem tools are unavailable to hosted chats"
                 );
-                session.agent(&node_id, &credential, action, export_step)?
+                let value = session.agent(&node_id, &credential, action, export_step)?;
+                if epoch.is_some() {
+                    hosted::check_epoch(&tx, &node_id, epoch)?;
+                }
+                value
             }
             Request::HostedStatus {
                 node_id,
@@ -804,10 +814,30 @@ impl StoreSession<'_> {
     }
     fn owner(&mut self, action: OwnerOp) -> Result<Value> {
         match action {
+            OwnerOp::WebDeliveryDemand { node_id } => self.web_delivery_demand(&node_id),
+            OwnerOp::WebDeliveryChecked {
+                node_id,
+                message_id,
+            } => {
+                let cleared = self.db.execute(
+                    "DELETE FROM web_delivery_demand WHERE node=?1 AND message=?2",
+                    params![node_id, message_id],
+                )?;
+                Ok(json!({"cleared":cleared==1}))
+            }
             OwnerOp::WebAdmission { node_id, body_hash } => self.web_admission(&node_id, body_hash),
             OwnerOp::WebCheckpoint { node_id } => self.web_checkpoint(&node_id),
             OwnerOp::WebLease { node_id, seconds } => self.web_lease(&node_id, seconds),
-            OwnerOp::WebCommit { node_id, revision } => self.web_commit(&node_id, revision),
+            OwnerOp::WebGrant {
+                node_id,
+                epoch,
+                expires_at,
+            } => self.web_grant(&node_id, epoch, expires_at),
+            OwnerOp::WebCommit {
+                node_id,
+                revision,
+                epoch,
+            } => self.web_commit(&node_id, revision, epoch),
             OwnerOp::RestoreWebNode { .. } => unreachable!("handled before session"),
             OwnerOp::NodeInvite {
                 request_id,
@@ -1400,11 +1430,14 @@ impl StoreSession<'_> {
             message.recipient == who.id && self.deliverable(&message)?,
             UNAVAILABLE
         );
-        self.db.execute(
-            "UPDATE messages SET acknowledged=1 WHERE id=?1",
+        let changed = self.db.execute(
+            "UPDATE messages SET acknowledged=1 WHERE id=?1 AND acknowledged=0",
             [message_id],
         )?;
         let sender = self.get_agent(&message.sender)?;
+        if changed == 1 {
+            self.web_state_changed(&sender.node_id)?;
+        }
         if !self.local_node(&sender.node_id) {
             self.receipt(
                 self.state.transport_host(&sender.node_id)?,
@@ -1582,9 +1615,11 @@ impl StoreSession<'_> {
         tx.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES (?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
         self.bind_attachments(&message, &attachments)?;
         self.record_relay_message(&message)?;
+        self.web_state_changed(&recipient.node_id)?;
         self.gate_web_message(&message)?;
         self.save_activity(&sender.id, message.created_at)?;
         if remote {
+            self.record_web_demand(&recipient.node_id, &message.id)?;
             self.queue_message(
                 self.state.transport_host(&recipient.node_id)?,
                 request_id,

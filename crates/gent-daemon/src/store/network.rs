@@ -443,24 +443,28 @@ impl StoreSession<'_> {
                     return Ok(());
                 }
                 let message = self.message(&message_id)?;
+                let sender_node = self.get_agent(&message.sender)?.node_id;
                 ensure!(
-                    self.local_node(&self.get_agent(&message.sender)?.node_id)
+                    self.local_node(&sender_node)
                         && self
                             .state
                             .transport_host(&self.get_agent(&message.recipient)?.node_id)?
                             == peer,
                     "receipt belongs to another exchange"
                 );
-                if delivered {
+                let changed = if delivered {
                     self.db.execute(
-                        "UPDATE messages SET acknowledged=1 WHERE id=?1",
+                        "UPDATE messages SET acknowledged=1 WHERE id=?1 AND acknowledged=0",
                         [message_id],
-                    )?;
+                    )?
                 } else {
                     self.db.execute(
                         "INSERT OR IGNORE INTO network_rejections VALUES(?1)",
                         [message_id],
-                    )?;
+                    )?
+                };
+                if changed == 1 {
+                    self.web_state_changed(&sender_node)?;
                 }
                 Ok(())
             }
@@ -584,6 +588,7 @@ impl StoreSession<'_> {
                 self.db.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES(?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
                 self.bind_attachments(&message, &attachments)?;
                 self.record_relay_message(&message)?;
+                self.web_state_changed(&recipient.node_id)?;
                 Ok(())
             }
         }

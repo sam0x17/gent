@@ -80,7 +80,7 @@ pub(crate) fn origin(value: &str) -> Result<Url> {
     );
     Ok(url)
 }
-fn loopback(url: &Url) -> bool {
+pub(crate) fn loopback(url: &Url) -> bool {
     url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))
 }
 fn random() -> Result<[u8; 32]> {

@@ -12,6 +12,8 @@ path = "src/main.rs"
 [features]
 # Local auth proof only; rejects overrides unless both origins are loopback.
 test-auth-provider = []
+# Disposable hosted connector proofs with a loopback relay and bridge.
+test-web-bridge = []
 # Disposable updater proofs only. Never bless or deploy this feature.
 test-updates = []
 

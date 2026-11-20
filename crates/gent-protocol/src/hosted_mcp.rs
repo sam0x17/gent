@@ -11,6 +11,12 @@ pub const MAX_IN_FLIGHT: usize = 4;
 pub const REQUEST_SECONDS: u64 = 30;
 pub const PING: &str = "gent-mcp-ping-v1";
 pub const PONG: &str = "gent-mcp-pong-v1";
+/// Negotiated by portable carriers and their bridge. Legacy gateways keep their timed lease.
+pub const PASSIVE_HEADER: &str = "x-gent-web-passive";
+pub const STANDBY_HEADER: &str = "x-gent-web-standby";
+pub const AVAILABLE: &str = "gent-web-available-v1";
+pub const PROBE: &str = "gent-web-probe-v1";
+pub const ALIVE: &str = "gent-web-alive-v1";
 
 // Never derive Debug: headers and bodies may contain OAuth credentials or chat
 // content. Logs should report only generic failures and request counts.

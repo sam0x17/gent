@@ -176,7 +176,7 @@ pub(crate) async fn run_web(
 ) -> Result<()> {
     let options = Run {
         listen: "127.0.0.1:8787".parse().unwrap(),
-        hosted: Some("https://mcp.gent.link".into()),
+        hosted: Some(crate::web::origin(&home)?),
         origin: None,
         tls_cert: None,
         tls_key: None,

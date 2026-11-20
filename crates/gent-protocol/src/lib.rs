@@ -612,15 +612,26 @@ pub enum OwnerOp {
     WebCommit {
         node_id: String,
         revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
     },
     WebLease {
         node_id: String,
         seconds: u64,
     },
+    /// Absolute Unix deadline bounded by the start of the authority request.
+    /// Zero closes the epoch and fences delayed grants for the same session.
+    WebGrant {
+        node_id: String,
+        epoch: u64,
+        expires_at: u64,
+    },
     RestoreWebNode {
         node_id: String,
         home: std::path::PathBuf,
         checkpoint: std::path::PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
     },
     PreparePeerConfiguration,
     Groups {
@@ -756,6 +767,13 @@ pub enum OwnerOp {
         dry_run: bool,
     },
     TransportStatus,
+    WebDeliveryDemand {
+        node_id: String,
+    },
+    WebDeliveryChecked {
+        node_id: String,
+        message_id: String,
+    },
     TransportClean {
         dry_run: bool,
     },
@@ -855,6 +873,8 @@ pub enum Request {
     HostedAgent {
         node_id: String,
         gateway_credential: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
         credential: String,
         action: AgentOp,
     },

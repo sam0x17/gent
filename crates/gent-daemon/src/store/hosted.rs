@@ -12,13 +12,18 @@ mod test_support;
 mod tests;
 
 pub(super) fn schema(db: &Connection) -> Result<()> {
+    grant_now();
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS hosted_nodes (
         node TEXT PRIMARY KEY,home TEXT NOT NULL UNIQUE,gateway_hash TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS hosted_checkpoints (
         node TEXT PRIMARY KEY,revision INTEGER NOT NULL,durable INTEGER NOT NULL,
         lease_until INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS hosted_work_grants (
+        node TEXT PRIMARY KEY,epoch INTEGER NOT NULL,restored INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hosted_event_gates (id TEXT PRIMARY KEY,node TEXT NOT NULL,revision INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS web_delivery_demand (
+        node TEXT PRIMARY KEY,message TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS hosted_directory (
         agent TEXT NOT NULL,node TEXT NOT NULL,revision INTEGER NOT NULL,payload BLOB NOT NULL,
         PRIMARY KEY(agent,revision));
@@ -27,12 +32,33 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+// Grants use Unix deadlines across local IPC. Advance the observed wall time
+// by monotonic elapsed time as well, so a wall-clock correction cannot revive
+// an expiring grant. Startup seals all previously installed grants.
+fn grant_now() -> i64 {
+    use std::{
+        sync::{Mutex, OnceLock},
+        time::{Instant, SystemTime, UNIX_EPOCH},
+    };
+    static CLOCK: OnceLock<Mutex<(SystemTime, Instant)>> = OnceLock::new();
+    let mut clock = CLOCK
+        .get_or_init(|| Mutex::new((SystemTime::now(), Instant::now())))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let instant = Instant::now();
+    let wall = SystemTime::now().max(clock.0 + instant.duration_since(clock.1));
+    *clock = (wall, instant);
+    wall.duration_since(UNIX_EPOCH)
+        .map_or(i64::MAX, |d| d.as_secs() as i64)
+}
+
 impl Store {
     pub(super) fn restore_web_node(
         &mut self,
         node: &str,
         home: &Path,
         checkpoint: &Path,
+        epoch: Option<u64>,
     ) -> Result<Value> {
         let home = std::fs::canonicalize(home)?;
         ensure!(home != self.home, "invalid web home");
@@ -47,6 +73,13 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_epoch(&tx, node, epoch)?;
+        if let Some(epoch) = epoch {
+            ensure!(tx.execute(
+                "UPDATE hosted_work_grants SET restored=1 WHERE node=?1 AND epoch=?2 AND restored=0",
+                params![node, epoch],
+            )? == 1, "web carrier already restored this epoch");
+        }
         let state = self.identity.state(&tx)?;
         state.require_fresh(now() as u64)?;
         ensure!(
@@ -69,8 +102,9 @@ impl Store {
         )?;
         tx.execute(
             "INSERT INTO hosted_checkpoints VALUES(?1,?2,?2,0) ON CONFLICT(node)
-            DO UPDATE SET revision=excluded.revision,durable=excluded.durable,lease_until=0",
-            params![node, snapshot.revision],
+            DO UPDATE SET revision=excluded.revision,durable=excluded.durable,
+            lease_until=CASE WHEN ?3 IS NULL THEN 0 ELSE hosted_checkpoints.lease_until END",
+            params![node, snapshot.revision, epoch],
         )?;
         let previous: Option<String> = tx
             .query_row(
@@ -87,6 +121,7 @@ impl Store {
                 [serde_json::to_string(&routes)?],
             )?;
         }
+        check_epoch(&tx, node, epoch)?;
         tx.commit()?;
         Ok(json!({"restored":true,"revision":snapshot.revision}))
     }
@@ -279,6 +314,27 @@ impl Store {
     }
 }
 
+/// The marker survives restart and release. An unscoped legacy operation can
+/// run only on a node that has never installed a fenced grant.
+pub(super) fn check_epoch(db: &Connection, node: &str, epoch: Option<u64>) -> Result<()> {
+    let current: Option<(u64, i64)> = db
+        .query_row(
+            "SELECT g.epoch,COALESCE(c.lease_until,0) FROM hosted_work_grants g
+         LEFT JOIN hosted_checkpoints c USING(node) WHERE g.node=?1",
+            [node],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    ensure!(
+        current.map(|(id, _)| id) == epoch,
+        "web carrier epoch changed"
+    );
+    if let Some((_, until)) = current {
+        ensure!(until > grant_now(), "web carrier grant expired");
+    }
+    Ok(())
+}
+
 impl StoreSession<'_> {
     pub(super) fn local_node(&self, node: &str) -> bool {
         self.state
@@ -312,6 +368,10 @@ impl StoreSession<'_> {
             saved.as_deref() == Some(hash(gateway).as_str()),
             "hosted node unavailable"
         );
+        Ok(())
+    }
+
+    pub(super) fn require_web_lease(&self, node: &str) -> Result<()> {
         if let Some(until) = self
             .db
             .query_row(

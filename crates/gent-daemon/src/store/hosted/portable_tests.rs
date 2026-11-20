@@ -2,12 +2,13 @@ use super::test_support::Pair;
 use super::*;
 
 fn owner(pair: &mut Pair, action: OwnerOp) -> Value {
-    pair.parent
-        .execute(Request::Owner {
-            credential: config::read_private(&pair.homes[0].path().join("owner.key")).unwrap(),
-            action,
-        })
-        .unwrap()
+    try_owner(pair, action).unwrap()
+}
+fn try_owner(pair: &mut Pair, action: OwnerOp) -> Result<Value> {
+    pair.parent.execute(Request::Owner {
+        credential: config::read_private(&pair.homes[0].path().join("owner.key"))?,
+        action,
+    })
 }
 fn call(pair: &mut Pair, index: usize, action: AgentOp) -> Result<Value> {
     pair.parent.execute(if index == 0 {
@@ -17,6 +18,7 @@ fn call(pair: &mut Pair, index: usize, action: AgentOp) -> Result<Value> {
         }
     } else {
         Request::HostedAgent {
+            epoch: None,
             node_id: pair.child.identity.node.id().into(),
             gateway_credential: config::read_private(&pair.homes[1].path().join("owner.key"))?,
             credential: pair.keys[index].clone(),
@@ -75,6 +77,41 @@ fn sent(pair: &mut Pair) -> String {
 }
 
 #[test]
+fn native_message_after_idle_marks_web_checkpoint_once() {
+    let mut pair = fixture();
+    let node = pair.child.identity.node.id().to_owned();
+    let checkpoint = OwnerOp::WebCheckpoint {
+        node_id: node.clone(),
+    };
+    let before = owner(&mut pair, checkpoint.clone())["revision"]
+        .as_u64()
+        .unwrap();
+    pair.parent
+        .db
+        .execute(
+            "UPDATE hosted_checkpoints SET lease_until=0 WHERE node=?1",
+            [&node],
+        )
+        .unwrap();
+    let send = AgentOp::Send {
+        recipient: pair.agents[1].clone(),
+        request_id: uuid::Uuid::now_v7().to_string(),
+        text: "arrived while web carrier idle".into(),
+        files: vec![],
+        file_ids: vec![],
+    };
+    let first = call(&mut pair, 0, send.clone()).unwrap();
+    assert_eq!(
+        call(&mut pair, 0, send).unwrap()["message_id"],
+        first["message_id"]
+    );
+    let state = owner(&mut pair, checkpoint);
+    assert_eq!(state["revision"], before + 1);
+    assert_eq!(state["lease_until"], 0);
+    assert!(call(&mut pair, 1, AgentOp::Inbox).is_err());
+}
+
+#[test]
 fn checkpoint_withholds_local_delivery_until_committed_and_preserves_native_credentials() {
     let mut pair = fixture();
     let node = pair.child.identity.node.id().to_owned();
@@ -93,6 +130,7 @@ fn checkpoint_withholds_local_delivery_until_committed_and_preserves_native_cred
     owner(
         &mut pair,
         OwnerOp::WebCommit {
+            epoch: None,
             node_id: node,
             revision: snapshot.revision,
         },
@@ -118,6 +156,7 @@ fn takeover_restores_committed_request_and_discards_unpublished_send() {
     owner(
         &mut pair,
         OwnerOp::WebCommit {
+            epoch: None,
             node_id: node.clone(),
             revision: snapshot.revision,
         },
@@ -164,6 +203,117 @@ fn expired_local_lease_rejects_web_mutations_without_affecting_native_chats() {
     assert!(call(&mut pair, 1, AgentOp::Identity).is_err());
     assert!(call(&mut pair, 0, AgentOp::Identity).is_ok());
     assert!(snapshot::export(pair.homes[0].path(), &node).is_err());
+}
+
+#[test]
+fn replacing_a_grant_fences_queued_requests_restore_and_checkpoint_completion() {
+    let mut pair = fixture();
+    let node = pair.child.identity.node.id().to_owned();
+    let home = pair.homes[1].path().to_owned();
+    let grant = |epoch, expires_at| OwnerOp::WebGrant {
+        node_id: node.clone(),
+        epoch,
+        expires_at,
+    };
+    let deadline = || (now() + 20) as u64;
+    owner(&mut pair, grant(7, deadline()));
+    let snapshot = snapshot::export_for_epoch(pair.homes[0].path(), &node, 7).unwrap();
+    let checkpoint = home.join("epoch-test.json");
+    config::write_private(&checkpoint, &serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let restore = |epoch| OwnerOp::RestoreWebNode {
+        node_id: node.clone(),
+        home: home.clone(),
+        checkpoint: checkpoint.clone(),
+        epoch,
+    };
+    let commit = |epoch| OwnerOp::WebCommit {
+        node_id: node.clone(),
+        revision: snapshot.revision,
+        epoch,
+    };
+    let credential = pair.keys[1].clone();
+    let gateway = config::read_private(&home.join("owner.key")).unwrap();
+    let request = |epoch, action| Request::HostedAgent {
+        node_id: node.clone(),
+        gateway_credential: gateway.clone(),
+        credential: credential.clone(),
+        epoch,
+        action,
+    };
+    let successor_deadline = deadline();
+    owner(&mut pair, grant(8, successor_deadline));
+    assert!(try_owner(&mut pair, grant(7, deadline())).is_err());
+    assert!(try_owner(&mut pair, grant(7, 0)).is_err());
+    assert!(
+        try_owner(
+            &mut pair,
+            OwnerOp::WebLease {
+                node_id: node.clone(),
+                seconds: 25
+            }
+        )
+        .is_err()
+    );
+    for stale in [None, Some(7)] {
+        assert!(
+            pair.parent
+                .execute(request(stale, AgentOp::Identity))
+                .is_err()
+        );
+        assert!(try_owner(&mut pair, commit(stale)).is_err());
+        assert!(try_owner(&mut pair, restore(stale)).is_err());
+    }
+    assert!(snapshot::export_for_epoch(pair.homes[0].path(), &node, 7).is_err());
+    assert!(snapshot::export(pair.homes[0].path(), &node).is_err());
+    owner(&mut pair, restore(Some(8)));
+    assert!(try_owner(&mut pair, restore(Some(8))).is_err());
+    assert_eq!(
+        owner(&mut pair, commit(Some(8)))["lease_until"],
+        successor_deadline
+    );
+    pair.parent
+        .execute(request(Some(8), AgentOp::Identity))
+        .unwrap();
+    owner(&mut pair, grant(8, 0));
+    assert!(try_owner(&mut pair, grant(8, deadline())).is_err());
+    assert!(
+        pair.parent
+            .execute(request(Some(8), AgentOp::Inbox))
+            .is_err()
+    );
+    assert!(call(&mut pair, 0, AgentOp::Inbox).is_ok());
+}
+
+#[test]
+fn expired_grant_rpc_and_restart_cannot_reopen_a_closed_epoch() {
+    let mut pair = fixture();
+    let node = pair.child.identity.node.id().to_owned();
+    let grant = |epoch, expires_at| OwnerOp::WebGrant {
+        node_id: node.clone(),
+        epoch,
+        expires_at,
+    };
+    let unix = now() as u64;
+    assert!(try_owner(&mut pair, grant(4, unix)).is_err());
+    assert!(try_owner(&mut pair, grant(4, unix + 60)).is_err());
+    let lease = owner(&mut pair, grant(4, unix + 20));
+    assert_eq!(lease["lease_until"], unix + 20);
+    // The passive socket can obtain fresh authority for this same epoch after
+    // natural expiry. Explicit release and daemon restart close it permanently.
+    pair.parent
+        .db
+        .execute(
+            "UPDATE hosted_checkpoints SET lease_until=?1 WHERE node=?2",
+            params![unix - 1, node],
+        )
+        .unwrap();
+    assert!(snapshot::export_for_epoch(pair.homes[0].path(), &node, 4).is_err());
+    owner(&mut pair, grant(4, unix + 20));
+    pair.parent = Store::open(pair.homes[0].path()).unwrap();
+    assert!(try_owner(&mut pair, grant(4, unix + 20)).is_err());
+    assert!(snapshot::export_for_epoch(pair.homes[0].path(), &node, 4).is_err());
+    owner(&mut pair, grant(5, unix + 20));
+    snapshot::export_for_epoch(pair.homes[0].path(), &node, 5).unwrap();
 }
 
 #[test]
@@ -245,6 +395,7 @@ fn directory_publishes_only_committed_generations_and_restore_removes_orphans() 
     owner(
         &mut pair,
         OwnerOp::WebCommit {
+            epoch: None,
             node_id: node.clone(),
             revision: snapshot.revision,
         },
@@ -282,6 +433,7 @@ fn directory_publishes_only_committed_generations_and_restore_removes_orphans() 
     let extra = pair
         .parent
         .execute(Request::HostedAgent {
+            epoch: None,
             node_id: node.clone(),
             gateway_credential: config::read_private(&pair.homes[1].path().join("owner.key"))
                 .unwrap(),

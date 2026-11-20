@@ -84,6 +84,7 @@ async fn app(
     options: &Run,
     endpoint: &Endpoint,
     stop: CancellationToken,
+    carrier_lock: Option<Arc<std::fs::File>>,
 ) -> Result<Router> {
     let mut registry = Registry::open(home)?.with_file_origins(&options.file_origin)?;
     ensure!(
@@ -91,6 +92,7 @@ async fn app(
         "hosted MCP cannot authenticate direct client TLS certificates; use a separate gateway registration"
     );
     registry.access = AccessRoute::Hosted;
+    registry.carrier_lock = carrier_lock;
     let metadata = super::metadata::runtime::Runtime::new(
         registry.clone(),
         format!("{}/mcp", endpoint.base),
@@ -110,7 +112,7 @@ async fn app(
 pub(super) async fn validate(home: &Path, options: &Run) -> Result<()> {
     let endpoint = endpoint(home, options)?;
     credential(home)?;
-    let _app = app(home, options, &endpoint, CancellationToken::new()).await?;
+    let _app = app(home, options, &endpoint, CancellationToken::new(), None).await?;
     Ok(())
 }
 
@@ -140,7 +142,15 @@ pub(super) async fn run_portable(
     }
     let _lock = managed_file::lock(&home.join("gateway/runtime.lock"))?;
     let stop = CancellationToken::new();
-    let app = app(&home, &options, &endpoint, stop.clone()).await?;
+    let _guard = stop.clone().drop_guard();
+    let app = app(
+        &home,
+        &options,
+        &endpoint,
+        stop.clone(),
+        session.as_ref().map(|s| s.files.clone()),
+    )
+    .await?;
     let control = super::control::Server::bind(&home)?;
     let connected = Arc::new(AtomicBool::new(false));
     eprintln!(
@@ -156,12 +166,15 @@ pub(super) async fn run_portable(
             }
             // Reload after every disconnect: account renewal can replace the
             // node's transport credential while this process remains alive.
-            if let Ok(token) = session
+            let token = session
                 .as_ref()
-                .map_or_else(|| credential(&home), |s| s.credential())
-            {
+                .map_or_else(|| credential(&home), |s| s.credential());
+            if token.is_err() && session.as_ref().is_some_and(|s| s.passive) {
+                anyhow::bail!("passive web carrier credential unavailable");
+            }
+            if let Ok(token) = token {
                 let began = tokio::time::Instant::now();
-                let _ = connection::run(
+                let result = connection::run(
                     &endpoint,
                     token,
                     app.clone(),
@@ -170,6 +183,14 @@ pub(super) async fn run_portable(
                     session.clone(),
                 )
                 .await;
+                if let Some(session) = session.as_ref().filter(|s| s.passive) {
+                    // Re-enter signed admission after a lost passive socket.
+                    connected.store(false, Ordering::Release);
+                    if !shutdown.is_cancelled() {
+                        session.disconnected();
+                    }
+                    return result;
+                }
                 if began.elapsed() > Duration::from_secs(60) {
                     delay = 1;
                 }

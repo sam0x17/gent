@@ -2,7 +2,7 @@ use super::Endpoint;
 use anyhow::{Context, Result, ensure};
 use axum::{Router, body::Body, http::Request};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use gent_protocol::hosted_mcp::{self as protocol, Frame, HttpRequest, HttpResponse};
 use std::{
     collections::BTreeSet,
@@ -42,16 +42,26 @@ pub(super) async fn run(
         request
             .headers_mut()
             .insert("x-gent-web-epoch", session.epoch.to_string().parse()?);
+        if session.passive {
+            request
+                .headers_mut()
+                .insert(protocol::PASSIVE_HEADER, "1".parse()?);
+        }
     }
     let config = WebSocketConfig::default()
         .max_message_size(Some(protocol::MAX_WIRE_BYTES))
         .max_frame_size(Some(protocol::MAX_WIRE_BYTES));
-    let (mut socket, _) = timeout(
+    let (mut socket, response) = timeout(
         Duration::from_secs(10),
         connect_async_with_config(request, Some(config), true),
     )
     .await
     .context("hosted MCP connection timed out")??;
+    let passive = session.as_ref().is_some_and(|s| s.passive);
+    ensure!(
+        passive == crate::web::failover::passive_echo(response.headers())?,
+        "bridge did not confirm passive web carrier"
+    );
     let ready = timeout(Duration::from_secs(10), socket.next())
         .await?
         .context("hosted MCP handshake ended")??;
@@ -65,6 +75,19 @@ pub(super) async fn run(
         "unsupported hosted MCP protocol"
     );
     connected.store(true, Ordering::Release);
+    serve(socket, &endpoint.host, app, shutdown, session, passive).await
+}
+
+async fn serve(
+    socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    host: &str,
+    app: Router,
+    shutdown: tokio_util::sync::CancellationToken,
+    session: Option<Arc<crate::web::failover::Session>>,
+    passive: bool,
+) -> Result<()> {
     let (mut writer, mut reader) = socket.split();
     let (responses, mut completed) = mpsc::channel(protocol::MAX_IN_FLIGHT);
     let mut tasks = JoinSet::new();
@@ -77,7 +100,7 @@ pub(super) async fn run(
         // Rotate bounded duplicate tracking only after every accepted response
         // has reached the socket. Discovery traffic cannot abort an active turn.
         if draining && tasks.is_empty() && completed.is_empty() {
-            writer.close().await?;
+            timeout(Duration::from_secs(5), writer.close()).await??;
             return Ok(());
         }
         tokio::select! {
@@ -86,6 +109,10 @@ pub(super) async fn run(
                 let message=message.context("hosted MCP connection ended")??;
                 last_received=Instant::now();
                 match &message {
+                    Message::Text(text) if passive && text.as_str()==protocol::PROBE=>{
+                        write(&mut writer, protocol::ALIVE.into(), passive).await?;
+                        continue;
+                    }
                     Message::Text(text) if text.as_str()==protocol::PONG=>continue,
                     Message::Ping(_)|Message::Pong(_)=>continue,
                     Message::Close(_)=>return Ok(()),
@@ -100,19 +127,19 @@ pub(super) async fn run(
                 ensure!(!seen.contains(&id),"repeated hosted request ID");
                 if draining || tasks.len()>=protocol::MAX_IN_FLIGHT {
                     let response=failure(id,503,"Gent gateway is busy; retry identical tool arguments");
-                    writer.send(Message::Text(serde_json::to_string(&Frame::Response(response))?.into())).await?;
+                    write(&mut writer, serde_json::to_string(&Frame::Response(response))?.into(), passive).await?;
                     continue;
                 }
                 seen.insert(id.clone());
                 draining=seen.len()>=4096;
                 let app=app.clone();
-                let host=endpoint.host.clone();
+                let host=host.to_owned();
                 let sender=responses.clone();
                 let session=session.clone();
                 tasks.spawn(async move {
-                    let operation=async {
+                    let operation=Box::pin(async {
                         if let Frame::Manage { action, .. } = frame {
-                            let session = session.context("portable carrier required")?;
+                            let session = session.as_ref().context("portable carrier required")?;
                             let result = session.connector(action).await;
                             return Ok(match result {
                                 Ok(value) => HttpResponse {
@@ -127,24 +154,46 @@ pub(super) async fn run(
                         let Frame::Request(request) = frame else { anyhow::bail!("invalid hosted request") };
 
                         let response=dispatch(app,&host,request).await?;
-                        if let Some(session)=session { session.flush().await?; }
+                        if let Some(session)=&session { session.flush().await?; }
                         Ok::<_,anyhow::Error>(response)
+                    });
+                    let serving=async {
+                        match &session {
+                            Some(session)=>session.work(operation).await,
+                            None=>operation.await,
+                        }
                     };
-                    let response=match timeout(Duration::from_secs(protocol::REQUEST_SECONDS-2),operation).await {
+                    let response=match timeout(Duration::from_secs(protocol::REQUEST_SECONDS-2),serving).await {
                         Ok(Ok(response))=>response,
                         _=>failure(id,502,"Gent could not return this result; retain the original request ID and check status before repeating work"),
                     };
                     let _=sender.send(response).await;
                 });
             },
-            Some(response)=completed.recv()=>writer.send(Message::Text(serde_json::to_string(&Frame::Response(response))?.into())).await?,
+            Some(response)=completed.recv()=>write(&mut writer, serde_json::to_string(&Frame::Response(response))?.into(), passive).await?,
             Some(_)=tasks.join_next(), if !tasks.is_empty()=>{},
-            _=heartbeat.tick()=> {
+            _=heartbeat.tick(), if !passive=> {
                 ensure!(last_received.elapsed()<Duration::from_secs(60),"hosted MCP heartbeat timed out");
                 writer.send(Message::Text(protocol::PING.into())).await?;
             },
         }
     }
+}
+
+// A stalled downstream write cannot hold the socket reader past the bridge's
+// liveness probe. Failing the connection lets the bridge invite a standby.
+async fn write(
+    writer: &mut (impl Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin),
+    text: tokio_tungstenite::tungstenite::Utf8Bytes,
+    passive: bool,
+) -> Result<()> {
+    let sending = writer.send(Message::Text(text));
+    if passive {
+        timeout(Duration::from_secs(1), sending).await??;
+    } else {
+        sending.await?;
+    }
+    Ok(())
 }
 
 fn parse(message: Message) -> Result<Frame> {
@@ -201,4 +250,80 @@ async fn dispatch(app: Router, host: &str, input: HttpRequest) -> Result<HttpRes
     };
     ensure!(response.valid(), "invalid hosted response");
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::post;
+    use tokio::{net::TcpListener, sync::Notify};
+    use tokio_tungstenite::{accept_async, connect_async};
+
+    #[tokio::test]
+    async fn passive_reader_answers_probes_while_a_hosted_call_waits() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let app = Router::new().route(
+            "/mcp",
+            post({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    "response"
+                }
+            }),
+        );
+        let bridge = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let id = uuid::Uuid::new_v4().to_string();
+            let request = Frame::Request(HttpRequest {
+                id: id.clone(),
+                method: "POST".into(),
+                path: "/mcp".into(),
+                headers: vec![],
+                body_base64: String::new(),
+            });
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&request).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            entered.notified().await;
+            for _ in 0..2 {
+                socket
+                    .send(Message::Text(protocol::PROBE.into()))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap(),
+                    Message::Text(protocol::ALIVE.into())
+                );
+            }
+            release.notify_one();
+            let Frame::Response(response) = parse(socket.next().await.unwrap().unwrap()).unwrap()
+            else {
+                panic!("missing hosted response")
+            };
+            assert_eq!(response.id, id);
+            assert_eq!(response.status, 200);
+            socket.close(None).await.unwrap();
+        };
+        let native = async {
+            let (socket, _) = connect_async(url).await.unwrap();
+            serve(socket, "localhost", app, Default::default(), None, true)
+                .await
+                .unwrap();
+        };
+        timeout(Duration::from_secs(3), async {
+            tokio::join!(bridge, native)
+        })
+        .await
+        .unwrap();
+    }
 }

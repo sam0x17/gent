@@ -43,6 +43,7 @@ impl Pair {
             }
         } else {
             Request::HostedAgent {
+                epoch: None,
                 node_id: self.child.identity.node.id().into(),
                 gateway_credential: config::read_private(&self.homes[1].path().join("owner.key"))?,
                 credential: self.keys[index].clone(),
@@ -397,6 +398,7 @@ fn hosted_scope_rejects_native_sibling_gateway_and_wrong_parent_credentials() {
     let sibling_gateway = config::read_private(&sibling_home.join("owner.key")).unwrap();
     pair.parent
         .execute(Request::HostedAgent {
+            epoch: None,
             node_id: sibling.id().into(),
             gateway_credential: sibling_gateway.clone(),
             credential: sibling_key.clone(),
@@ -426,6 +428,7 @@ fn hosted_scope_rejects_native_sibling_gateway_and_wrong_parent_credentials() {
         assert!(
             pair.parent
                 .execute(Request::HostedAgent {
+                    epoch: None,
                     node_id: node.into(),
                     gateway_credential: gateway,
                     credential: key,
@@ -466,6 +469,7 @@ fn hosted_scope_rejects_native_sibling_gateway_and_wrong_parent_credentials() {
     assert!(
         other
             .execute(Request::HostedAgent {
+                epoch: None,
                 node_id: pair.child.identity.node.id().into(),
                 gateway_credential: gateway,
                 credential: pair.keys[1].clone(),
@@ -911,6 +915,7 @@ async fn unix_proxy_scopes_json_and_binary_file_uploads_and_drains_shutdown() {
     let mut store = Store::open(pair.homes[0].path()).unwrap();
     let chunk = store
         .execute(Request::HostedAgent {
+            epoch: None,
             node_id: child_node,
             gateway_credential: gateway,
             credential: pair.keys[1].clone(),

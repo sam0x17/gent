@@ -1,6 +1,8 @@
 //! A web node's local socket carries scoped RPCs to its native hosting daemon.
 //! It owns no replicated store, sync loop, notification socket or updater.
-pub use crate::store::hosted::snapshot::{Snapshot, export as checkpoint};
+pub use crate::store::hosted::snapshot::{
+    Snapshot, export as checkpoint, export_for_epoch as checkpoint_for_epoch,
+};
 use crate::{config, connection};
 use anyhow::{Context, Result, ensure};
 use gent_protocol::{AgentOp, MAX_FRAME_BYTES, OwnerOp, Request, Response};
@@ -11,7 +13,7 @@ use tokio::{
     sync::Semaphore,
 };
 
-fn wrap(request: Request, node: &str, gateway: &str) -> Result<Request> {
+fn wrap(request: Request, node: &str, gateway: &str, epoch: Option<u64>) -> Result<Request> {
     match request {
         Request::Agent { credential, action } => {
             ensure!(
@@ -24,6 +26,7 @@ fn wrap(request: Request, node: &str, gateway: &str) -> Result<Request> {
             Ok(Request::HostedAgent {
                 node_id: node.into(),
                 gateway_credential: gateway.into(),
+                epoch,
                 credential,
                 action,
             })
@@ -39,7 +42,13 @@ fn wrap(request: Request, node: &str, gateway: &str) -> Result<Request> {
     }
 }
 
-async fn serve(stream: UnixStream, parent: &Path, node: &str, key: &str) -> Result<()> {
+async fn serve(
+    stream: UnixStream,
+    parent: &Path,
+    node: &str,
+    key: &str,
+    epoch: Option<u64>,
+) -> Result<()> {
     let mut stream = BufReader::new(stream);
     let mut frame = Vec::new();
     (&mut stream)
@@ -52,7 +61,7 @@ async fn serve(stream: UnixStream, parent: &Path, node: &str, key: &str) -> Resu
     );
     let request = serde_json::from_slice(&frame)
         .map_err(anyhow::Error::from)
-        .and_then(|request| wrap(request, node, key));
+        .and_then(|request| wrap(request, node, key, epoch));
     let request = match request {
         Ok(request) => request,
         Err(_) => {
@@ -93,6 +102,24 @@ pub async fn run_with_budget(
     home: &Path,
     shutdown: impl std::future::Future<Output = ()>,
     budget: ConnectionBudget,
+) -> Result<()> {
+    run_scoped(home, shutdown, budget, None).await
+}
+
+pub async fn run_with_epoch(
+    home: &Path,
+    shutdown: impl std::future::Future<Output = ()>,
+    budget: ConnectionBudget,
+    epoch: u64,
+) -> Result<()> {
+    run_scoped(home, shutdown, budget, Some(epoch)).await
+}
+
+async fn run_scoped(
+    home: &Path,
+    shutdown: impl std::future::Future<Output = ()>,
+    budget: ConnectionBudget,
+    epoch: Option<u64>,
 ) -> Result<()> {
     tokio::pin!(shutdown);
     let cfg = config::load_for_runtime(home)?;
@@ -138,7 +165,7 @@ pub async fn run_with_budget(
                 let key=key.clone();
                 pending.spawn(async move {
                     let _permit=permit;
-                    let _=tokio::time::timeout(Duration::from_secs(35),serve(socket,&parent,&node,&key)).await;
+                    let _=tokio::time::timeout(Duration::from_secs(35),serve(socket,&parent,&node,&key,epoch)).await;
                 });
             }
         }

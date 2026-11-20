@@ -116,6 +116,7 @@ async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_id
     let gateway = config::read_private(&child_home.path().join("owner.key")).unwrap();
     let call = |store: &mut Store, action| {
         store.execute(Request::HostedAgent {
+            epoch: None,
             node_id: child.id().into(),
             gateway_credential: gateway.clone(),
             credential: key.clone(),
@@ -249,6 +250,7 @@ async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_id
         &mut pair.stores[0],
         pair.homes[0].path(),
         OwnerOp::WebCommit {
+            epoch: None,
             node_id: child.id().into(),
             revision: checkpoint.revision,
         },
@@ -278,6 +280,24 @@ async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_id
         )
         .unwrap();
     let new_home = tempfile::tempdir().unwrap();
+    let demand = OwnerOp::WebDeliveryDemand {
+        node_id: child.id().into(),
+    };
+    let current = owner(&mut pair.stores[1], pair.homes[1].path(), demand.clone());
+    assert_eq!(current["message_id"], reply["message_id"]);
+    // A late status response for an earlier send must leave this reply pending.
+    let late = OwnerOp::WebDeliveryChecked {
+        node_id: child.id().into(),
+        message_id: turn.clone(),
+    };
+    assert_eq!(
+        owner(&mut pair.stores[1], pair.homes[1].path(), late)["cleared"],
+        false
+    );
+    assert_eq!(
+        owner(&mut pair.stores[1], pair.homes[1].path(), demand)["message_id"],
+        reply["message_id"]
+    );
     std::fs::set_permissions(new_home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut cfg = config::load_for_runtime(child_home.path()).unwrap();
     cfg.set_hosted_parent(config::HostedParent {
@@ -335,6 +355,7 @@ async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_id
     );
     let next = |store: &mut Store, action| {
         store.execute(Request::HostedAgent {
+            epoch: None,
             node_id: child.id().into(),
             gateway_credential: new_gateway.clone(),
             credential: key.clone(),

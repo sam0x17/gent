@@ -1,18 +1,20 @@
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
+use gent_protocol::hosted_mcp::PASSIVE_HEADER;
 use gent_protocol::web_failover::{Admission, Control, MAX_CONTROL_BYTES};
 use sha2::{Digest, Sha256};
 
 pub(in crate::web) struct Client {
     pub parent: PathBuf,
     pub node: String,
-    url: String,
+    pub(super) url: String,
     http: reqwest::Client,
 }
 
 impl Client {
-    pub fn new(parent: &Path, node: &str, origin: &str) -> Result<Self> {
+    pub fn new(parent: &Path, node: &str) -> Result<Self> {
+        let origin = crate::web::origin(parent)?;
         let cfg = node_home::inspect(parent)?;
         let base = gent_protocol::hosted_mcp::node_base(&cfg.cluster.id, node)
             .context("invalid web identity")?;
@@ -35,15 +37,29 @@ impl Client {
         config::read_relay_credential(&self.parent.join(relay.credential_file))
     }
 
+    pub(super) async fn acquire(&self, create: bool) -> Result<(u16, Vec<u8>, bool)> {
+        self.post(
+            "control",
+            serde_json::to_vec(&Control::Acquire { create })?,
+            true,
+        )
+        .await
+    }
+
     pub async fn call(&self, operation: &Control) -> Result<(u16, Vec<u8>)> {
-        self.post("control", serde_json::to_vec(operation)?).await
+        let (status, bytes, _) = self
+            .post("control", serde_json::to_vec(operation)?, false)
+            .await?;
+        Ok((status, bytes))
     }
 
     pub async fn manage(
         &self,
         action: &gent_protocol::hosted_mcp::ConnectorAction,
     ) -> Result<String> {
-        let (status, bytes) = self.post("manage", serde_json::to_vec(action)?).await?;
+        let (status, bytes, _) = self
+            .post("manage", serde_json::to_vec(action)?, false)
+            .await?;
         match status {
             200 => Ok(serde_json::from_slice(&bytes)?),
             410 => anyhow::bail!("web node is revoked"),
@@ -57,7 +73,12 @@ impl Client {
         }
     }
 
-    async fn post(&self, route: &str, bytes: Vec<u8>) -> Result<(u16, Vec<u8>)> {
+    async fn post(
+        &self,
+        route: &str,
+        bytes: Vec<u8>,
+        offer_passive: bool,
+    ) -> Result<(u16, Vec<u8>, bool)> {
         ensure!(
             bytes.len() <= MAX_CONTROL_BYTES,
             "web control exceeds limits"
@@ -72,7 +93,7 @@ impl Client {
             )
             .await?,
         )?;
-        let response = self
+        let mut request = self
             .http
             .post(format!("{}/{route}", self.url))
             .timeout(Duration::from_secs(if route == "manage" { 40 } else { 12 }))
@@ -82,11 +103,16 @@ impl Client {
                 STANDARD.encode(serde_json::to_vec(&proof)?),
             )
             .header("Content-Type", "application/json")
-            .body(bytes)
+            .body(bytes);
+        if offer_passive {
+            request = request.header(PASSIVE_HEADER, "1");
+        }
+        let response = request
             .send()
             .await
             .map_err(|_| anyhow::anyhow!("web checkpoint service unavailable"))?;
         let status = response.status().as_u16();
+        let passive = offer_passive && passive_echo(response.headers())?;
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(part) = stream.next().await {
@@ -97,7 +123,7 @@ impl Client {
             );
             bytes.extend(part);
         }
-        Ok((status, bytes))
+        Ok((status, bytes, passive))
     }
 
     pub async fn required<T: serde::de::DeserializeOwned>(&self, operation: &Control) -> Result<T> {

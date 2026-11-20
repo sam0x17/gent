@@ -45,7 +45,7 @@ pub(super) async fn execute(
         .as_str()
         .filter(|id| valid_id(id))
         .context("invalid web node identity")?;
-    let client = Client::new(parent, id, ORIGIN)?;
+    let client = Client::new(parent, id)?;
     let mut response = json!({"name":node["name"],"node_id":id,"web_node":true});
     if revoke {
         let (status, _) = client.call(&Control::RevokeConnector).await?;
@@ -85,7 +85,7 @@ pub(super) async fn execute(
     let base =
         gent_protocol::hosted_mcp::node_base(&cluster, id).context("invalid connector identity")?;
     ensure!(
-        url.strip_prefix(&format!("{ORIGIN}{base}"))
+        url.strip_prefix(&format!("{}{base}", origin(parent)?))
             .and_then(gent_protocol::hosted_mcp::capability_token)
             .is_some(),
         "connector URL scope mismatch"
@@ -104,7 +104,7 @@ pub(super) async fn update_status(parent: &Path, row: &mut Value) {
         return;
     };
     let result = async {
-        Client::new(parent, id, ORIGIN)?
+        Client::new(parent, id)?
             .manage(&ConnectorAction::Status)
             .await
     }

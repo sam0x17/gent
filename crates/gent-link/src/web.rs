@@ -20,7 +20,22 @@ use std::{
 };
 use storage::Record;
 
-const ORIGIN: &str = "https://mcp.gent.link";
+pub(crate) fn origin(home: &Path) -> Result<String> {
+    #[cfg(feature = "test-web-bridge")]
+    if let Some(raw) = std::env::var_os("GENT_TEST_WEB_ORIGIN") {
+        let bridge = auth::origin(raw.to_str().context("invalid test web origin")?)?;
+        let relay = node_home::inspect(home)?
+            .relay
+            .context("missing test relay")?;
+        ensure!(
+            auth::loopback(&bridge) && auth::loopback(&auth::origin(&relay.endpoint)?),
+            "test bridge requires loopback relay and bridge origins"
+        );
+        return Ok(bridge.origin().ascii_serialization());
+    }
+    let _ = home;
+    Ok("https://mcp.gent.link".into())
+}
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Command {
@@ -97,7 +112,7 @@ fn output_allowed(out: Option<&Path>) -> Result<()> {
 fn connection(home: &Path, cfg: &config::Config, rotate: bool) -> Result<String> {
     let base = gent_protocol::hosted_mcp::node_base(&cfg.cluster.id, &cfg.node.id)
         .context("invalid web node identity")?;
-    gateway::registry::capability::url(home, &format!("{ORIGIN}{base}"), rotate)
+    gateway::registry::capability::url(home, &format!("{}{base}", origin(home)?), rotate)
 }
 
 fn output_url(mut value: Value, url: &str, out: Option<&Path>) -> Result<Value> {
