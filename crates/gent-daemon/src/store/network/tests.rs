@@ -281,7 +281,13 @@ async fn uploaded_packets_wait_offline_and_replay_until_the_reader_signs() {
     pair.stores[0]
         .transport_confirm(&group, false, Some(&baseline))
         .unwrap();
-    let dirty = |store: &Store| store.sync_pending_groups().unwrap().contains(&group);
+    let streams = pair.stores[0].sync_streams().unwrap();
+    let dirty = |store: &Store| {
+        store
+            .sync_pending_groups(&streams)
+            .unwrap()
+            .contains(&group)
+    };
     assert!(!dirty(&pair.stores[0]));
     let sent = pair.send(vec![]).unwrap();
     assert!(dirty(&pair.stores[0]));

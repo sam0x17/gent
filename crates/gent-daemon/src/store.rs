@@ -524,7 +524,10 @@ impl Store {
         streams.extend(self.data_streams()?);
         Ok(streams)
     }
-    pub(crate) fn sync_pending_groups(&self) -> Result<BTreeSet<Vec<u8>>> {
+    pub(crate) fn sync_pending_groups(
+        &self,
+        streams: &[crate::sync::Stream],
+    ) -> Result<BTreeSet<Vec<u8>>> {
         let mut groups = self
             .db
             .prepare(
@@ -544,23 +547,31 @@ impl Store {
         // An unpublished legacy configuration revision is work even before
         // its first fragment has a stream position. Old owner epochs stop at
         // their signed handoff baseline.
+        let writers: BTreeSet<_> = streams
+            .iter()
+            .filter(|s| s.configuration && s.outgoing)
+            .map(|s| s.group.as_slice())
+            .collect();
+        if writers.is_empty() {
+            return Ok(groups);
+        }
+        let state = self.identity.state(&self.db)?;
         let mut query = self.db.prepare(
             "SELECT c.group_id,c.grant,h.revision FROM configuration_streams c
              JOIN streams s USING(group_id) JOIN authority_history h ON h.revision=c.revision+1
              WHERE s.writer=?1",
         )?;
         let mut rows = query.query([self.identity.node.id()])?;
-        let mut state = None;
         while let Some(row) = rows.next()? {
+            let group: Vec<u8> = row.get(0)?;
+            if !writers.contains(group.as_slice()) {
+                continue;
+            }
             let grant = gent_crypto::SignedConfigurationGrant::decode(&row.get::<_, Vec<u8>>(1)?)?;
-            let state = match &mut state {
-                Some(state) => state,
-                empty => empty.insert(self.identity.state(&self.db)?),
-            };
-            let limit = encrypted::ordered::configuration::publication_limit(&grant, state);
+            let limit = encrypted::ordered::configuration::publication_limit(&grant, &state);
             let revision: u64 = row.get(2)?;
             if limit.is_none_or(|last| revision <= last) {
-                groups.insert(row.get(0)?);
+                groups.insert(group);
             }
         }
         Ok(groups)

@@ -441,7 +441,9 @@ async fn run(
                 | (_, _, _, _, Err(error), _)
                 | (_, _, _, _, _, Err(error)) => Err(error),
             };
-            Ok((store.sync_streams()?, pending, store.sync_pending_groups()?))
+            let streams = store.sync_streams()?;
+            let queued = store.sync_pending_groups(&streams)?;
+            Ok((streams, pending, queued))
         })
         .await;
         let mut progressed = configuration_result.as_ref().copied().unwrap_or(false)
