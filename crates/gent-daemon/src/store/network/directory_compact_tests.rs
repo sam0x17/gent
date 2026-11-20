@@ -11,7 +11,7 @@ async fn unchanged_directory_is_short_and_v4_still_gets_a_complete_frontier() {
     pair.send(vec![]).unwrap();
     let body: Vec<u8> = pair.stores[0].db.query_row("SELECT body FROM network_events WHERE json_extract(CAST(body AS TEXT),'$.event.kind')='message'", [], |r| r.get(0)).unwrap();
     let record: Record = serde_json::from_slice(&body).unwrap();
-    assert_eq!(record.version, 5);
+    assert_eq!(record.version, crate::messages::wire::CURRENT);
     let directory = record.directory.unwrap();
     assert!(directory.incarnation.is_some());
     assert!(directory.frontier.is_empty());

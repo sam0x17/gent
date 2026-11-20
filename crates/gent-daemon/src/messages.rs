@@ -102,6 +102,27 @@ pub enum Event {
     },
 }
 
+impl Event {
+    /// Each fragment gets its own compression context. Keep credentials out of
+    /// dictionaries that also contain chat text, names, or other peer input.
+    pub(crate) fn permits_compression(&self) -> bool {
+        match self {
+            Self::Message { attachments, .. } => attachments.is_empty(),
+            Self::Presence { .. }
+            | Self::Receipt { .. }
+            | Self::Registration { .. }
+            | Self::ConversationActivity { .. }
+            | Self::Directory { .. }
+            | Self::Direct { .. } => true,
+            Self::NodeInvite { .. }
+            | Self::Mesh { .. }
+            | Self::OwnerPreparation { .. }
+            | Self::ConfigurationRequest { .. }
+            | Self::ConfigurationResult { .. } => false,
+        }
+    }
+}
+
 /// Private MLS payload only. Never use this type in public chat responses.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -33,6 +33,11 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
                 "ALTER TABLE network_events ADD COLUMN announcement INTEGER NOT NULL DEFAULT 0",
             )?;
         }
+        if table == "network_events" && !columns.iter().any(|c| c == "compress") {
+            tx.execute_batch(
+                "ALTER TABLE network_events ADD COLUMN compress INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
     }
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS network_announcements (
@@ -159,6 +164,7 @@ impl StoreSession<'_> {
                 self.outgoing_directory(peer, version, matches!(&event, Event::Directory { .. }))
             })
             .transpose()?;
+        let compress = negotiated >= messages::wire::ZSTD_VERSION && event.permits_compression();
         let body = serde_json::to_vec(&Record {
             version,
             authority: self.state.checkpoint().clone(),
@@ -171,8 +177,8 @@ impl StoreSession<'_> {
         );
         clean(self.db, timestamp, false)?;
         capacity(self.db, traffic, body.len(), announcement.is_some())?;
-        self.db.execute("INSERT INTO network_events(id,peer,body,subject,traffic,retire_after,announcement) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![id,peer,body,subject,traffic,deadline,announcement.is_some()])?;
+        self.db.execute("INSERT INTO network_events(id,peer,body,subject,traffic,retire_after,announcement,compress) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![id,peer,body,subject,traffic,deadline,announcement.is_some(),compress])?;
         if let Some(snapshot) = directory {
             self.directory_admitted(peer, &snapshot)?;
         }

@@ -7,8 +7,9 @@ use serde_json::Value;
 mod compact;
 mod value;
 
-pub const CURRENT: u8 = 5;
-pub const NEGOTIATED: &[u8] = &[2, 3, 4, 5];
+pub const ZSTD_VERSION: u8 = 6;
+pub const CURRENT: u8 = ZSTD_VERSION;
+pub const NEGOTIATED: &[u8] = &[2, 3, 4, 5, ZSTD_VERSION];
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,7 +115,7 @@ impl Serialize for Record {
         }
         match self.version {
             1 => {}
-            2..=5 => v2(&mut event, true).map_err(ser::Error::custom)?,
+            2..=CURRENT => v2(&mut event, true).map_err(ser::Error::custom)?,
             _ => return Err(ser::Error::custom("unsupported node record version")),
         }
         Envelope {
@@ -154,7 +155,7 @@ impl<'de> Deserialize<'de> for Record {
         }
         match envelope.version {
             1 => {}
-            2..=5 => v2(&mut envelope.event, false).map_err(de::Error::custom)?,
+            2..=CURRENT => v2(&mut envelope.event, false).map_err(de::Error::custom)?,
             _ => return Err(de::Error::custom("unsupported node record version")),
         }
         let event: Event = serde_json::from_value(envelope.event).map_err(de::Error::custom)?;

@@ -194,6 +194,7 @@ impl<'a> OrderedEndpoint<'a> {
         group: &[u8],
         fragment: (Uuid, usize, bool),
         body: &[u8],
+        compress: bool,
         now: u64,
         check: impl FnOnce(&Connection, &VerifiedState) -> Result<()>,
     ) -> Result<Packet> {
@@ -201,7 +202,7 @@ impl<'a> OrderedEndpoint<'a> {
             check(session.db, &session.state)?;
             let id = requests::allocate(session.db, group, body, Some(fragment))?;
             publish_in(session, group, Purpose::Data, |session| {
-                session.send(group, id, body)
+                session.send_with_compression(group, id, body, compress)
             })
         })
     }

@@ -1290,6 +1290,7 @@ async fn configuration_results_require_the_original_writer_request_and_verified_
 #[tokio::test]
 async fn attachment_grants_reject_substitution_and_downloads_resume_with_current_authority() {
     let mut pair = Pair::new().await;
+    directory_push_tests::negotiate(&mut pair);
     let paths = pair.agent(0, AgentOp::FilePaths).unwrap();
     let bytes = vec![0x91; gent_crypto::files::CHUNK_BYTES * 2 + 7];
     std::fs::write(
@@ -1320,15 +1321,17 @@ async fn attachment_grants_reject_substitution_and_downloads_resume_with_current
         )
         .unwrap();
     let message_id = sent["message_id"].as_str().unwrap();
-    let body: Vec<u8> = pair.stores[0]
+    let (body, compress): (Vec<u8>, bool) = pair.stores[0]
         .db
         .query_row(
-            "SELECT body FROM network_events WHERE subject=?1",
+            "SELECT body,compress FROM network_events WHERE subject=?1",
             [message_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
     let record: Record = serde_json::from_slice(&body).unwrap();
+    assert_eq!(record.version, messages::wire::CURRENT);
+    assert!(!compress, "file grants must use the uncompressed envelope");
     let id = match &record.event {
         Event::Message { message, .. } => message.attachments[0].id.clone(),
         _ => panic!(),

@@ -42,6 +42,17 @@ authority denies further transport.
 
 ## Relay efficiency
 
+Native peers that negotiate wire version 6 compress ordinary chat, directory,
+presence and receipt fragments with zstd level 9 before MLS encryption. Gent
+uses a fresh compression context for each fragment and keeps the compressed
+form when it saves bytes. Records carrying private file grants, invitations or
+configuration credentials retain their original encoding. Separate file objects
+and configuration streams use their existing formats.
+
+Gent records the peer's compression capability when it queues the event. Mixed
+versions can exchange messages while nodes update. Retries on either network
+path reuse the saved ciphertext, including after a restart.
+
 Wire version 5 sends compact directory hashes. Unchanged directories carry only
 the root, sequence, and database incarnation. First advertisements, changed
 roots, repairs, and periodic refreshes include the bounded branch summaries.

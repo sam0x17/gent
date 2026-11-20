@@ -16,6 +16,48 @@ fn queued(pair: &Pair, id: &str) -> Value {
 }
 
 #[tokio::test]
+async fn compression_follows_the_queued_peer_version_and_reduces_mls_ciphertext() {
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let group = pair.group();
+    let file = FilePart {
+        name: "notes.txt".into(),
+        media_type: "text/plain".into(),
+        data_base64: STANDARD.encode(b"notes from the conversation\n".repeat(1024)),
+    };
+    let mut sizes = Vec::new();
+    for (version, later_version) in [(5, 6), (6, 5)] {
+        pair.stores[0]
+            .db
+            .execute("UPDATE wire_peers SET version=?1", [version])
+            .unwrap();
+        let sent = pair.send(vec![file.clone()]).unwrap();
+        let id = sent["message_id"].as_str().unwrap();
+        assert_eq!(queued(&pair, id)["version"], version);
+        pair.stores[0]
+            .db
+            .execute("UPDATE wire_peers SET version=?1", [later_version])
+            .unwrap();
+        pair.reopen(0);
+        let next = pair.stores[1].data_next(&group).unwrap();
+        pair.stores[0].data_prepare(&group).unwrap();
+        let packet = pair.stores[0].data_outgoing(&group, next).unwrap().unwrap();
+        sizes.push(packet.ciphertext().len());
+        pair.stores[1].data_receive(&packet).unwrap();
+        let inbox = pair.agent(1, AgentOp::Inbox).unwrap();
+        assert!(
+            inbox
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == id && m["files"][0] == json!(file))
+        );
+        pair.pump();
+    }
+    assert!(sizes[1] < sizes[0] / 8, "V5/V6 ciphertext sizes {sizes:?}");
+}
+
+#[tokio::test]
 async fn connected_v4_peers_upgrade_without_old_envelopes_overwriting_capabilities() {
     let mut pair = Pair::new().await;
     super::directory_push_tests::negotiate(&mut pair);

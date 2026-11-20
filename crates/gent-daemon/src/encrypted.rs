@@ -9,6 +9,7 @@
 //! Retained legacy retries remain valid regardless of UUID version.
 pub mod history;
 pub mod ordered;
+mod payload;
 mod requests;
 #[cfg(test)]
 mod storage_tests;
@@ -713,6 +714,15 @@ impl Session<'_> {
         Ok(())
     }
     fn send(&self, group_id: &[u8], id: Uuid, body: &[u8]) -> Result<Outgoing> {
+        self.send_with_compression(group_id, id, body, false)
+    }
+    fn send_with_compression(
+        &self,
+        group_id: &[u8],
+        id: Uuid,
+        body: &[u8],
+        compress: bool,
+    ) -> Result<Outgoing> {
         let db = self.db;
         let provider = &self.provider;
         let state = &self.state;
@@ -728,11 +738,9 @@ impl Session<'_> {
         if let Some(packet) = retry(db, id, &fingerprint)? {
             return Ok(packet);
         }
-        let envelope = serde_json::to_vec(&Envelope {
-            version: 1,
-            id,
-            body: STANDARD.encode(body),
-        })?;
+        // Fingerprints and retained retries use the original plaintext across
+        // codec upgrades. Only a new encryption chooses a representation.
+        let envelope = payload::encode(id, body, compress)?;
         let bytes = group
             .create_message(provider, signer, &envelope)?
             .to_bytes()?;
@@ -856,17 +864,13 @@ impl Session<'_> {
                     bytes.len() <= MAX_WIRE_BYTES,
                     "application envelope too large"
                 );
-                let envelope: Envelope = serde_json::from_slice(&bytes)?;
+                let (id, body) =
+                    payload::decode(&bytes, writer.is_some() && !self.configuration_only)?;
                 ensure!(
-                    envelope.version == 1 && !envelope.id.is_nil(),
-                    "invalid application envelope"
-                );
-                let body = STANDARD.decode(envelope.body)?;
-                ensure!(
-                    !body.is_empty() && body.len() <= MAX_PAYLOAD_BYTES,
+                    !id.is_nil() && !body.is_empty() && body.len() <= MAX_PAYLOAD_BYTES,
                     "invalid payload size"
                 );
-                handle_application(envelope.id, sender, body)?
+                handle_application(id, sender, body)?
             }
             ProcessedMessageContent::StagedCommitMessage(commit) => {
                 // Existing-group membership additions require a separate approved

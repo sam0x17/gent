@@ -19,7 +19,14 @@ async fn allocated_retirement_is_batched_and_preview_preserves_every_retry_assoc
         .unwrap();
         let packet = pair
             .endpoint(0)
-            .send_checked(&group, (event, 0, true), &body, now() as u64, |_, _| Ok(()))
+            .send_checked(
+                &group,
+                (event, 0, true),
+                &body,
+                false,
+                now() as u64,
+                |_, _| Ok(()),
+            )
             .unwrap();
         ids.push(pair.packet_request(&packet));
         pair.endpoint(1).stage(&packet, now() as u64).unwrap();
@@ -111,6 +118,7 @@ impl Pair {
 #[tokio::test]
 async fn allocated_requests_survive_offline_restarts_then_cannot_be_reused_after_confirmation() {
     let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
     pair.send(vec![]).unwrap();
     let group = pair.group();
     let (event, frame) = pair.first_frame();
@@ -144,9 +152,14 @@ async fn allocated_requests_survive_offline_restarts_then_cannot_be_reused_after
     // ciphertext for the already completed fragment after its ID was forgotten.
     assert!(
         pair.endpoint(0)
-            .send_checked(&group, (event, 0, false), &frame, now() as u64, |db, _| {
-                check_cursor(db, &group, (event, 0, false))
-            })
+            .send_checked(
+                &group,
+                (event, 0, false),
+                &frame,
+                false,
+                now() as u64,
+                |db, _| { check_cursor(db, &group, (event, 0, false)) }
+            )
             .is_err()
     );
     pair.reopen(0);

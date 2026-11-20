@@ -796,7 +796,11 @@ impl Store {
         let Some(selected) = queue::next_id(&self.db, &peer)? else {
             return Ok(());
         };
-        let (id,body,offset,mut cancelled,subject,control) = self.db.query_row("SELECT id,body,offset,cancelled,subject,traffic<>'data' FROM network_events WHERE id=?1", [&selected], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,usize>(2)?,r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,bool>(5)?)))?;
+        let (id, body, offset, mut cancelled, subject, control, compress) = self.db.query_row(
+            "SELECT id,body,offset,cancelled,subject,traffic<>'data',compress FROM network_events WHERE id=?1",
+            [&selected],
+            |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,usize>(2)?,r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,bool>(5)?,r.get::<_,bool>(6)?)),
+        )?;
         let id = Uuid::parse_str(&id)?;
         let state = self.identity.state(&self.db)?;
         if let Some(subject) = &subject {
@@ -859,6 +863,7 @@ impl Store {
             group,
             (id, offset, cancelled),
             &serde_json::to_vec(&frame)?,
+            compress,
             now() as u64,
             |db, state| {
                 self.data_peer(db, group, true)?;
