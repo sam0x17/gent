@@ -1,6 +1,6 @@
 # Connect a web or mobile chat
 
-On a cluster machine that will stay online:
+On any enrolled native node with configuration authority, run
 
 ```sh
 gent node add claude-personal --web
@@ -20,10 +20,10 @@ and native node identity stay the same. Web nodes have the usual open default
 permissions; use node/chat restrictions when needed. Node restrictions and
 same-node rules continue to use the web node's own identity.
 
-The machine's Gent daemon starts and supervises their gateways automatically.
-Keep it online and signed in. It renews their service leases without copying
-GitHub credentials into them. Updates restart their runtimes using the new
-binary. Their messages, node identities and chat bindings persist. Upgrade all
+Gent starts the gateway on the creating node and saves a portable checkpoint.
+After that, any online native node with configuration authority can serve it.
+The current carrier renews its service lease using its own credentials. Updates
+restart the gateway and preserve its messages, node identity and chat bindings. Upgrade all
 native cluster nodes with `gent update` for hosted-node routing. Existing web
 nodes migrate on their hosting machine and keep their connector URLs and chat
 IDs; there is no need to reenroll or register the conversation again.
@@ -104,8 +104,9 @@ gent node add claude-personal --web --code-out ~/.gent/claude-url.txt
 gent node web url claude-personal --out ~/.gent/claude-url.txt
 ```
 
-Repeating `gent node add NAME --web` on another node retrieves the existing connector and URL. If setup reports the node is saved
-but offline, keep the updated daemon running and check `gent node web list`.
+Repeating `gent node add NAME --web` on another node retrieves the existing
+connector and URL. If setup reports the node is saved but offline, keep the
+updated daemon running and check `gent node web list`.
 An interrupted URL rotation resumes from its private journal. A revoked URL
 cannot be reactivated by repeating setup.
 
