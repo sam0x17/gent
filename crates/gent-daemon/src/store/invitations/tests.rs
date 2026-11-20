@@ -381,8 +381,9 @@ fn claims_survive_restarts_and_competing_store_instances_cannot_choose_two_nodes
             let home = fixture.home.path().to_owned();
             let barrier = barrier.clone();
             std::thread::spawn(move || {
-                let mut store = Store::open(&home).unwrap();
+                let opened = Store::open(&home);
                 barrier.wait();
+                let mut store = opened.unwrap();
                 store.accept_invitation(pending, &claim).is_ok()
             })
         })

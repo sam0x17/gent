@@ -6,7 +6,7 @@ use crate::messages::directory::Snapshot;
 pub(super) fn schema(db: &Connection) -> Result<()> {
     // Legacy admission timestamps carried neither incarnation nor evidence of
     // agreement. The next outgoing record seeds the new cache with a full view.
-    let tx = db.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS directory_incarnation(singleton INTEGER PRIMARY KEY CHECK(singleton=1),id TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS directory_frontiers(
             peer TEXT PRIMARY KEY REFERENCES network_links(peer) ON DELETE CASCADE,
