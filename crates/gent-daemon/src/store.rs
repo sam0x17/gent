@@ -367,6 +367,13 @@ impl Store {
             timestamp,
         };
         let owner_request = matches!(&request, Request::Owner { .. });
+        let refresh_nodes = matches!(
+            &request,
+            Request::Owner {
+                action: OwnerOp::RefreshNodes,
+                ..
+            }
+        );
         let status_request = matches!(
             &request,
             Request::Owner {
@@ -412,6 +419,19 @@ impl Store {
             }
         };
         tx.commit()?;
+        if refresh_nodes
+            && value.as_array().is_some_and(|nodes| {
+                nodes
+                    .iter()
+                    .any(|n| n["presence"]["probe_started_at"].is_i64())
+            })
+            && self
+                .sync_health
+                .connected
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.sync_health.verify_watch.notify_one();
+        }
         if status_request {
             value["sync"] = self.synchronization_status()?;
         }
@@ -530,7 +550,7 @@ impl Store {
     ) -> Result<crate::sync::MailboxWork> {
         let mut work = crate::sync::MailboxWork::default();
         let mut pending = self.db.prepare(
-            "SELECT s.group_id,s.purpose='data',s.head>=COALESCE(u.next_sequence,0)
+            "SELECT s.group_id,s.head>=COALESCE(u.next_sequence,0)
              FROM streams s LEFT JOIN stream_relay_upload u USING(group_id)
              LEFT JOIN stream_confirmed c USING(group_id)
              WHERE s.writer=?1 AND s.head>COALESCE(c.sequence,-1)",
@@ -538,10 +558,8 @@ impl Store {
         let mut rows = pending.query([self.identity.node.id()])?;
         while let Some(row) = rows.next()? {
             let group: Vec<u8> = row.get(0)?;
+            work.unconfirmed.insert(group.clone());
             if row.get::<_, bool>(1)? {
-                work.unconfirmed_data.insert(group.clone());
-            }
-            if row.get::<_, bool>(2)? {
                 work.ready.insert(group);
             }
         }
@@ -884,6 +902,7 @@ impl StoreSession<'_> {
                 before,
             } => self.permission_admin_history(administrator.as_deref(), before),
             OwnerOp::Nodes => self.nodes(),
+            OwnerOp::RefreshNodes => self.refresh_nodes(),
             OwnerOp::Agents => Ok(serde_json::to_value(self.directory(None)?)?),
             OwnerOp::Resolve {
                 name,

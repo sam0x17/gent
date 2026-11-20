@@ -1,11 +1,15 @@
 //! Exact local dirty sets; relay hints never advance stream cursors.
 use super::*;
-use gent_protocol::transport_watch::{Interest, MAX_INTERESTS};
+use gent_protocol::transport_watch::{Interest, MAX_INTERESTS, Subscription, VERSION};
 
 #[derive(Default)]
-pub(super) struct Hints(Mutex<State>);
+pub(super) struct Hints {
+    state: Mutex<State>,
+    pub(super) subscription_changed: Notify,
+}
 #[derive(Default)]
 struct State {
+    passive: bool,
     interests: Vec<Interest>,
     dirty: BTreeSet<Vec<u8>>,
     full: bool,
@@ -16,44 +20,67 @@ impl Hints {
     pub(super) fn subscribe(&self, streams: &[Stream]) {
         let interests: Vec<_> = streams
             .iter()
-            .take(MAX_INTERESTS)
             .map(|s| Interest {
                 mailbox: URL_SAFE_NO_PAD.encode(&s.group),
                 outgoing: s.outgoing,
             })
             .collect();
-        let mut state = self.0.lock().expect("sync hints poisoned");
+        let mut state = self.state.lock().expect("sync hints poisoned");
         if state.interests != interests {
             state.interests = interests;
+            self.subscription_changed.notify_one();
             state.full = true;
         }
     }
-    pub(super) fn interests(&self) -> Vec<Interest> {
-        self.0
+    pub(super) fn set_passive(&self, passive: bool) {
+        self.state.lock().expect("sync hints poisoned").passive = passive;
+    }
+    pub(super) fn passive(&self) -> bool {
+        let state = self.state.lock().expect("sync hints poisoned");
+        state.passive
+    }
+    pub(super) fn subscription(&self, passive: bool) -> Subscription {
+        let state = self.state.lock().expect("sync hints poisoned");
+        let all = passive && state.interests.len() > MAX_INTERESTS;
+        let end = if all {
+            0
+        } else {
+            state.interests.len().min(MAX_INTERESTS)
+        };
+        Subscription {
+            version: VERSION,
+            all,
+            interests: state.interests[..end].to_vec(),
+        }
+    }
+
+    #[cfg(test)]
+    fn interests(&self) -> Vec<Interest> {
+        self.state
             .lock()
             .expect("sync hints poisoned")
             .interests
             .clone()
     }
     pub(super) fn all(&self) {
-        let mut state = self.0.lock().expect("sync hints poisoned");
+        let mut state = self.state.lock().expect("sync hints poisoned");
         state.full = true;
         state.control = true;
     }
     pub(super) fn reconnected(&self) {
-        let mut state = self.0.lock().expect("sync hints poisoned");
+        let mut state = self.state.lock().expect("sync hints poisoned");
         state.full = true;
         state.control = true;
         state.reconnected = true;
     }
     pub(super) fn take_reconnected(&self) -> bool {
-        std::mem::take(&mut self.0.lock().expect("sync hints poisoned").reconnected)
+        std::mem::take(&mut self.state.lock().expect("sync hints poisoned").reconnected)
     }
     pub(super) fn control(&self) -> bool {
-        std::mem::take(&mut self.0.lock().expect("sync hints poisoned").control)
+        std::mem::take(&mut self.state.lock().expect("sync hints poisoned").control)
     }
     pub(super) fn changed(&self, streams: &[Interest]) -> bool {
-        let mut state = self.0.lock().expect("sync hints poisoned");
+        let mut state = self.state.lock().expect("sync hints poisoned");
         let mut changed = false;
         for stream in streams {
             if state.interests.contains(stream)
@@ -65,7 +92,7 @@ impl Hints {
         changed
     }
     pub(super) fn take(&self) -> (bool, BTreeSet<Vec<u8>>) {
-        let mut state = self.0.lock().expect("sync hints poisoned");
+        let mut state = self.state.lock().expect("sync hints poisoned");
         (
             std::mem::take(&mut state.full),
             std::mem::take(&mut state.dirty),
@@ -118,12 +145,18 @@ impl Schedule {
         self.pending.extend(dirty);
         self.pending.extend(work.ready.iter().cloned());
         if full || now >= self.next_full {
-            self.pending.extend(streams.iter().map(|s| s.group.clone()));
+            if full || !connected || !hints.passive() {
+                self.pending.extend(streams.iter().map(|s| s.group.clone()));
+            } else {
+                // A lost receipt or relay rollback needs repair while a writer
+                // still owns unsigned history. Drained, subscribed streams sleep.
+                self.pending.extend(work.unconfirmed.iter().cloned());
+            }
             self.peer_repair.extend(
                 streams
                     .iter()
                     .filter(|s| {
-                        s.outgoing && !s.configuration && work.unconfirmed_data.contains(&s.group)
+                        s.outgoing && !s.configuration && work.unconfirmed.contains(&s.group)
                     })
                     .map(|s| s.group.clone()),
             );
@@ -138,7 +171,7 @@ impl Schedule {
         // A partial peer batch can drain its uploaded suffix on the next turn.
         // Re-read the durable receipt before scheduling another attempt.
         self.peer_repair
-            .retain(|g| work.unconfirmed_data.contains(g) && streams.iter().any(|s| &s.group == g));
+            .retain(|g| work.unconfirmed.contains(g) && streams.iter().any(|s| &s.group == g));
         self.pending.extend(self.peer_repair.iter().cloned());
         self.pending.extend(
             retries
@@ -167,7 +200,7 @@ impl Schedule {
         for (_, s) in &selected {
             self.pending.remove(&s.group);
             let repair = self.peer_repair.remove(&s.group)
-                || (retries.contains_key(&s.group) && work.unconfirmed_data.contains(&s.group));
+                || (retries.contains_key(&s.group) && work.unconfirmed.contains(&s.group));
             if s.outgoing && !s.configuration && (repair || work.ready.contains(&s.group)) {
                 peers.insert(s.group.clone());
             }
@@ -230,7 +263,7 @@ mod tests {
         assert_eq!(select(BTreeSet::new(), true), 0);
         assert!(hints.changed(&hints.interests()));
         assert_eq!(select(BTreeSet::new(), true), 1);
-        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::time::advance(Duration::from_secs(37)).await;
         assert_eq!(select(BTreeSet::new(), true), 1);
         hints.all();
         assert_eq!(select(BTreeSet::new(), false), 1);
@@ -243,6 +276,38 @@ mod tests {
         assert!(!hints.take_reconnected());
         assert_eq!(select(BTreeSet::new(), true), 1);
     }
+    #[tokio::test(start_paused = true)]
+    async fn acknowledged_watch_sleeps_until_a_change_or_an_unsigned_upload_needs_repair() {
+        let streams: Vec<_> = (0..3)
+            .map(|n| Stream {
+                group: vec![n],
+                outgoing: n != 0,
+                configuration: n == 2,
+            })
+            .collect();
+        let hints = Hints::default();
+        hints.subscribe(&streams);
+        hints.set_passive(true);
+        let mut schedule = Schedule::default();
+        let mut work = MailboxWork::default();
+        let select = |s: &mut Schedule, w: &MailboxWork| {
+            s.select(&streams, &hints, w, &BTreeMap::new(), true)
+        };
+        assert_eq!(select(&mut schedule, &work).streams.len(), 3);
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(select(&mut schedule, &work).streams.is_empty());
+        assert!(hints.changed(&hints.interests()[..1]));
+        assert_eq!(select(&mut schedule, &work).streams[0].group, vec![0]);
+        work.unconfirmed.insert(vec![2]);
+        tokio::time::advance(Duration::from_secs(40)).await;
+        let repair = select(&mut schedule, &work);
+        assert_eq!(repair.streams.len(), 1);
+        assert_eq!(repair.streams[0].group, vec![2]);
+        assert!(repair.peers.is_empty());
+        hints.reconnected();
+        assert_eq!(select(&mut schedule, &work).streams.len(), 3);
+    }
+
     #[test]
     fn repair_retries_uploaded_peer_batches_until_durably_confirmed() {
         let stream = Stream {
@@ -254,7 +319,7 @@ mod tests {
         let hints = Hints::default();
         hints.subscribe(streams);
         let mut work = MailboxWork::default();
-        work.unconfirmed_data.insert(stream.group.clone());
+        work.unconfirmed.insert(stream.group.clone());
         let mut schedule = Schedule::default();
         let select = |s: &mut Schedule, w: &MailboxWork| {
             s.select(streams, &hints, w, &BTreeMap::new(), true)
@@ -274,7 +339,7 @@ mod tests {
         schedule.peer_progress(stream.group.clone());
         assert!(select(&mut schedule, &work).peers.contains(&stream.group));
         schedule.peer_progress(stream.group.clone());
-        work.unconfirmed_data.clear();
+        work.unconfirmed.clear();
         assert!(select(&mut schedule, &work).streams.is_empty());
     }
 

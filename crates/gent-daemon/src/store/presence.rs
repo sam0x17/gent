@@ -23,7 +23,9 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
          CHECK((challenge IS NULL)=(issued_at IS NULL)),
          CHECK(issued_at IS NULL OR issued_at>=0),CHECK(next_probe_at>=0),
          CHECK(verified_at IS NULL OR verified_at>=0),
-         CHECK(failed_at IS NULL OR failed_at>=0));",
+         CHECK(failed_at IS NULL OR failed_at>=0));
+         CREATE TABLE IF NOT EXISTS presence_requests (
+           peer TEXT PRIMARY KEY REFERENCES network_links(peer) ON DELETE CASCADE);",
     )?;
     Ok(())
 }
@@ -214,6 +216,40 @@ impl StoreSession<'_> {
         Ok(())
     }
 
+    /// Call on a real change that needs peer capabilities. A pending challenge
+    /// covers later changes too: its reply replays current activity and roots.
+    pub(super) fn request_presence(&self, peer: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO presence_requests SELECT peer FROM network_links WHERE peer=?1
+             AND NOT EXISTS(SELECT 1 FROM node_presence WHERE peer=?1 AND
+                (challenge IS NOT NULL OR next_probe_at>?2))",
+            params![peer, self.timestamp],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn refresh_nodes(&self) -> Result<Value> {
+        if self.config.relay.is_some()
+            && self
+                .state
+                .authorize_node(
+                    self.identity.node.id(),
+                    &self.identity.node.public_key(),
+                    self.timestamp as u64,
+                )
+                .is_ok()
+        {
+            self.db.execute(
+                "INSERT OR IGNORE INTO presence_requests SELECT l.peer
+                FROM network_links l LEFT JOIN node_presence p ON p.peer=l.peer
+                WHERE p.challenge IS NULL AND (p.next_probe_at IS NULL OR p.next_probe_at<=?1)",
+                [self.timestamp],
+            )?;
+            self.queue_presence()?;
+        }
+        self.nodes()
+    }
+
     fn queue_presence(&self) -> Result<bool> {
         // Membership and key replacement invalidate cached evidence. The row
         // count stays bounded by the signed membership limit, including across
@@ -242,6 +278,8 @@ impl StoreSession<'_> {
         let peers = self.db.prepare(
             "SELECT l.peer,l.peer_key FROM network_links l LEFT JOIN node_presence p ON p.peer=l.peer
              WHERE p.challenge IS NULL AND (p.next_probe_at IS NULL OR p.next_probe_at<=?1)
+             AND (p.peer IS NULL OR p.next_probe_at=0 OR p.failed_at IS NOT NULL OR
+                  EXISTS(SELECT 1 FROM presence_requests r WHERE r.peer=l.peer))
              ORDER BY COALESCE(p.next_probe_at,0),l.peer",
         )?.query_map([self.timestamp], |r| Ok((r.get::<_, String>(0)?, r.get::<_, PublicKey>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -282,6 +320,8 @@ impl StoreSession<'_> {
                  challenge=excluded.challenge,issued_at=excluded.issued_at,next_probe_at=excluded.next_probe_at",
                 params![peer, key, challenge.to_string(), self.timestamp],
             )?;
+            self.db
+                .execute("DELETE FROM presence_requests WHERE peer=?1", [&peer])?;
             queued += 1;
             if queued == BATCH {
                 break;
@@ -342,8 +382,10 @@ impl StoreSession<'_> {
                 ("connected", "recent_encrypted_round_trip")
             } else if recent {
                 ("degraded", "probe_timed_out")
-            } else if verified.is_some() || timed_out || failed.is_some() {
+            } else if timed_out || failed.is_some() {
                 ("disconnected", "no_recent_encrypted_round_trip")
+            } else if verified.is_some() {
+                ("unknown", "awaiting_fresh_round_trip")
             } else {
                 ("unknown", "awaiting_first_round_trip")
             };

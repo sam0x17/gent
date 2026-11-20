@@ -19,7 +19,7 @@ available. Each daemon has one UDP endpoint and bounded incoming and cached
 outgoing connections. Endpoint keys and addresses travel inside the encrypted
 node stream. Receivers recheck current signed membership and the endpoint-key
 binding on each request. Address advertisements expire after three minutes and
-refresh when addresses change or their lifetime is nearly half spent.
+refresh on address changes or when traffic needs a new binding. An idle binding can expire.
 
 The default uses reachable LAN, VPN, or public IP addresses. It does not enable
 router port mapping, public address lookup, or an external Iroh relay. Networks
@@ -69,9 +69,15 @@ summary format; negotiation makes rolling upgrades possible. Registration
 generations remain authoritative across directory sequence rollback.
 
 Version 2 relay watches subscribe to relevant packet and receipt streams.
-Notifications only schedule reconciliation; they never prove delivery or advance
-a cursor. Queued work runs immediately, and a periodic full scan recovers lost
-hints. Scheduling rotates between streams to prevent a busy peer starving others.
+A node and relay that negotiate acknowledged notifications keep the cloud
+WebSocket silent while their queues are drained. A packet or signed checkpoint
+change wakes its subscribed reader or writer. The daemon acknowledges scheduling
+the read, and verifies the encrypted history separately. The relay retains
+outstanding changes on the socket across hibernation and retries a missed
+acknowledgment. Reconnecting reconciles the current directory of streams.
+An outstanding upload, explicit connectivity check, or expiring configuration
+authority can also trigger a check. Legacy watches retain timed repair scans,
+and a lost watch falls back to mailbox reconciliation while it reconnects.
 
 An uploaded packet can wait for its signed receipt without triggering another
 upload on each scheduler pass. A timed repair sweep can compare several incoming

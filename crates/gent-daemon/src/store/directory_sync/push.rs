@@ -104,9 +104,6 @@ impl StoreSession<'_> {
     }
 
     fn push_directory_page(&self, peer: &str) -> Result<bool> {
-        if self.wire_version(peer)? < 4 {
-            return Ok(false);
-        }
         type Progress = (Vec<u8>, Option<Vec<u8>>, String, bool);
         let member = self
             .state
@@ -123,6 +120,18 @@ impl StoreSession<'_> {
         };
         let remote: Snapshot = serde_json::from_slice(&bytes)?;
         let local = self.directory_snapshot()?;
+        let version = self.wire_version(peer)?;
+        if version < 4 {
+            // The capability proof may have aged out while both replicas slept.
+            // Re-negotiate only when the local view has actually changed.
+            if version == 1
+                && local.root != remote.root
+                && hash.as_deref() != Some(local.root.hash.as_slice())
+            {
+                self.request_presence(peer)?;
+            }
+            return Ok(false);
+        }
         if local.root == remote.root {
             self.db.execute(
                 "UPDATE directory_push SET local_hash=?2,complete=1 WHERE peer=?1",

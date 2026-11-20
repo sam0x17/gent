@@ -61,7 +61,11 @@ impl StoreSession<'_> {
             .keys()
             .filter(|peer| peer.as_str() != self.identity.node.id())
         {
-            self.announce_activity_to(id, peer)?;
+            if !self.activity_supported(peer)? {
+                self.request_presence(peer)?;
+            } else {
+                self.announce_activity_to(id, peer)?;
+            }
         }
         Ok(())
     }

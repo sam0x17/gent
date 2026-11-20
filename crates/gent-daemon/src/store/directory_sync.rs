@@ -340,7 +340,10 @@ impl StoreSession<'_> {
             if peer == self.identity.node.id() || self.state.transport_host(peer)? != peer {
                 continue;
             }
-            if self.wire_version(peer)? >= 4 {
+            if self
+                .last_wire_version(peer, &member.signing_key)?
+                .is_some_and(|v| v >= 4)
+            {
                 peers.push(self.push_directory_status(peer, &member.name, &member.signing_key)?);
                 continue;
             }

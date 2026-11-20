@@ -32,6 +32,23 @@ impl StoreSession<'_> {
             .unwrap_or(1))
     }
 
+    /// Display historical directory agreement after the live codec proof ages out.
+    /// Queued records still use wire_version() and its freshness checks.
+    pub(super) fn last_wire_version(
+        &self,
+        peer: &str,
+        key: &gent_crypto::PublicKey,
+    ) -> Result<Option<u8>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT version FROM wire_peers WHERE peer=?1 AND peer_key=?2",
+                params![peer, key.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub(super) fn confirm_wire_version(&self, peer: &str, version: u8) -> Result<()> {
         ensure!(
             crate::messages::wire::NEGOTIATED.contains(&version),

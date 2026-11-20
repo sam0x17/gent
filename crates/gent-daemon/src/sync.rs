@@ -42,7 +42,7 @@ pub(crate) struct Stream {
 #[derive(Default)]
 pub(crate) struct MailboxWork {
     pub(crate) ready: BTreeSet<Vec<u8>>,
-    pub(crate) unconfirmed_data: BTreeSet<Vec<u8>>,
+    pub(crate) unconfirmed: BTreeSet<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -412,24 +412,27 @@ async fn run(
         if let Some(direct) = &direct {
             let _ = direct.advertise(store.clone()).await;
         }
-        let pending_configuration = local(store.clone(), |s| {
-            s.queue_configuration_renewal()?;
-            Ok(!s.configuration_proposals()?.is_empty()
-                || s.configuration_log_migration()?.is_some())
+        let (pending_configuration, authority_remaining) = local(store.clone(), |s| {
+            let remaining = s.queue_configuration_renewal()?;
+            Ok((
+                !s.configuration_proposals()?.is_empty()
+                    || s.configuration_log_migration()?.is_some(),
+                remaining,
+            ))
         })
         .await
-        .unwrap_or(true);
+        .unwrap_or((true, 0));
         let configuration_result =
             if hints.control() || pending_configuration || Instant::now() >= next_control {
                 let result = configuration.sync_once(store.clone()).await;
-                next_control = Instant::now()
-                    + Duration::from_secs(if !result.as_ref().is_ok_and(|p| !p) {
-                        1
-                    } else if health.connected.load(std::sync::atomic::Ordering::SeqCst) {
-                        30
-                    } else {
-                        5
-                    });
+                next_control = if !result.as_ref().is_ok_and(|p| !p) {
+                    Instant::now() + Duration::from_secs(1)
+                } else if hints.passive() {
+                    Instant::now() + Duration::from_secs(authority_remaining.max(5))
+                } else {
+                    let connected = health.connected.load(std::sync::atomic::Ordering::SeqCst);
+                    Instant::now() + Duration::from_secs(if connected { 30 } else { 5 })
+                };
                 result
             } else {
                 Ok(false)
@@ -491,6 +494,9 @@ async fn run(
                     retries.clear();
                 }
                 let selected = schedule.select(&streams, &hints, &work, &retries, connected);
+                if schedule.timed_repair && !work.unconfirmed.is_empty() && connected {
+                    health.verify_watch.notify_one();
+                }
                 progressed |= schedule.has_ready(&retries);
                 next_sweep = Some(schedule.next_full());
                 let mut work = sweep::select(

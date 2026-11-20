@@ -7,6 +7,23 @@ use gent_protocol::OwnerOp;
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
 
+/// Give newly requested probes time to return. Cached inventory reads used by
+/// background services never trigger a probe or wait on a remote machine.
+pub async fn connections(home: &Path) -> Result<Value> {
+    let mut nodes = owner(home, OwnerOp::RefreshNodes).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline
+        && nodes.as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|n| n["status"] == "unknown" && n["presence"]["probe_started_at"].is_i64())
+        })
+    {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        nodes = owner(home, OwnerOp::Nodes).await?;
+    }
+    Ok(nodes)
+}
+
 async fn reconcile(home: &Path, removal: &Value) -> Result<Value> {
     if removal["service_status"] != "pending" {
         return Ok(removal.clone());

@@ -672,6 +672,7 @@ pub enum OwnerOp {
         before: Option<u64>,
     },
     Nodes,
+    RefreshNodes,
     Agents,
     ObserveActivity {
         agent_id: String,

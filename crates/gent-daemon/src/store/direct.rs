@@ -144,8 +144,22 @@ impl Store {
             if session.wire_version(&peer)? < 5 {
                 continue;
             }
-            let recent:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM direct_advertised WHERE peer=?1 AND endpoint=?2 AND expires_at>?3)",params![peer,advertised,session.timestamp+90],|r|r.get(0))?;
-            if recent {
+            // An unchanged address may expire during an idle period. Refresh
+            // it for traffic or a fresh probe; always publish a changed address.
+            let skip: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM direct_advertised WHERE peer=?1 AND endpoint=?2
+                 AND (expires_at>?3 OR (NOT EXISTS(SELECT 1 FROM network_events WHERE peer=?1)
+                 AND NOT EXISTS(SELECT 1 FROM node_presence WHERE peer=?1 AND
+                     (issued_at>=?4 OR verified_at>=?4)))))",
+                params![
+                    peer,
+                    advertised,
+                    session.timestamp + 90,
+                    session.timestamp - 30
+                ],
+                |r| r.get(0),
+            )?;
+            if skip {
                 continue;
             }
             let queued:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM network_events WHERE peer=?1 AND cancelled=0 AND json_extract(CAST(body AS TEXT),'$.event.kind')='direct')",[&peer],|r|r.get(0))?;

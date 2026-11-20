@@ -15,7 +15,7 @@ pub(super) async fn connect(
     url: &str,
     mut offer: bool,
     take_over: bool,
-) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, bool)> {
+) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, bool, bool)> {
     loop {
         // Each attempt generates a fresh upgrade key and uses the same trusted
         // origin, TLS settings and bearer. The connector never follows redirects.
@@ -24,6 +24,10 @@ pub(super) async fn connect(
         if let Some(cluster) = &relay.cluster {
             headers.insert("X-Gent-Cluster", cluster.parse()?);
         }
+        headers.insert(
+            transport_watch::PASSIVE_HEADER,
+            transport_watch::PASSIVE_VERSION.parse()?,
+        );
         headers.insert("X-Gent-Watch", "2".parse()?);
         headers.insert("X-Gent-Authority", "3".parse()?);
         headers.insert("Authorization", relay.authorization.clone());
@@ -61,7 +65,11 @@ pub(super) async fn connect(
                         .headers()
                         .get(wire::HEADER)
                         .is_some_and(|value| value == wire::OFFER);
-                return Ok((socket, negotiated));
+                let passive = response
+                    .headers()
+                    .get(transport_watch::PASSIVE_HEADER)
+                    .is_some_and(|v| v == transport_watch::PASSIVE_VERSION);
+                return Ok((socket, negotiated, passive));
             }
         }
     }

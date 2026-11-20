@@ -1,6 +1,24 @@
 use super::*;
 
 #[tokio::test]
+async fn idle_peers_stay_quiet_and_real_changes_request_fresh_proofs() {
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    advance(&pair, 0, 300);
+    assert!(!pair.stores[0].presence_tick().unwrap());
+    assert_eq!(
+        remote(&mut pair, 0)["presence"]["reason"],
+        "awaiting_fresh_round_trip"
+    );
+    assert_eq!(count(&pair, 0, "network_events"), 0);
+    pair.send(vec![]).unwrap();
+    assert!(pair.stores[0].presence_tick().unwrap());
+    let first = challenge(&pair, 0);
+    owner(&mut pair, 0, OwnerOp::RefreshNodes).unwrap();
+    assert_eq!(challenge(&pair, 0), first);
+}
+
+#[tokio::test]
 async fn negotiated_peers_reply_once_and_expired_capabilities_restore_compatibility() {
     let mut pair = Pair::new().await;
     pair.stores[0].presence_tick().unwrap();
@@ -79,7 +97,7 @@ async fn legacy_presence_reply_does_not_enable_activity_and_unmatched_proof_is_i
     reply(&pair, 0, first).unwrap();
     assert_eq!(count(&pair, 0, "activity_peers"), 0);
     advance(&pair, 0, 31);
-    pair.stores[0].presence_tick().unwrap();
+    owner(&mut pair, 0, OwnerOp::RefreshNodes).unwrap();
     let second = challenge(&pair, 0);
     reply(&pair, 0, activity::acknowledgement(first)).unwrap();
     assert_eq!(count(&pair, 0, "activity_peers"), 0);
@@ -272,7 +290,7 @@ async fn late_and_replayed_replies_cannot_supply_freshness() {
     assert!(reply(&pair, 0, Uuid::nil()).is_err());
     assert!(reply(&pair, 0, Uuid::now_v7()).is_err());
     advance(&pair, 0, 25);
-    assert!(pair.stores[0].presence_tick().unwrap());
+    owner(&mut pair, 0, OwnerOp::RefreshNodes).unwrap();
     deliver_one_way(&mut pair, 0).unwrap();
     advance(&pair, 0, 31);
     deliver_one_way(&mut pair, 1).unwrap();
@@ -290,7 +308,7 @@ async fn late_and_replayed_replies_cannot_supply_freshness() {
         Value::Null
     );
     advance(&pair, 0, 91);
-    assert_eq!(remote(&mut pair, 0)["status"], "disconnected");
+    assert_eq!(remote(&mut pair, 0)["status"], "unknown");
 }
 
 #[tokio::test]
@@ -307,7 +325,7 @@ async fn the_exact_response_deadline_is_accepted_without_extending_replays() {
     reply(&pair, 0, nonce).unwrap();
     assert_eq!(remote(&mut pair, 0)["last_seen"], observed["last_seen"]);
     advance(&pair, 0, 1);
-    assert_eq!(remote(&mut pair, 0)["status"], "disconnected");
+    assert_eq!(remote(&mut pair, 0)["status"], "unknown");
 }
 
 #[tokio::test]
@@ -382,7 +400,7 @@ async fn presence_requires_current_membership_and_never_overrides_agent_policy()
     assert_eq!(remote(&mut pair, 0)["status"], "connected");
     assert!(pair.send(vec![]).is_err());
     advance(&pair, 0, 30);
-    pair.stores[0].presence_tick().unwrap();
+    owner(&mut pair, 0, OwnerOp::RefreshNodes).unwrap();
     advance(&pair, 0, 31);
     assert_eq!(remote(&mut pair, 0)["status"], "degraded");
     advance(&pair, 0, 30);

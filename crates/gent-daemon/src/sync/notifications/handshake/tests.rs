@@ -57,12 +57,13 @@ async fn old_relay_conflict_immediately_recovers_authenticated_v2_hints() {
             .await
             .unwrap();
     });
-    let (mut socket, negotiated) =
+    let (mut socket, negotiated, passive) =
         tokio::time::timeout(Duration::from_secs(3), connect(&relay, &url, true, true))
             .await
             .unwrap()
             .unwrap();
     assert!(!negotiated);
+    assert!(!passive);
     let ready = socket.next().await.unwrap().unwrap().into_text().unwrap();
     assert_eq!(ready.as_str(), r#"{"version":2,"event":"ready"}"#);
     server.await.unwrap();

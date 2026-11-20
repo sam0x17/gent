@@ -164,7 +164,7 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
     let streams = std::slice::from_ref(&stream);
     let work = sender.lock().unwrap().sync_pending_groups(streams).unwrap();
     assert!(!work.ready.contains(group));
-    assert!(work.unconfirmed_data.contains(group));
+    assert!(work.unconfirmed.contains(group));
     let hints = schedule::Hints::default();
     let mut schedule = schedule::Schedule::default();
     let retries = Default::default();

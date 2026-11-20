@@ -960,7 +960,7 @@ async fn execute(cli: Cli) -> Result<()> {
             .context(
                 "this daemon does not report sync progress; update Gent and restart its daemon",
             )?,
-        Some(Command::Nodes) => owner(&home, OwnerOp::Nodes).await?,
+        Some(Command::Nodes) => node::connections(&home).await?,
         Some(Command::Files { command }) => {
             let action = match command.unwrap_or(FilesCommand::Status) {
                 FilesCommand::Status => OwnerOp::FilesStatus,

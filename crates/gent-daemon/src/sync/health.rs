@@ -11,6 +11,7 @@ use std::sync::{
 #[derive(Default)]
 pub(crate) struct Health {
     pub(crate) connected: Arc<AtomicBool>,
+    pub(crate) verify_watch: tokio::sync::Notify,
     pass: Mutex<Pass>,
     wss: Mutex<Option<Arc<super::notifications::wss::Metrics>>>,
     exchange: Mutex<Option<Arc<super::exchange::Exchange>>>,

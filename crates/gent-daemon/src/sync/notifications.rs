@@ -5,22 +5,16 @@ pub(super) mod wss;
 use super::{Relay, SharedStore, health::Health, schedule::Hints};
 use anyhow::{Context, Result, ensure};
 use futures_util::{SinkExt, StreamExt};
-use gent_protocol::transport_watch::{MAX_BYTES, Notice, Subscription};
+use gent_protocol::transport_watch::{MAX_BYTES, Notice, WatchAck};
 use gent_protocol::transport_wss as wire;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
-use tokio::{
-    sync::Notify,
-    task::JoinHandle,
-    time::{Instant, MissedTickBehavior},
-};
+use tokio::{sync::Notify, task::JoinHandle, time::Instant};
 use tokio_tungstenite::tungstenite::Message;
 
-const PING: &str = "gent-ping-v1";
-const PONG: &str = "gent-pong-v1";
 const COALESCE: Duration = Duration::from_millis(50);
 
 pub(super) struct Listener {
@@ -55,11 +49,12 @@ impl Listener {
                 // Errors contain no application state and are not logged with
                 // request headers, which carry the transport credential.
                 let result =
-                    listen(&relay, &wakeup, &flag, &hints, &route, &store, take_over).await;
+                    listen(&relay, &wakeup, &health, &hints, &route, &store, take_over).await;
                 health.watch_ended(
                     result.as_ref().err().map(|e| safe_reason(e)),
                     started.elapsed(),
                 );
+                hints.set_passive(false);
                 if flag.swap(false, Ordering::SeqCst) {
                     hints.all();
                 }
@@ -114,7 +109,7 @@ fn safe_reason(error: &anyhow::Error) -> &'static str {
 async fn listen(
     relay: &Relay,
     wakeup: &Notify,
-    connected: &AtomicBool,
+    health: &Health,
     hints: &Hints,
     route: &wss::Wss,
     store: &SharedStore,
@@ -133,19 +128,17 @@ async fn listen(
         })
         .await
         .unwrap_or(false);
-    let (mut socket, negotiated) =
+    let (mut socket, negotiated, passive) =
         handshake::connect(relay, url.as_str(), offered, take_over).await?;
     let mut peer: Option<wss::Connection> = None;
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut ready = false;
+    let mut verifying = false;
     let mut deadline = Instant::now() + Duration::from_secs(5);
     let mut dirty = false;
     let mut next_signal = Instant::now();
     let mut version = 1;
     let mut subscription = None;
-    let mut subscribe = tokio::time::interval(Duration::from_secs(1));
-    subscribe.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut seen = None;
     loop {
         tokio::select! {
             frame = async { peer.as_mut().expect("peer watch ready").next_send().await }, if peer.is_some() => {
@@ -154,18 +147,22 @@ async fn listen(
                 tokio::time::timeout(Duration::from_secs(3), socket.send(Message::Binary(frame.into()))).await??;
                 peer.as_ref().expect("peer watch ready").sent(bytes);
             }
-            _ = subscribe.tick(), if ready && version == 2 => {
-                let interests = hints.interests();
-                if subscription.as_ref() != Some(&interests) {
-                    let text = serde_json::to_string(&Subscription {version:2,interests:interests.clone()})?;
+            _ = hints.subscription_changed.notified(), if ready && version == 2 => {
+                let value = hints.subscription(passive);
+                if subscription.as_ref() != Some(&value) {
+                    let text = serde_json::to_string(&value)?;
                     tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Text(text.into()))).await??;
-                    subscription = Some(interests);
+                    subscription = Some(value);
                 }
             }
-            _ = tokio::time::sleep_until(deadline) => anyhow::bail!("push heartbeat expired"),
-            _ = heartbeat.tick(), if ready => {
-                tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Text(PING.into()))).await??;
+            _ = health.verify_watch.notified(), if ready && !verifying => {
+                // Only outstanding work or an explicit freshness request can
+                // probe an apparently open route. Quiet sockets have no timer.
+                tokio::time::timeout(Duration::from_secs(5), socket.send(Message::text("gent-ping-v1"))).await??;
+                verifying = true;
+                deadline = Instant::now() + Duration::from_secs(10);
             }
+            _ = tokio::time::sleep_until(deadline), if !ready || verifying => anyhow::bail!("watch verification timed out"),
             _ = tokio::time::sleep_until(next_signal), if dirty => {
                 wakeup.notify_one();
                 dirty = false;
@@ -173,9 +170,7 @@ async fn listen(
             }
             frame = socket.next() => {
                 match frame.context("push channel closed")?? {
-                    Message::Text(text) if ready && text == PONG => {
-                        deadline = Instant::now() + Duration::from_secs(45);
-                    }
+                    Message::Text(text) if ready && text == "gent-pong-v1" => verifying = false,
                     Message::Binary(bytes) => {
                         peer.as_mut().context("unnegotiated peer frame")?.received(&bytes, store)?;
                     }
@@ -190,16 +185,29 @@ async fn listen(
                                 if version == 2 && negotiated {
                                     peer = Some(wss::Connection::open(route));
                                 }
+                                hints.set_passive(passive && version == 2);
+                                hints.subscription_changed.notify_one();
                                 hints.reconnected();
-                                deadline = Instant::now() + Duration::from_secs(45);
-                                connected.store(true, Ordering::SeqCst);
+                                health.connected.store(true, Ordering::SeqCst);
                                 // Reconcile after subscription to close the race
                                 // with packets stored during the handshake.
                                 wakeup.notify_one();
                             }
                             "changed" if ready => {
-                                if notice.version == 1 || notice.all {hints.all(); dirty = true;}
-                                else {dirty |= hints.changed(&notice.streams);}
+                                ensure!(notice.serial.is_some() == (passive && version == 2) && notice.version == version, "invalid watch serial or version");
+                                if seen.is_none() || notice.serial > seen {
+                                    if notice.version == 1 || notice.all {
+                                        hints.all();
+                                        dirty = true;
+                                    } else {
+                                        dirty |= hints.changed(&notice.streams);
+                                    }
+                                    seen = notice.serial;
+                                }
+                                if let Some(serial) = notice.serial {
+                                    let text = serde_json::to_string(&WatchAck { seen: serial })?;
+                                    tokio::time::timeout(Duration::from_secs(5), socket.send(Message::Text(text.into()))).await??;
+                                }
                             },
                             _ => anyhow::bail!("invalid push event"),
                         }

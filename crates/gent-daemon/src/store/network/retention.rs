@@ -147,6 +147,9 @@ impl StoreSession<'_> {
                 );
             }
         }
+        if !matches!(event, Event::Presence { .. } | Event::Direct { .. }) {
+            self.request_presence(peer)?;
+        }
         let negotiated = self.wire_version(peer)?;
         let version = if matches!(&event, Event::Directory { envelope } if matches!(envelope.as_ref(), crate::messages::directory::Envelope::Push { .. }))
         {

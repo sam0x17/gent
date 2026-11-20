@@ -3,17 +3,18 @@ use super::*;
 impl Store {
     /// Any remaining administrator can renew authority, including after every
     /// node has been offline long enough for the previous lease to expire.
-    pub(crate) fn queue_configuration_renewal(&self) -> Result<()> {
+    pub(crate) fn queue_configuration_renewal(&self) -> Result<u64> {
         let state = self.identity.state(&self.db)?;
+        let remaining = state.state().expires_at.saturating_sub(now() as u64);
         if state.state().peer.is_none()
-            || state.state().expires_at.saturating_sub(now() as u64) > 6 * 60 * 60
+            || remaining > 6 * 60 * 60
             || !state
                 .state()
                 .nodes
                 .get(self.identity.node.id())
                 .is_some_and(|n| n.can_configure)
         {
-            return Ok(());
+            return Ok(remaining);
         }
         let tx = self.db.unchecked_transaction()?;
         let id = gent_crypto::scoped_id(
@@ -26,7 +27,7 @@ impl Store {
         self.network_session(&tx, state)
             .submit_configuration(&id.to_string(), ConfigurationEdit::Renew)?;
         tx.commit()?;
-        Ok(())
+        Ok(remaining)
     }
 
     /// The transport has already checked for a committed retry receipt. Only
