@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use gent_protocol::web_failover::{Admission, Control, MAX_CONTROL_BYTES};
 use sha2::{Digest, Sha256};
 
-pub(super) struct Client {
+pub(in crate::web) struct Client {
     pub parent: PathBuf,
     pub node: String,
     url: String,
@@ -19,7 +19,7 @@ impl Client {
         Ok(Self {
             parent: parent.into(),
             node: node.into(),
-            url: format!("{origin}{base}/control"),
+            url: format!("{origin}{base}"),
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(12))
@@ -36,7 +36,28 @@ impl Client {
     }
 
     pub async fn call(&self, operation: &Control) -> Result<(u16, Vec<u8>)> {
-        let bytes = serde_json::to_vec(operation)?;
+        self.post("control", serde_json::to_vec(operation)?).await
+    }
+
+    pub async fn manage(
+        &self,
+        action: &gent_protocol::hosted_mcp::ConnectorAction,
+    ) -> Result<String> {
+        let (status, bytes) = self.post("manage", serde_json::to_vec(action)?).await?;
+        match status {
+            200 => Ok(serde_json::from_slice(&bytes)?),
+            410 => anyhow::bail!("web node is revoked"),
+            403 => anyhow::bail!("current cluster configuration authority required"),
+            422 => {
+                anyhow::bail!("connector URL unavailable or expired; use gent node web rotate NAME")
+            }
+            _ => anyhow::bail!(
+                "web connector management unavailable ({status}); retry when the cluster has an updated online carrier"
+            ),
+        }
+    }
+
+    async fn post(&self, route: &str, bytes: Vec<u8>) -> Result<(u16, Vec<u8>)> {
         ensure!(
             bytes.len() <= MAX_CONTROL_BYTES,
             "web control exceeds limits"
@@ -53,7 +74,8 @@ impl Client {
         )?;
         let response = self
             .http
-            .post(&self.url)
+            .post(format!("{}/{route}", self.url))
+            .timeout(Duration::from_secs(if route == "manage" { 40 } else { 12 }))
             .bearer_auth(self.credential()?)
             .header(
                 "X-Gent-Web-Admission",

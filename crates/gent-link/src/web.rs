@@ -1,6 +1,7 @@
 //! Named hosted nodes belong to the machine's one cluster. Their private
 //! runtimes are supervised by its daemon; they are never selectable profiles.
 pub(crate) mod failover;
+mod management;
 mod runtime;
 mod storage;
 use crate::{auth, gateway, managed_file, node_home, owner};
@@ -23,7 +24,7 @@ const ORIGIN: &str = "https://mcp.gent.link";
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Command {
-    /// Show web nodes hosted by this machine, without revealing their URLs.
+    /// List web connectors in this cluster and show their current status.
     List,
     /// Display this web node's private connector URL.
     Url(Output),
@@ -122,6 +123,15 @@ pub(crate) async fn add(parent: &Path, name: &str, out: Option<&Path>) -> Result
         cfg.service.is_some(),
         "web nodes need a Gent service cluster"
     );
+    if let Some(node) = management::resolve(parent, name).await? {
+        let mut result = management::execute(parent, &node, out, false, false).await?;
+        result["ready"] = true.into();
+        result["cluster"] = cfg.cluster.name.into();
+        result["next"] =
+            "Add a custom MCP connector using this private URL and select No authentication."
+                .into();
+        return Ok(result);
+    }
     let directory = storage::directory(parent)?;
     let lock = managed_file::lock(&directory.join("setup.lock"))?;
     let home = storage::home(parent, name);
@@ -207,10 +217,12 @@ pub(crate) async fn execute(parent: &Path, command: Command) -> Result<Value> {
     if let Command::List = command {
         let parent_config = node_home::inspect(parent)?;
         let mut nodes = Vec::new();
-        for (home, record) in storage::list(parent)? {
-            nodes.push(json!({"name":record.name,"node_id":record.node,
+        if parent_config.service.is_none() {
+            for (home, record) in storage::list(parent)? {
+                nodes.push(json!({"name":record.name,"node_id":record.node,
                 "host_node_id":parent_config.node.id,"host_node_name":parent_config.node.name,
                 "revoked":record.revoked,"ready":!record.revoked && runtime::ready(&home).await}));
+            }
         }
         let directory = owner(parent, OwnerOp::Nodes).await?;
         if let Some(directory) = directory.as_array() {
@@ -235,6 +247,12 @@ pub(crate) async fn execute(parent: &Path, command: Command) -> Result<Value> {
                 }
             }
         }
+        if parent_config.service.is_some() {
+            use futures_util::{StreamExt, stream};
+            stream::iter(nodes.iter_mut())
+                .for_each_concurrent(4, |row| management::update_status(parent, row))
+                .await;
+        }
         return Ok(json!({"web_nodes":nodes}));
     }
     let (name, out, rotate, revoke) = match command {
@@ -245,6 +263,12 @@ pub(crate) async fn execute(parent: &Path, command: Command) -> Result<Value> {
     };
     if !revoke {
         output_allowed(out.as_deref())?;
+    }
+    if node_home::inspect(parent)?.service.is_some() {
+        let node = management::resolve(parent, &name)
+            .await?
+            .context("unknown web node in this cluster")?;
+        return management::execute(parent, &node, out.as_deref(), rotate, revoke).await;
     }
     let directory = storage::directory(parent)?;
     let _lock = managed_file::lock(&directory.join("setup.lock"))?;
@@ -312,7 +336,7 @@ pub(crate) fn print(value: &Value) {
                 } else if node["ready"] == true {
                     "connected"
                 } else if node["ready"].is_null() {
-                    "hosted elsewhere"
+                    "status unknown"
                 } else {
                     "offline"
                 },

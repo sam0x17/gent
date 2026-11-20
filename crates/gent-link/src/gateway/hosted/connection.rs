@@ -38,6 +38,9 @@ pub(super) async fn run(
     if let Some(session) = &session {
         request
             .headers_mut()
+            .insert("x-gent-web-management", "1".parse()?);
+        request
+            .headers_mut()
             .insert("x-gent-web-epoch", session.epoch.to_string().parse()?);
     }
     let config = WebSocketConfig::default()
@@ -88,23 +91,41 @@ pub(super) async fn run(
                     Message::Close(_)=>return Ok(()),
                     _=>{},
                 }
-                let Frame::Request(request)=parse(message)? else {anyhow::bail!("unexpected hosted frame");};
-                ensure!(request.valid(),"invalid hosted request");
-                ensure!(!seen.contains(&request.id),"repeated hosted request ID");
+                let frame = parse(message)?;
+                let id = match &frame {
+                    Frame::Request(request) if request.valid() => request.id.clone(),
+                    Frame::Manage { id, action } if session.is_some() && protocol::valid_id(id) && action.valid() => id.clone(),
+                    _ => anyhow::bail!("invalid hosted request"),
+                };
+                ensure!(!seen.contains(&id),"repeated hosted request ID");
                 if draining || tasks.len()>=protocol::MAX_IN_FLIGHT {
-                    let response=failure(request.id,503,"Gent gateway is busy; retry identical tool arguments");
+                    let response=failure(id,503,"Gent gateway is busy; retry identical tool arguments");
                     writer.send(Message::Text(serde_json::to_string(&Frame::Response(response))?.into())).await?;
                     continue;
                 }
-                seen.insert(request.id.clone());
+                seen.insert(id.clone());
                 draining=seen.len()>=4096;
                 let app=app.clone();
                 let host=endpoint.host.clone();
                 let sender=responses.clone();
                 let session=session.clone();
                 tasks.spawn(async move {
-                    let id=request.id.clone();
                     let operation=async {
+                        if let Frame::Manage { action, .. } = frame {
+                            let session = session.context("portable carrier required")?;
+                            let result = session.connector(action).await;
+                            return Ok(match result {
+                                Ok(value) => HttpResponse {
+                                    id: id.clone(), status: 200,
+                                    headers: vec![("content-type".into(), "application/json".into()), ("cache-control".into(),"no-store".into())],
+                                    body_base64: STANDARD.encode(serde_json::to_vec(&value)?),
+                                },
+                                Err(error) if error.to_string().contains("connector URL expired") => failure(id.clone(),422,"connector URL expired"),
+                                Err(_) => failure(id.clone(),503,"connector management pending"),
+                            });
+                        }
+                        let Frame::Request(request) = frame else { anyhow::bail!("invalid hosted request") };
+
                         let response=dispatch(app,&host,request).await?;
                         if let Some(session)=session { session.flush().await?; }
                         Ok::<_,anyhow::Error>(response)

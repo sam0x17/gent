@@ -30,6 +30,19 @@ impl Session {
             management: std::sync::RwLock::new(None),
         }
     }
+    pub(crate) async fn connector(
+        &self,
+        action: gent_protocol::hosted_mcp::ConnectorAction,
+    ) -> Result<String> {
+        let cfg = node_home::inspect(&self.home)?;
+        let base = gent_protocol::hosted_mcp::node_base(&cfg.cluster.id, &cfg.node.id)
+            .context("invalid web node identity")?;
+        let result =
+            gateway::registry::capability::manage(&self.home, &format!("{ORIGIN}{base}"), &action)?;
+        self.flush().await?;
+        Ok(result)
+    }
+
     pub(crate) fn credential(&self) -> Result<String> {
         self.client.credential()
     }

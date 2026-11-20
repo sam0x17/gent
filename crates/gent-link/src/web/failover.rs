@@ -1,5 +1,5 @@
 //! A named web connector can move between authorized native cluster nodes.
-mod client;
+pub(super) mod client;
 mod session;
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};

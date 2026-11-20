@@ -117,6 +117,32 @@ pub(super) fn recover(registry: &Registry, state: &mut State) -> Result<()> {
 
 /// Only explicit owner setup/show/rotate calls may return this secret.
 pub(crate) fn url(home: &Path, base: &str, rotate: bool) -> Result<String> {
+    access(home, base, rotate, None, false)
+}
+
+/// A rotation based on an observed fingerprint can be repeated after a lost
+/// response. A concurrent successful rotation already satisfies that request.
+pub(crate) fn manage(
+    home: &Path,
+    base: &str,
+    action: &gent_protocol::hosted_mcp::ConnectorAction,
+) -> Result<String> {
+    use gent_protocol::hosted_mcp::ConnectorAction::*;
+    match action {
+        Status => anyhow::bail!("connector status is supplied by the bridge"),
+        Url => url(home, base, false),
+        Fingerprint => access(home, base, false, None, true),
+        Rotate { expected } => access(home, base, true, Some(expected), false),
+    }
+}
+
+fn access(
+    home: &Path,
+    base: &str,
+    rotate: bool,
+    expected: Option<&str>,
+    fingerprint: bool,
+) -> Result<String> {
     let normalized = managed_file::normalize(home)?;
     let home = normalized.as_path();
     let registry = Registry::open(home)?;
@@ -146,7 +172,14 @@ pub(crate) fn url(home: &Path, base: &str, rotate: bool) -> Result<String> {
     );
     let now = auth::now()?;
     ensure!(now >= state.clock, "gateway clock moved backward");
-    if rotate && !was_pending {
+    let current = client
+        .token_hash
+        .as_deref()
+        .context("missing connector credential")?;
+    if fingerprint {
+        return Ok(current.to_owned());
+    }
+    if rotate && !was_pending && expected.is_none_or(|hash| hash == current) {
         let previous_hash = client
             .token_hash
             .clone()
@@ -185,6 +218,23 @@ pub(crate) fn revoke(home: &Path) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retrying_rotation_with_the_original_fingerprint_preserves_the_new_url() {
+        use gent_protocol::hosted_mcp::ConnectorAction;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("node");
+        config::initialize(&home, "web").unwrap();
+        create(&home).unwrap();
+        let base = "https://example.invalid";
+        let before = manage(&home, base, &ConnectorAction::Url).unwrap();
+        let expected = manage(&home, base, &ConnectorAction::Fingerprint).unwrap();
+        let action = ConnectorAction::Rotate { expected };
+        let after = manage(&home, base, &action).unwrap();
+        assert_ne!(before, after);
+        assert_eq!(manage(&home, base, &action).unwrap(), after);
+        assert_eq!(manage(&home, base, &ConnectorAction::Url).unwrap(), after);
+    }
 
     #[tokio::test]
     async fn interrupted_rotation_recovers_before_and_after_registry_commit() {

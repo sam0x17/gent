@@ -1,3 +1,9 @@
+# Cluster operations
+
+Expose cluster resources from every enrolled machine with the required permissions.
+Resolve the resource through the cluster directory. When a conversation needs its
+native host, route the request there on the caller's behalf.
+
 # CI
 
 - macOS CI must be manual-only. Put macOS jobs in workflows triggered solely by `workflow_dispatch`; do not trigger them through pushes, pull requests, schedules, or automatic workflow chaining.

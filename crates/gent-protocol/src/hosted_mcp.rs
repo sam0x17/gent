@@ -20,6 +20,31 @@ pub enum Frame {
     Ready { version: u8 },
     Request(HttpRequest),
     Response(HttpResponse),
+    Manage { id: String, action: ConnectorAction },
+}
+
+/// Only the signed native management endpoint may send these frames.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConnectorAction {
+    Status,
+    Url,
+    Fingerprint,
+    Rotate { expected: String },
+}
+
+impl ConnectorAction {
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::Rotate { expected } => {
+                expected.len() == 64
+                    && expected
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }
+            _ => true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,8 +89,9 @@ pub fn route(path: &str) -> Option<(&str, &str, String)> {
     if let Some(rest) = path.strip_prefix("/clusters/") {
         let (cluster, node, suffix) = scope(rest)?;
         let native = format!("/{suffix}");
-        return (matches!(native.as_str(), "/connect" | "/control") || valid_path(&native))
-            .then_some((cluster, node, native));
+        return (matches!(native.as_str(), "/connect" | "/control" | "/manage")
+            || valid_path(&native))
+        .then_some((cluster, node, native));
     }
     for (public, native, suffix) in [
         (

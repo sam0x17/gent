@@ -51,6 +51,8 @@ impl Checkpoint {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Control {
     Inspect,
+    /// Revoke a named connector under current cluster configuration authority.
+    RevokeConnector,
     Acquire {
         create: bool,
     },

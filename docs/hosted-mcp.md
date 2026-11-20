@@ -77,6 +77,11 @@ work.
 
 ## Manage a web node
 
+Run these commands on any enrolled native node with configuration authority.
+Use the connector name or its node ID. Gent finds its current carrier through
+the bridge. Displaying or rotating a URL needs an online carrier. Revocation
+also works while the carrier is offline.
+
 ```sh
 gent node web list
 gent node web url claude-personal
@@ -99,7 +104,7 @@ gent node add claude-personal --web --code-out ~/.gent/claude-url.txt
 gent node web url claude-personal --out ~/.gent/claude-url.txt
 ```
 
-Setup retries reuse the same node and URL. If setup reports the node is saved
+Repeating `gent node add NAME --web` on another node retrieves the existing connector and URL. If setup reports the node is saved
 but offline, keep the updated daemon running and check `gent node web list`.
 An interrupted URL rotation resumes from its private journal. A revoked URL
 cannot be reactivated by repeating setup.

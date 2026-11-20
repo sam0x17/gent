@@ -408,7 +408,7 @@ enum NodeCommand {
     Reset,
     /// Add a named node through a one-time invitation, or host one with --web.
     Add(enrollment::AddArgs),
-    /// Manage named web/mobile connectors hosted by this machine.
+    /// Manage the cluster's named web/mobile connectors.
     Web {
         #[command(subcommand)]
         command: web::Command,
