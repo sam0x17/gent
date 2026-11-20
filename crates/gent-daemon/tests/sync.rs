@@ -638,9 +638,21 @@ async fn invalid_push_cannot_change_authority_and_polling_recovers_without_webso
     relay.notices.send(relay::Notice::Close).unwrap();
     wait_watchers(&relay, 0).await;
     let next = f.set(policy("fallback"));
-    tokio::time::timeout(Duration::from_secs(5), f.wait_revision(next))
+    // The disconnected reader can begin its five-second repair just before
+    // the writer publishes. Time the reader from the durable upload.
+    let db = rusqlite::Connection::open(f.homes[0].path().join("state.sqlite3")).unwrap();
+    tokio::time::timeout(Duration::from_secs(6), async {
+        while !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM configuration_streams c JOIN streams s USING(group_id)
+             JOIN stream_relay_upload u USING(group_id) WHERE c.revision=?1 AND u.next_sequence=s.head+1)",
+            [next], |row| row.get::<_, bool>(0),
+        ).unwrap() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.expect("disconnected writer did not publish");
+    tokio::time::timeout(Duration::from_secs(6), f.wait_revision(next))
         .await
-        .unwrap();
+        .expect("disconnected reader did not apply the published revision on its next sweep");
     drop(_source);
     drop(_receiver);
     wait_watchers(&relay, 0).await;

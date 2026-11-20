@@ -1,4 +1,4 @@
-//! One ciphertext chunk per object per pass; all local work rechecks authority.
+//! Bounded file transfers run independently of the chat scheduler.
 use super::*;
 use crate::file_transport::FileRelay;
 
@@ -14,12 +14,15 @@ impl Drop for Worker {
     }
 }
 impl Scheduler {
-    pub fn start(mut self, store: SharedStore) -> Worker {
+    pub fn start(mut self, store: SharedStore, direct: Option<Arc<direct::Direct>>) -> Worker {
         Worker(tokio::spawn(async move {
             loop {
                 // This worker never consumes configuration wake-ups. Check for
                 // new file jobs at least once per second while otherwise idle.
-                let progressed = self.tick(store.clone()).await.unwrap_or(false);
+                let progressed = self
+                    .tick(store.clone(), direct.as_ref())
+                    .await
+                    .unwrap_or(false);
                 let mut pause = if progressed {
                     Duration::from_millis(10)
                 } else {
@@ -46,7 +49,11 @@ impl Scheduler {
             .map(|r| r.at.saturating_duration_since(Instant::now()))
             .min()
     }
-    pub async fn tick(&mut self, store: SharedStore) -> Result<bool> {
+    pub async fn tick(
+        &mut self,
+        store: SharedStore,
+        direct: Option<&Arc<direct::Direct>>,
+    ) -> Result<bool> {
         let jobs = local(store.clone(), |s| s.file_jobs()).await?;
         self.retries.retain(|id, _| jobs.contains(id));
         let begin = self.cursor.min(jobs.len());
@@ -63,7 +70,7 @@ impl Scheduler {
                 let store = store.clone();
                 let relay = self.relay.clone();
                 async move {
-                    let result = transfer_file(store, relay, &id).await;
+                    let result = transfer_file(store, relay, direct, &id).await;
                     (id, result)
                 }
             })
@@ -92,26 +99,51 @@ impl Scheduler {
         Ok(progressed)
     }
 }
-async fn transfer_file(store: SharedStore, relay: FileRelay, id: &str) -> Result<bool> {
+async fn transfer_file(
+    store: SharedStore,
+    relay: FileRelay,
+    direct: Option<&Arc<direct::Direct>>,
+    id: &str,
+) -> Result<bool> {
     let object = id.to_owned();
     let Some(job) = local(store.clone(), move |s| s.file_transfer(&object)).await? else {
         return Ok(false);
     };
     if job.upload {
         let mut snapshot = relay.reserve(id, &job.manifest).await?;
-        let missing =
-            (0..job.manifest.chunks.len() as u32).find(|i| !snapshot.uploaded.contains(i));
-        if let Some(index) = missing {
+        // One reservation reports all chunks the relay has. A lost PUT reply
+        // is reconciled on the next reservation using the original ciphertext.
+        let missing: Vec<_> = (0..job.manifest.chunks.len() as u32)
+            .filter(|i| !snapshot.uploaded.contains(i))
+            .take(4)
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for index in missing.iter().copied() {
             let object = job.id.clone();
             let bytes = local(store.clone(), move |s| s.file_upload(&object, index)).await?;
             relay.put(id, &job.manifest, index, &bytes).await?;
             snapshot.uploaded.push(index);
-            snapshot.uploaded.sort_unstable();
+            if Instant::now() >= deadline {
+                break;
+            }
         }
+        snapshot.uploaded.sort_unstable();
         let changed = local(store, move |s| s.file_uploaded(&job.id, &snapshot.uploaded)).await?;
-        Ok(missing.is_some() || changed)
+        Ok(!missing.is_empty() || changed)
     } else if let Some(&index) = job.missing.first() {
-        let Some(bytes) = relay.get(id, &job.manifest, index).await? else {
+        let direct_bytes = match direct {
+            Some(direct) => {
+                direct
+                    .file_chunk(store.clone(), &job.peer, id, &job.manifest, index)
+                    .await
+            }
+            None => None,
+        };
+        let bytes = if let Some(bytes) = direct_bytes {
+            bytes
+        } else if let Some(bytes) = relay.get(id, &job.manifest, index).await? {
+            bytes
+        } else {
             anyhow::bail!("file chunk awaiting relay recovery");
         };
         local(store, move |s| s.file_received(&job.id, index, &bytes)).await?;

@@ -8,7 +8,7 @@ use gent_crypto::stream::{MAX_RECEIPT_BYTES, Packet, Receipt};
 use reqwest::{Client, StatusCode, Url, header};
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -37,6 +37,12 @@ pub(crate) struct Stream {
     pub group: Vec<u8>,
     pub outgoing: bool,
     pub configuration: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct MailboxWork {
+    pub(crate) ready: BTreeSet<Vec<u8>>,
+    pub(crate) unconfirmed_data: BTreeSet<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -336,6 +342,12 @@ struct Retry {
     delay: Duration,
 }
 
+enum TransferRoute {
+    MailboxRead,
+    MailboxWrite,
+    Peer,
+}
+
 /// Start only when the owner has configured a relay endpoint and private token
 /// file. The task needs no MCP turn and never publishes plaintext pairing metadata.
 pub fn start(store: SharedStore) -> Result<Option<JoinHandle<()>>> {
@@ -386,12 +398,11 @@ async fn run(
         direct: direct.clone(),
         wss: push.wss.clone(),
     };
-    let _files = files.start(store.clone());
+    let _files = files.start(store.clone(), direct.clone());
     let mut retries = BTreeMap::<Vec<u8>, Retry>::new();
     let mut transferred = BTreeMap::<Vec<u8>, u64>::new();
     let mut checkpoints = BTreeMap::<Vec<u8>, transfer::State>::new();
     let mut schedule = schedule::Schedule::default();
-    let mut was_connected = false;
     let sweep_support = Arc::new(batch::Support::default());
     let mut previous_error = None;
     let configuration = crate::configuration_log::ConfigurationRelay::from_relay(relay.clone());
@@ -412,10 +423,12 @@ async fn run(
             if hints.control() || pending_configuration || Instant::now() >= next_control {
                 let result = configuration.sync_once(store.clone()).await;
                 next_control = Instant::now()
-                    + Duration::from_secs(if result.as_ref().is_ok_and(|p| !p) {
+                    + Duration::from_secs(if !result.as_ref().is_ok_and(|p| !p) {
+                        1
+                    } else if health.connected.load(std::sync::atomic::Ordering::SeqCst) {
                         30
                     } else {
-                        1
+                        5
                     });
                 result
             } else {
@@ -442,8 +455,8 @@ async fn run(
                 | (_, _, _, _, _, Err(error)) => Err(error),
             };
             let streams = store.sync_streams()?;
-            let queued = store.sync_pending_groups(&streams)?;
-            Ok((streams, pending, queued))
+            let work = store.sync_pending_groups(&streams)?;
+            Ok((streams, pending, work))
         })
         .await;
         let mut progressed = configuration_result.as_ref().copied().unwrap_or(false)
@@ -457,7 +470,7 @@ async fn run(
         let (mut successes, mut failures, mut local_error) = (0, 0, false);
         let mut next_sweep = None;
         match result {
-            Ok((streams, pending, queued)) => {
+            Ok((streams, pending, work)) => {
                 match pending {
                     Ok(pending) => mesh_pending = pending,
                     Err(e) => {
@@ -474,20 +487,14 @@ async fn run(
                 health.retain(&streams, mesh_pending);
                 hints.subscribe(&streams);
                 let connected = health.connected.load(std::sync::atomic::Ordering::SeqCst);
-                if was_connected && !connected {
-                    // Start the five-second disconnected cadence immediately.
-                    hints.all();
-                }
-                was_connected = connected;
                 if hints.take_reconnected() {
                     retries.clear();
                 }
-                let selected =
-                    schedule.select(&streams, &hints, queued.clone(), &retries, connected);
+                let selected = schedule.select(&streams, &hints, &work, &retries, connected);
                 progressed |= schedule.has_ready(&retries);
                 next_sweep = Some(schedule.next_full());
                 let mut work = sweep::select(
-                    selected,
+                    selected.streams,
                     schedule.timed_repair,
                     sweep_support.clone(),
                     store.clone(),
@@ -501,42 +508,67 @@ async fn run(
                     let health = health.clone();
                     let wakeup = wakeup.clone();
                     let peers = peers.clone();
-                    let outgoing = entry.outgoing;
-                    let peer_work = outgoing && !entry.configuration && queued.contains(&group);
+                    let mailbox_route = if entry.outgoing {
+                        TransferRoute::MailboxWrite
+                    } else {
+                        TransferRoute::MailboxRead
+                    };
+                    let peer_work = selected.peers.contains(&group);
                     let mut checkpoint = checkpoints.remove(&group).unwrap_or_default();
                     async move {
                         if matches!(check, sweep::Check::Current) {
                             health.idle(&group);
-                            return (group, outgoing, checkpoint, Ok(None));
+                            return (group, mailbox_route, checkpoint, Ok(None));
                         }
                         if matches!(check, sweep::Check::RestoreCheckpoint) {
                             checkpoint.forget_publication();
                         }
                         checkpoint.collect_direct().await;
+                        let mut prepared = transfer::Prepared::new(wakeup);
                         if peer_work
                             && let Some(result) = peers
-                                .transfer(&store, &relay, &entry, &health, &wakeup, &mut checkpoint)
+                                .transfer(
+                                    &store,
+                                    &relay,
+                                    &entry,
+                                    &health,
+                                    &mut prepared,
+                                    &mut checkpoint,
+                                )
                                 .await
                             && !matches!(result, Ok(None))
                         {
-                            return (group, outgoing, checkpoint, result);
+                            return (group, TransferRoute::Peer, checkpoint, result);
                         }
-                        let result =
-                            transfer::run(store, relay, entry, health, wakeup, &mut checkpoint)
-                                .await;
-                        (group, outgoing, checkpoint, result)
+                        let result = transfer::run(
+                            store,
+                            relay,
+                            entry,
+                            health,
+                            &mut prepared,
+                            &mut checkpoint,
+                        )
+                        .await;
+                        (group, mailbox_route, checkpoint, result)
                     }
                 })
                 .buffer_unordered(4);
                 let mut completed = Vec::new();
-                while let Some((group, outgoing, checkpoint, result)) = work.next().await {
+                while let Some((group, route, checkpoint, result)) = work.next().await {
                     match result {
                         Ok(position) => {
                             successes += 1;
-                            if checkpoint.more() || (!outgoing && position.is_some()) {
+                            if checkpoint.more()
+                                || (matches!(route, TransferRoute::MailboxRead)
+                                    && position.is_some())
+                            {
                                 schedule.again(group.clone());
                             }
                             if let Some(position) = position {
+                                if matches!(route, TransferRoute::Peer) {
+                                    schedule.peer_progress(group.clone());
+                                    progressed = true;
+                                }
                                 progressed |=
                                     transferred.insert(group.clone(), position) != Some(position);
                             }

@@ -44,7 +44,35 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS direct_advertised(peer TEXT PRIMARY KEY REFERENCES network_links(peer) ON DELETE CASCADE,endpoint TEXT NOT NULL,expires_at INTEGER NOT NULL);")?;
     Ok(())
 }
+pub(super) fn address(
+    db: &Connection,
+    peer: &str,
+    key: &[u8],
+    timestamp: i64,
+) -> Result<Option<EndpointAddr>> {
+    let bytes: Option<Vec<u8>> = db.query_row(
+        "SELECT d.address FROM direct_peers d JOIN network_links l
+         ON l.peer=d.peer AND l.peer_key=d.peer_key WHERE d.peer=?1 AND d.peer_key=?2 AND d.expires_at>?3",
+        params![peer,key,timestamp], |row| row.get(0)
+    ).optional()?;
+    bytes
+        .map(|b| Ok(serde_json::from_slice::<Address>(&b)?.endpoint))
+        .transpose()
+}
+
 impl StoreSession<'_> {
+    pub(super) fn direct_address(&self, peer: &str) -> Result<Option<EndpointAddr>> {
+        let node = self
+            .state
+            .state()
+            .nodes
+            .get(peer)
+            .context("unknown direct peer")?;
+        self.state
+            .authorize_node(peer, &node.signing_key, self.timestamp as u64)?;
+        address(self.db, peer, &node.signing_key, self.timestamp)
+    }
+
     pub(super) fn receive_direct(&self, peer: &str, address: Address) -> Result<()> {
         address.validate()?;
         if address.expires_at <= self.timestamp {
@@ -147,15 +175,17 @@ impl Store {
     }
 
     pub(crate) fn direct_target(&self, group: &[u8]) -> Result<Option<EndpointAddr>> {
-        let peer = self.session_peer(group, true)?;
-        let address:Option<Vec<u8>>=self.db.query_row("SELECT d.address FROM direct_peers d JOIN network_links l ON l.peer=d.peer AND l.peer_key=d.peer_key WHERE d.peer=?1 AND d.expires_at>?2",params![peer,now()],|r|r.get(0)).optional()?;
-        address
-            .map(|bytes| {
-                serde_json::from_slice::<Address>(&bytes)
-                    .map(|a| a.endpoint)
-                    .map_err(Into::into)
-            })
-            .transpose()
+        ensure!(
+            matches!(self.direct_settings()?.direct, config::Direct::Auto),
+            "direct transport disabled"
+        );
+        let peer: String = self.db.query_row(
+            "SELECT peer FROM network_links WHERE outgoing=?1",
+            [group],
+            |row| row.get(0),
+        )?;
+        self.network_session(&self.db, self.identity.state(&self.db)?)
+            .direct_address(&peer)
     }
     pub(crate) fn direct_receive(
         &mut self,

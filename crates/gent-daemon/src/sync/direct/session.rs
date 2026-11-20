@@ -2,6 +2,8 @@
 //! bounded batch of compact signed packets. Its response is one compact signed
 //! receipt for the committed head. Carriers supply routing and correlation.
 use super::*;
+pub(crate) use crate::sync::transfer::Prepared;
+use crate::sync::transfer::outgoing::Pending;
 
 pub(crate) const VERSION: u8 = 2;
 const MAGIC: &[u8; 4] = b"GNTS";
@@ -93,44 +95,18 @@ pub(super) async fn receive(
     .await
 }
 
-pub(super) struct Pending {
-    pub(super) batch: Batch,
-    last: u64,
+pub(crate) struct Confirmed {
+    pub(crate) last: u64,
+    pub(in crate::sync) receipt: Receipt,
 }
 
 impl Pending {
-    pub(super) async fn prepare(
-        store: SharedStore,
-        group: &[u8],
-        wakeup: Arc<Notify>,
-    ) -> Result<Option<Self>> {
-        let g = group.to_vec();
-        let first = local(store.clone(), move |s| {
-            let Some(receipt) = s.transport_confirm(&g, false, None)? else {
-                return Ok(0);
-            };
-            ensure!(
-                receipt.group() == g,
-                "saved receipt belongs to another stream"
-            );
-            Ok(receipt.sequence() + 1)
-        })
-        .await?;
-        let batch =
-            crate::sync::transfer::outgoing::prepare(store, group, false, first, wakeup).await?;
-        if batch.packets().is_empty() {
-            return Ok(None);
-        }
-        let last = first + batch.packets().len() as u64 - 1;
-        Ok(Some(Self { batch, last }))
-    }
-
     pub(super) async fn exchange<F, Fut>(
         &self,
         store: SharedStore,
         group: &[u8],
         exchange: F,
-    ) -> Result<u64>
+    ) -> Result<Confirmed>
     where
         F: FnOnce(Vec<u8>) -> Fut,
         Fut: Future<Output = Result<Vec<u8>>>,
@@ -145,36 +121,41 @@ impl Pending {
         store: SharedStore,
         group: &[u8],
         receipt: Receipt,
-    ) -> Result<u64> {
+    ) -> Result<Confirmed> {
         ensure!(
-            receipt.sequence() >= self.last,
+            receipt.sequence() >= self.last(),
             "receiver did not commit session batch"
         );
         let group = group.to_vec();
         let count = self.batch.packets().len();
-        local(store, move |s| {
-            s.transport_confirm(&group, false, Some(&receipt))?;
+        let receipt = local(store, move |s| {
+            let confirmed = s
+                .transport_confirm(&group, false, Some(&receipt))?
+                .context("missing committed receipt")?;
             for _ in 0..count {
                 s.sync_health.progress(&group, true, crate::store::now());
             }
-            Ok(())
+            Ok(confirmed)
         })
         .await?;
-        Ok(self.last)
+        Ok(Confirmed {
+            last: self.last(),
+            receipt,
+        })
     }
 }
 
 pub(crate) async fn push<F, Fut>(
     store: SharedStore,
     group: &[u8],
-    wakeup: Arc<Notify>,
+    prepared: &mut Prepared,
     exchange: F,
-) -> Result<Option<u64>>
+) -> Result<Option<Confirmed>>
 where
     F: FnOnce(Vec<u8>) -> Fut,
     Fut: Future<Output = Result<Vec<u8>>>,
 {
-    let Some(pending) = Pending::prepare(store.clone(), group, wakeup).await? else {
+    let Some(pending) = prepared.peer(store.clone(), group).await? else {
         return Ok(None);
     };
     pending.exchange(store, group, exchange).await.map(Some)

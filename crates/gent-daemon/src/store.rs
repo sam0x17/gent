@@ -527,22 +527,35 @@ impl Store {
     pub(crate) fn sync_pending_groups(
         &self,
         streams: &[crate::sync::Stream],
-    ) -> Result<BTreeSet<Vec<u8>>> {
-        let mut groups = self
+    ) -> Result<crate::sync::MailboxWork> {
+        let mut work = crate::sync::MailboxWork::default();
+        let mut pending = self.db.prepare(
+            "SELECT s.group_id,s.purpose='data',s.head>=COALESCE(u.next_sequence,0)
+             FROM streams s LEFT JOIN stream_relay_upload u USING(group_id)
+             LEFT JOIN stream_confirmed c USING(group_id)
+             WHERE s.writer=?1 AND s.head>COALESCE(c.sequence,-1)",
+        )?;
+        let mut rows = pending.query([self.identity.node.id()])?;
+        while let Some(row) = rows.next()? {
+            let group: Vec<u8> = row.get(0)?;
+            if row.get::<_, bool>(1)? {
+                work.unconfirmed_data.insert(group.clone());
+            }
+            if row.get::<_, bool>(2)? {
+                work.ready.insert(group);
+            }
+        }
+        let local = self
             .db
             .prepare(
-                "SELECT l.outgoing FROM network_events e JOIN network_links l ON l.peer=e.peer
-             UNION SELECT s.group_id FROM streams s
-               LEFT JOIN stream_relay_upload u USING(group_id)
-               LEFT JOIN stream_confirmed c USING(group_id)
-               WHERE s.writer=?1 AND s.head>=COALESCE(u.next_sequence,0)
-                 AND s.head>COALESCE(c.sequence,-1)
-             UNION SELECT group_id FROM owner_deliveries WHERE next<parts
+                "SELECT group_id FROM owner_deliveries WHERE next<parts
              UNION SELECT s.group_id FROM streams s JOIN stream_pending p
                ON p.group_id=s.group_id AND p.sequence=s.head+1",
             )?
-            .query_map([self.identity.node.id()], |r| r.get(0))?
-            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<Vec<u8>>>>()?;
+        work.ready.extend(local);
+        self.add_ready_network_groups(&mut work.ready)?;
 
         // An unpublished legacy configuration revision is work even before
         // its first fragment has a stream position. Old owner epochs stop at
@@ -553,7 +566,7 @@ impl Store {
             .map(|s| s.group.as_slice())
             .collect();
         if writers.is_empty() {
-            return Ok(groups);
+            return Ok(work);
         }
         let state = self.identity.state(&self.db)?;
         let mut query = self.db.prepare(
@@ -571,10 +584,10 @@ impl Store {
             let limit = encrypted::ordered::configuration::publication_limit(&grant, &state);
             let revision: u64 = row.get(2)?;
             if limit.is_none_or(|last| revision <= last) {
-                groups.insert(group);
+                work.ready.insert(group);
             }
         }
-        Ok(groups)
+        Ok(work)
     }
 
     /// A relay can roll back its queue or lose a successful PUT response.
@@ -652,7 +665,9 @@ impl Store {
                 receipt.group() == group,
                 "checkpoint belongs to another stream"
             );
-            endpoint.confirm(receipt, &reader, now() as u64)?;
+            return endpoint
+                .confirm_and_get(receipt, &reader, now() as u64)
+                .map(Some);
         }
         endpoint.confirmed_receipt(group, now() as u64)
     }

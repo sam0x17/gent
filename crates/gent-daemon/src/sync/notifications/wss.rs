@@ -1,6 +1,8 @@
 //! Every request is scoped to one negotiated watch. Losing that watch drops
 //! its queued sends and receipt waiters. The durable MLS outbox owns retries.
-use crate::sync::{SharedStore, Stream, direct::session, health::Health, local};
+use crate::sync::{
+    SharedStore, Stream, direct::session, health::Health, local, transfer::Prepared,
+};
 use anyhow::{Context, Result, ensure};
 use gent_protocol::transport_wss::{Frame, Kind, Uuid};
 use std::{
@@ -12,7 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{Notify, mpsc, oneshot},
+    sync::{mpsc, oneshot},
     task::JoinSet,
 };
 
@@ -82,8 +84,8 @@ impl Wss {
         store: &SharedStore,
         entry: &Stream,
         health: &Health,
-        wakeup: &Arc<Notify>,
-    ) -> Option<Result<Option<u64>>> {
+        prepared: &mut Prepared,
+    ) -> Option<Result<Option<session::Confirmed>>> {
         if !entry.outgoing || entry.configuration {
             return None;
         }
@@ -105,7 +107,7 @@ impl Wss {
         let result = session::push(
             store.clone(),
             &entry.group,
-            wakeup.clone(),
+            prepared,
             |payload| async move {
                 let (reply, result) = oneshot::channel();
                 channel
@@ -120,15 +122,15 @@ impl Wss {
         )
         .await;
         match result {
-            Ok(last) => {
-                if last.is_some() {
+            Ok(confirmed) => {
+                if confirmed.is_some() {
                     self.metrics
                         .confirmed_batches
                         .fetch_add(1, Ordering::Relaxed);
                 } else {
                     health.idle(&entry.group);
                 }
-                Some(Ok(last))
+                Some(Ok(confirmed))
             }
             Err(_) => {
                 route.failed(peer, tokio::time::Instant::now());

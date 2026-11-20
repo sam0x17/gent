@@ -1,7 +1,6 @@
 //! Exact local dirty sets; relay hints never advance stream cursors.
 use super::*;
 use gent_protocol::transport_watch::{Interest, MAX_INTERESTS};
-use std::collections::BTreeSet;
 
 #[derive(Default)]
 pub(super) struct Hints(Mutex<State>);
@@ -77,6 +76,7 @@ impl Hints {
 pub(super) struct Schedule {
     next_full: Instant,
     pending: BTreeSet<Vec<u8>>,
+    peer_repair: BTreeSet<Vec<u8>>,
     cursor: usize,
     pub(super) timed_repair: bool,
 }
@@ -85,20 +85,27 @@ impl Default for Schedule {
         Self {
             next_full: Instant::now(),
             pending: BTreeSet::new(),
+            peer_repair: BTreeSet::new(),
             cursor: 0,
             timed_repair: false,
         }
     }
 }
+
+pub(super) struct Selection {
+    pub(super) streams: Vec<Stream>,
+    pub(super) peers: BTreeSet<Vec<u8>>,
+}
+
 impl Schedule {
     pub(super) fn select(
         &mut self,
         streams: &[Stream],
         hints: &Hints,
-        queued: BTreeSet<Vec<u8>>,
+        work: &MailboxWork,
         retries: &BTreeMap<Vec<u8>, Retry>,
         connected: bool,
-    ) -> Vec<Stream> {
+    ) -> Selection {
         let now = Instant::now();
         let (full, dirty) = hints.take();
         // A reconnect, explicit hint or follow-up to an active transfer can
@@ -109,9 +116,17 @@ impl Schedule {
             && self.pending.is_empty()
             && retries.is_empty();
         self.pending.extend(dirty);
-        self.pending.extend(queued);
+        self.pending.extend(work.ready.iter().cloned());
         if full || now >= self.next_full {
             self.pending.extend(streams.iter().map(|s| s.group.clone()));
+            self.peer_repair.extend(
+                streams
+                    .iter()
+                    .filter(|s| {
+                        s.outgoing && !s.configuration && work.unconfirmed_data.contains(&s.group)
+                    })
+                    .map(|s| s.group.clone()),
+            );
             // Small deterministic per-process jitter avoids synchronized scans.
             self.next_full = now
                 + Duration::from_secs(if connected {
@@ -120,6 +135,11 @@ impl Schedule {
                     5
                 });
         }
+        // A partial peer batch can drain its uploaded suffix on the next turn.
+        // Re-read the durable receipt before scheduling another attempt.
+        self.peer_repair
+            .retain(|g| work.unconfirmed_data.contains(g) && streams.iter().any(|s| &s.group == g));
+        self.pending.extend(self.peer_repair.iter().cloned());
         self.pending.extend(
             retries
                 .iter()
@@ -143,13 +163,25 @@ impl Schedule {
         if let Some((last, _)) = selected.last() {
             self.cursor = (last + 1) % streams.len();
         }
+        let mut peers = BTreeSet::new();
         for (_, s) in &selected {
             self.pending.remove(&s.group);
+            let repair = self.peer_repair.remove(&s.group)
+                || (retries.contains_key(&s.group) && work.unconfirmed_data.contains(&s.group));
+            if s.outgoing && !s.configuration && (repair || work.ready.contains(&s.group)) {
+                peers.insert(s.group.clone());
+            }
         }
-        selected.into_iter().map(|(_, s)| s).collect()
+        Selection {
+            streams: selected.into_iter().map(|(_, s)| s).collect(),
+            peers,
+        }
     }
     pub(super) fn again(&mut self, group: Vec<u8>) {
         self.pending.insert(group);
+    }
+    pub(super) fn peer_progress(&mut self, group: Vec<u8>) {
+        self.peer_repair.insert(group);
     }
     pub(super) fn next_full(&self) -> Instant {
         self.next_full
@@ -178,7 +210,17 @@ mod tests {
         let retries = BTreeMap::new();
         let mut select = |queued, connected| {
             schedule
-                .select(&streams, &hints, queued, &retries, connected)
+                .select(
+                    &streams,
+                    &hints,
+                    &MailboxWork {
+                        ready: queued,
+                        ..Default::default()
+                    },
+                    &retries,
+                    connected,
+                )
+                .streams
                 .len()
         };
         assert_eq!(select(BTreeSet::new(), true), 1);
@@ -202,6 +244,41 @@ mod tests {
         assert_eq!(select(BTreeSet::new(), true), 1);
     }
     #[test]
+    fn repair_retries_uploaded_peer_batches_until_durably_confirmed() {
+        let stream = Stream {
+            group: vec![1],
+            outgoing: true,
+            configuration: false,
+        };
+        let streams = std::slice::from_ref(&stream);
+        let hints = Hints::default();
+        hints.subscribe(streams);
+        let mut work = MailboxWork::default();
+        work.unconfirmed_data.insert(stream.group.clone());
+        let mut schedule = Schedule::default();
+        let select = |s: &mut Schedule, w: &MailboxWork| {
+            s.select(streams, &hints, w, &BTreeMap::new(), true)
+        };
+        assert!(select(&mut schedule, &work).peers.contains(&stream.group));
+        // A sleeping recipient and a successful cloud upload incur no extra turn.
+        assert!(select(&mut schedule, &work).streams.is_empty());
+        hints.changed(&hints.interests());
+        let hint = select(&mut schedule, &work);
+        assert_eq!(hint.streams.len(), 1);
+        assert!(hint.peers.is_empty());
+        schedule.next_full = Instant::now();
+        assert!(select(&mut schedule, &work).peers.contains(&stream.group));
+        hints.reconnected();
+        assert!(select(&mut schedule, &work).peers.contains(&stream.group));
+        // Successful peer batches resume immediately while ciphertext remains.
+        schedule.peer_progress(stream.group.clone());
+        assert!(select(&mut schedule, &work).peers.contains(&stream.group));
+        schedule.peer_progress(stream.group.clone());
+        work.unconfirmed_data.clear();
+        assert!(select(&mut schedule, &work).streams.is_empty());
+    }
+
+    #[test]
     fn continuously_queued_peers_cannot_starve_later_streams() {
         let streams: Vec<_> = (0..100)
             .map(|i| Stream {
@@ -210,16 +287,17 @@ mod tests {
                 configuration: false,
             })
             .collect();
-        let queued = streams
-            .iter()
-            .map(|s| s.group.clone())
-            .collect::<BTreeSet<_>>();
+        let work = MailboxWork {
+            ready: streams.iter().map(|s| s.group.clone()).collect(),
+            ..Default::default()
+        };
         let hints = Hints::default();
         let mut schedule = Schedule::default();
         let mut seen = BTreeSet::new();
         for _ in 0..4 {
-            let selected =
-                schedule.select(&streams, &hints, queued.clone(), &BTreeMap::new(), true);
+            let selected = schedule
+                .select(&streams, &hints, &work, &BTreeMap::new(), true)
+                .streams;
             assert_eq!(selected.len(), 32);
             seen.extend(selected.into_iter().map(|s| s.group));
         }
@@ -240,13 +318,15 @@ mod tests {
         let retries = BTreeMap::new();
         assert_eq!(
             schedule
-                .select(&streams, &hints, BTreeSet::new(), &retries, true)
+                .select(&streams, &hints, &MailboxWork::default(), &retries, true)
+                .streams
                 .len(),
             3
         );
         assert!(
             schedule
-                .select(&streams, &hints, BTreeSet::new(), &retries, true)
+                .select(&streams, &hints, &MailboxWork::default(), &retries, true)
+                .streams
                 .is_empty()
         );
         assert!(!hints.changed(&[Interest {
@@ -258,13 +338,17 @@ mod tests {
             outgoing: false,
         }]);
         assert_eq!(
-            schedule.select(&streams, &hints, BTreeSet::new(), &retries, true)[0].group,
+            schedule
+                .select(&streams, &hints, &MailboxWork::default(), &retries, true)
+                .streams[0]
+                .group,
             vec![1]
         );
         schedule.next_full = Instant::now();
         assert_eq!(
             schedule
-                .select(&streams, &hints, BTreeSet::new(), &retries, true)
+                .select(&streams, &hints, &MailboxWork::default(), &retries, true)
+                .streams
                 .len(),
             3
         );

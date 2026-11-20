@@ -1,6 +1,96 @@
 use super::*;
-use crate::sync::direct::{Direct, session};
+use crate::sync::direct::{
+    Direct,
+    session::{self, Prepared},
+};
 use std::sync::Mutex;
+
+#[tokio::test]
+async fn direct_file_download_resumes_missing_chunks_and_obeys_current_access() {
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let bytes = vec![0xe7; gent_crypto::files::CHUNK_BYTES + 13];
+    let sent = send_attachment(&mut pair, &bytes);
+    let id: String = pair.stores[0]
+        .db
+        .query_row(
+            "SELECT object_id FROM agent_files WHERE message=?1",
+            [sent["message_id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let first = pair.stores[0].file_upload(&id, 0).unwrap();
+    pair.stores[0].file_uploaded(&id, &[0, 1]).unwrap();
+    pair.pump();
+    pair.stores[1].file_received(&id, 0, &first).unwrap();
+    let job = pair.stores[1].file_transfer(&id).unwrap().unwrap();
+    assert_eq!(job.missing, vec![1]);
+
+    let health = pair.stores.each_ref().map(|s| s.sync_health.clone());
+    let stores = pair.stores.map(|s| Arc::new(Mutex::new(s)));
+    let sender = Direct::start(stores[0].clone(), health[0].clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let receiver = Direct::start(stores[1].clone(), health[1].clone())
+        .await
+        .unwrap()
+        .unwrap();
+    sender.advertise(stores[0].clone()).await.unwrap();
+    receiver.advertise(stores[1].clone()).await.unwrap();
+    pump(&stores);
+    let other = iroh::SecretKey::generate().public();
+    assert!(
+        stores[0]
+            .lock()
+            .unwrap()
+            .peer_file_chunk(other, &id, 1)
+            .is_err()
+    );
+    let chunk = receiver
+        .file_chunk(stores[1].clone(), &job.peer, &id, &job.manifest, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        chunk,
+        stores[0].lock().unwrap().file_upload(&id, 1).unwrap()
+    );
+    stores[1]
+        .lock()
+        .unwrap()
+        .file_received(&id, 1, &chunk)
+        .unwrap();
+    assert!(
+        stores[1]
+            .lock()
+            .unwrap()
+            .file_transfer(&id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        health[1].snapshot()["direct_traffic"]["received_file_chunk_bytes"],
+        chunk.len()
+    );
+
+    config::edit_local(pair.homes[0].path(), |cfg| {
+        cfg.extra.insert(
+            "transport".into(),
+            toml::Value::try_from(config::Transport {
+                direct: config::Direct::Off,
+                relays: vec![],
+            })?,
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        receiver
+            .file_chunk(stores[1].clone(), &job.peer, &id, &job.manifest, 0)
+            .await
+            .is_none()
+    );
+}
 
 #[tokio::test]
 async fn bootstrap_can_stop_only_after_a_verified_receipt_for_the_current_link() {
@@ -15,11 +105,19 @@ async fn bootstrap_can_stop_only_after_a_verified_receipt_for_the_current_link()
         .transport_confirm(&group, false, Some(&receipt))
         .unwrap();
     assert!(pair.stores[0].mesh_link_confirmed(peer).unwrap());
-    // A corrupt saved receipt is never accepted as evidence for cancelling work.
+    // Even intact signed bytes cannot authorize a different persisted floor.
     pair.stores[0]
         .db
         .execute(
-            "UPDATE stream_confirmed SET receipt=x'00' WHERE group_id=?1",
+            "UPDATE stream_confirmed SET sequence=sequence+1 WHERE group_id=?1",
+            [&group],
+        )
+        .unwrap();
+    assert!(pair.stores[0].mesh_link_confirmed(peer).is_err());
+    pair.stores[0]
+        .db
+        .execute(
+            "UPDATE stream_confirmed SET sequence=sequence-1, receipt=x'00' WHERE group_id=?1",
             [&group],
         )
         .unwrap();
@@ -73,11 +171,16 @@ async fn direct_delivers_with_signed_receipts_and_disabled_path_preserves_cloud_
     let sent = send();
     let wakeup = stores[0].lock().unwrap().sync_wakeup.clone();
     assert!(
-        a.transfer(stores[0].clone(), &stream, &health[0], wakeup.clone())
-            .await
-            .unwrap()
-            .unwrap()
-            .is_some()
+        a.transfer(
+            stores[0].clone(),
+            &stream,
+            &health[0],
+            &mut Prepared::new(wakeup.clone())
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .is_some()
     );
     let inbox = stores[1]
         .lock()
@@ -168,9 +271,11 @@ async fn direct_delivers_with_signed_receipts_and_disabled_path_preserves_cloud_
             .unwrap();
         (reverse, receiver.sync_wakeup.clone())
     };
+    let mut forward_batch = Prepared::new(wakeup.clone());
+    let mut reverse_batch = Prepared::new(reverse_wakeup);
     let (forward, backward) = tokio::join!(
-        a.transfer(stores[0].clone(), &stream, &health[0], wakeup.clone()),
-        b.transfer(stores[1].clone(), &reverse, &health[1], reverse_wakeup),
+        a.transfer(stores[0].clone(), &stream, &health[0], &mut forward_batch),
+        b.transfer(stores[1].clone(), &reverse, &health[1], &mut reverse_batch),
     );
     assert!(forward.unwrap().unwrap().is_some());
     assert!(backward.unwrap().unwrap().is_some());
@@ -183,11 +288,16 @@ async fn direct_delivers_with_signed_receipts_and_disabled_path_preserves_cloud_
     pump(&stores);
     let before = health[0].snapshot()["direct_traffic"].clone();
     assert!(
-        a.transfer(stores[0].clone(), &stream, &health[0], wakeup.clone())
-            .await
-            .unwrap()
-            .unwrap()
-            .is_none()
+        a.transfer(
+            stores[0].clone(),
+            &stream,
+            &health[0],
+            &mut Prepared::new(wakeup.clone())
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none()
     );
     assert_eq!(health[0].snapshot()["direct_traffic"], before);
     config::edit_local(pair.homes[1].path(), |cfg| {
@@ -203,9 +313,14 @@ async fn direct_delivers_with_signed_receipts_and_disabled_path_preserves_cloud_
     .unwrap();
     send();
     assert!(
-        a.transfer(stores[0].clone(), &stream, &health[0], wakeup)
-            .await
-            .is_none()
+        a.transfer(
+            stores[0].clone(),
+            &stream,
+            &health[0],
+            &mut Prepared::new(wakeup)
+        )
+        .await
+        .is_none()
     );
     pump(&stores);
     let inbox = stores[1]
@@ -237,7 +352,7 @@ async fn session_restart_retries_the_exact_batch_until_the_reader_signs_its_hist
     let mut signed = None;
     let receiver_store = receiver.clone();
     let peer = sender_id.clone();
-    let lost = session::push(sender.clone(), &group, wake, |bytes| {
+    let lost = session::push(sender.clone(), &group, &mut Prepared::new(wake), |bytes| {
         sent_bytes = bytes.clone();
         let saved = &mut signed;
         async move {
@@ -281,10 +396,15 @@ async fn session_restart_retries_the_exact_batch_until_the_reader_signs_its_hist
         .unwrap();
 
     for invalid in [base.clone(), wrong_signer, wrong_history, wrong_group] {
-        let result = session::push(sender.clone(), &group, wake.clone(), |bytes| {
-            assert_eq!(bytes, sent_bytes);
-            std::future::ready(invalid.encode_compact())
-        })
+        let result = session::push(
+            sender.clone(),
+            &group,
+            &mut Prepared::new(wake.clone()),
+            |bytes| {
+                assert_eq!(bytes, sent_bytes);
+                std::future::ready(invalid.encode_compact())
+            },
+        )
         .await;
         assert!(result.is_err());
         assert_eq!(
@@ -297,14 +417,19 @@ async fn session_restart_retries_the_exact_batch_until_the_reader_signs_its_hist
         );
     }
 
-    let accepted = session::push(sender.clone(), &group, wake.clone(), |bytes| {
-        assert_eq!(bytes, sent_bytes);
-        let receiver = receiver.clone();
-        async move { session::accept(receiver, session::Peer::Node(sender_id), &bytes).await }
-    })
+    let accepted = session::push(
+        sender.clone(),
+        &group,
+        &mut Prepared::new(wake.clone()),
+        |bytes| {
+            assert_eq!(bytes, sent_bytes);
+            let receiver = receiver.clone();
+            async move { session::accept(receiver, session::Peer::Node(sender_id), &bytes).await }
+        },
+    )
     .await
     .unwrap();
-    assert_eq!(accepted, Some(signed.sequence()));
+    assert_eq!(accepted.unwrap().last, signed.sequence());
     assert_eq!(
         sender
             .lock()
@@ -313,13 +438,13 @@ async fn session_restart_retries_the_exact_batch_until_the_reader_signs_its_hist
             .unwrap(),
         Some(signed)
     );
-    assert_eq!(
-        session::push(sender, &group, wake, |_| std::future::ready(Err(
-            anyhow::anyhow!("unexpected empty probe")
-        )))
+    assert!(
+        session::push(sender, &group, &mut Prepared::new(wake), |_| {
+            std::future::ready(Err(anyhow::anyhow!("unexpected empty probe")))
+        })
         .await
-        .unwrap(),
-        None
+        .unwrap()
+        .is_none()
     );
     let inbox = receiver
         .lock()

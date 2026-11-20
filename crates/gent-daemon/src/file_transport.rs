@@ -164,7 +164,7 @@ async fn snapshot(response: reqwest::Response) -> Result<Snapshot> {
     Ok(result)
 }
 
-fn verify_chunk(manifest: &Manifest, index: u32, bytes: &[u8]) -> Result<()> {
+pub(crate) fn verify_chunk(manifest: &Manifest, index: u32, bytes: &[u8]) -> Result<()> {
     manifest.validate().map_err(anyhow::Error::msg)?;
     let chunk = manifest
         .chunks

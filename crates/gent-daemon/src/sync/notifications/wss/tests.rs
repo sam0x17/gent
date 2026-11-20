@@ -1,5 +1,5 @@
 use super::*;
-use crate::sync::{test_http, transfer};
+use crate::sync::{schedule, test_http, transfer};
 use gent_crypto::stream::Packet;
 use gent_protocol::transport_batch::Batch;
 
@@ -42,15 +42,18 @@ fn attempt(
     route: &Wss,
     sender: &SharedStore,
     stream: &Stream,
-) -> tokio::task::JoinHandle<Option<Result<Option<u64>>>> {
+) -> tokio::task::JoinHandle<(Prepared, Option<u64>)> {
     let route = route.clone();
     let sender = sender.clone();
     let stream = stream.clone();
     tokio::spawn(async move {
         let health = sender.lock().unwrap().sync_health.clone();
-        route
-            .transfer(&sender, &stream, &health, &Arc::new(Notify::new()))
+        let mut prepared = Prepared::new(Arc::default());
+        let delivery = route
+            .transfer(&sender, &stream, &health, &mut prepared)
             .await
+            .map(|result| result.unwrap().expect("queued peer batch").last);
+        (prepared, delivery)
     })
 }
 
@@ -81,7 +84,7 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
     let lost = rx.next_send().await.unwrap();
     assert_eq!(Frame::decode(&lost).unwrap().kind, Kind::Receipt);
     drop(socket);
-    assert!(delivery.await.unwrap().is_none());
+    assert!(delivery.await.unwrap().1.is_none());
     assert_eq!(baseline, confirmed());
 
     // Recipient is unavailable on reconnect. New work for this peer skips
@@ -103,12 +106,14 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
             sender,
         )
         .unwrap();
-    assert!(retry.await.unwrap().is_none());
+    let (mut prepared, delivery) = retry.await.unwrap();
+    assert!(delivery.is_none());
     assert!(
         tokio::time::timeout(Duration::from_secs(1), attempt(&tx, sender, &stream))
             .await
             .unwrap()
             .unwrap()
+            .1
             .is_none()
     );
     drop(socket);
@@ -142,7 +147,7 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
             relay,
             stream.clone(),
             Arc::default(),
-            Arc::new(Notify::new()),
+            &mut prepared,
             &mut transfer::State::default()
         )
         .await
@@ -156,7 +161,28 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
     // Deliver the retained batch again on a fresh watch. A receipt with the
     // right correlation from a third peer cannot complete the request.
     let mut socket = Connection::open(&tx);
-    let delivery = attempt(&tx, sender, &stream);
+    let streams = std::slice::from_ref(&stream);
+    let work = sender.lock().unwrap().sync_pending_groups(streams).unwrap();
+    assert!(!work.ready.contains(group));
+    assert!(work.unconfirmed_data.contains(group));
+    let hints = schedule::Hints::default();
+    let mut schedule = schedule::Schedule::default();
+    let retries = Default::default();
+    schedule.select(streams, &hints, &work, &retries, true);
+    assert!(
+        schedule
+            .select(streams, &hints, &work, &retries, true)
+            .streams
+            .is_empty()
+    );
+    hints.reconnected();
+    let selected = schedule.select(streams, &hints, &work, &retries, true);
+    let peer = selected
+        .streams
+        .iter()
+        .find(|s| selected.peers.contains(&s.group))
+        .unwrap();
+    let delivery = attempt(&tx, sender, peer);
     let push = socket.next_send().await.unwrap();
     assert_eq!(Frame::decode(&push).unwrap().payload, frame.payload);
     rx.received(&rewrite(&push, a), receiver).unwrap();
@@ -168,6 +194,6 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
         .unwrap();
     assert!(socket.pending.contains_key(&ack.id));
     socket.received(&rewrite(&response, b), sender).unwrap();
-    assert_eq!(delivery.await.unwrap().unwrap().unwrap(), Some(last));
+    assert_eq!(delivery.await.unwrap().1, Some(last));
     assert_eq!(confirmed().sequence(), last);
 }

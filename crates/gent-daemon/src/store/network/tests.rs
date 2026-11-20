@@ -286,6 +286,7 @@ async fn uploaded_packets_wait_offline_and_replay_until_the_reader_signs() {
         store
             .sync_pending_groups(&streams)
             .unwrap()
+            .ready
             .contains(&group)
     };
     assert!(!dirty(&pair.stores[0]));
@@ -423,25 +424,37 @@ async fn retired_partial_message_cancels_after_restart_even_if_fragment_cursor_r
         pair.stores[0]
             .transport_confirm(&group, false, Some(&receipt))
             .unwrap();
-        pair.stores[0]
-            .db
-            .execute_batch("DROP TRIGGER fail_cancel")
-            .unwrap();
-        pair.pump();
-        pair.stores[0]
-            .transport_confirm(&group, false, Some(&receipt))
-            .unwrap();
-        assert_eq!(
-            pair.stores[0]
+        let pending_requests = |store: &Store| {
+            store
                 .db
                 .query_row(
                     "SELECT COUNT(*) FROM transport_requests WHERE group_id=?1",
                     [&group],
                     |r| r.get::<_, u64>(0),
                 )
-                .unwrap(),
-            0
+                .unwrap()
+        };
+        assert_eq!(
+            pending_requests(&pair.stores[0]),
+            1 + u64::from(failed_cursor)
         );
+        pair.stores[0]
+            .db
+            .execute_batch("DROP TRIGGER fail_cancel")
+            .unwrap();
+        pair.stores[0].data_prepare(&group).unwrap();
+        assert_eq!(
+            pending_requests(&pair.stores[0]),
+            0,
+            "confirmed requests survived cursor recovery (fragment rolled back: {failed_cursor})"
+        );
+        assert_eq!(
+            pair.stores[0]
+                .transport_confirm(&group, false, Some(&receipt))
+                .unwrap(),
+            Some(receipt)
+        );
+        pair.pump();
         assert_eq!(
             pair.stores[1]
                 .db
@@ -1408,15 +1421,11 @@ async fn configuration_results_require_the_original_writer_request_and_verified_
     );
 }
 
-#[tokio::test]
-async fn attachment_grants_reject_substitution_and_downloads_resume_with_current_authority() {
-    let mut pair = Pair::new().await;
-    directory_push_tests::negotiate(&mut pair);
+fn send_attachment(pair: &mut Pair, bytes: &[u8]) -> Value {
     let paths = pair.agent(0, AgentOp::FilePaths).unwrap();
-    let bytes = vec![0x91; gent_crypto::files::CHUNK_BYTES * 2 + 7];
     std::fs::write(
         std::path::Path::new(paths["import_directory"].as_str().unwrap()).join("native.bin"),
-        &bytes,
+        bytes,
     )
     .unwrap();
     let imported = pair
@@ -1429,18 +1438,25 @@ async fn attachment_grants_reject_substitution_and_downloads_resume_with_current
             },
         )
         .unwrap();
-    let sent = pair
-        .agent(
-            0,
-            AgentOp::Send {
-                recipient: pair.agents[1].clone(),
-                request_id: Uuid::now_v7().to_string(),
-                text: "file review".into(),
-                files: vec![],
-                file_ids: vec![imported["file"]["id"].as_str().unwrap().into()],
-            },
-        )
-        .unwrap();
+    pair.agent(
+        0,
+        AgentOp::Send {
+            recipient: pair.agents[1].clone(),
+            request_id: Uuid::now_v7().to_string(),
+            text: "file review".into(),
+            files: vec![],
+            file_ids: vec![imported["file"]["id"].as_str().unwrap().into()],
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn attachment_grants_reject_substitution_and_downloads_resume_with_current_authority() {
+    let mut pair = Pair::new().await;
+    directory_push_tests::negotiate(&mut pair);
+    let bytes = vec![0x91; gent_crypto::files::CHUNK_BYTES * 2 + 7];
+    let sent = send_attachment(&mut pair, &bytes);
     let message_id = sent["message_id"].as_str().unwrap();
     let (body, compress): (Vec<u8>, bool) = pair.stores[0]
         .db
@@ -1469,10 +1485,35 @@ async fn attachment_grants_reject_substitution_and_downloads_resume_with_current
     pair.reopen(0);
     let job = pair.stores[0].file_transfer(&id).unwrap().unwrap();
     assert_eq!(job.missing, vec![0, 1, 2]);
+    let group = pair.group();
+    let baseline = pair.stores[1].transport_receipt(&group, false).unwrap();
+    pair.stores[0]
+        .transport_confirm(&group, false, Some(&baseline))
+        .unwrap();
+    let streams = pair.stores[0].sync_streams().unwrap();
+    let ready = |s: &Store| {
+        s.sync_pending_groups(&streams)
+            .unwrap()
+            .ready
+            .contains(&group)
+    };
+    assert!(!ready(&pair.stores[0]));
     let chunks: Vec<_> = (0..3)
         .map(|i| pair.stores[0].file_upload(&id, i).unwrap())
         .collect();
+    pair.stores[0].file_uploaded(&id, &[0, 1]).unwrap();
+    assert!(!ready(&pair.stores[0]));
+    // A cancelled record can still publish its cancellation before the file finishes.
+    let tx = pair.stores[0].db.unchecked_transaction().unwrap();
+    tx.execute(
+        "UPDATE network_events SET cancelled=1 WHERE subject=?1",
+        [message_id],
+    )
+    .unwrap();
+    assert!(ready(&pair.stores[0]));
+    tx.rollback().unwrap();
     pair.stores[0].file_uploaded(&id, &[0, 1, 2]).unwrap();
+    assert!(ready(&pair.stores[0]));
     // A forged grant for the same visible descriptor must be rejected, including
     // duplicate messages after the original object has expired/reaped.
     for attack in 0..4 {

@@ -3,6 +3,7 @@ use super::*;
 mod checkpoints;
 pub(super) mod outgoing;
 pub(super) use checkpoints::State;
+pub(crate) use outgoing::Prepared;
 
 const TIME_SLICE: Duration = Duration::from_secs(2);
 
@@ -19,32 +20,27 @@ impl Peers {
         relay: &Relay,
         entry: &Stream,
         health: &health::Health,
-        wakeup: &Arc<Notify>,
+        prepared: &mut Prepared,
         state: &mut State,
     ) -> Option<Result<Option<u64>>> {
         let direct = match &self.direct {
             Some(direct) => {
                 direct
-                    .transfer(store.clone(), entry, health, wakeup.clone())
+                    .transfer(store.clone(), entry, health, prepared)
                     .await
             }
             None => None,
         };
         let result = match direct {
             Some(result) => result,
-            None => self.wss.transfer(store, entry, health, wakeup).await?,
+            None => self.wss.transfer(store, entry, health, prepared).await?,
         };
-        if result.is_ok() {
-            let group = entry.group.clone();
-            if let Ok(Some(receipt)) = local(store.clone(), move |s| {
-                s.transport_confirm(&group, false, None)
+        Some(result.map(|delivery| {
+            delivery.map(|confirmed| {
+                state.retire_direct(relay, &confirmed.receipt);
+                confirmed.last
             })
-            .await
-            {
-                state.retire_direct(relay, &receipt);
-            }
-        }
-        Some(result)
+        }))
     }
 }
 
@@ -53,7 +49,7 @@ pub(super) async fn run(
     relay: Relay,
     entry: Stream,
     health: Arc<health::Health>,
-    wakeup: Arc<Notify>,
+    prepared: &mut Prepared,
     state: &mut State,
 ) -> Result<Option<u64>> {
     let group = entry.group;
@@ -83,7 +79,7 @@ pub(super) async fn run(
             entry.configuration,
             first,
             &health,
-            wakeup,
+            prepared,
         )
         .await;
     } else {

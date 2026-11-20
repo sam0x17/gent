@@ -6,6 +6,10 @@ pub use uuid::Uuid;
 /// Both sides must send this header on the existing watch upgrade.
 pub const HEADER: &str = "x-gent-peer-session";
 pub const OFFER: &str = "2";
+/// A handoff-aware daemon can take over an existing data route. A displaced
+/// daemon continues watching for hints without contesting that route.
+pub const HANDOFF: &str = "x-gent-peer-handoff";
+pub const REPLACED: u16 = 4001;
 const MAGIC: &[u8; 5] = b"GNTW\x01";
 const PREFIX: usize = 5 + 1 + 16 + 16;
 pub const MAX_SESSION: usize = 5 + 2 + 256 + crate::transport_batch::MAX_BYTES;

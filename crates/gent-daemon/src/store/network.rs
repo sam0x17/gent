@@ -793,43 +793,20 @@ impl Store {
     }
     pub(crate) fn data_prepare(&mut self, group: &[u8]) -> Result<()> {
         let peer = self.data_peer(&self.db, group, true)?;
-        let Some(selected) = queue::next_id(&self.db, &peer)? else {
+        let Some(queue::ReadyEvent {
+            id,
+            subject,
+            cancelled,
+        }) = queue::ready_event(self, &peer)?
+        else {
             return Ok(());
         };
-        let (id, body, offset, mut cancelled, subject, control, compress) = self.db.query_row(
-            "SELECT id,body,offset,cancelled,subject,traffic<>'data',compress FROM network_events WHERE id=?1",
-            [&selected],
-            |r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,usize>(2)?,r.get::<_,bool>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,bool>(5)?,r.get::<_,bool>(6)?)),
+        let (body, offset, control, compress): (Vec<u8>, usize, bool, bool) = self.db.query_row(
+            "SELECT body,offset,traffic<>'data',compress FROM network_events WHERE id=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
         let id = Uuid::parse_str(&id)?;
-        let state = self.identity.state(&self.db)?;
-        if let Some(subject) = &subject {
-            let session = self.network_session(&self.db, state);
-            let message = session.message(subject)?;
-            if !session.web_message_ready(&message)? {
-                return Ok(());
-            }
-            if !session.deliverable(&message)? {
-                cancelled = true;
-            } else if !cancelled {
-                for file in &message.attachments {
-                    let status: Option<(u64,u64)> = self.db.query_row(
-                        "SELECT (SELECT COUNT(*) FROM file_chunks WHERE object_id=?1), (SELECT COALESCE(SUM(uploaded),0) FROM file_chunks WHERE object_id=?1) FROM file_objects WHERE id=?1 AND complete=1 AND expires_at>?2",
-                        params![file.id,session.timestamp], |r|Ok((r.get(0)?,r.get(1)?)),
-                    ).optional()?;
-                    match status {
-                        None => {
-                            cancelled = true;
-                            break;
-                        }
-                        Some((present, uploaded)) if present == 0 || present != uploaded => {
-                            return Ok(());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
         if cancelled {
             let tx = self.db.unchecked_transaction()?;
             tx.execute(
@@ -859,7 +836,7 @@ impl Store {
             }
         };
         let mut endpoint = OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
-        endpoint.send_checked(
+        let packet = endpoint.send_checked(
             group,
             (id, offset, cancelled),
             &serde_json::to_vec(&frame)?,
@@ -881,17 +858,29 @@ impl Store {
         // Ciphertext and its request ID already committed together. If this
         // cursor write fails, retrying returns that exact packet without a ratchet step.
         let tx = self.db.unchecked_transaction()?;
-        if cancelled || end == body.len() {
+        let confirmed: Option<u64> = if cancelled || end == body.len() {
             if !cancelled && control {
                 configuration::pending::capture_record(&tx, self.identity.node.id(), &body)?;
             }
             retention::finish(&tx, id)?;
-            tx.execute("DELETE FROM network_events WHERE id=?1", [id.to_string()])?;
+            tx.query_row(
+                "DELETE FROM network_events WHERE id=?1 AND offset=?2 AND cancelled=?3
+                 RETURNING (SELECT sequence FROM stream_confirmed WHERE group_id=?4)",
+                params![id.to_string(), offset, cancelled, group],
+                |row| row.get(0),
+            )?
         } else {
-            tx.execute(
-                "UPDATE network_events SET offset=?1 WHERE id=?2",
-                params![end, id.to_string()],
-            )?;
+            tx.query_row(
+                "UPDATE network_events SET offset=?1 WHERE id=?2 AND offset=?3 AND cancelled=0
+                 RETURNING (SELECT sequence FROM stream_confirmed WHERE group_id=?4)",
+                params![end, id.to_string(), offset, group],
+                |row| row.get(0),
+            )?
+        };
+        // The usual new fragment is ahead of the signed floor. A cursor
+        // recovered after a lost write may release already acknowledged bytes.
+        if confirmed.is_some_and(|head| head > 0 && (head >= packet.sequence() || cancelled)) {
+            encrypted::ordered::confirmation::retire_released_fragment(&tx, group, id, offset)?;
         }
         tx.commit()?;
         Ok(())

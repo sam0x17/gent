@@ -96,6 +96,13 @@ reset when the daemon starts. Include the WebSocket and sweep bytes when
 comparing Cloudflare traffic. These process counters exclude TLS, address
 discovery and other services.
 
-Web connectors still enter through Cloudflare and use the existing carrier and
-checkpoint system. A native carrier may use direct transport to another node.
-Large file objects and ordered cluster configuration retain their cloud paths.
+Gent stages encrypted attachments in cloud storage before publishing their
+messages. A recipient with a reachable sender can fetch its missing chunks
+over a separate QUIC connection. It checks each chunk against the message's
+manifest and resumes from cloud storage if the sender disconnects. A peer
+serves a chunk only to the current authorized recipient's node. Direct file
+bytes appear separately under `direct_traffic`.
+
+Web connectors enter through Cloudflare and use the carrier and checkpoint
+system. A native carrier may use direct transport to another node. Ordered
+cluster configuration uses the cloud path.

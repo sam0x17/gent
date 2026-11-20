@@ -311,6 +311,7 @@ pub(crate) struct Transfer {
     pub manifest: Manifest,
     pub upload: bool,
     pub missing: Vec<u32>,
+    pub peer: String,
 }
 impl StoreSession<'_> {
     fn transfer(&self, id: &str) -> Result<Option<Transfer>> {
@@ -338,6 +339,14 @@ impl StoreSession<'_> {
         }
         Ok(Some(Transfer {
             id: id.into(),
+            peer: self
+                .state
+                .transport_host(if upload {
+                    &recipient.node_id
+                } else {
+                    &sender.node_id
+                })?
+                .to_owned(),
             manifest: self.file_manifest(id)?,
             upload,
             missing: if upload {
@@ -380,6 +389,31 @@ impl Store {
             ensure!(s.transfer(id)?.is_some_and(|t| t.upload), FILE_UNAVAILABLE);
             s.objects()?.upload_chunk(id, index)
         })
+    }
+    pub(crate) fn peer_file_chunk(
+        &mut self,
+        endpoint: iroh::EndpointId,
+        id: &str,
+        index: u32,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            matches!(self.direct_settings()?.direct, config::Direct::Auto),
+            FILE_UNAVAILABLE
+        );
+        self.file_transaction(|s| {
+            let job = s.transfer(id)?.context(FILE_UNAVAILABLE)?;
+            ensure!(job.upload, FILE_UNAVAILABLE);
+            let address = s.direct_address(&job.peer)?.context(FILE_UNAVAILABLE)?;
+            ensure!(address.id == endpoint, FILE_UNAVAILABLE);
+            s.objects()?.upload_chunk(id, index)
+        })
+    }
+
+    pub(crate) fn peer_file_source(&mut self, peer: &str) -> Result<Option<iroh::EndpointAddr>> {
+        if matches!(self.direct_settings()?.direct, config::Direct::Off) {
+            return Ok(None);
+        }
+        self.file_transaction(|s| s.direct_address(peer))
     }
     pub(crate) fn file_uploaded(&mut self, id: &str, uploaded: &[u32]) -> Result<bool> {
         let (changed, complete) = self.file_transaction(|s| {

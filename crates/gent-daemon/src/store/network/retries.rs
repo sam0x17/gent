@@ -2,6 +2,63 @@ use super::*;
 use gent_crypto::stream::Packet;
 
 #[tokio::test]
+async fn confirmed_priority_message_keeps_its_retry_until_its_own_cursor_commits() {
+    let mut pair = Pair::new().await;
+    pair.stores[0]
+        .execute(Request::Agent {
+            credential: config::secret(),
+            action: AgentOp::Register {
+                name: "queued-registration".into(),
+                provider: "test".into(),
+            },
+        })
+        .unwrap();
+    let sent = pair.send(vec![]).unwrap();
+    let group = pair.group();
+    let next = pair.stores[1].data_next(&group).unwrap();
+    let event = queue::next_id(&pair.stores[0].db, pair.stores[1].identity.node.id())
+        .unwrap()
+        .unwrap();
+    let earlier: bool = pair.stores[0]
+        .db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM network_events WHERE rowid<e.rowid AND peer=e.peer)
+         FROM network_events e WHERE id=?1 AND subject=?2",
+            params![event, sent["message_id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(earlier);
+    pair.stores[0].db.execute_batch(
+        "CREATE TRIGGER fail_cursor BEFORE DELETE ON network_events BEGIN SELECT RAISE(ABORT,'cursor failure'); END;"
+    ).unwrap();
+    assert!(pair.stores[0].data_prepare(&group).is_err());
+    let packet = pair.stores[0].data_outgoing(&group, next).unwrap().unwrap();
+    let request = pair.packet_request(&packet);
+    pair.stores[1].data_receive(&packet).unwrap();
+    let receipt = pair.stores[1].transport_receipt(&group, false).unwrap();
+    pair.stores[0]
+        .transport_confirm(&group, false, Some(&receipt))
+        .unwrap();
+    assert_eq!(pair.retry_rows(request), [1, 1, 1, 0]);
+
+    pair.reopen(0);
+    pair.stores[0]
+        .db
+        .execute_batch("DROP TRIGGER fail_cursor")
+        .unwrap();
+    pair.stores[0].data_prepare(&group).unwrap();
+    assert_eq!(
+        pair.endpoint(0).status(&group, now() as u64).unwrap().head,
+        packet.sequence()
+    );
+    assert_eq!(pair.retry_rows(request), [0; 4]);
+    let inbox = pair.agent(1, AgentOp::Inbox).unwrap();
+    assert_eq!(inbox.as_array().unwrap().len(), 1);
+    assert_eq!(inbox[0]["id"], sent["message_id"]);
+}
+
+#[tokio::test]
 async fn allocated_retirement_is_batched_and_preview_preserves_every_retry_association() {
     let pair = Pair::new().await;
     let group = pair.group();
@@ -32,10 +89,16 @@ async fn allocated_retirement_is_batched_and_preview_preserves_every_retry_assoc
         pair.endpoint(1).stage(&packet, now() as u64).unwrap();
         pair.endpoint(1).drain(&group, 1, now() as u64).unwrap();
     }
-    let receipt = pair.endpoint(1).receipt(&group, now() as u64).unwrap();
-    pair.endpoint(0)
-        .confirm(&receipt, pair.stores[1].identity.node.id(), now() as u64)
-        .unwrap();
+    let latest = pair.endpoint(1).receipt(&group, now() as u64).unwrap();
+    // Applying the ACK retires one bounded prefix. Reading its durable value,
+    // replaying it, or receiving an older signed ACK cannot start another pass.
+    for received in [Some(&latest), None, Some(&latest), Some(&receipt)] {
+        let confirmed = pair.stores[0]
+            .transport_confirm(&group, false, received)
+            .unwrap()
+            .unwrap();
+        assert_eq!(confirmed, latest);
+    }
     for id in &ids[..256] {
         assert_eq!(pair.retry_rows(*id), [0; 4]);
     }

@@ -15,17 +15,82 @@ pub(crate) fn next(db: &Connection, group: &[u8]) -> Result<u64> {
 }
 
 fn mode(db: &Connection, group: &[u8]) -> Result<Purpose> {
-    Ok(
-        match stream(db, group)?
-            .context("unknown stream")?
-            .purpose
-            .as_str()
-        {
-            "data" => Purpose::Data,
-            "configuration" => Purpose::Configuration,
-            _ => bail!("unknown stream purpose"),
-        },
-    )
+    match stream(db, group)?
+        .context("unknown stream")?
+        .purpose
+        .as_str()
+    {
+        "data" => Ok(Purpose::Data),
+        "configuration" => Ok(Purpose::Configuration),
+        _ => bail!("unknown stream purpose"),
+    }
+}
+
+struct SavedReceipt {
+    reader: String,
+    key: PublicKey,
+    sequence: u64,
+    digest: Digest,
+    wire: Vec<u8>,
+}
+
+impl SavedReceipt {
+    fn load(db: &Connection, group: &[u8]) -> Result<Option<Self>> {
+        Ok(db.query_row(
+            "SELECT reader,reader_key,sequence,digest,receipt FROM stream_confirmed WHERE group_id=?1",
+            [group], |r| Ok(Self {
+                reader: r.get(0)?, key: r.get(1)?, sequence: r.get(2)?, digest: r.get(3)?, wire: r.get(4)?,
+            }),
+        ).optional()?)
+    }
+
+    fn verified(&self, group: &[u8], key: &PublicKey, head: u64) -> Result<Receipt> {
+        let receipt = Receipt::decode(&self.wire)?;
+        ensure!(
+            receipt.group() == group
+                && receipt.sequence() == self.sequence
+                && receipt.digest() == self.digest
+                && self.sequence <= head
+                && self.key == *key,
+            "saved receipt does not match the confirmed stream"
+        );
+        receipt.verify(key)?;
+        Ok(receipt)
+    }
+}
+
+fn authorized_reader(
+    session: &Session<'_>,
+    group: &[u8],
+    purpose: Purpose,
+    reader: &str,
+) -> Result<(Stream, PublicKey)> {
+    let saved = checked_stream(session, group, purpose)?;
+    ensure!(
+        saved.writer == session.signer.id() && reader != session.signer.id(),
+        "invalid stream receipt roles"
+    );
+    ensure!(
+        saved.roster == roster_hash(&[session.signer.id(), reader])?,
+        "receipt reader does not match two-node roster"
+    );
+    let key = session
+        .state
+        .state()
+        .nodes
+        .get(reader)
+        .context("unknown receipt reader")?
+        .signing_key;
+    if purpose == Purpose::Configuration {
+        let grant = configuration::progress(session.db, group)?.grant;
+        ensure!(
+            grant.grant.reader == reader && grant.grant.reader_key == key,
+            "configuration receipt reader mismatch"
+        );
+    } else {
+        session.state.authorize_node(reader, &key, session.now)?;
+    }
+    Ok((saved, key))
 }
 
 impl OrderedEndpoint<'_> {
@@ -52,35 +117,30 @@ impl OrderedEndpoint<'_> {
 
     /// `reader` comes from the caller's independently pinned link or owner grant.
     pub fn confirm(&mut self, receipt: &Receipt, reader: &str, now: u64) -> Result<()> {
+        self.confirm_and_get(receipt, reader, now).map(|_| ())
+    }
+
+    /// Return the newest authenticated checkpoint in the same transaction that
+    /// accepts an ACK. A stale ACK may arrive after another route advanced it.
+    pub(crate) fn confirm_and_get(
+        &mut self,
+        receipt: &Receipt,
+        reader: &str,
+        now: u64,
+    ) -> Result<Receipt> {
         let purpose = mode(&self.inner.db, receipt.group())?;
         self.inner.transact_mode(now, purpose == Purpose::Configuration, |session| {
-            let saved = checked_stream(session, receipt.group(), purpose)?;
-            ensure!(saved.writer == session.signer.id() && reader != session.signer.id(),
-                "invalid stream receipt roles");
-            ensure!(saved.roster == roster_hash(&[session.signer.id(), reader])?,
-                "receipt reader does not match two-node roster");
-            let key = session.state.state().nodes.get(reader)
-                .context("unknown receipt reader")?.signing_key;
-            if purpose == Purpose::Configuration {
-                let grant = configuration::progress(session.db, receipt.group())?.grant;
-                ensure!(grant.grant.reader == reader && grant.grant.reader_key == key,
-                    "configuration receipt reader mismatch");
-            } else {
-                session.state.authorize_node(reader, &key, now)?;
-            }
+            let (saved, key) = authorized_reader(session, receipt.group(), purpose, reader)?;
             receipt.verify(&key)?;
             ensure!(receipt.sequence() <= saved.head, "receipt is ahead of local stream");
-            let previous: Option<(String, PublicKey, u64, Digest)> = session.db.query_row(
-                "SELECT reader,reader_key,sequence,digest FROM stream_confirmed WHERE group_id=?1",
-                [receipt.group()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            ).optional()?;
-            if let Some((peer, pin, sequence, digest)) = previous {
-                ensure!(peer == reader && pin == key, "receipt reader pin changed");
-                if receipt.sequence() <= sequence {
-                    ensure!(receipt.sequence() < sequence || receipt.digest() == digest,
-                        "conflicting receiver checkpoint");
-                    retire(session.db, false)?;
-                    return Ok(());
+            if let Some(previous) = SavedReceipt::load(session.db, receipt.group())? {
+                ensure!(previous.reader == reader && previous.key == key, "receipt reader pin changed");
+                if receipt.sequence() < previous.sequence {
+                    return previous.verified(receipt.group(), &key, saved.head);
+                }
+                if receipt.sequence() == previous.sequence {
+                    ensure!(receipt.digest() == previous.digest && receipt.encode()? == previous.wire, "conflicting receiver checkpoint");
+                    return Ok(receipt.clone());
                 }
             }
             let wire: Vec<u8> = session.db.query_row(
@@ -96,7 +156,7 @@ impl OrderedEndpoint<'_> {
                 params![receipt.group(), reader, key.as_slice(), receipt.sequence(),
                     receipt.digest().as_slice(), receipt.encode()?])?;
             retire(session.db, false)?;
-            Ok(())
+            Ok(receipt.clone())
         })
     }
     pub fn confirmed_next(&self, group: &[u8]) -> Result<u64> {
@@ -106,20 +166,23 @@ impl OrderedEndpoint<'_> {
     /// Return only a previously verified checkpoint, rechecking current peer
     /// authority before transport can use it to restore a relay's missing floor.
     pub fn confirmed_receipt(&mut self, group: &[u8], now: u64) -> Result<Option<Receipt>> {
-        let wire: Option<(Vec<u8>, String)> = self
+        let tx = self
             .inner
             .db
-            .query_row(
-                "SELECT receipt,reader FROM stream_confirmed WHERE group_id=?1",
-                [group],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((wire, reader)) = wire else {
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let Some(previous) = SavedReceipt::load(&tx, group)? else {
             return Ok(None);
         };
-        let receipt = Receipt::decode(&wire)?;
-        self.confirm(&receipt, &reader, now)?;
+        let purpose = mode(&tx, group)?;
+        let session = Session::load(
+            &tx,
+            self.inner.identity,
+            now,
+            purpose == Purpose::Configuration,
+        )?;
+        let (saved, key) = authorized_reader(&session, group, purpose, &previous.reader)?;
+        let receipt = previous.verified(group, &key, saved.head)?;
+        tx.commit()?;
         Ok(Some(receipt))
     }
 
@@ -131,68 +194,114 @@ impl OrderedEndpoint<'_> {
     }
 }
 
-/// Keep any packet whose daemon fragment cursor may not have committed yet.
-/// Only the oldest event for a peer can have been encrypted. Both part/cancel
-/// IDs are protected across revocation or history cleanup changing that event.
-fn protected(db: &Connection) -> Result<String> {
-    let runtime: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='network_events')",
-        [],
-        |r| r.get(0),
-    )?;
-    let mut ids = vec![];
-    if runtime {
-        let mut query=db.prepare("SELECT e.id,e.offset FROM network_events e JOIN
-            (SELECT peer,MIN(rowid) AS first FROM network_events GROUP BY peer) h ON e.rowid=h.first")?;
-        for row in query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?)))? {
-            let (id, offset) = row?;
-            for cancel in [false, true] {
-                ids.push(
-                    crate::messages::packet_id(Uuid::parse_str(&id)?, offset, cancel).to_string(),
-                );
-            }
-        }
-        let mut query = db.prepare("SELECT r.id FROM transport_requests r JOIN network_events e
-            ON r.event=e.id AND r.offset=e.offset JOIN
-            (SELECT peer,MIN(rowid) AS first FROM network_events GROUP BY peer) h ON e.rowid=h.first")?;
-        for row in query.query_map([], |r| r.get::<_, String>(0))? {
-            ids.push(row?);
+// Legacy requests have no event association. Derive their deterministic IDs
+// only if the retirement pass encounters a confirmed legacy packet.
+fn legacy_fragments(db: &Connection) -> Result<BTreeSet<String>> {
+    let mut query = db.prepare("SELECT id,offset FROM network_events")?;
+    let mut rows = query.query([])?;
+    let mut ids = BTreeSet::new();
+    while let Some(row) = rows.next()? {
+        let event = Uuid::parse_str(&row.get::<_, String>(0)?)?;
+        let offset = row.get(1)?;
+        for cancelled in [false, true] {
+            ids.insert(crate::messages::packet_id(event, offset, cancelled).to_string());
         }
     }
-    Ok(serde_json::to_string(&ids)?)
+    Ok(ids)
+}
+
+fn retire_request(db: &Connection, id: &str, managed: bool) -> Result<()> {
+    if managed {
+        db.execute("DELETE FROM configuration_requests WHERE id=?1", [id])?;
+        db.execute("DELETE FROM stream_outbox WHERE id=?1", [id])?;
+        db.execute("DELETE FROM outbox WHERE id=?1", [id])?;
+        db.execute("DELETE FROM transport_requests WHERE id=?1", [id])?;
+    } else {
+        db.execute("UPDATE stream_outbox SET packet=X'' WHERE id=?1", [id])?;
+        db.execute("UPDATE outbox SET bytes=X'' WHERE id=?1", [id])?;
+    }
+    Ok(())
+}
+
+/// The caller has advanced or deleted this exact cursor in the same transaction.
+/// A cancellation can release both a part and a cancel at the same offset.
+pub(crate) fn retire_released_fragment(
+    db: &Connection,
+    group: &[u8],
+    event: Uuid,
+    offset: usize,
+) -> Result<()> {
+    let legacy =
+        [false, true].map(|cancel| crate::messages::packet_id(event, offset, cancel).to_string());
+    let mut query = db.prepare(
+        "WITH ids(id) AS (
+            SELECT id FROM transport_requests WHERE group_id=?1 AND event=?2 AND offset=?3
+            UNION ALL SELECT ?4 UNION ALL SELECT ?5)
+         SELECT o.id,t.id IS NOT NULL FROM ids CROSS JOIN stream_outbox o ON o.id=ids.id
+         JOIN stream_confirmed c ON c.group_id=o.group_id LEFT JOIN transport_requests t ON t.id=o.id
+         WHERE o.group_id=?1 AND o.sequence>0 AND o.sequence<=c.sequence"
+    )?;
+    let released = query
+        .query_map(
+            params![group, event.to_string(), offset, legacy[0], legacy[1]],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, managed) in released {
+        retire_request(db, &id, managed)?;
+    }
+    Ok(())
 }
 
 /// Preserve origins and legacy tombstones. Allocated IDs can be forgotten because
 /// an unknown UUIDv7 cannot start another operation through any MLS request API.
 pub(crate) fn retire(db: &Connection, dry_run: bool) -> Result<(usize, u64, usize)> {
-    let protected = protected(db)?;
-    let rows = db
-        .prepare(
-            "SELECT o.id,length(o.packet)+COALESCE(length(r.bytes),0),t.id IS NOT NULL FROM stream_outbox o
-        JOIN stream_confirmed c USING(group_id) LEFT JOIN outbox r ON r.id=o.id
-        LEFT JOIN transport_requests t ON t.id=o.id
-        WHERE o.sequence>0 AND o.sequence<=c.sequence AND (length(o.packet)>0 OR t.id IS NOT NULL)
-          AND o.id NOT IN (SELECT value FROM json_each(?1)) ORDER BY o.rowid LIMIT 256",
-        )?
-        .query_map([protected], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?, r.get::<_, bool>(2)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let runtime: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='network_events')",
+        [],
+        |row| row.get(0),
+    )?;
+    // The scheduler can prioritize any queued event. Check each allocated
+    // fragment's own cursor, independent of which event is currently first.
+    let unprotected = if runtime {
+        "AND NOT EXISTS(SELECT 1 FROM network_events e WHERE e.id=t.event AND e.offset=t.offset)"
+    } else {
+        ""
+    };
+    let mut query = db.prepare(&format!(
+        "SELECT o.id,length(o.packet)+COALESCE(length(r.bytes),0),t.id IS NOT NULL FROM stream_outbox o
+         JOIN stream_confirmed c USING(group_id) LEFT JOIN outbox r ON r.id=o.id
+         LEFT JOIN transport_requests t ON t.id=o.id
+         WHERE o.sequence>0 AND o.sequence<=c.sequence AND (length(o.packet)>0 OR t.id IS NOT NULL)
+         {unprotected} ORDER BY o.rowid"
+    ))?;
+    let mut candidates = query.query([])?;
+    let mut legacy = None;
+    let mut rows = Vec::new();
     let mut bytes = 0;
     let mut requests = 0;
-    for (id, size, managed) in &rows {
-        bytes += size;
-        requests += usize::from(*managed);
-        if !dry_run {
-            if *managed {
-                db.execute("DELETE FROM configuration_requests WHERE id=?1", [id])?;
-                db.execute("DELETE FROM stream_outbox WHERE id=?1", [id])?;
-                db.execute("DELETE FROM outbox WHERE id=?1", [id])?;
-                db.execute("DELETE FROM transport_requests WHERE id=?1", [id])?;
-            } else {
-                db.execute("UPDATE stream_outbox SET packet=X'' WHERE id=?1", [id])?;
-                db.execute("UPDATE outbox SET bytes=X'' WHERE id=?1", [id])?;
+    while rows.len() < 256
+        && let Some(row) = candidates.next()?
+    {
+        let id: String = row.get(0)?;
+        let managed: bool = row.get(2)?;
+        if runtime && !managed {
+            let ids = match &legacy {
+                Some(ids) => ids,
+                None => legacy.insert(legacy_fragments(db)?),
+            };
+            if ids.contains(&id) {
+                continue;
             }
+        }
+        bytes += row.get::<_, u64>(1)?;
+        requests += usize::from(managed);
+        rows.push((id, managed));
+    }
+    drop(candidates);
+    if !dry_run {
+        for (id, managed) in &rows {
+            retire_request(db, id, *managed)?;
         }
     }
     Ok((rows.len(), bytes, requests))

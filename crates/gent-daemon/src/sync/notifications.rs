@@ -1,5 +1,6 @@
 //! The outbound watch carries mailbox hints and, after negotiation, peer
 //! sessions. Only verified endpoint receipts advance confirmed history.
+mod handshake;
 pub(super) mod wss;
 use super::{Relay, SharedStore, health::Health, schedule::Hints};
 use anyhow::{Context, Result, ensure};
@@ -16,10 +17,7 @@ use tokio::{
     task::JoinHandle,
     time::{Instant, MissedTickBehavior},
 };
-use tokio_tungstenite::{
-    connect_async_with_config,
-    tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
-};
+use tokio_tungstenite::tungstenite::Message;
 
 const PING: &str = "gent-ping-v1";
 const PONG: &str = "gent-pong-v1";
@@ -51,17 +49,28 @@ impl Listener {
         let flag = connected.clone();
         let task = tokio::spawn(async move {
             let mut delay = Duration::from_secs(1);
+            let mut take_over = true;
             loop {
                 let started = Instant::now();
                 // Errors contain no application state and are not logged with
                 // request headers, which carry the transport credential.
-                let result = listen(&relay, &wakeup, &flag, &hints, &route, &store).await;
+                let result =
+                    listen(&relay, &wakeup, &flag, &hints, &route, &store, take_over).await;
                 health.watch_ended(
                     result.as_ref().err().map(|e| safe_reason(e)),
                     started.elapsed(),
                 );
-                flag.store(false, Ordering::SeqCst);
+                if flag.swap(false, Ordering::SeqCst) {
+                    hints.all();
+                }
                 wakeup.notify_one();
+                // A replacement owns the route now. Rejoin immediately for
+                // hints and only claim a vacant route on future reconnects.
+                if result.is_ok() {
+                    take_over = false;
+                    delay = Duration::from_secs(1);
+                    continue;
+                }
                 if started.elapsed() >= Duration::from_secs(30) {
                     delay = Duration::from_secs(1);
                 }
@@ -109,24 +118,12 @@ async fn listen(
     hints: &Hints,
     route: &wss::Wss,
     store: &SharedStore,
+    take_over: bool,
 ) -> Result<()> {
     let mut url = relay.origin.join("v1/watch")?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme)
         .map_err(|_| anyhow::anyhow!("invalid push origin"))?;
-    let mut request = url.as_str().into_client_request()?;
-    if let Some(cluster) = &relay.cluster {
-        request
-            .headers_mut()
-            .insert("X-Gent-Cluster", cluster.parse()?);
-    }
-    request.headers_mut().insert("X-Gent-Watch", "2".parse()?);
-    request
-        .headers_mut()
-        .insert("X-Gent-Authority", "3".parse()?);
-    request
-        .headers_mut()
-        .insert("Authorization", relay.authorization.clone());
     let offered = scheme == "wss"
         && super::local(store.clone(), |s| {
             Ok(matches!(
@@ -136,31 +133,8 @@ async fn listen(
         })
         .await
         .unwrap_or(false);
-    if offered {
-        request
-            .headers_mut()
-            .insert(wire::HEADER, wire::OFFER.parse()?);
-    }
-    let limit = if offered { wire::MAX_FRAME } else { MAX_BYTES };
-    let config = WebSocketConfig::default()
-        .read_buffer_size(4096)
-        .write_buffer_size(0)
-        .max_write_buffer_size(limit * 2)
-        .max_message_size(Some(limit))
-        .max_frame_size(Some(limit));
-    // This API performs one handshake and does not follow redirects. The same
-    // origin validation and TLS trust as HTTP apply; credentials stay on origin.
-    let (mut socket, response) = tokio::time::timeout(
-        Duration::from_secs(5),
-        connect_async_with_config(request, Some(config), true),
-    )
-    .await
-    .context("push connection timed out")??;
-    let negotiated = offered
-        && response
-            .headers()
-            .get(wire::HEADER)
-            .is_some_and(|value| value == wire::OFFER);
+    let (mut socket, negotiated) =
+        handshake::connect(relay, url.as_str(), offered, take_over).await?;
     let mut peer: Option<wss::Connection> = None;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -230,6 +204,7 @@ async fn listen(
                             _ => anyhow::bail!("invalid push event"),
                         }
                     }
+                    Message::Close(Some(reason)) if peer.is_some() && u16::from(reason.code) == wire::REPLACED => return Ok(()),
                     Message::Ping(_) => { tokio::time::timeout(Duration::from_secs(5), socket.flush()).await??; }
                     Message::Pong(_) => {}
                     _ => anyhow::bail!("invalid push frame"),

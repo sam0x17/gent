@@ -179,20 +179,7 @@ impl<'a> EncryptedEndpoint<'a> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let state = authority(&tx, self.identity)?;
-        if configuration_only {
-            authorize_saved_node(&state, self.identity.id(), &self.identity.public_key())?;
-        } else {
-            state.authorize_node(self.identity.id(), &self.identity.public_key(), now)?;
-        }
-        let session = Session {
-            db: &tx,
-            provider: Provider::new(&tx),
-            state,
-            signer: self.identity,
-            now,
-            configuration_only,
-        };
+        let session = Session::load(&tx, self.identity, now, configuration_only)?;
         let result = operation(&session)?;
         tx.commit()?;
         Ok(result)
@@ -560,7 +547,29 @@ struct Session<'a> {
     now: u64,
     configuration_only: bool,
 }
-impl Session<'_> {
+impl<'a> Session<'a> {
+    fn load(
+        db: &'a Connection,
+        signer: &'a NodeIdentity,
+        now: u64,
+        configuration_only: bool,
+    ) -> Result<Self> {
+        let state = authority(db, signer)?;
+        if configuration_only {
+            authorize_saved_node(&state, signer.id(), &signer.public_key())?;
+        } else {
+            state.authorize_node(signer.id(), &signer.public_key(), now)?;
+        }
+        Ok(Self {
+            db,
+            provider: Provider::new(db),
+            state,
+            signer,
+            now,
+            configuration_only,
+        })
+    }
+
     fn key_package(&self, request: Uuid) -> Result<Vec<u8>> {
         let db = self.db;
         let provider = &self.provider;

@@ -8,6 +8,7 @@ use iroh::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::{sync::Semaphore, task::JoinSet};
 
+mod file_chunks;
 mod legacy;
 mod quic;
 pub(crate) mod session;
@@ -27,6 +28,8 @@ pub(crate) struct Metrics {
     streams: AtomicU64,
     dial_failures: AtomicU64,
     receipt_failures: AtomicU64,
+    file_sent: AtomicU64,
+    file_received: AtomicU64,
 }
 impl Metrics {
     pub(super) fn snapshot(&self) -> serde_json::Value {
@@ -40,6 +43,8 @@ impl Metrics {
             "binary_send_streams_opened": self.streams.load(Ordering::Relaxed),
             "dial_failures": self.dial_failures.load(Ordering::Relaxed),
             "receipt_failures": self.receipt_failures.load(Ordering::Relaxed),
+            "sent_file_chunk_bytes": self.file_sent.load(Ordering::Relaxed),
+            "received_file_chunk_bytes": self.file_received.load(Ordering::Relaxed),
             "scope": "Native QUIC process counters. Byte counts include binary batch framing on v2 and canonical packet bytes on v1. Excludes signed replies and QUIC overhead."
         })
     }
@@ -51,6 +56,7 @@ pub(crate) struct Direct {
     failed: Mutex<BTreeMap<EndpointId, Instant>>,
     in_flight: Semaphore,
     listener: JoinHandle<()>,
+    files: file_chunks::Client,
     metrics: Arc<Metrics>,
 }
 impl Drop for Direct {
@@ -77,7 +83,11 @@ impl Direct {
         };
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::generate())
-            .alpns(vec![quic::ALPN.to_vec(), legacy::ALPN.to_vec()])
+            .alpns(vec![
+                quic::ALPN.to_vec(),
+                legacy::ALPN.to_vec(),
+                file_chunks::ALPN.to_vec(),
+            ])
             .transport_config(
                 QuicTransportConfig::builder()
                     .max_concurrent_bidi_streams(1u32.into())
@@ -103,6 +113,7 @@ impl Direct {
             failed: Mutex::new(BTreeMap::new()),
             in_flight: Semaphore::new(quic::MAX_LINKS),
             listener,
+            files: file_chunks::Client::default(),
             metrics,
         })))
     }
@@ -140,8 +151,8 @@ impl Direct {
         store: SharedStore,
         entry: &Stream,
         health: &health::Health,
-        wakeup: Arc<Notify>,
-    ) -> Option<Result<Option<u64>>> {
+        prepared: &mut transfer::Prepared,
+    ) -> Option<Result<Option<session::Confirmed>>> {
         if entry.configuration || !entry.outgoing {
             return None;
         }
@@ -163,22 +174,20 @@ impl Direct {
         }
         let _permit = self.in_flight.try_acquire().ok()?;
         let deadline = Instant::now() + OPERATION;
-        let pending = match tokio::time::timeout_at(
-            deadline,
-            session::Pending::prepare(store.clone(), &entry.group, wakeup),
-        )
-        .await
-        {
-            Ok(Ok(Some(pending))) => pending,
-            Ok(Ok(None)) => {
-                health.idle(&entry.group);
-                return Some(Ok(None));
-            }
-            _ => {
-                self.metrics.fallbacks.fetch_add(1, Ordering::Relaxed);
-                return None;
-            }
-        };
+        let pending =
+            match tokio::time::timeout_at(deadline, prepared.peer(store.clone(), &entry.group))
+                .await
+            {
+                Ok(Ok(Some(pending))) => pending,
+                Ok(Ok(None)) => {
+                    health.idle(&entry.group);
+                    return Some(Ok(None));
+                }
+                _ => {
+                    self.metrics.fallbacks.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+            };
         let link =
             match tokio::time::timeout_at(deadline, self.connection(addr, store.clone())).await {
                 Ok(Ok(link)) => link,
@@ -205,9 +214,9 @@ impl Direct {
             }
         };
         match tokio::time::timeout_at(deadline, operation).await {
-            Ok(Ok(last)) => {
+            Ok(Ok(confirmed)) => {
                 self.metrics.deliveries.fetch_add(1, Ordering::Relaxed);
-                Some(Ok(Some(last)))
+                Some(Ok(Some(confirmed)))
             }
             _ => {
                 self.metrics
@@ -228,6 +237,7 @@ async fn listen(
     metrics: Arc<Metrics>,
 ) {
     let limit = Arc::new(Semaphore::new(quic::MAX_LINKS));
+    let file_limit = Arc::new(Semaphore::new(2));
     let mut tasks = JoinSet::new();
     let mut prune = tokio::time::interval(Duration::from_secs(1));
     loop {
@@ -244,6 +254,7 @@ async fn listen(
                 let store = store.clone();
                 let pool = pool.clone();
                 let metrics = metrics.clone();
+                let file_limit = file_limit.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
                     let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_secs(5), incoming).await else {
@@ -254,6 +265,11 @@ async fn listen(
                         conn.close(1u32.into(), b"unrecognized node");
                     } else if conn.alpn() == quic::ALPN {
                         pool.install(local_id, conn, false, store, metrics);
+                    } else if conn.alpn() == file_chunks::ALPN {
+                        if let Ok(_file) = file_limit.try_acquire() {
+                            let _ = file_chunks::serve(&conn, store, &metrics).await;
+                        }
+                        conn.close(0u32.into(), b"file session ended");
                     } else {
                         let _ = legacy::serve(&conn, store, metrics).await;
                         conn.close(0u32.into(), b"legacy session ended");
