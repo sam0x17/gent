@@ -6,7 +6,21 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, watch};
 
 const REGISTRATION_WINDOW: Duration = Duration::from_secs(8);
 
+#[derive(Clone)]
+pub(super) struct Source {
+    pub(super) offer: HelperOffer,
+    pub(super) operator: (EndpointId, [u8; 32]),
+    pub(super) expiry: i64,
+}
+impl Source {
+    fn matches(&self, slot: &Slot) -> bool {
+        self.operator == slot.operator && same_service(&self.offer, &slot.offer)
+    }
+}
+
 pub(super) struct Slot {
+    operator: (EndpointId, [u8; 32]),
+    locator: watch::Sender<i64>,
     offer: Arc<HelperOffer>,
     available: watch::Sender<bool>,
     bound: Arc<Mutex<Option<Arc<Auxiliary>>>>,
@@ -16,6 +30,9 @@ pub(super) struct Slot {
 impl Drop for Slot {
     fn drop(&mut self) {
         self.available.send_replace(false);
+        if let Some(aux) = self.get() {
+            aux.withdraw_registration();
+        }
         self.worker.abort();
     }
 }
@@ -29,14 +46,14 @@ impl Slot {
 pub(super) struct Helpers {
     pub(super) active: BTreeMap<String, Slot>,
     pub(super) draining: Vec<Slot>,
-    offers: BTreeMap<String, HelperOffer>,
+    offers: BTreeMap<String, Source>,
     attempts: BTreeMap<String, (u64, usize)>,
     sequence: u64,
     last_rotation: Option<Instant>,
 }
 
 impl Helpers {
-    pub(super) fn update(&mut self, offers: BTreeMap<String, HelperOffer>, wakeup: &Notify) {
+    pub(super) fn update(&mut self, offers: BTreeMap<String, Source>, wakeup: &Notify) {
         self.offers = offers;
         self.attempts.retain(|id, _| self.offers.contains_key(id));
         self.draining.retain(|slot| {
@@ -50,12 +67,18 @@ impl Helpers {
             if let Some(aux) = &aux {
                 aux.prune();
             }
-            if self
-                .offers
-                .get(&id)
-                .is_some_and(|o| same_service(&slot.offer, o))
+            if let Some(source) = self.offers.get(&id).filter(|s| s.matches(&slot))
                 && !slot.worker.is_finished()
+                && (registration::deadline(source.expiry).is_some()
+                    || aux.as_ref().is_some_and(|a| a.retained()))
             {
+                slot.locator.send_if_modified(|at| {
+                    if *at == source.expiry {
+                        return false;
+                    }
+                    *at = source.expiry;
+                    true
+                });
                 if aux.is_some_and(|a| a.registration().is_some()) {
                     slot.last_good = Instant::now();
                 }
@@ -84,22 +107,21 @@ impl Helpers {
                 && self
                     .offers
                     .get(&slot.offer.helper_node)
-                    .is_some_and(|o| same_service(o, &slot.offer))
+                    .is_some_and(|s| s.matches(slot) && registration::deadline(s.expiry).is_some())
             {
                 let mut slot = self.draining.swap_remove(index);
+                slot.locator
+                    .send_replace(self.offers[&slot.offer.helper_node].expiry);
                 slot.available.send_replace(true);
                 slot.last_good = Instant::now();
-                if let Some(aux) = slot.get()
-                    && aux.update_registration()
-                {
-                    factory.wakeup.notify_one();
-                }
                 self.active.insert(slot.offer.helper_node.clone(), slot);
             } else {
                 index += 1;
             }
         }
-        let crowded = self.offers.len() > self.active.len();
+        let crowded = self.offers.iter().any(|(id, s)| {
+            !self.active.contains_key(id) && registration::deadline(s.expiry).is_some()
+        });
         if self
             .last_rotation
             .is_none_or(|t| t.elapsed() >= REGISTRATION_WINDOW)
@@ -131,7 +153,11 @@ impl Helpers {
             if self.active.len() + self.draining.len() >= MAX_HELPERS {
                 break;
             }
-            let offer = &self.offers[id];
+            let source = &self.offers[id];
+            if registration::deadline(source.expiry).is_none() {
+                continue;
+            }
+            let offer = &source.offer;
             // A repeated signed description of one TLS service must never create
             // another registration for this identity, even under another node ID.
             if self
@@ -147,8 +173,7 @@ impl Helpers {
             *next = next.wrapping_add(1);
             self.sequence += 1;
             *seq = self.sequence;
-            self.active
-                .insert(id.clone(), factory.start(Arc::new(offer.clone()), alias));
+            self.active.insert(id.clone(), factory.start(source, alias));
         }
     }
 }
@@ -164,10 +189,18 @@ pub(super) struct Factory {
     owners: Mutex<BTreeMap<[u8; 32], Weak<AsyncMutex<()>>>>,
 }
 impl Factory {
-    fn start(&self, offer: Arc<HelperOffer>, alias: RelayUrl) -> Slot {
+    fn start(&self, source: &Source, alias: RelayUrl) -> Slot {
+        let offer = Arc::new(source.offer.clone());
+        let operator = source.operator;
+        let (locator, mut expiry) = watch::channel(source.expiry);
+        let authority = Authority {
+            offer: offer.clone(),
+            operator,
+            locator: expiry.clone(),
+        };
         let bound = Arc::new(Mutex::new(None));
         let (available, mut active) = watch::channel(true);
-        let (ready, config) = (bound.clone(), offer.clone());
+        let ready = bound.clone();
         let key = self.key.clone();
         let store = self.store.clone();
         let metrics = self.metrics.clone();
@@ -188,9 +221,12 @@ impl Factory {
         let worker = tokio::spawn(async move {
             let permit = owner.lock_owned().await;
             let aux = loop {
+                if registration::deadline(*expiry.borrow()).is_none() {
+                    return;
+                }
                 if let Ok(aux) = Auxiliary::bind(
                     key.clone(),
-                    config.clone(),
+                    authority.clone(),
                     &url,
                     udp,
                     store.clone(),
@@ -208,26 +244,44 @@ impl Factory {
             let mut report = aux.endpoint.net_report();
             *ready.lock().expect("helper endpoint poisoned") = Some(aux.clone());
             let watch = async {
+                let mut new_report = false;
+                let mut relay_enabled = true;
                 loop {
-                    if aux.update_registration() {
+                    if aux.update_registration(report.get().as_ref(), new_report) {
                         wake.notify_one();
                     }
-                    tokio::select! {
-                        changed=active.changed()=>{
-                            if changed.is_err() {break;}
-                            let enable=*active.borrow_and_update();
-                            if enable {
-                                aux.endpoint.insert_relay(url.clone(),Arc::new(aux.relay_config.clone())).await;
-                            } else { aux.endpoint.remove_relay(&url).await; }
+                    let until =
+                        registration::deadline(*expiry.borrow_and_update()).max(aux.live_until());
+                    let enabled = *active.borrow_and_update() && until.is_some();
+                    if enabled != relay_enabled {
+                        if enabled {
+                            aux.endpoint
+                                .insert_relay(url.clone(), Arc::new(aux.relay_config.clone()))
+                                .await;
+                        } else {
+                            if aux.withdraw_registration() {
+                                wake.notify_one();
+                            }
+                            aux.endpoint.remove_relay(&url).await;
                         }
+                        relay_enabled = enabled;
+                    }
+                    new_report = false;
+                    tokio::select! {
+                        _=aux.reschedule.notified()=>{},
+                        changed=active.changed()=> if changed.is_err() {break},
+                        changed=expiry.changed()=> if changed.is_err() {break},
                         s=status.updated() => if s.is_err() {break},
-                        r=report.updated() => if r.is_err() {break},
+                        r=report.updated() => { if r.is_err() {break;} new_report = true; },
+                        _=async {if let Some(t)=until { tokio::time::sleep_until(t).await }} , if enabled => {}
                     }
                 }
             };
-            tokio::select! { _=watch=>{}, _=aux.clone().listen(incoming,files)=>{} }
+            tokio::select! { _=watch=>{}, _=aux.renew_home()=>{}, _=aux.clone().listen(incoming,files)=>{} }
         });
         Slot {
+            operator,
+            locator,
             offer,
             available,
             bound,
@@ -292,20 +346,25 @@ mod tests {
             notify.clone(),
         );
         // Run the allocator without yielding to its background bind tasks.
+        let operator = (SecretKey::generate().public(), [5; 32]);
         let offers: BTreeMap<_, _> = (0..=MAX_HELPERS)
             .map(|n| {
                 let node = format!("test-{n:02}");
                 (
                     node.clone(),
-                    HelperOffer {
-                        helper_node: node,
-                        urls: vec![
-                            "https://127.0.0.1:7001/".parse().unwrap(),
-                            "https://127.0.0.1:7002/".parse().unwrap(),
-                        ],
-                        cert_der: vec![n as u8],
-                        generation: [n as u8; 32],
-                        qad_port: None,
+                    Source {
+                        operator,
+                        expiry: crate::store::now() + 180,
+                        offer: HelperOffer {
+                            helper_node: node,
+                            urls: vec![
+                                "https://127.0.0.1:7001/".parse().unwrap(),
+                                "https://127.0.0.1:7002/".parse().unwrap(),
+                            ],
+                            cert_der: vec![n as u8],
+                            generation: [n as u8; 32],
+                            qad_port: None,
+                        },
                     },
                 )
             })
@@ -335,7 +394,7 @@ mod tests {
         helpers.allocate(&factory);
         assert_eq!(chosen, helpers.sequence);
         let mut duplicate = offers["test-16"].clone();
-        duplicate.helper_node = "another-name".into();
+        duplicate.offer.helper_node = "another-name".into();
         helpers.update(
             [
                 ("another-name".into(), duplicate),

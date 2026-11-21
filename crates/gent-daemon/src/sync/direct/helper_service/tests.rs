@@ -50,8 +50,24 @@ fn start(
     udp: bool,
 ) -> Result<(HelperService, Arc<Metrics>)> {
     let totals: Arc<Metrics> = Arc::default();
-    let service = HelperService::bind(store, own, node, listener(udp), LOOPBACK, totals.clone())?;
+    let service = HelperService::bind(
+        store.clone(),
+        own,
+        node,
+        listener(udp),
+        LOOPBACK,
+        totals.clone(),
+    )?;
+    publish(&store, own, service.offer())?;
     Ok((service, totals))
+}
+
+fn publish(store: &SharedStore, endpoint: EndpointId, offer: &HelperOffer) -> Result<()> {
+    store.lock().unwrap().advertise_direct_with_helpers(
+        EndpointAddr::new(endpoint),
+        Some(offer.clone()),
+        vec![],
+    )
 }
 
 async fn ping(client: &mut Client) -> Result<()> {
@@ -182,7 +198,7 @@ async fn translated_public_port_preserves_https_aliases_and_omits_qad() -> Resul
         ..listener(true)
     };
     let service = HelperService::bind(
-        store,
+        store.clone(),
         key.public(),
         node,
         settings,
@@ -190,6 +206,7 @@ async fn translated_public_port_preserves_https_aliases_and_omits_qad() -> Resul
         Arc::default(),
     )?;
     let offer = service.offer();
+    publish(&store, key.public(), offer)?;
     assert_eq!(offer.qad_port, None);
     assert_eq!(
         offer.urls,
@@ -315,6 +332,7 @@ async fn revoked_member_loses_existing_relay_session_while_host_stays_registered
         assert_eq!(db.execute("INSERT INTO direct_peers(peer,peer_key,endpoint,address,expires_at) SELECT peer,peer_key,?2,?3,?4 FROM network_links WHERE peer=?1",
             rusqlite::params![member, peer_key.public().to_string(), serde_json::to_vec(&address)?, address.expires_at])?, 1);
 
+        db.execute("INSERT OR REPLACE INTO wire_peers SELECT peer,peer_key,7,?2 FROM network_links WHERE peer=?1", rusqlite::params![member, crate::store::now()])?;
         let (service, totals) = start(store.clone(), host_key.public(), node, false)?;
         let tls = client_tls(service.offer())?;
         let connect = |key| {
@@ -322,6 +340,31 @@ async fn revoked_member_loses_existing_relay_session_while_host_stays_registered
                 .tls_client_config(tls.clone())
         };
         let mut a = connect(host_key.clone()).connect().await?;
+        let offer = service.offer();
+        let alias = &offer.urls[0];
+        // The member still has a fresh endpoint binding, but H's previously
+        // published locator for this member is too old to admit a new socket.
+        let original: i64 = db.query_row(
+            "SELECT expires_at FROM direct_advertised WHERE peer=?1",
+            [&member],
+            |r| r.get(0),
+        )?;
+        db.execute(
+            "UPDATE direct_advertised SET expires_at=0 WHERE peer=?1",
+            [&member],
+        )?;
+        store.lock().unwrap().direct_allowed(peer_key.public())?;
+        assert!(matches!(
+            connect(peer_key.clone()).connect().await,
+            Err(ConnectError::Handshake {
+                source: handshake::Error::ServerDeniedAuth { .. },
+                ..
+            })
+        ));
+        db.execute(
+            "UPDATE direct_advertised SET expires_at=?2 WHERE peer=?1",
+            rusqlite::params![member, original],
+        )?;
         let mut b = connect(peer_key.clone()).connect().await?;
         let payload = Datagrams::from([0xab; 4096]);
         a.send(ClientToRelayMsg::Datagrams {
@@ -333,6 +376,8 @@ async fn revoked_member_loses_existing_relay_session_while_host_stays_registered
             matches!(b.next().await.transpose()?, Some(RelayToClientMsg::Datagrams {remote_endpoint_id,datagrams}) if remote_endpoint_id == host_key.public() && datagrams == payload)
         );
         assert_eq!(totals.bytes_sent.get(), 4096);
+        time::sleep(ESTABLISH).await;
+        let grant = lease::renew(&peer_key, offer, alias, None).await?;
         let removed = setup.handle(gent_protocol::Request::Owner {
             credential,
             action: gent_protocol::OwnerOp::RemoveNode { node_id: member },
@@ -340,6 +385,11 @@ async fn revoked_member_loses_existing_relay_session_while_host_stays_registered
         ensure!(
             matches!(removed, gent_protocol::Response::Ok(_)),
             "member removal failed"
+        );
+        assert!(
+            lease::renew(&peer_key, offer, alias, Some(&grant))
+                .await
+                .is_err()
         );
         while let Some(Ok(_)) = b.next().await {}
         assert!(matches!(
@@ -359,7 +409,16 @@ async fn revoked_member_loses_existing_relay_session_while_host_stays_registered
 #[tokio::test(start_paused = true)]
 async fn full_registry_denies_admission_and_stale_slots_cannot_block_shutdown() -> Result<()> {
     let (_home, store, own, node) = fixture()?;
-    let gate = Arc::new(Admission::new(store, own.public(), node.clone()));
+    let (tcp, _) = sockets(LOOPBACK, Some(0), false, None)?;
+    let (offer, tls) = identity(
+        node.clone(),
+        vec![LOOPBACK.into()],
+        tcp.local_addr()?.port(),
+        None,
+        false,
+    )?;
+    let alias = offer.urls[0].clone();
+    let gate = Arc::new(Admission::new(store, own.public(), Arc::new(offer)));
     let request = ClientRequest::new(
         own.public(),
         Default::default(),
@@ -371,7 +430,16 @@ async fn full_registry_denies_admission_and_stale_slots_cannot_block_shutdown() 
             // No corresponding Iroh actor exists for these synthetic stale slots.
             state.live.insert(
                 SecretKey::generate().public(),
-                (request.connection_id(), (node.clone(), [0; 32])),
+                Session {
+                    connection: request.connection_id(),
+                    binding: (node.clone(), [0; 32]),
+                    alias: alias.clone(),
+                    settled: Instant::now(),
+                    until: Instant::now(),
+                    token: [0; 32],
+                    predecessor: None,
+                    retired: false,
+                },
             );
         }
     }
@@ -379,14 +447,6 @@ async fn full_registry_denies_admission_and_stale_slots_cannot_block_shutdown() 
         gate.on_connect(&request).await,
         Access::Deny { .. }
     ));
-    let (tcp, _) = sockets(LOOPBACK, Some(0), false, None)?;
-    let (_, tls) = identity(
-        node,
-        vec![LOOPBACK.into()],
-        tcp.local_addr()?.port(),
-        None,
-        false,
-    )?;
     let (stop, shutdown) = oneshot::channel();
     drop(stop);
     let start = Instant::now();
@@ -509,6 +569,7 @@ async fn endpoint_registration_and_counters_survive_listener_replacement() -> Re
                 totals.clone(),
             )?;
             let offer = service.offer();
+            publish(&store, key.public(), offer)?;
             assert_ne!(previous_generation, Some(offer.generation));
             previous_generation = Some(offer.generation);
             let ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -530,4 +591,96 @@ async fn endpoint_registration_and_counters_survive_listener_replacement() -> Re
         Ok(())
     };
     time::timeout(Duration::from_secs(15), trial).await?
+}
+
+#[tokio::test]
+async fn native_lease_recovers_a_lost_reply_and_stops_on_withdrawal() -> Result<()> {
+    let trial = async {
+        let (home, store, key, node) = fixture()?;
+        let (service, _) = start(store.clone(), key.public(), node, false)?;
+        let offer = service.offer();
+        let alias = &offer.urls[0];
+        let db = encrypted::open_database(home.path(), "state.sqlite3")?;
+        db.execute(
+            "UPDATE direct_local SET expires_at=?1",
+            [crate::store::now() + 30],
+        )?;
+        assert!(lease::renew(&key, offer, alias, None).await.is_err());
+        let connect = ClientBuilder::new(alias.clone(), key.clone(), DnsResolver::new())
+            .tls_client_config(client_tls(offer)?);
+        let mut registered = connect.connect().await?;
+        ping(&mut registered).await?;
+        time::sleep(ESTABLISH).await;
+        let initial = lease::renew(&key, offer, alias, None).await?;
+        assert!(initial.until <= Instant::now() + Duration::from_secs(30));
+        assert!(
+            lease::renew(&SecretKey::generate(), offer, alias, None)
+                .await
+                .is_err()
+        );
+        db.execute("UPDATE direct_local SET expires_at=0", [])?;
+        assert!(lease::renew(&key, offer, alias, None).await.is_err());
+        let sent = Instant::now();
+        let lost = lease::renew(&key, offer, alias, Some(&initial)).await?;
+        let elapsed = sent.elapsed();
+        assert!(lost.until > initial.until);
+        time::sleep(elapsed + Duration::from_millis(100)).await;
+        let recovered = lease::renew(&key, offer, alias, Some(&initial)).await?;
+        assert!(recovered.until <= lost.until + elapsed + Duration::from_millis(2));
+        let current = lease::renew(&key, offer, alias, Some(&recovered)).await?;
+        assert!(
+            lease::renew(&key, offer, alias, Some(&initial))
+                .await
+                .is_err()
+        );
+        ping(&mut registered).await?;
+
+        store.lock().unwrap().advertise_direct_with_helpers(
+            EndpointAddr::new(key.public()),
+            None,
+            vec![],
+        )?;
+        assert!(
+            lease::renew(&key, offer, alias, Some(&current))
+                .await
+                .is_err()
+        );
+        while let Some(Ok(_)) = registered.next().await {}
+        assert!(connect.connect().await.is_err());
+        publish(&store, key.public(), offer)?;
+        let mut replacement = connect.connect().await?;
+        ping(&mut replacement).await?;
+        time::sleep(ESTABLISH).await;
+        assert!(
+            lease::renew(&key, offer, alias, Some(&current))
+                .await
+                .is_err()
+        );
+        lease::renew(&key, offer, alias, None).await?;
+        service.shutdown().await;
+        Ok(())
+    };
+    time::timeout(Duration::from_secs(25), trial).await?
+}
+
+#[tokio::test]
+async fn initial_registration_expires_without_a_renewal() -> Result<()> {
+    let (home, store, key, node) = fixture()?;
+    let (service, _) = start(store, key.public(), node, false)?;
+    let db = encrypted::open_database(home.path(), "state.sqlite3")?;
+    db.execute(
+        "UPDATE direct_local SET expires_at=?1",
+        [crate::store::now() + 3],
+    )?;
+    let client = ClientBuilder::new(service.offer().urls[0].clone(), key, DnsResolver::new())
+        .tls_client_config(client_tls(service.offer())?);
+    let mut live = client.connect().await?;
+    ping(&mut live).await?;
+    time::timeout(Duration::from_secs(3) + RECHECK + DB_TIMEOUT, async {
+        while let Some(Ok(_)) = live.next().await {}
+    })
+    .await?;
+    assert!(client.connect().await.is_err());
+    service.shutdown().await;
+    Ok(())
 }

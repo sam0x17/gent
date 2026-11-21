@@ -49,9 +49,14 @@ relays = []     # up to four explicitly configured HTTPS Iroh relays
 
 The direct dial budget is 250 ms and a native batch attempt has a three-second
 deadline, including helper selection and the signed reply. Endpoint address
-advertisements expire after three minutes. Queued work and on-demand presence
-checks can refresh them. Older peers continue using their negotiated address
-format and existing transports.
+advertisements expire after three minutes. An already registered node renews
+directly with its helper over pinned HTTPS, normally halfway through a
+two-minute lease. This keeps the registration available during idle periods
+without publishing a new address through Cloudflare. The peers prove their
+node identities on each new application connection. Losing the registration
+ends its lease. A new registration requires a fresh advertised address.
+Queued work and on-demand presence checks can refresh an address. Older peers
+continue using their negotiated address format and existing transports.
 
 Direct access follows the cluster's signed configuration and its expiry. Cloud
 account suspension denies service access; it does not instantly erase an
@@ -114,8 +119,9 @@ and lost responses do not cause an immediate replay through another route.
 helper ID when known. A signed receipt on QUIC or WebSocket confirms the
 recipient committed the last packet in the reported batch. The mailbox reports
 the sequence of the signed checkpoint it supplied. A mailbox upload confirms the relay accepted ciphertext.
-An exchange that used multiple QUIC paths, or whose STREAM counters could
-not account for the transfer, is labeled accordingly. A hosted web node shows
+A direct QUIC observation can use a physical IP or an overlay address such as
+a tailnet IP. An exchange that used multiple QUIC paths, or whose STREAM
+counters could not account for the transfer, is labeled accordingly. A hosted web node shows
 its carrier's native transport evidence. Restarting the daemon clears the
 observations.
 

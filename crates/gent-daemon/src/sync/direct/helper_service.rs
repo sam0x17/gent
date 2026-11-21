@@ -40,12 +40,26 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(8);
 const RECHECK: Duration = Duration::from_secs(3);
 const DB_TIMEOUT: Duration = Duration::from_secs(1);
 
+pub(super) mod lease;
+
 type Binding = (String, [u8; 32]);
 
-#[derive(Debug, Default)]
+#[derive(Clone)]
+struct Session {
+    connection: ConnectionId,
+    binding: Binding,
+    alias: RelayUrl,
+    settled: Instant,
+    until: Instant,
+    token: [u8; 32],
+    predecessor: Option<([u8; 32], Instant)>,
+    retired: bool,
+}
+
+#[derive(Default)]
 struct Registrations {
     closed: bool,
-    live: BTreeMap<EndpointId, (ConnectionId, Binding)>,
+    live: BTreeMap<EndpointId, Session>,
 }
 
 impl Registrations {
@@ -57,7 +71,7 @@ impl Registrations {
 struct Admission {
     store: SharedStore,
     own: EndpointId,
-    node: String,
+    offer: Arc<HelperOffer>,
     registrations: Mutex<Registrations>,
     auth_slots: Arc<Semaphore>,
     sweep_slot: Arc<Semaphore>,
@@ -70,11 +84,11 @@ impl std::fmt::Debug for Admission {
 }
 
 impl Admission {
-    fn new(store: SharedStore, own: EndpointId, node: String) -> Self {
+    fn new(store: SharedStore, own: EndpointId, offer: Arc<HelperOffer>) -> Self {
         Self {
             store,
             own,
-            node,
+            offer,
             registrations: Mutex::default(),
             auth_slots: Arc::new(Semaphore::new(4)),
             sweep_slot: Arc::new(Semaphore::new(1)),
@@ -87,15 +101,11 @@ impl Admission {
         &self,
         ids: Vec<EndpointId>,
         fresh: bool,
-    ) -> Result<BTreeMap<EndpointId, Binding>> {
-        let slots = if fresh {
-            &self.auth_slots
-        } else {
-            &self.sweep_slot
-        };
+        slots: &Arc<Semaphore>,
+    ) -> Result<BTreeMap<EndpointId, (Binding, i64)>> {
         let permit = slots.clone().try_acquire_owned()?;
         let own = self.own;
-        let node = self.node.clone();
+        let offer = self.offer.clone();
         time::timeout(
             DB_TIMEOUT,
             local(self.store.clone(), move |store| {
@@ -105,18 +115,19 @@ impl Admission {
                     "helper disabled"
                 );
                 let host = store.direct_binding(own, false)?;
-                ensure!(host.0 == node, "host endpoint belongs to a different node");
+                ensure!(
+                    host.0 == offer.helper_node,
+                    "host endpoint belongs to a different node"
+                );
                 Ok(ids
                     .into_iter()
                     .filter_map(|id| {
-                        if id == own && !fresh {
-                            Some((id, host.clone()))
+                        let allowed = if fresh {
+                            store.helper_admission(id, &offer)
                         } else {
-                            store
-                                .direct_binding(id, fresh)
-                                .ok()
-                                .map(|binding| (id, binding))
-                        }
+                            store.helper_renewal(id, &offer)
+                        };
+                        allowed.ok().map(|binding| (id, binding))
                     })
                     .collect())
             }),
@@ -130,13 +141,21 @@ impl Admission {
             return;
         }
         let allowed = self
-            .bindings(sessions.keys().copied().collect(), false)
+            .bindings(sessions.keys().copied().collect(), false, &self.sweep_slot)
             .await
             .unwrap_or_default();
-        for (id, (connection, binding)) in sessions {
-            if allowed.get(&id) != Some(&binding) {
-                // A late result for an old connection must never evict its replacement.
-                service.clients().disconnect(id, Some(connection));
+        for (id, snapshot) in sessions {
+            let mut state = self.registrations.lock().unwrap();
+            if let Some(current) = state.live.get_mut(&id)
+                && current.connection == snapshot.connection
+                && (current.until <= Instant::now()
+                    || !allowed.get(&id).is_some_and(|(binding, expiry)| {
+                        binding == &current.binding && *expiry > crate::store::now()
+                    }))
+            {
+                current.retired = true;
+                drop(state);
+                service.clients().disconnect(id, Some(snapshot.connection));
             }
         }
     }
@@ -152,12 +171,26 @@ impl AccessControl for Admission {
         if !self.registrations.lock().unwrap().accepts(id) {
             return Access::Deny { reason: None };
         }
-        if let Ok(mut allowed) = self.bindings(vec![id], true).await
-            && let Some(binding) = allowed.remove(&id)
+        if let Some(alias) = lease::alias(request.headers(), &self.offer)
+            && let Ok(mut allowed) = self.bindings(vec![id], true, &self.auth_slots).await
+            && let Some((binding, expiry)) = allowed.remove(&id)
+            && let Some(until) = lease::deadline(expiry)
         {
             let mut state = self.registrations.lock().unwrap();
             if state.accepts(id) {
-                state.live.insert(id, (request.connection_id(), binding));
+                state.live.insert(
+                    id,
+                    Session {
+                        connection: request.connection_id(),
+                        binding,
+                        alias: alias.clone(),
+                        settled: Instant::now() + ESTABLISH,
+                        until,
+                        token: [0; 32],
+                        predecessor: None,
+                        retired: false,
+                    },
+                );
                 return Access::Allow;
             }
         }
@@ -169,7 +202,7 @@ impl AccessControl for Admission {
         if state
             .live
             .get(&id)
-            .is_some_and(|(current, _)| *current == connection)
+            .is_some_and(|session| session.connection == connection)
         {
             state.live.remove(&id);
         }
@@ -344,7 +377,7 @@ pub(super) struct ListenerConfig {
 }
 
 pub(super) struct HelperService {
-    offer: HelperOffer,
+    offer: Arc<HelperOffer>,
     stop: oneshot::Sender<()>,
     task: JoinHandle<()>,
 }
@@ -389,11 +422,8 @@ impl HelperService {
             socket.is_some(),
         )?;
         let qad = socket.map(|s| qad_endpoint(s, tls.clone())).transpose()?;
-        let admission = Arc::new(Admission::new(
-            store,
-            local_endpoint,
-            offer.helper_node.clone(),
-        ));
+        let offer = Arc::new(offer);
+        let admission = Arc::new(Admission::new(store, local_endpoint, offer.clone()));
         let (stop, shutdown) = oneshot::channel();
         let task = tokio::spawn(serve(
             tcp,
@@ -425,6 +455,7 @@ async fn serve(
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut handlers = Handlers::default();
+    lease::install(&mut handlers, admission.clone());
     handlers.insert(
         (http::Method::GET, "/ping"),
         Box::new(|_, res| Ok(res.body::<BytesBody>(Box::new(String::new()))?)),

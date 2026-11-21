@@ -7,11 +7,13 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use zeroize::Zeroizing;
 mod agents;
+mod helper;
 mod hosting;
 #[cfg(feature = "invitation")]
 mod noise;
 pub mod peer;
 pub use agents::*;
+pub use helper::verify_helper_channel;
 #[cfg(feature = "invitation")]
 pub mod invitation;
 pub mod recovery;

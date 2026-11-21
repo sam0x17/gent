@@ -12,6 +12,7 @@ pub(crate) const MAX_FRAME_BYTES: usize = HEADER + 256 + gent_protocol::transpor
 
 pub(crate) enum Peer {
     ObservedEndpoint(EndpointId, health::TransportPath),
+    Helper(EndpointId, health::TransportPath, Arc<HelperPeer>),
     Node(String),
 }
 
@@ -86,6 +87,15 @@ pub(super) async fn receive(
         let last = packets.last().map(Packet::sequence);
         let (receipt, path) = match peer {
             Peer::ObservedEndpoint(id, path) => (s.direct_receive(id, &group, packets)?, path),
+            Peer::Helper(id, path, pin) => {
+                let receipt =
+                    if path == health::TransportPath::DirectQuic && s.direct_allowed(id).is_ok() {
+                        s.direct_receive(id, &group, packets)?
+                    } else {
+                        s.helper_receive(&pin, &group, packets)?
+                    };
+                (receipt, path)
+            }
             Peer::Node(id) => (
                 s.node_session_receive(&id, &group, packets)?,
                 health::TransportPath::RelayWss,

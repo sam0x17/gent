@@ -432,3 +432,190 @@ async fn helper_passive_expiry_after_idle_stays_quiet_until_bidirectional_refres
     }
     panic!("real work did not refresh the service and both registrations");
 }
+
+#[tokio::test]
+async fn native_grant_delivers_first_batch_after_240s_without_refreshing_mailbox_locators()
+-> Result<()> {
+    use crate::store::direct::{HelperChannel, NativeTarget};
+    use tokio::{sync::watch, time::Instant};
+
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let endpoints = [endpoint(), endpoint()];
+    let service = std::sync::Arc::new(offer(pair.stores[0].identity.node.id()));
+    for (i, store) in pair.stores.iter_mut().enumerate() {
+        store.advertise_direct_with_helpers(
+            endpoints[i].clone(),
+            (i == 0).then(|| service.as_ref().clone()),
+            vec![leg(&service, i, 10)],
+        )?;
+    }
+    pair.pump();
+    let group = pair.group();
+    let operator = (endpoints[0].id, pair.stores[0].identity.node.public_key());
+    let (client, deadline) = pair.stores[0].helper_admission(endpoints[1].id, &service)?;
+    assert_eq!(client.0, pair.stores[1].identity.node.id());
+    assert!(deadline > now() && deadline <= now() + 180);
+    let (leases, channels): (Vec<_>, Vec<_>) = (0..2)
+        .map(|i| {
+            let (tx, rx) =
+                watch::channel(Some(Instant::now() + std::time::Duration::from_secs(180)));
+            (
+                tx,
+                HelperChannel {
+                    local: endpoints[i].id,
+                    peer: endpoints[1 - i].id,
+                    offer: service.clone(),
+                    operator,
+                    lease: rx,
+                },
+            )
+        })
+        .unzip();
+    for (i, s) in pair.stores.iter().enumerate() {
+        s.db.execute_batch(
+            "UPDATE direct_advertised SET expires_at=expires_at-240;
+                            UPDATE direct_peers SET expires_at=expires_at-240;
+                            UPDATE wire_peers SET confirmed_at=confirmed_at-240",
+        )?;
+        assert!(s.direct_allowed(endpoints[1 - i].id).is_err());
+        assert!(s.helper_candidates(endpoints[1 - i].id)?.is_empty());
+        assert_eq!(s.helper_hints(endpoints[1 - i].id)?.len(), 1);
+        let queued: u64 =
+            s.db.query_row("SELECT count(*) FROM network_events", [], |r| r.get(0))?;
+        assert_eq!(queued, 0);
+    }
+    assert!(
+        matches!(pair.stores[0].direct_target(&group)?,Some(NativeTarget::HelperOnly(id)) if id==endpoints[1].id)
+    );
+    assert!(
+        pair.stores[0]
+            .helper_admission(endpoints[1].id, &service)
+            .is_err()
+    );
+    assert_eq!(
+        pair.stores[0].helper_renewal(endpoints[1].id, &service)?.0,
+        client
+    );
+    // Even when H has a fresh client locator, an expired publication from H to
+    // that client cannot bootstrap a new WSS registration or an initial grant.
+    pair.stores[0]
+        .db
+        .execute("UPDATE direct_peers SET expires_at=expires_at+240", [])?;
+    assert!(
+        pair.stores[0]
+            .helper_admission(endpoints[1].id, &service)
+            .is_err()
+    );
+    pair.stores[0]
+        .db
+        .execute("UPDATE direct_peers SET expires_at=expires_at-240", [])?;
+    let a_proof = pair.stores[0].sign_helper_peer(&channels[0], [1; 32])?;
+    let b_proof = pair.stores[1].sign_helper_peer(&channels[1], [2; 32])?;
+    assert!(
+        pair.stores[1]
+            .verify_helper_peer(&channels[1], [2; 32], &a_proof)
+            .is_err()
+    );
+    assert!(
+        pair.stores[0]
+            .verify_helper_peer(&channels[0], [1; 32], &a_proof)
+            .is_err()
+    );
+    let a = pair.stores[1].verify_helper_peer(&channels[1], [1; 32], &a_proof)?;
+    let b = pair.stores[0].verify_helper_peer(&channels[0], [2; 32], &b_proof)?;
+    let sent = pair.send(vec![])?;
+    pair.stores[0].authorize_helper_peer(&b, Some(&client.0))?;
+    pair.stores[0].data_prepare(&group)?;
+    let next = pair.stores[1].data_next(&group)?;
+    let packet = pair.stores[0].data_outgoing(&group, next)?.unwrap();
+    assert!(
+        pair.stores[1]
+            .direct_receive(endpoints[0].id, &group, vec![packet.clone()])
+            .is_err()
+    );
+    let receipt = pair.stores[1].helper_receive(&a, &group, vec![packet])?;
+    pair.stores[0].transport_confirm(&group, false, Some(&receipt))?;
+    let inbox = pair.agent(1, AgentOp::Inbox)?;
+    assert!(
+        inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == sent["message_id"])
+    );
+    for (i, s) in pair.stores.iter().enumerate() {
+        assert!(s.direct_allowed(endpoints[1 - i].id).is_err());
+    }
+    leases[1].send_replace(Some(Instant::now()));
+    assert!(!a.live());
+    assert!(pair.stores[1].authorize_helper_peer(&a, None).is_err());
+    drop(leases);
+    assert!(!b.live());
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_helper_peer_loses_authority_on_withdrawal_rekey_and_membership_removal()
+-> Result<()> {
+    use crate::store::direct::HelperChannel;
+    use tokio::{sync::watch, time::Instant};
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let ends = [endpoint(), endpoint()];
+    let service = std::sync::Arc::new(offer(pair.stores[1].identity.node.id()));
+    for (i, s) in pair.stores.iter_mut().enumerate() {
+        s.advertise_direct_with_helpers(
+            ends[i].clone(),
+            (i == 1).then(|| service.as_ref().clone()),
+            vec![leg(&service, i, 1)],
+        )?;
+    }
+    pair.pump();
+    let (_lease, rx) = watch::channel(Some(Instant::now() + std::time::Duration::from_secs(180)));
+    let channel = |i: usize| HelperChannel {
+        local: ends[i].id,
+        peer: ends[1 - i].id,
+        offer: service.clone(),
+        operator: (ends[1].id, pair.stores[1].identity.node.public_key()),
+        lease: rx.clone(),
+    };
+    let remote = channel(0);
+    let sig = pair.stores[1].sign_helper_peer(&channel(1), [3; 32])?;
+    let next_sig = pair.stores[1].sign_helper_peer(&channel(1), [4; 32])?;
+    let s = &mut pair.stores[0];
+    let pin = s.verify_helper_peer(&remote, [3; 32], &sig)?;
+    assert!(s.authorize_helper_peer(&pin, Some("another-node")).is_err());
+    let changed = offer(&service.helper_node);
+    let initial = |offer, expires_at| Address {
+        endpoint: ends[1].clone(),
+        expires_at,
+        offer,
+        registrations: vec![],
+    };
+    let accept = |s: &Store, addr| {
+        s.network_session(&s.db, s.identity.state(&s.db)?)
+            .receive_direct(&service.helper_node, addr)
+    };
+    // Later MLS events can revoke a retained service even with an already-aged
+    // timestamp and the same Iroh endpoint. Do not install a never-fresh offer.
+    accept(s, initial(Some(changed.clone()), now() - 1))?;
+    assert!(s.helper_authority(&service)?.is_none());
+    assert!(s.helper_authority(&changed)?.is_none());
+    assert!(s.authorize_helper_peer(&pin, None).is_err());
+    accept(s, initial(Some(service.as_ref().clone()), now() + 180))?;
+    // The new connection's proof still depends on current signed membership
+    // and the current link. Changing either invalidates a cryptographically valid signature.
+    let pin = s.verify_helper_peer(&remote, [4; 32], &next_sig)?;
+    s.db.execute("UPDATE network_links SET peer_key=zeroblob(32)", [])?;
+    assert!(s.authorize_helper_peer(&pin, None).is_err());
+    s.db.execute("UPDATE network_links SET peer_key=?1", [remote.operator.1])?;
+    s.execute(Request::Owner {
+        credential: config::read_private(&pair.homes[0].path().join("owner.key"))?,
+        action: OwnerOp::RemoveNode {
+            node_id: service.helper_node.clone(),
+        },
+    })?;
+    assert!(s.authorize_helper_peer(&pin, None).is_err());
+    Ok(())
+}

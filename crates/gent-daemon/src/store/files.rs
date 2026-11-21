@@ -409,11 +409,32 @@ impl Store {
         })
     }
 
-    pub(crate) fn peer_file_source(&mut self, peer: &str) -> Result<Option<iroh::EndpointAddr>> {
+    pub(crate) fn helper_file_chunk(
+        &mut self,
+        pin: &super::direct::HelperPeer,
+        id: &str,
+        index: u32,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            matches!(self.direct_settings()?.direct, config::Direct::Auto),
+            FILE_UNAVAILABLE
+        );
+        self.file_transaction(|s| {
+            let job = s.transfer(id)?.context(FILE_UNAVAILABLE)?;
+            ensure!(job.upload, FILE_UNAVAILABLE);
+            s.authorize_helper_peer(pin, Some(&job.peer))?;
+            s.objects()?.upload_chunk(id, index)
+        })
+    }
+
+    pub(crate) fn peer_file_source(
+        &mut self,
+        peer: &str,
+    ) -> Result<Option<super::direct::NativeTarget>> {
         if matches!(self.direct_settings()?.direct, config::Direct::Off) {
             return Ok(None);
         }
-        self.file_transaction(|s| s.direct_address(peer))
+        self.file_transaction(|s| s.native_target(peer))
     }
     pub(crate) fn file_uploaded(&mut self, id: &str, uploaded: &[u32]) -> Result<bool> {
         let (changed, complete) = self.file_transaction(|s| {

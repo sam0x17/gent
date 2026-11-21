@@ -1,7 +1,7 @@
 //! One Iroh identity/socket per helper service, with its own relay map, trust
 //! anchor and application connections. All enrolled peers share that socket.
 use super::*;
-use iroh::{EndpointAddr, NetReportConfig, RelayConfig, Watcher};
+use iroh::{EndpointAddr, NetReportConfig, RelayConfig};
 use iroh_relay::{RelayQuicConfig, tls::CaTlsConfig};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -21,7 +21,7 @@ impl Kind {
 #[derive(Clone)]
 pub(super) enum Application {
     Chat(Arc<quic::Link>),
-    File(Connection),
+    File(Connection, Arc<HelperPeer>),
 }
 #[derive(Clone)]
 pub(super) struct Live {
@@ -30,33 +30,53 @@ pub(super) struct Live {
     dialed: bool,
 }
 
+impl Live {
+    fn usable(&self) -> bool {
+        if self.proof.conn.close_reason().is_some() {
+            return false;
+        }
+        if self.proof.selected() == Some(PathKind::Direct) {
+            return true;
+        }
+        let pin = match &self.application {
+            Application::Chat(link) => link.pin.as_deref(),
+            Application::File(_, pin) => Some(pin.as_ref()),
+        };
+        pin.is_some_and(HelperPeer::live)
+    }
+}
+
 type Pair = (EndpointId, Kind);
 
 pub(super) struct Auxiliary {
     pub(super) offer: Arc<HelperOffer>,
     pub(super) endpoint: Endpoint,
     pub(super) relay_config: RelayConfig,
-    active: tokio::sync::watch::Receiver<bool>,
-    published: Mutex<Option<HelperRegistration>>,
+    pub(super) active: tokio::sync::watch::Receiver<bool>,
+    pub(super) authority: Authority,
+    pub(super) home: Mutex<registration::Home>,
+    pub(super) home_changed: Notify,
+    pub(super) reschedule: Notify,
     chats: quic::Pool,
     incoming_files: Arc<Mutex<BTreeMap<usize, Arc<Proof>>>>,
     live: Mutex<BTreeMap<Pair, Live>>,
     failures: Mutex<BTreeMap<Pair, Instant>>,
     opening: Mutex<BTreeSet<Pair>>,
-    store: SharedStore,
+    pub(super) store: SharedStore,
     metrics: Arc<Metrics>,
 }
 
 impl Auxiliary {
     pub(super) async fn bind(
         key: SecretKey,
-        offer: Arc<HelperOffer>,
+        authority: Authority,
         alias: &RelayUrl,
         udp: bool,
         store: SharedStore,
         metrics: Arc<Metrics>,
         active: tokio::sync::watch::Receiver<bool>,
     ) -> Result<Self> {
+        let offer = authority.offer.clone();
         // One alias at a time. Two live home relay actors with the same
         // identity on different aliases would compete at the same server.
         let qad = offer
@@ -88,7 +108,10 @@ impl Auxiliary {
             endpoint: builder.bind().await?,
             offer: offer.clone(),
             chats: quic::Pool::for_helper(offer.helper_node.clone()),
-            published: Mutex::default(),
+            authority,
+            home: Mutex::default(),
+            home_changed: Notify::new(),
+            reschedule: Notify::new(),
             active,
             relay_config,
             incoming_files: Arc::default(),
@@ -100,62 +123,12 @@ impl Auxiliary {
         })
     }
 
-    pub(super) fn registration(&self) -> Option<HelperRegistration> {
-        if !*self.active.borrow() {
-            return None;
-        }
-        self.published
-            .lock()
-            .expect("helper registration poisoned")
-            .clone()
-    }
-
-    pub(super) fn update_registration(&self) -> bool {
-        let current = self.observed_registration();
-        let mut published = self.published.lock().expect("helper registration poisoned");
-        if !*self.active.borrow() {
-            return false;
-        }
-        if !registration_changed(published.as_ref(), current.as_ref()) {
-            return false;
-        }
-        *published = current;
-        true
-    }
-
-    pub(super) fn withdraw_registration(&self) -> bool {
-        self.published
-            .lock()
-            .expect("helper registration poisoned")
-            .take()
-            .is_some()
-    }
-
-    fn observed_registration(&self) -> Option<HelperRegistration> {
-        let status = self.endpoint.home_relay_status().get();
-        let report = self.endpoint.net_report().get()?;
-        let (_, url, rtt) = report
-            .relay_latency
-            .iter()
-            .filter(|(_, url, _)| {
-                self.offer.urls.contains(url)
-                    && status.iter().any(|s| s.url() == *url && s.is_connected())
-            })
-            .min_by_key(|(_, _, rtt)| *rtt)?;
-        Some(HelperRegistration {
-            helper_node: self.offer.helper_node.clone(),
-            generation: self.offer.generation,
-            url: url.clone(),
-            rtt_ms: rtt.as_millis().min(60_000) as u32,
-        })
-    }
-
     pub(super) fn lookup(&self, peer: EndpointId, kind: Kind) -> Option<Live> {
         self.live
             .lock()
             .expect("helper links poisoned")
             .get(&(peer, kind))
-            .filter(|s| s.proof.conn.close_reason().is_none())
+            .filter(|s| s.usable())
             .cloned()
     }
 
@@ -181,7 +154,7 @@ impl Auxiliary {
             .lock()
             .expect("helper links poisoned")
             .retain(|(peer, kind), s| {
-                if s.proof.conn.close_reason().is_some() {
+                if !s.usable() {
                     self.failure((*peer, *kind));
                     return false;
                 }
@@ -213,7 +186,13 @@ impl Auxiliary {
         !live.is_empty() || !files.is_empty()
     }
 
-    fn install(&self, proof: Arc<Proof>, kind: Kind, dialed: bool) -> Option<Live> {
+    fn install(
+        &self,
+        proof: Arc<Proof>,
+        pin: HelperPeer,
+        kind: Kind,
+        dialed: bool,
+    ) -> Option<Live> {
         let conn = &proof.conn;
         let peer = conn.remote_id();
         let pair = (peer, kind);
@@ -222,7 +201,14 @@ impl Auxiliary {
             return None;
         }
         if let Some(old) = live.get(&pair)
-            && old.proof.conn.close_reason().is_none()
+            && !old.usable()
+        {
+            old.proof
+                .conn
+                .close(0u32.into(), b"expired helper registration");
+        }
+        if let Some(old) = live.get(&pair)
+            && old.usable()
             && (old.dialed == dialed || old.dialed == (self.endpoint.id() < peer))
         {
             return Some(old.clone());
@@ -235,6 +221,7 @@ impl Auxiliary {
                     dialed,
                     self.store.clone(),
                     self.metrics.clone(),
+                    Some(pin),
                 );
                 if link.conn.stable_id() != conn.stable_id() {
                     return live
@@ -256,7 +243,7 @@ impl Auxiliary {
                 {
                     return None;
                 }
-                Application::File(conn.clone())
+                Application::File(conn.clone(), Arc::new(pin))
             }
         };
         let saved = Live {
@@ -317,6 +304,7 @@ impl Auxiliary {
         }
         let _opening = Opening(self, pair);
         let connected = tokio::time::timeout(ATTEMPT, async {
+            let channel = self.channel(peer)?;
             let addr = EndpointAddr::new(peer).with_relay_url(url);
             let conn = self.endpoint.connect(addr, kind.alpn()).await.ok()?;
             if conn.remote_id() != peer || conn.alpn() != kind.alpn() {
@@ -324,7 +312,11 @@ impl Auxiliary {
             }
             let proof = Arc::new(Proof::start(conn, self.offer.clone(), self.active.clone()));
             proof.measure().await?;
-            let live = self.install(proof, kind, true)?;
+            let pin = proof
+                .authenticate(channel, self.store.clone(), true)
+                .await
+                .ok()?;
+            let live = self.install(proof, pin, kind, true)?;
             Some((live.application, live.proof.cached()?))
         })
         .await
@@ -336,7 +328,7 @@ impl Auxiliary {
         connected
     }
 
-    fn serve_file(&self, proof: Arc<Proof>, capacity: Arc<Semaphore>) {
+    fn serve_file(&self, proof: Arc<Proof>, pin: HelperPeer, capacity: Arc<Semaphore>) {
         let Ok(permit) = capacity.try_acquire_owned() else {
             return;
         };
@@ -351,7 +343,7 @@ impl Auxiliary {
         let metrics = self.metrics.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = file_chunks::serve(&conn, store, &metrics).await;
+            let _ = file_chunks::serve(&conn, store, &metrics, Some(pin)).await;
             if let Some(files) = files.upgrade() {
                 files
                     .lock()
@@ -367,29 +359,24 @@ impl Auxiliary {
         }
         let conn = incoming.await.ok()?;
         let peer = conn.remote_id();
-        let offered = self.offer.clone();
-        local(self.store.clone(), move |s| {
-            s.direct_allowed(peer)?;
-            ensure!(
-                s.helper_offers()?
-                    .iter()
-                    .any(|current| same_service(current, &offered)),
-                "helper offer expired"
-            );
-            Ok(())
-        })
-        .await
-        .ok()?;
+        let channel = self.channel(peer)?;
+        local(self.store.clone(), move |s| s.direct_binding(peer, false))
+            .await
+            .ok()?;
         let proof = Arc::new(Proof::start(conn, self.offer.clone(), self.active.clone()));
         proof.measure().await?;
+        let pin = proof
+            .authenticate(channel, self.store.clone(), false)
+            .await
+            .ok()?;
         if !*self.active.borrow() {
             return None;
         }
         match proof.conn.alpn() {
             alpn if alpn == Kind::Chat.alpn() => {
-                self.install(proof, Kind::Chat, false)?;
+                self.install(proof, pin, Kind::Chat, false)?;
             }
-            alpn if alpn == Kind::File.alpn() => self.serve_file(proof, files),
+            alpn if alpn == Kind::File.alpn() => self.serve_file(proof, pin, files),
             _ => return None,
         }
         Some(())

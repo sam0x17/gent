@@ -135,7 +135,7 @@ impl Proof {
         active: tokio::sync::watch::Receiver<bool>,
     ) -> Self {
         let tag = Sha256::new()
-            .chain_update(b"gent/helper-path/1")
+            .chain_update(b"gent/helper-path/2")
             .chain_update(offer.generation)
             .chain_update(offer.helper_node.as_bytes())
             .finalize()
@@ -157,6 +157,53 @@ impl Proof {
             serial: AsyncMutex::new(()),
             responder,
         }
+    }
+
+    /// Both ends open the application lane only after this fixed-size
+    /// handshake on its own stream. The stream's TLS exporter prevents
+    /// forwarding a node signature to another connection.
+    pub(super) async fn authenticate(
+        &self,
+        channel: HelperChannel,
+        store: SharedStore,
+        dialed: bool,
+    ) -> Result<HelperPeer> {
+        let (mut tx, mut rx) = if dialed {
+            self.conn.open_bi().await?
+        } else {
+            self.conn.accept_bi().await?
+        };
+        let nonce = *uuid::Uuid::new_v4().as_bytes();
+        tx.write_all(&nonce).await?;
+        let mut other = [0; 16];
+        rx.read_exact(&mut other).await?;
+        let (client, server) = if dialed {
+            (nonce, other)
+        } else {
+            (other, nonce)
+        };
+        let mut exporter = [0; 32];
+        self.conn
+            .export_keying_material(&mut exporter, b"gent/helper-peer/1", self.conn.alpn())
+            .map_err(|_| anyhow::anyhow!("helper peer channel binding failed"))?;
+        let challenge: [u8; 32] = Sha256::new()
+            .chain_update(exporter)
+            .chain_update(client)
+            .chain_update(server)
+            .finalize()
+            .into();
+        let signing = channel.clone();
+        let signature = local(store.clone(), move |s| {
+            s.sign_helper_peer(&signing, challenge)
+        })
+        .await?;
+        tx.write_all(&signature).await?;
+        tx.finish()?;
+        let peer_signature = rx.read_to_end(64).await?;
+        local(store, move |s| {
+            s.verify_helper_peer(&channel, challenge, &peer_signature)
+        })
+        .await
     }
 
     pub(super) fn selected(&self) -> Option<PathKind> {

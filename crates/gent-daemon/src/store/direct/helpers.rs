@@ -44,21 +44,24 @@ pub(in crate::store) struct CertificateCache(RefCell<VecDeque<(HelperOffer, Rang
 
 impl CertificateCache {
     fn valid_at(&self, offer: &HelperOffer, owner: &str, timestamp: i64) -> Result<bool> {
+        Ok(self.window(offer, owner)?.contains(&timestamp))
+    }
+
+    pub(super) fn window(&self, offer: &HelperOffer, owner: &str) -> Result<RangeInclusive<i64>> {
         ensure!(
             offer.helper_node == owner,
             "helper offer belongs to another node"
         );
         let mut cache = self.0.borrow_mut();
         if let Some((_, validity)) = cache.iter().find(|(saved, _)| saved == offer) {
-            return Ok(validity.contains(&timestamp));
+            return Ok(validity.clone());
         }
         let validity = offer.certificate_window()?;
-        let valid = validity.contains(&timestamp);
         if cache.len() == MAX_CACHED_CERTIFICATES {
             cache.pop_front();
         }
-        cache.push_back((offer.clone(), validity));
-        Ok(valid)
+        cache.push_back((offer.clone(), validity.clone()));
+        Ok(validity)
     }
 }
 
@@ -113,7 +116,16 @@ fn helper_ip(url: &RelayUrl) -> Result<IpAddr> {
 }
 
 impl HelperOffer {
-    fn certificate_window(&self) -> Result<RangeInclusive<i64>> {
+    pub(super) fn matches_service(&self, other: &Self) -> bool {
+        self.helper_node == other.helper_node
+            && self.generation == other.generation
+            && self.cert_der == other.cert_der
+            && self.qad_port == other.qad_port
+            && self.urls.len() == other.urls.len()
+            && self.urls.iter().all(|url| other.urls.contains(url))
+    }
+
+    pub(super) fn certificate_window(&self) -> Result<RangeInclusive<i64>> {
         ensure!(
             (1..=MAX_ALIASES).contains(&self.urls.len())
                 && self.qad_port != Some(0)
@@ -222,6 +234,7 @@ impl Address {
             .as_ref()
             .map(|o| (o.urls.clone(), o.generation, o.qad_port));
         Topology {
+            recipient_key: None,
             endpoint: self.endpoint.clone(),
             service,
             registrations,
@@ -231,12 +244,32 @@ impl Address {
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Topology {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) recipient_key: Option<gent_crypto::PublicKey>,
     endpoint: EndpointAddr,
     service: Option<(Vec<RelayUrl>, [u8; 32], Option<u16>)>,
     registrations: BTreeSet<(String, RelayUrl, [u8; 32])>,
 }
 
 impl Topology {
+    pub(super) fn published_service(
+        &self,
+        endpoint: EndpointId,
+        offer: &HelperOffer,
+        recipient_key: gent_crypto::PublicKey,
+    ) -> bool {
+        self.recipient_key == Some(recipient_key)
+            && self.endpoint.id == endpoint
+            && self
+                .service
+                .as_ref()
+                .is_some_and(|(urls, generation, qad)| {
+                    *generation == offer.generation
+                        && *qad == offer.qad_port
+                        && urls.len() == offer.urls.len()
+                        && urls.iter().all(|url| offer.urls.contains(url))
+                })
+    }
     pub(super) fn encode(&self, plain: &str) -> Result<String> {
         if self.registrations.is_empty() && self.service.is_none() {
             return Ok(plain.to_owned());
@@ -263,7 +296,7 @@ impl Topology {
         }
         for (node, url, generation) in old.registrations.difference(&self.registrations) {
             if session
-                .current_offer(node, cache)?
+                .current_offer(node, cache, true)?
                 .is_some_and(|o| o.generation == *generation && o.urls.contains(url))
             {
                 return Ok(false);
@@ -271,6 +304,12 @@ impl Topology {
         }
         Ok(true)
     }
+}
+
+pub(super) struct Source {
+    pub(super) address: Address,
+    pub(super) key: gent_crypto::PublicKey,
+    pub(super) expires_at: i64,
 }
 
 impl StoreSession<'_> {
@@ -307,21 +346,34 @@ impl StoreSession<'_> {
         Ok(owner)
     }
 
-    fn helper_source(&self, peer: &str) -> Result<Option<Address>> {
+    pub(super) fn helper_source(&self, peer: &str, fresh: bool) -> Result<Option<Source>> {
         let local = peer == self.identity.node.id();
-        let mut stmt = self.db.prepare_cached("SELECT peer_key,address FROM direct_sources WHERE peer=?1 AND local=?2 AND expires_at>?3")?;
-        let mut rows = stmt.query(params![peer, local, self.timestamp])?;
+        let mut stmt = self.db.prepare_cached("SELECT peer_key,address,expires_at FROM direct_sources WHERE peer=?1 AND local=?2 AND (NOT ?4 OR expires_at>?3)")?;
+        let mut rows = stmt.query(params![peer, local, self.timestamp, fresh])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
         };
-        if !self.current_source(peer, &row.get::<_, Vec<u8>>(0)?, local) {
+        let key: gent_crypto::PublicKey = row.get(0)?;
+        if !self.current_source(peer, &key, local) {
             return Ok(None);
         }
-        Ok(Some(serde_json::from_slice(row.get_ref(1)?.as_blob()?)?))
+        Ok(Some(Source {
+            key,
+            address: serde_json::from_slice(row.get_ref(1)?.as_blob()?)?,
+            expires_at: row.get(2)?,
+        }))
     }
 
-    fn current_offer(&self, peer: &str, cache: &CertificateCache) -> Result<Option<HelperOffer>> {
-        let Some(offer) = self.helper_source(peer)?.and_then(|a| a.offer) else {
+    fn current_offer(
+        &self,
+        peer: &str,
+        cache: &CertificateCache,
+        fresh: bool,
+    ) -> Result<Option<HelperOffer>> {
+        let Some(offer) = self
+            .helper_source(peer, fresh)?
+            .and_then(|s| s.address.offer)
+        else {
             return Ok(None);
         };
         Ok(cache
@@ -331,32 +383,67 @@ impl StoreSession<'_> {
 }
 
 impl Store {
+    /// Only these offers may start new helper sockets without a native grant.
+    #[cfg(test)]
     pub(crate) fn helper_offers(&self) -> Result<Vec<HelperOffer>> {
+        let now = now();
+        Ok(self
+            .helper_authorities()?
+            .into_iter()
+            .filter(|(_, _, _, expires)| *expires > now)
+            .map(|(offer, _, _, _)| offer)
+            .collect())
+    }
+
+    /// Also returns expired locator deadlines for checking existing registrations.
+    /// The signing identity and endpoint are checked against current membership.
+    pub(crate) fn helper_authorities(&self) -> Result<Vec<HelperAuthority>> {
         if matches!(self.direct_settings()?.direct, config::Direct::Off) {
             return Ok(vec![]);
         }
         let tx = self.db.unchecked_transaction()?;
         let session = self.network_session(&tx, self.identity.state(&tx)?);
         session.require_local_membership()?;
-        let mut stmt = tx.prepare("SELECT peer,peer_key,local,json_extract(CAST(address AS TEXT),'$.offer') FROM direct_sources WHERE expires_at>?1 AND json_type(CAST(address AS TEXT),'$.offer')='object' ORDER BY peer")?;
+        let mut stmt = tx.prepare_cached("SELECT peer,peer_key,local,json_extract(CAST(address AS TEXT),'$.offer'),endpoint,expires_at FROM direct_sources ORDER BY peer")?;
         let mut offers = Vec::new();
-        let mut rows = stmt.query([session.timestamp])?;
+        let mut observed = BTreeSet::new();
+        let mut ambiguous = BTreeSet::new();
+        let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let peer: String = row.get(0)?;
-            if session.current_source(&peer, &row.get::<_, Vec<u8>>(1)?, row.get(2)?) {
-                let offer: HelperOffer = serde_json::from_str(row.get_ref(3)?.as_str()?)?;
+            let key = row.get::<_, gent_crypto::PublicKey>(1)?;
+            if session.current_source(&peer, &key, row.get(2)?) {
+                let endpoint: EndpointId = row.get_ref(4)?.as_str()?.parse()?;
+                if !observed.insert(endpoint) {
+                    ambiguous.insert(endpoint);
+                }
+                let Some(json) = row.get::<_, Option<String>>(3)? else {
+                    continue;
+                };
+                let offer: HelperOffer = serde_json::from_str(&json)?;
                 if self
                     .direct_certs
                     .valid_at(&offer, &peer, session.timestamp)?
                 {
-                    offers.push(offer);
+                    offers.push((offer, endpoint, key, row.get(5)?));
                 }
             }
         }
+        offers.retain(|(_, id, _, _)| !ambiguous.contains(id));
         Ok(offers)
     }
 
+    #[cfg(test)]
     pub(crate) fn helper_candidates(&self, target: EndpointId) -> Result<Vec<HelperCandidate>> {
+        self.helper_legs(target, true)
+    }
+
+    /// Historical matching legs only order probes on already-authorized slots.
+    pub(crate) fn helper_hints(&self, target: EndpointId) -> Result<Vec<HelperCandidate>> {
+        self.helper_legs(target, false)
+    }
+
+    fn helper_legs(&self, target: EndpointId, fresh: bool) -> Result<Vec<HelperCandidate>> {
         if matches!(self.direct_settings()?.direct, config::Direct::Off) {
             return Ok(vec![]);
         }
@@ -365,29 +452,31 @@ impl Store {
         session.require_local_membership()?;
         let me = self.identity.node.id();
         let Some((peer, _)) = session
-            .endpoint_binding(target, true)?
+            .endpoint_binding(target, fresh)?
             .filter(|(node, _)| node != me)
         else {
             return Ok(vec![]);
         };
-        let (Some(local), Some(remote)) =
-            (session.helper_source(me)?, session.helper_source(&peer)?)
-        else {
+        let (Some(local), Some(remote)) = (
+            session.helper_source(me, fresh)?,
+            session.helper_source(&peer, fresh)?,
+        ) else {
             return Ok(vec![]);
         };
         let mut candidates = Vec::new();
         let helpers: BTreeSet<_> = local
+            .address
             .registrations
             .iter()
             .map(|leg| leg.helper_node.as_str())
             .collect();
         for helper in helpers {
-            let Some(offer) = session.current_offer(helper, &self.direct_certs)? else {
+            let Some(offer) = session.current_offer(helper, &self.direct_certs, fresh)? else {
                 continue;
             };
             if let (Some(local), Some(remote)) = (
-                offer.best_registration(&local.registrations),
-                offer.best_registration(&remote.registrations),
+                offer.best_registration(&local.address.registrations),
+                offer.best_registration(&remote.address.registrations),
             ) {
                 candidates.push(HelperCandidate {
                     offer,

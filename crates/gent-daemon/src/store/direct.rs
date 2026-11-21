@@ -5,9 +5,25 @@ use crate::messages::Event;
 use gent_crypto::stream::{Packet, Receipt};
 use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use serde::{Deserialize, Serialize};
+mod channel;
 mod helpers;
+pub(crate) use channel::{HelperAuthority, HelperChannel, HelperPeer};
 pub(super) use helpers::CertificateCache;
 pub(crate) use helpers::{HelperCandidate, HelperOffer, HelperRegistration};
+
+pub(crate) enum NativeTarget {
+    Advertised(EndpointAddr),
+    HelperOnly(EndpointId),
+}
+
+impl NativeTarget {
+    pub(crate) fn id(&self) -> EndpointId {
+        match self {
+            Self::Advertised(address) => address.id,
+            Self::HelperOnly(id) => *id,
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +90,24 @@ pub(super) fn address(
 }
 
 impl StoreSession<'_> {
+    pub(super) fn native_target(&self, peer: &str) -> Result<Option<NativeTarget>> {
+        self.require_local_membership()?;
+        let Some(source) = self.helper_source(peer, false)? else {
+            return Ok(None);
+        };
+        if peer == self.identity.node.id()
+            || !self
+                .endpoint_binding(source.address.endpoint.id, false)?
+                .is_some_and(|(node, _)| node == peer)
+        {
+            return Ok(None);
+        }
+        Ok(Some(if source.expires_at > self.timestamp {
+            NativeTarget::Advertised(source.address.endpoint)
+        } else {
+            NativeTarget::HelperOnly(source.address.endpoint.id)
+        }))
+    }
     pub(super) fn direct_address(&self, peer: &str) -> Result<Option<EndpointAddr>> {
         let node = self
             .state
@@ -102,6 +136,7 @@ impl StoreSession<'_> {
             peer != self.identity.node.id(),
             "remote direct address claimed local identity"
         );
+        address.validate_helpers(peer, self.timestamp, None)?;
         if address.expires_at <= self.timestamp {
             // MLS records arrive in order. Even a delayed replacement ends the
             // old endpoint's authority to keep an established helper session.
@@ -109,9 +144,29 @@ impl StoreSession<'_> {
                 "DELETE FROM direct_peers WHERE peer=?1 AND endpoint<>?2",
                 params![peer, address.endpoint.id.to_string()],
             )?;
+            // A delayed same-endpoint withdrawal/rotation also supersedes a
+            // retained service. An aged record can remove earlier evidence,
+            // but cannot introduce a new service, registration, or locator.
+            if let Some(old) = self.helper_source(peer, false)? {
+                let mut retained = old.address;
+                if retained.offer != address.offer {
+                    retained.offer = None;
+                }
+                retained.registrations.retain(|r| {
+                    address.registrations.iter().any(|new| {
+                        r.helper_node == new.helper_node
+                            && r.generation == new.generation
+                            && r.url == new.url
+                    })
+                });
+                retained.expires_at = address.expires_at.min(old.expires_at);
+                self.db.execute(
+                    "UPDATE direct_peers SET address=?2, expires_at=?3 WHERE peer=?1",
+                    params![peer, serde_json::to_vec(&retained)?, retained.expires_at],
+                )?;
+            }
             return Ok(());
         }
-        address.validate_helpers(peer, self.timestamp, None)?;
         self.db.execute("INSERT INTO direct_peers VALUES(?1,?2,?3,?4,?5) ON CONFLICT(peer) DO UPDATE SET peer_key=excluded.peer_key,endpoint=excluded.endpoint,address=excluded.address,expires_at=excluded.expires_at",
             params![peer,link_key,address.endpoint.id.to_string(),serde_json::to_vec(&address)?,address.expires_at])?;
         Ok(())
@@ -185,21 +240,26 @@ impl Store {
             ],
         )?;
         let plain = serde_json::to_string(&address.endpoint)?;
-        let topology = address.topology();
-        let extended = topology.encode(&plain)?;
+        let mut topology = address.topology();
         let peers = tx
-            .prepare("SELECT peer FROM network_links ORDER BY peer")?
-            .query_map([], |r| r.get::<_, String>(0))?
+            .prepare("SELECT peer,peer_key FROM network_links ORDER BY peer")?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, gent_crypto::PublicKey>(1)?,
+                ))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for peer in peers {
+        for (peer, key) in peers {
             let version = session.wire_version(&peer)?;
             if version < 5 {
                 continue;
             }
             let advertised = if version >= crate::messages::wire::HELPERS_VERSION {
-                &extended
+                topology.recipient_key = address.offer.as_ref().map(|_| key);
+                topology.encode(&plain)?
             } else {
-                &plain
+                plain.clone()
             };
             let previous: Option<(String, i64)> = tx
                 .query_row(
@@ -209,10 +269,10 @@ impl Store {
                 )
                 .optional()?;
             if let Some((saved, expiry)) = previous {
-                if saved == *advertised && expiry > session.timestamp + 90 {
+                if saved == advertised && expiry > session.timestamp + 90 {
                     continue;
                 }
-                if saved == *advertised
+                if saved == advertised
                     || (version >= crate::messages::wire::HELPERS_VERSION
                         && topology.passive_withdrawal(&saved, &session, &self.direct_certs)?)
                 {
@@ -229,7 +289,10 @@ impl Store {
                 }
             }
             let queued:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM network_events WHERE peer=?1 AND cancelled=0 AND json_extract(CAST(body AS TEXT),'$.event.kind')='direct')",[&peer],|r|r.get(0))?;
-            if queued {
+            if queued
+                || super::network::active_peer(&session.state, &peer, &key, session.timestamp)
+                    .is_err()
+            {
                 continue;
             }
             session.queue(
@@ -254,7 +317,7 @@ impl Store {
         self.data_peer(&self.db, group, outgoing)
     }
 
-    pub(crate) fn direct_target(&self, group: &[u8]) -> Result<Option<EndpointAddr>> {
+    pub(crate) fn direct_target(&self, group: &[u8]) -> Result<Option<NativeTarget>> {
         ensure!(
             matches!(self.direct_settings()?.direct, config::Direct::Auto),
             "direct transport disabled"
@@ -265,7 +328,7 @@ impl Store {
             |row| row.get(0),
         )?;
         self.network_session(&self.db, self.identity.state(&self.db)?)
-            .direct_address(&peer)
+            .native_target(&peer)
     }
     pub(crate) fn direct_receive(
         &mut self,

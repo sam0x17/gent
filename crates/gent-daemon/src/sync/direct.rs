@@ -1,5 +1,6 @@
 //! Opportunistic peer delivery of the same durable MLS history as the mailbox.
 use super::*;
+use crate::store::direct::{HelperPeer, NativeTarget};
 use gent_protocol::transport_batch::Batch;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr,
@@ -172,7 +173,7 @@ impl Direct {
         let registrations = self.routes.registrations();
         let offers = local(store, move |s| {
             s.advertise_direct_with_helpers(addr, offer, registrations)?;
-            s.helper_offers()
+            s.helper_authorities()
         })
         .await?;
         self.routes.refresh(offers).await;
@@ -220,6 +221,7 @@ impl Direct {
                     true,
                     store,
                     self.metrics.clone(),
+                    None,
                 ));
             }
             self.metrics.dial_failures.fetch_add(1, Ordering::Relaxed);
@@ -237,6 +239,21 @@ impl Direct {
         health: &health::Health,
         deadline: Instant,
     ) -> Option<session::Confirmed> {
+        if let Some(pin) = &link.pin {
+            let pin = pin.clone();
+            let g = group.to_vec();
+            let direct = selected_ip(&link.conn);
+            tokio::time::timeout_at(
+                deadline,
+                local(store.clone(), move |s| {
+                    let peer = s.session_peer(&g, true)?;
+                    authorize_session_path(s, &pin, &peer, direct)
+                }),
+            )
+            .await
+            .ok()?
+            .ok()?;
+        }
         let lane = link.reserve()?;
         let before = path::Frames::read(&link.conn);
         let operation = async {
@@ -289,11 +306,11 @@ impl Direct {
             return None;
         }
         let group = entry.group.clone();
-        let addr = local(store.clone(), move |s| s.direct_target(&group))
+        let target = local(store.clone(), move |s| s.direct_target(&group))
             .await
             .ok()
             .flatten()?;
-        let id = addr.id;
+        let id = target.id();
         let _permit = self.in_flight.try_acquire().ok()?;
         let deadline = Instant::now() + OPERATION;
         let pending =
@@ -310,8 +327,10 @@ impl Direct {
                     return None;
                 }
             };
-        if let Ok(Some(link)) =
-            tokio::time::timeout_at(deadline, self.primary_connection(addr, store.clone())).await
+        if let NativeTarget::Advertised(addr) = target
+            && let Ok(Some(link)) =
+                tokio::time::timeout_at(deadline, self.primary_connection(addr, store.clone()))
+                    .await
         {
             if let Some(confirmed) = self
                 .send_batch(
@@ -333,7 +352,7 @@ impl Direct {
         // An early primary failure leaves time to replay the same ciphertext
         // through a qualified helper inside the original delivery deadline.
         let helper_link = async {
-            let candidates = local(store.clone(), move |s| s.helper_candidates(id))
+            let candidates = local(store.clone(), move |s| s.helper_hints(id))
                 .await
                 .ok()?;
             self.routes.chat(id, &candidates).await
@@ -349,6 +368,23 @@ impl Direct {
         self.metrics.fallbacks.fetch_add(1, Ordering::Relaxed);
         None
     }
+}
+
+fn selected_ip(conn: &Connection) -> bool {
+    conn.paths()
+        .iter()
+        .any(|path| path.is_selected() && matches!(path.remote_addr(), TransportAddr::Ip(_)))
+}
+
+fn authorize_session_path(store: &Store, pin: &HelperPeer, peer: &str, direct: bool) -> Result<()> {
+    if direct
+        && store
+            .direct_binding(pin.endpoint(), true)
+            .is_ok_and(|(id, _)| id == peer)
+    {
+        return Ok(());
+    }
+    store.authorize_helper_peer(pin, Some(peer))
 }
 
 async fn listen(
@@ -385,10 +421,10 @@ async fn listen(
                     if local(store.clone(), move |s| s.direct_allowed(id)).await.is_err() {
                         conn.close(1u32.into(), b"unrecognized node");
                     } else if conn.alpn() == quic::ALPN {
-                        pool.install(local_id, conn, false, store, metrics);
+                        pool.install(local_id, conn, false, store, metrics, None);
                     } else if conn.alpn() == file_chunks::ALPN {
                         if let Ok(_file) = file_limit.try_acquire() {
-                            let _ = file_chunks::serve(&conn, store, &metrics).await;
+                            let _ = file_chunks::serve(&conn, store, &metrics, None).await;
                         }
                         conn.close(0u32.into(), b"file session ended");
                     } else {

@@ -41,6 +41,7 @@ async fn serve(
     used: Arc<Mutex<Instant>>,
     metrics: Arc<Metrics>,
     helper: Option<String>,
+    pin: Option<Arc<HelperPeer>>,
 ) -> Result<()> {
     let (mut send, mut recv) = conn.accept_bi().await?;
     loop {
@@ -53,15 +54,13 @@ async fn serve(
         tokio::time::timeout(Duration::from_secs(5), async {
             recv.read_exact(&mut len[1..]).await?;
             let bytes = read_frame(&mut recv, len, session::MAX_FRAME_BYTES).await?;
-            let receipt = session::accept(
-                store.clone(),
-                session::Peer::ObservedEndpoint(
-                    conn.remote_id(),
-                    path::Frames::read(&conn).received(before, helper.as_deref()),
-                ),
-                &bytes,
-            )
-            .await?;
+            let id = conn.remote_id();
+            let path = path::Frames::read(&conn).received(before, helper.as_deref());
+            let peer = match &pin {
+                Some(pin) => session::Peer::Helper(id, path, pin.clone()),
+                None => session::Peer::ObservedEndpoint(id, path),
+            };
+            let receipt = session::accept(store.clone(), peer, &bytes).await?;
             *used.lock().expect("QUIC activity poisoned") = Instant::now();
             metrics
                 .received
@@ -76,6 +75,7 @@ pub(super) struct Link {
     pub(super) conn: Connection,
     /// Identifies the relay when frame counters show relay traffic, even after pool removal.
     pub(super) helper_id: Option<String>,
+    pub(super) pin: Option<Arc<HelperPeer>>,
     used: Arc<Mutex<Instant>>,
     outgoing: AsyncMutex<Option<Streams>>,
     dialed: bool,
@@ -166,6 +166,7 @@ impl Pool {
         dialed: bool,
         store: SharedStore,
         metrics: Arc<Metrics>,
+        pin: Option<HelperPeer>,
     ) -> Arc<Link> {
         let id = conn.remote_id();
         let mut saved = self.links.lock().expect("QUIC pool poisoned");
@@ -188,19 +189,22 @@ impl Pool {
             saved.remove(&oldest);
         }
         let used = Arc::new(Mutex::new(Instant::now()));
+        let pin = pin.map(Arc::new);
         let reader = (conn.alpn() == ALPN).then(|| {
+            let pin = pin.clone();
             let conn = conn.clone();
             let used = used.clone();
             let metrics = metrics.clone();
             let helper = self.helper.clone();
             tokio::spawn(async move {
-                let _ = serve(conn.clone(), store, used, metrics, helper).await;
+                let _ = serve(conn.clone(), store, used, metrics, helper, pin).await;
                 conn.close(1u32.into(), b"session stream ended");
             })
         });
         let link = Arc::new(Link {
             conn,
             helper_id: self.helper.clone(),
+            pin,
             used,
             outgoing: AsyncMutex::new(None),
             dialed,
@@ -241,11 +245,12 @@ mod tests {
         config::initialize(&home, "pool-id")?;
         let store = Arc::new(Mutex::new(Store::open(&home)?));
         let pool = Pool::for_helper("helper-a".to_owned());
-        let link = pool.install(a.id(), outgoing?, true, store.clone(), Arc::default());
+        let link = pool.install(a.id(), outgoing?, true, store.clone(), Arc::default(), None);
         assert!(Arc::ptr_eq(&link, &pool.get(b.id()).unwrap()));
         drop(pool);
         assert_eq!(link.helper_id.as_deref(), Some("helper-a"));
-        let ordinary = Pool::default().install(b.id(), incoming?, false, store, Arc::default());
+        let ordinary =
+            Pool::default().install(b.id(), incoming?, false, store, Arc::default(), None);
         assert!(ordinary.helper_id.is_none());
         Ok(())
     }

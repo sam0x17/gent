@@ -60,11 +60,11 @@ impl Direct {
         manifest: &Manifest,
         index: u32,
     ) -> Option<Vec<u8>> {
-        let peer = peer.to_owned();
-        let address = local(store.clone(), move |s| s.peer_file_source(&peer))
+        let source = peer.to_owned();
+        let target = local(store.clone(), move |s| s.peer_file_source(&source))
             .await
             .ok()??;
-        let id = address.id;
+        let id = target.id();
         let length = manifest.chunks.get(index as usize)?.bytes as usize;
         let object = Uuid::parse_str(object).ok()?;
         let deadline = Instant::now() + OPERATION;
@@ -82,7 +82,9 @@ impl Direct {
                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             Ok::<_, anyhow::Error>(bytes)
         };
-        if let Some(link) = self.primary_file_connection(address).await {
+        if let NativeTarget::Advertised(address) = target
+            && let Some(link) = self.primary_file_connection(address).await
+        {
             if let Ok(Ok(bytes)) = tokio::time::timeout_at(deadline, fetch(&link)).await {
                 return Some(bytes);
             }
@@ -90,10 +92,23 @@ impl Direct {
             self.files.backoff(id);
         }
         let helper = async {
-            let candidates = local(store, move |s| s.helper_candidates(id)).await.ok()?;
+            let candidates = local(store.clone(), move |s| s.helper_hints(id))
+                .await
+                .ok()?;
             self.routes.file(id, &candidates).await
         };
-        let link = tokio::time::timeout_at(deadline, helper).await.ok()??;
+        let (link, pin) = tokio::time::timeout_at(deadline, helper).await.ok()??;
+        let peer = peer.to_owned();
+        let direct = selected_ip(&link);
+        tokio::time::timeout_at(
+            deadline,
+            local(store, move |s| {
+                authorize_session_path(s, &pin, &peer, direct)
+            }),
+        )
+        .await
+        .ok()?
+        .ok()?;
         if let Ok(Ok(bytes)) = tokio::time::timeout_at(deadline, fetch(&link)).await {
             return Some(bytes);
         }
@@ -110,8 +125,15 @@ impl Client {
     }
 }
 
-pub(super) async fn serve(conn: &Connection, store: SharedStore, metrics: &Metrics) -> Result<()> {
+pub(super) async fn serve(
+    conn: &Connection,
+    store: SharedStore,
+    metrics: &Metrics,
+    pin: Option<HelperPeer>,
+) -> Result<()> {
+    let pin = pin.map(Arc::new);
     loop {
+        let before = path::Frames::read(conn);
         let (mut send, mut recv) = tokio::time::timeout(IDLE, conn.accept_bi()).await??;
         tokio::time::timeout(OPERATION, async {
             let request = recv.read_to_end(17).await?;
@@ -120,8 +142,14 @@ pub(super) async fn serve(conn: &Connection, store: SharedStore, metrics: &Metri
             let index = u32::from(request[16]);
             ensure!(index < MAX_CHUNKS, "invalid file chunk index");
             let endpoint = conn.remote_id();
-            let bytes = local(store.clone(), move |s| {
-                s.peer_file_chunk(endpoint, &object, index)
+            let pin = pin.clone();
+            let direct = path::Frames::read(conn).received(before, None)
+                == health::TransportPath::DirectQuic;
+            let bytes = local(store.clone(), move |s| match pin {
+                Some(pin) if !(direct && s.direct_allowed(endpoint).is_ok()) => {
+                    s.helper_file_chunk(&pin, &object, index)
+                }
+                _ => s.peer_file_chunk(endpoint, &object, index),
             })
             .await?;
             send.write_all(&bytes).await?;

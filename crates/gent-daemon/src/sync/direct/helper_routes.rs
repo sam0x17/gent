@@ -1,13 +1,18 @@
 //! Pair-specific helper routes. Primary QUIC stays on its own endpoint and pool.
 use super::*;
-use crate::store::direct::{HelperCandidate, HelperOffer, HelperRegistration};
+use crate::store::direct::{
+    HelperAuthority, HelperCandidate, HelperChannel, HelperOffer, HelperPeer, HelperRegistration,
+};
 use auxiliary::{Application, Auxiliary, Kind};
 use iroh::{RelayUrl, Watcher};
 use proof::{PathKind, Proof, Sample};
+use tokio::sync::watch;
 
 mod auxiliary;
 mod proof;
+mod registration;
 mod registry;
+use registration::Authority;
 use registry::{Factory, Helpers, Slot};
 #[cfg(test)]
 mod tests;
@@ -52,11 +57,22 @@ impl Routes {
 
     /// Reconciles the authenticated offer snapshot. Binding, registration and
     /// network measurements run independently of the scheduler and send path.
-    pub(super) async fn refresh(&self, offers: Vec<HelperOffer>) {
+    pub(super) async fn refresh(&self, offers: Vec<HelperAuthority>) {
         let offers = offers
             .into_iter()
-            .filter(|o| !o.urls.is_empty() && !o.urls.iter().any(|u| self.primary.contains(u)))
-            .map(|o| (o.helper_node.clone(), o))
+            .filter(|(o, ..)| {
+                !o.urls.is_empty() && !o.urls.iter().any(|u| self.primary.contains(u))
+            })
+            .map(|(offer, endpoint, key, expiry)| {
+                (
+                    offer.helper_node.clone(),
+                    registry::Source {
+                        offer,
+                        operator: (endpoint, key),
+                        expiry,
+                    },
+                )
+            })
             .collect();
         let mut helpers = self.helpers.lock().expect("helper endpoints poisoned");
         helpers.update(offers, &self.wakeup);
@@ -93,7 +109,7 @@ impl Routes {
         &self,
         peer: EndpointId,
         candidates: &[HelperCandidate],
-    ) -> Option<Connection> {
+    ) -> Option<(Connection, HelperPeer)> {
         match tokio::time::timeout(
             ATTEMPT + Duration::from_millis(100),
             self.select(peer, Kind::File, candidates),
@@ -101,7 +117,7 @@ impl Routes {
         .await
         .ok()??
         {
-            Application::File(conn) => Some(conn),
+            Application::File(conn, pin) => Some((conn, (*pin).clone())),
             _ => None,
         }
     }
@@ -287,19 +303,4 @@ fn legs(
 
 fn worth_switching(current: Duration, next: Duration) -> bool {
     next + (current / 5).max(Duration::from_millis(2)) < current
-}
-
-fn registration_changed(
-    old: Option<&HelperRegistration>,
-    new: Option<&HelperRegistration>,
-) -> bool {
-    match (old, new) {
-        (Some(a), Some(b)) => {
-            a.url != b.url
-                || a.generation != b.generation
-                || a.rtt_ms.abs_diff(b.rtt_ms) > (a.rtt_ms / 5).max(2)
-        }
-        (None, None) => false,
-        _ => true,
-    }
 }

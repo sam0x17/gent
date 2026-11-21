@@ -57,12 +57,25 @@ fn incumbent_survives_jitter_but_not_a_material_improvement() {
     assert!(!worth_switching(ms(100), ms(83)));
     assert!(!worth_switching(ms(3), ms(2)));
     assert!(worth_switching(ms(161), ms(63)));
-    let o = offer();
-    let a = leg(&o, 0, 20);
-    assert!(!registration_changed(Some(&a), Some(&leg(&o, 0, 21))));
-    assert!(registration_changed(Some(&a), Some(&leg(&o, 1, 20))));
-    assert!(registration_changed(Some(&a), None));
-    assert!(registration_changed(None, Some(&a)));
+}
+
+#[test]
+fn incomplete_rtt_reports_preserve_only_the_continuously_registered_home() {
+    let mut home = registration::Home::default();
+    assert!(!home.observe(None, Some(20), true));
+    assert!(home.observe(Some(0), Some(20), false));
+    assert!(!home.observe(Some(0), Some(21), true));
+    for _ in 0..4 {
+        assert!(!home.observe(Some(0), None, true));
+    }
+    assert!(home.observe(None, Some(20), false));
+    assert!(!home.observe(Some(1), Some(20), true));
+    assert!(!home.observe(Some(1), Some(20), false));
+    assert!(home.observe(Some(1), Some(28), true));
+    // A coalesced reconnect is also a new TLS session.
+    assert!(home.observe(Some(2), Some(28), true));
+    assert!(!home.observe(Some(2), None, true));
+    assert!(home.observe(Some(2), Some(28), true));
 }
 
 async fn loopback_pair() -> (Endpoint, Endpoint, Connection, Connection) {
@@ -158,20 +171,38 @@ async fn tcp_only_registration_uses_live_tls_and_wakes_on_helper_loss() -> Resul
     )
     .await?;
     let wake = Arc::new(Notify::new());
-    let routes = Routes::new(key, vec![], false, store, Arc::default(), wake.clone());
     let trusted = service.offer().clone();
+    let authorities = {
+        let mut store = store.lock().unwrap();
+        store.advertise_direct_with_helpers(
+            EndpointAddr::new(key.public()),
+            Some(trusted.clone()),
+            vec![],
+        )?;
+        store.helper_authorities()?
+    };
+    let (_, operator, node_key, _) = authorities[0];
+    let routes = Routes::new(
+        key,
+        vec![],
+        false,
+        store.clone(),
+        Arc::default(),
+        wake.clone(),
+    );
     let mut wrong = trusted.clone();
     let unrelated = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])?;
     wrong.cert_der = unrelated.cert.der().to_vec();
     wrong.generation = Sha256::digest(&wrong.cert_der).into();
-    routes.refresh(vec![wrong]).await;
+    let source = |offer| (offer, operator, node_key, crate::store::now() + 180);
+    routes.refresh(vec![source(wrong)]).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(500), wake.notified())
             .await
             .is_err()
     );
     assert!(routes.registrations().is_empty());
-    routes.refresh(vec![trusted.clone()]).await;
+    routes.refresh(authorities).await;
     tokio::time::timeout(Duration::from_secs(12), async {
         loop {
             if !routes.registrations().is_empty() {
@@ -189,6 +220,37 @@ async fn tcp_only_registration_uses_live_tls_and_wakes_on_helper_loss() -> Resul
         .get()
         .unwrap();
     assert!(aux.endpoint.bound_sockets().is_empty());
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !aux.retained() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await?;
+    // The same already-admitted socket can serve a cold peer after locator
+    // expiry. A second pool observing that same snapshot cannot start a dial.
+    let db = crate::encrypted::open_database(home.path(), "state.sqlite3")?;
+    db.execute("UPDATE direct_local SET expires_at=0", [])?;
+    let stale = store.lock().unwrap().helper_authorities()?;
+    assert_eq!(stale[0].3, 0);
+    routes.refresh(stale.clone()).await;
+    assert!(Arc::ptr_eq(
+        &aux,
+        &routes.helpers.lock().unwrap().active[&trusted.helper_node]
+            .get()
+            .unwrap()
+    ));
+    assert_eq!(routes.registrations().len(), 1);
+    let cold = Routes::new(
+        SecretKey::generate(),
+        vec![],
+        false,
+        store,
+        Arc::default(),
+        Arc::default(),
+    );
+    cold.refresh(stale.clone()).await;
+    assert!(cold.helpers.lock().unwrap().active.is_empty());
+    let mut scope = aux.channel(SecretKey::generate().public()).unwrap().lease;
     service.shutdown().await;
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
@@ -199,5 +261,11 @@ async fn tcp_only_registration_uses_live_tls_and_wakes_on_helper_loss() -> Resul
         }
     })
     .await?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while scope.changed().await.is_ok() {}
+    })
+    .await?;
+    routes.refresh(stale).await;
+    assert!(routes.helpers.lock().unwrap().active.is_empty());
     Ok(())
 }
