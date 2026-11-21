@@ -262,7 +262,8 @@ impl Direct {
                     group,
                     path,
                     health::TransportEvidence::SignedReceipt,
-                    confirmed.receipt.sequence(),
+                    // A concurrent carrier can advance the saved receipt beyond this batch.
+                    confirmed.last,
                 );
                 self.metrics.deliveries.fetch_add(1, Ordering::Relaxed);
                 Some(confirmed)

@@ -111,8 +111,9 @@ and lost responses do not cause an immediate replay through another route.
 
 `gent nodes` shows the last observed transfer path alongside presence.
 `gent nodes --verbose` includes the time, sequence, direction of evidence and
-helper ID when known. A signed receipt confirms the recipient committed that
-stream sequence. A mailbox upload confirms the relay accepted ciphertext.
+helper ID when known. A signed receipt on QUIC or WebSocket confirms the
+recipient committed the last packet in the reported batch. The mailbox reports
+the sequence of the signed checkpoint it supplied. A mailbox upload confirms the relay accepted ciphertext.
 An exchange that used multiple QUIC paths, or whose STREAM counters could
 not account for the transfer, is labeled accordingly. A hosted web node shows
 its carrier's native transport evidence. Restarting the daemon clears the
