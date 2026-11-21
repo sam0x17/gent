@@ -78,7 +78,7 @@ async fn direct_file_download_resumes_missing_chunks_and_obeys_current_access() 
             "transport".into(),
             toml::Value::try_from(config::Transport {
                 direct: config::Direct::Off,
-                relays: vec![],
+                ..Default::default()
             })?,
         );
         Ok(())
@@ -305,7 +305,7 @@ async fn direct_delivers_with_signed_receipts_and_disabled_path_preserves_cloud_
             "transport".into(),
             toml::Value::try_from(config::Transport {
                 direct: config::Direct::Off,
-                relays: vec![],
+                ..Default::default()
             })?,
         );
         Ok(())

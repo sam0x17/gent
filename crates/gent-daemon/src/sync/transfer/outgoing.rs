@@ -187,7 +187,9 @@ pub(super) async fn run(
         health.idle(group);
         return Ok(None);
     }
-    let count = relay.put_batch(group, first, &batch).await?;
+    let count = relay
+        .put_batch(group, first, &batch, (!configuration).then_some(health))
+        .await?;
     let next = first + count as u64;
     let g = group.to_vec();
     local(store, move |s| s.record_relay_upload(&g, next)).await?;

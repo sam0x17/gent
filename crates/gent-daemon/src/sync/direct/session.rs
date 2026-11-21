@@ -11,7 +11,7 @@ const HEADER: usize = 7;
 pub(crate) const MAX_FRAME_BYTES: usize = HEADER + 256 + gent_protocol::transport_batch::MAX_BYTES;
 
 pub(crate) enum Peer {
-    Endpoint(EndpointId),
+    ObservedEndpoint(EndpointId, health::TransportPath),
     Node(String),
 }
 
@@ -83,10 +83,22 @@ pub(super) async fn receive(
 ) -> Result<Receipt> {
     local(store, move |s| {
         let count = packets.len();
-        let receipt = match peer {
-            Peer::Endpoint(id) => s.direct_receive(id, &group, packets)?,
-            Peer::Node(id) => s.node_session_receive(&id, &group, packets)?,
+        let last = packets.last().map(Packet::sequence);
+        let (receipt, path) = match peer {
+            Peer::ObservedEndpoint(id, path) => (s.direct_receive(id, &group, packets)?, path),
+            Peer::Node(id) => (
+                s.node_session_receive(&id, &group, packets)?,
+                health::TransportPath::RelayWss,
+            ),
         };
+        if let Some(last) = last {
+            s.sync_health.record_transport(
+                &group,
+                path,
+                health::TransportEvidence::ReceivedPacket,
+                last,
+            );
+        }
         for _ in 0..count {
             s.sync_health.progress(&group, false, crate::store::now());
         }

@@ -123,7 +123,13 @@ impl Wss {
         .await;
         match result {
             Ok(confirmed) => {
-                if confirmed.is_some() {
+                if let Some(batch) = &confirmed {
+                    health.record_transport(
+                        &entry.group,
+                        crate::sync::health::TransportPath::RelayWss,
+                        crate::sync::health::TransportEvidence::SignedReceipt,
+                        batch.last,
+                    );
                     self.metrics
                         .confirmed_batches
                         .fetch_add(1, Ordering::Relaxed);

@@ -89,6 +89,28 @@ async fn hosted_chat_uses_parent_directory_and_native_transport_with_original_id
     );
     pair.stores[0].reconcile_hosted_routes().unwrap();
     pair.pump();
+    // Resolve the logical child's last transport from the carrier's pinned
+    // stream. The evidence remains diagnostic even without fresh presence.
+    let group = pair.group();
+    pair.stores[1].sync_health.record_transport(
+        &group,
+        crate::sync::health::TransportPath::ClusterHelper {
+            helper_id: "helper".into(),
+        },
+        crate::sync::health::TransportEvidence::ReceivedPacket,
+        1,
+    );
+    let nodes = owner(&mut pair.stores[1], pair.homes[1].path(), OwnerOp::Nodes);
+    let rows = nodes.as_array().unwrap();
+    let carrier = &rows.iter().find(|n| n["id"] == parent).unwrap()["transport"];
+    let hosted = &rows.iter().find(|n| n["id"] == child.id()).unwrap()["transport"];
+    assert_eq!(hosted, carrier);
+    assert_eq!(hosted["carrier_id"], parent);
+    assert_eq!(hosted["last"]["helper_id"], "helper");
+    assert_eq!(
+        pair.stores[1].synchronization_status().unwrap()["peer_transports"][0]["last"],
+        hosted["last"]
+    );
     // The native parent's Merkle directory also repairs a lost web chat.
     for store in &mut pair.stores {
         store.presence_tick().unwrap();

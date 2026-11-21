@@ -24,7 +24,12 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn active_peer(state: &VerifiedState, peer: &str, key: &[u8], timestamp: i64) -> Result<()> {
+pub(super) fn active_peer(
+    state: &VerifiedState,
+    peer: &str,
+    key: &[u8],
+    timestamp: i64,
+) -> Result<()> {
     ensure!(
         state.transport_host(peer)? == peer,
         "web node uses its hosting node's transport"
@@ -400,6 +405,17 @@ impl StoreSession<'_> {
     }
     fn import_event(&mut self, peer: &str, event: Event) -> Result<()> {
         self.timestamp = requests::clock(self.db, self.timestamp)?;
+        // A reply and its queue entry can drain before the next advertisement
+        // pass. Remember actual incoming demand for an aged return address.
+        if matches!(
+            event,
+            Event::Message { .. } | Event::Receipt { .. } | Event::Presence { reply: false, .. }
+        ) {
+            self.db.execute(
+                "DELETE FROM direct_advertised WHERE peer=?1 AND expires_at<=?2",
+                params![peer, self.timestamp + 90],
+            )?;
+        }
         match event {
             Event::Direct { address } => self.receive_direct(peer, address),
             Event::Directory { envelope } => self.receive_directory(peer, *envelope),

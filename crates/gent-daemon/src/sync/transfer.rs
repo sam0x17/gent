@@ -60,7 +60,19 @@ pub(super) async fn run(
         let relay_next = remote.next;
         let g = group.clone();
         let (confirmed, first) = local(store.clone(), move |store| {
-            let confirmed = store.transport_confirm(&g, entry.configuration, received.as_ref())?;
+            let (confirmed, advanced) =
+                store.transport_confirmation(&g, entry.configuration, received.as_ref())?;
+            if !entry.configuration
+                && advanced
+                && let Some(receipt) = &confirmed
+            {
+                store.sync_health.record_transport(
+                    &g,
+                    health::TransportPath::Mailbox,
+                    health::TransportEvidence::SignedReceipt,
+                    receipt.sequence(),
+                );
+            }
             let floor = confirmed.as_ref().map_or(0, |r| r.sequence() + 1);
             let first = store.relay_upload_start(&g, relay_next, floor)?;
             Ok((confirmed, first))
@@ -111,6 +123,7 @@ pub(super) async fn run(
                 }
             }
             for packet in packets {
+                let sequence = packet.sequence();
                 let g = group.clone();
                 let receipt = local(store.clone(), move |store| {
                     if entry.configuration {
@@ -126,6 +139,14 @@ pub(super) async fn run(
                     "received packet did not advance the stream"
                 );
                 let accepted = receipt.sequence();
+                if !entry.configuration {
+                    health.record_transport(
+                        &group,
+                        health::TransportPath::Mailbox,
+                        health::TransportEvidence::ReceivedPacket,
+                        sequence,
+                    );
+                }
                 latest = Some(receipt);
                 health.progress(&group, false, crate::store::now());
                 last = Some(accepted);

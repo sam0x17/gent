@@ -5,12 +5,19 @@ use crate::messages::Event;
 use gent_crypto::stream::{Packet, Receipt};
 use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use serde::{Deserialize, Serialize};
+mod helpers;
+pub(super) use helpers::CertificateCache;
+pub(crate) use helpers::{HelperCandidate, HelperOffer, HelperRegistration};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Address {
     pub endpoint: EndpointAddr,
     pub expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) offer: Option<HelperOffer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) registrations: Vec<HelperRegistration>,
 }
 impl Address {
     fn validate(&self) -> Result<()> {
@@ -41,7 +48,13 @@ impl Address {
 }
 pub(super) fn schema(db: &Connection) -> Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS direct_peers(peer TEXT PRIMARY KEY REFERENCES network_links(peer) ON DELETE CASCADE,peer_key BLOB NOT NULL,endpoint TEXT NOT NULL,address BLOB NOT NULL,expires_at INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS direct_advertised(peer TEXT PRIMARY KEY REFERENCES network_links(peer) ON DELETE CASCADE,endpoint TEXT NOT NULL,expires_at INTEGER NOT NULL);")?;
+        CREATE TABLE IF NOT EXISTS direct_advertised(peer TEXT PRIMARY KEY REFERENCES network_links(peer) ON DELETE CASCADE,endpoint TEXT NOT NULL,expires_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS direct_local(singleton INTEGER PRIMARY KEY CHECK(singleton=1),peer TEXT NOT NULL,peer_key BLOB NOT NULL,endpoint TEXT NOT NULL,address BLOB NOT NULL,expires_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS direct_endpoint ON direct_peers(endpoint);
+        CREATE VIEW IF NOT EXISTS direct_sources AS
+            SELECT d.peer,d.peer_key,d.endpoint,d.address,d.expires_at,0 AS local
+            FROM direct_peers d JOIN network_links l ON d.peer=l.peer AND d.peer_key=l.peer_key
+            UNION ALL SELECT peer,peer_key,endpoint,address,expires_at,1 FROM direct_local;")?;
     Ok(())
 }
 pub(super) fn address(
@@ -73,94 +86,147 @@ impl StoreSession<'_> {
         address(self.db, peer, &node.signing_key, self.timestamp)
     }
 
-    pub(super) fn receive_direct(&self, peer: &str, address: Address) -> Result<()> {
+    pub(super) fn receive_direct(&self, peer: &str, mut address: Address) -> Result<()> {
         address.validate()?;
-        if address.expires_at <= self.timestamp {
-            return Ok(());
-        }
         ensure!(
             address.expires_at <= self.timestamp + 600,
             "direct address expiry too far ahead"
         );
-        let node = self
-            .state
-            .state()
-            .nodes
-            .get(peer)
-            .context("unknown direct peer")?;
-        self.state
-            .authorize_node(peer, &node.signing_key, self.timestamp as u64)?;
+        let link_key: Vec<u8> = self.db.query_row(
+            "SELECT peer_key FROM network_links WHERE peer=?1",
+            [peer],
+            |r| r.get(0),
+        )?;
+        super::network::active_peer(&self.state, peer, &link_key, self.timestamp)?;
+        ensure!(
+            peer != self.identity.node.id(),
+            "remote direct address claimed local identity"
+        );
+        if address.expires_at <= self.timestamp {
+            // MLS records arrive in order. Even a delayed replacement ends the
+            // old endpoint's authority to keep an established helper session.
+            self.db.execute(
+                "DELETE FROM direct_peers WHERE peer=?1 AND endpoint<>?2",
+                params![peer, address.endpoint.id.to_string()],
+            )?;
+            return Ok(());
+        }
+        address.validate_helpers(peer, self.timestamp, None)?;
         self.db.execute("INSERT INTO direct_peers VALUES(?1,?2,?3,?4,?5) ON CONFLICT(peer) DO UPDATE SET peer_key=excluded.peer_key,endpoint=excluded.endpoint,address=excluded.address,expires_at=excluded.expires_at",
-            params![peer,node.signing_key.as_slice(),address.endpoint.id.to_string(),serde_json::to_vec(&address)?,address.expires_at])?;
+            params![peer,link_key,address.endpoint.id.to_string(),serde_json::to_vec(&address)?,address.expires_at])?;
         Ok(())
     }
 }
 impl Store {
     pub(crate) fn direct_allowed(&self, endpoint: EndpointId) -> Result<()> {
+        self.direct_binding(endpoint, true).map(|_| ())
+    }
+    /// A live authenticated session can outlive an idle address advertisement.
+    /// Removal, authority expiry and key replacement still end its admission.
+    pub(crate) fn direct_binding(
+        &self,
+        endpoint: EndpointId,
+        fresh: bool,
+    ) -> Result<(String, gent_crypto::PublicKey)> {
         ensure!(
             matches!(self.direct_settings()?.direct, config::Direct::Auto),
             "direct transport disabled"
         );
-        let state = self.identity.state(&self.db)?;
-        let mut query=self.db.prepare("SELECT d.peer,d.peer_key FROM direct_peers d JOIN network_links l ON l.peer=d.peer AND l.peer_key=d.peer_key WHERE d.endpoint=?1 AND d.expires_at>?2")?;
-        for row in query.query_map(params![endpoint.to_string(), now()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })? {
-            let (peer, key) = row?;
-            if state
-                .authorize_node(
-                    &peer,
-                    &key.try_into()
-                        .map_err(|_| anyhow::anyhow!("invalid direct peer key"))?,
-                    now() as u64,
-                )
-                .is_ok()
-            {
-                return Ok(());
-            }
-        }
-        anyhow::bail!("unrecognized direct endpoint")
+        let tx = self.db.unchecked_transaction()?;
+        let session = self.network_session(&tx, self.identity.state(&tx)?);
+        session.require_local_membership()?;
+        session
+            .endpoint_binding(endpoint, fresh)?
+            .context("unrecognized direct endpoint")
     }
     pub(crate) fn direct_settings(&self) -> Result<config::Transport> {
         config::load(&self.home)?.transport()
     }
+    #[cfg(test)]
     pub(crate) fn advertise_direct(&mut self, endpoint: EndpointAddr) -> Result<()> {
+        self.advertise_direct_with_helpers(endpoint, None, vec![])
+    }
+    pub(crate) fn advertise_direct_with_helpers(
+        &mut self,
+        endpoint: EndpointAddr,
+        offer: Option<HelperOffer>,
+        registrations: Vec<HelperRegistration>,
+    ) -> Result<()> {
         if matches!(self.direct_settings()?.direct, config::Direct::Off) {
             return Ok(());
         }
         let tx = self.db.unchecked_transaction()?;
         let session = self.network_session(&tx, self.identity.state(&tx)?);
-        let address = Address {
+        session.require_local_membership()?;
+        let mut address = Address {
             endpoint,
             expires_at: session.timestamp + 180,
+            offer,
+            registrations,
         };
         address.validate()?;
-        let advertised = serde_json::to_string(&address.endpoint)?;
+        let local_id = self.identity.node.id();
+        address.validate_helpers(local_id, session.timestamp, Some(&self.direct_certs))?;
+        tx.execute(
+            "INSERT INTO direct_local VALUES(1,?1,?2,?3,?4,?5)
+            ON CONFLICT(singleton) DO UPDATE SET peer=excluded.peer,peer_key=excluded.peer_key,
+                endpoint=excluded.endpoint,address=excluded.address,expires_at=excluded.expires_at
+            WHERE direct_local.expires_at<=?6 OR direct_local.peer<>excluded.peer
+                OR direct_local.peer_key<>excluded.peer_key
+                OR json_remove(CAST(direct_local.address AS TEXT),'$.expires_at')
+                   <>json_remove(CAST(excluded.address AS TEXT),'$.expires_at')",
+            params![
+                local_id,
+                self.identity.node.public_key().as_slice(),
+                address.endpoint.id.to_string(),
+                serde_json::to_vec(&address)?,
+                address.expires_at,
+                session.timestamp + 90
+            ],
+        )?;
+        let plain = serde_json::to_string(&address.endpoint)?;
+        let topology = address.topology();
+        let extended = topology.encode(&plain)?;
         let peers = tx
             .prepare("SELECT peer FROM network_links ORDER BY peer")?
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for peer in peers {
-            if session.wire_version(&peer)? < 5 {
+            let version = session.wire_version(&peer)?;
+            if version < 5 {
                 continue;
             }
-            // An unchanged address may expire during an idle period. Refresh
-            // it for traffic or a fresh probe; always publish a changed address.
-            let skip: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM direct_advertised WHERE peer=?1 AND endpoint=?2
-                 AND (expires_at>?3 OR (NOT EXISTS(SELECT 1 FROM network_events WHERE peer=?1)
-                 AND NOT EXISTS(SELECT 1 FROM node_presence WHERE peer=?1 AND
-                     (issued_at>=?4 OR verified_at>=?4)))))",
-                params![
-                    peer,
-                    advertised,
-                    session.timestamp + 90,
-                    session.timestamp - 30
-                ],
-                |r| r.get(0),
-            )?;
-            if skip {
-                continue;
+            let advertised = if version >= crate::messages::wire::HELPERS_VERSION {
+                &extended
+            } else {
+                &plain
+            };
+            let previous: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT endpoint,expires_at FROM direct_advertised WHERE peer=?1",
+                    [&peer],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((saved, expiry)) = previous {
+                if saved == *advertised && expiry > session.timestamp + 90 {
+                    continue;
+                }
+                if saved == *advertised
+                    || (version >= crate::messages::wire::HELPERS_VERSION
+                        && topology.passive_withdrawal(&saved, &session, &self.direct_certs)?)
+                {
+                    let active: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM network_events WHERE peer=?1 AND cancelled=0)
+                         OR EXISTS(SELECT 1 FROM node_presence WHERE peer=?1 AND
+                           (issued_at>=?2 OR verified_at>=?2))",
+                        params![peer, session.timestamp - 30],
+                        |r| r.get(0),
+                    )?;
+                    if !active {
+                        continue;
+                    }
+                }
             }
             let queued:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM network_events WHERE peer=?1 AND cancelled=0 AND json_extract(CAST(body AS TEXT),'$.event.kind')='direct')",[&peer],|r|r.get(0))?;
             if queued {

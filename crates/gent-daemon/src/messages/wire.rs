@@ -8,8 +8,9 @@ mod compact;
 mod value;
 
 pub const ZSTD_VERSION: u8 = 6;
-pub const CURRENT: u8 = ZSTD_VERSION;
-pub const NEGOTIATED: &[u8] = &[2, 3, 4, 5, ZSTD_VERSION];
+pub const HELPERS_VERSION: u8 = 7;
+pub const CURRENT: u8 = HELPERS_VERSION;
+pub const NEGOTIATED: &[u8] = &[2, 3, 4, 5, ZSTD_VERSION, HELPERS_VERSION];
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +104,13 @@ impl Serialize for Record {
                 "direct transport requires node record version 5",
             ));
         }
+        if self.version < HELPERS_VERSION && matches!(self.event, Event::Direct { .. }) {
+            let address = event["address"]
+                .as_object_mut()
+                .ok_or_else(|| ser::Error::custom("invalid direct address"))?;
+            address.remove("offer");
+            address.remove("registrations");
+        }
         if self.version < 4 && (self.directory.is_some() || event["envelope"]["step"] == "push") {
             return Err(ser::Error::custom(
                 "directory push requires node record version 4",
@@ -141,6 +149,16 @@ impl<'de> Deserialize<'de> for Record {
                 "direct transport requires node record version 5",
             ));
         }
+        if envelope.version < HELPERS_VERSION
+            && envelope.event["kind"] == "direct"
+            && ["offer", "registrations"]
+                .iter()
+                .any(|key| envelope.event["address"].get(key).is_some())
+        {
+            return Err(de::Error::custom(
+                "helper advertisements require node record version 7",
+            ));
+        }
         if envelope.version < 4
             && (envelope.directory.is_some() || envelope.event["envelope"]["step"] == "push")
         {
@@ -176,6 +194,34 @@ impl<'de> Deserialize<'de> for Record {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn helper_fields_are_negotiated_without_changing_legacy_direct_addresses() {
+        let address = json!({"endpoint":iroh::EndpointAddr::new(iroh::SecretKey::generate().public()),"expires_at":1234});
+        let mut latest = json!({"version":7,"authority":{"revision":1,"state_hash":vec![0;32]},
+            "event":{"kind":"direct","address":address}});
+        let service = uuid::Uuid::new_v4().to_string();
+        latest["event"]["address"]["offer"] = json!({"helper_node":service,"urls":["https://127.0.0.1:9443/"],
+            "cert_der":"AQ==","generation":vec![1;32],"qad_port":9443});
+        latest["event"]["address"]["registrations"] = json!([{"helper_node":service,"url":"https://127.0.0.1:9443/",
+            "generation":vec![1;32],"rtt_ms":2}]);
+        let mut record: Record = serde_json::from_value(latest.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&record).unwrap(), latest);
+        for version in 1..=6 {
+            let mut extended = latest.clone();
+            extended["version"] = json!(version);
+            assert!(serde_json::from_value::<Record>(extended).is_err());
+            record.version = version;
+            if version < 5 {
+                assert!(serde_json::to_value(&record).is_err());
+            } else {
+                let legacy = serde_json::to_value(&record).unwrap();
+                assert_eq!(legacy["event"]["address"], address);
+                let decoded: Record = serde_json::from_value(legacy.clone()).unwrap();
+                assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+            }
+        }
+    }
 
     #[test]
     fn snapshots_and_pushes_require_v4_and_round_trip_chat_fields() {

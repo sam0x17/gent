@@ -38,6 +38,7 @@ pub(super) async fn serve(
     metrics: Arc<Metrics>,
 ) -> Result<()> {
     loop {
+        let before = path::Frames::read(conn);
         let (mut send, mut recv) =
             tokio::time::timeout(Duration::from_secs(60), conn.accept_bi()).await??;
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -57,7 +58,10 @@ pub(super) async fn serve(
                 .collect::<Result<Vec<_>>>()?;
             let receipt = session::receive(
                 store.clone(),
-                session::Peer::Endpoint(conn.remote_id()),
+                session::Peer::ObservedEndpoint(
+                    conn.remote_id(),
+                    path::Frames::read(conn).received(before, None),
+                ),
                 group,
                 packets,
             )

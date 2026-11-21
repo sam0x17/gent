@@ -228,7 +228,7 @@ impl StoreSession<'_> {
         Ok(())
     }
 
-    pub(super) fn refresh_nodes(&self) -> Result<Value> {
+    pub(super) fn refresh_nodes(&self, health: &crate::sync::health::Health) -> Result<Value> {
         if self.config.relay.is_some()
             && self
                 .state
@@ -247,7 +247,7 @@ impl StoreSession<'_> {
             )?;
             self.queue_presence()?;
         }
-        self.nodes()
+        self.nodes(health)
     }
 
     fn queue_presence(&self) -> Result<bool> {
@@ -330,7 +330,7 @@ impl StoreSession<'_> {
         Ok(queued > 0)
     }
 
-    pub(super) fn nodes(&self) -> Result<Value> {
+    pub(super) fn nodes(&self, health: &crate::sync::health::Health) -> Result<Value> {
         let owner = if self.state.state().peer.is_some() {
             None
         } else if self.identity.is_current_owner(&self.state) {
@@ -340,9 +340,16 @@ impl StoreSession<'_> {
         };
         let links = self
             .db
-            .prepare("SELECT peer,peer_key FROM network_links")?
+            .prepare("SELECT peer,peer_key,incoming,outgoing FROM network_links")?
             .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, PublicKey>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (
+                        r.get::<_, PublicKey>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                        r.get::<_, Vec<u8>>(3)?,
+                    ),
+                ))
             })?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
         let mut nodes = Vec::new();
@@ -357,7 +364,10 @@ impl StoreSession<'_> {
         for (id, member) in &self.state.state().nodes {
             let host = self.state.transport_host(id)?;
             let host_key = self.state.state().nodes[host].signing_key;
-            let paired = links.get(host).is_some_and(|key| *key == host_key);
+            let link = links.get(host).filter(|(key, _, _)| *key == host_key);
+            let paired = link.is_some();
+            let transport =
+                health.peer_transport(host, link.map(|(_, rx, tx)| (rx.as_slice(), tx.as_slice())));
             let saved = evidence(self.db, host)?.filter(|saved| saved.key == host_key);
             let verified = saved.as_ref().and_then(|saved| saved.verified_at);
             let issued = saved.as_ref().and_then(|saved| saved.issued_at);
@@ -391,7 +401,7 @@ impl StoreSession<'_> {
             };
             nodes.push(
                 json!({"id":id,"name":member.name,"can_configure":member.can_configure,
-                "hosted_by":member.hosted_by,
+                "hosted_by":member.hosted_by,"transport":transport,
                 "is_owner":owner.as_ref().map(|owner| owner == id),
                 "wire_version":if host==self.identity.node.id() {crate::messages::wire::CURRENT} else {self.wire_version(host)?},
                 "data_link":paired,"status":status,"revision":self.state.checkpoint().revision,

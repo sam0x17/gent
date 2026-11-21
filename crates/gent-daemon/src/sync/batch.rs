@@ -56,8 +56,24 @@ impl Relay {
         }
         Ok(self.get(group, first).await?.into_iter().collect())
     }
-    pub(super) async fn put_batch(&self, group: &[u8], first: u64, batch: &Batch) -> Result<usize> {
+    pub(super) async fn put_batch(
+        &self,
+        group: &[u8],
+        first: u64,
+        batch: &Batch,
+        data_health: Option<&health::Health>,
+    ) -> Result<usize> {
         ensure!(!batch.packets().is_empty(), "cannot publish an empty batch");
+        let acknowledged = |sequence| {
+            if let Some(health) = data_health {
+                health.record_transport(
+                    group,
+                    health::TransportPath::Mailbox,
+                    health::TransportEvidence::MailboxUpload,
+                    sequence,
+                );
+            }
+        };
         if self.batches.enabled() {
             let response = self
                 .mailbox("PUT", self.batch_route(group, first)?, batch.encode())
@@ -84,6 +100,7 @@ impl Relay {
                         && stored.next == first + stored.count as u64,
                     "invalid batch storage acknowledgment"
                 );
+                acknowledged(stored.next - 1);
                 return Ok(stored.count);
             }
         }
@@ -92,7 +109,9 @@ impl Relay {
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut count = 0;
         for bytes in batch.packets() {
-            self.put(&Packet::decode(bytes)?).await?;
+            let packet = Packet::decode(bytes)?;
+            self.put(&packet).await?;
+            acknowledged(packet.sequence());
             count += 1;
             if Instant::now() >= deadline {
                 break;

@@ -127,7 +127,7 @@ impl OrderedEndpoint<'_> {
         receipt: &Receipt,
         reader: &str,
         now: u64,
-    ) -> Result<Receipt> {
+    ) -> Result<(Receipt, bool)> {
         let purpose = mode(&self.inner.db, receipt.group())?;
         self.inner.transact_mode(now, purpose == Purpose::Configuration, |session| {
             let (saved, key) = authorized_reader(session, receipt.group(), purpose, reader)?;
@@ -136,11 +136,11 @@ impl OrderedEndpoint<'_> {
             if let Some(previous) = SavedReceipt::load(session.db, receipt.group())? {
                 ensure!(previous.reader == reader && previous.key == key, "receipt reader pin changed");
                 if receipt.sequence() < previous.sequence {
-                    return previous.verified(receipt.group(), &key, saved.head);
+                    return Ok((previous.verified(receipt.group(), &key, saved.head)?, false));
                 }
                 if receipt.sequence() == previous.sequence {
                     ensure!(receipt.digest() == previous.digest && receipt.encode()? == previous.wire, "conflicting receiver checkpoint");
-                    return Ok(receipt.clone());
+                    return Ok((receipt.clone(), false));
                 }
             }
             let wire: Vec<u8> = session.db.query_row(
@@ -156,7 +156,7 @@ impl OrderedEndpoint<'_> {
                 params![receipt.group(), reader, key.as_slice(), receipt.sequence(),
                     receipt.digest().as_slice(), receipt.encode()?])?;
             retire(session.db, false)?;
-            Ok(receipt.clone())
+            Ok((receipt.clone(), true))
         })
     }
     pub fn confirmed_next(&self, group: &[u8]) -> Result<u64> {

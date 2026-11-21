@@ -65,6 +65,7 @@ const UNAVAILABLE: &str = "recipient or message unavailable";
 
 pub struct Store {
     db: Connection,
+    direct_certs: direct::CertificateCache,
     home: PathBuf,
     config: Config,
     identity: Identity,
@@ -73,6 +74,9 @@ pub struct Store {
     pub(crate) sync_health: Arc<crate::sync::health::Health>,
 }
 impl Store {
+    pub(crate) fn local_node_id(&self) -> &str {
+        self.identity.node.id()
+    }
     /// Called by offline owner provisioning while holding daemon.lock. Service
     /// registration cannot turn a joined node into a cryptographic owner.
     pub fn require_provisioning_owner(&self) -> Result<()> {
@@ -213,6 +217,7 @@ impl Store {
         }
         tx.commit()?;
         let mut store = Self {
+            direct_certs: Default::default(),
             db,
             home: home.into(),
             config,
@@ -385,7 +390,7 @@ impl Store {
             }
         );
         let mut value = match request {
-            Request::Owner { action, .. } => session.owner(action)?,
+            Request::Owner { action, .. } => session.owner(action, &self.sync_health)?,
             Request::Agent { credential, action } => {
                 session.state.authorize_node(
                     self.identity.node.id(),
@@ -681,6 +686,18 @@ impl Store {
         configuration: bool,
         receipt: Option<&gent_crypto::stream::Receipt>,
     ) -> Result<Option<gent_crypto::stream::Receipt>> {
+        Ok(self
+            .transport_confirmation(group, configuration, receipt)?
+            .0)
+    }
+
+    /// The flag records a newly advanced durable checkpoint, excluding cached or replayed ACKs.
+    pub(crate) fn transport_confirmation(
+        &self,
+        group: &[u8],
+        configuration: bool,
+        receipt: Option<&gent_crypto::stream::Receipt>,
+    ) -> Result<(Option<gent_crypto::stream::Receipt>, bool)> {
         let mut endpoint =
             encrypted::ordered::OrderedEndpoint::open_runtime(&self.home, &self.identity.node)?;
         let reader = if configuration {
@@ -695,9 +712,9 @@ impl Store {
             );
             return endpoint
                 .confirm_and_get(receipt, &reader, now() as u64)
-                .map(Some);
+                .map(|(receipt, advanced)| (Some(receipt), advanced));
         }
-        endpoint.confirmed_receipt(group, now() as u64)
+        Ok((endpoint.confirmed_receipt(group, now() as u64)?, false))
     }
     pub(crate) fn sync_outgoing(
         &self,
@@ -812,7 +829,7 @@ impl StoreSession<'_> {
         }
         Ok(agents)
     }
-    fn owner(&mut self, action: OwnerOp) -> Result<Value> {
+    fn owner(&mut self, action: OwnerOp, health: &crate::sync::health::Health) -> Result<Value> {
         match action {
             OwnerOp::WebDeliveryDemand { node_id } => self.web_delivery_demand(&node_id),
             OwnerOp::WebDeliveryChecked {
@@ -931,8 +948,8 @@ impl StoreSession<'_> {
                 administrator,
                 before,
             } => self.permission_admin_history(administrator.as_deref(), before),
-            OwnerOp::Nodes => self.nodes(),
-            OwnerOp::RefreshNodes => self.refresh_nodes(),
+            OwnerOp::Nodes => self.nodes(health),
+            OwnerOp::RefreshNodes => self.refresh_nodes(health),
             OwnerOp::Agents => Ok(serde_json::to_value(self.directory(None)?)?),
             OwnerOp::Resolve {
                 name,

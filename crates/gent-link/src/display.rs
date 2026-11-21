@@ -52,6 +52,8 @@ struct NodeStatus {
     can_configure: bool,
     #[serde(default)]
     is_owner: Option<bool>,
+    #[serde(default)]
+    transport: Value,
 }
 
 // Labels can contain Unicode formatting characters even when configuration
@@ -180,6 +182,10 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
         View::Nodes => {
             let nodes: Vec<NodeStatus> =
                 serde_json::from_value(value.clone()).context("invalid node list response")?;
+            let names: BTreeMap<_, _> = nodes
+                .iter()
+                .map(|n| (n.id.as_str(), n.name.as_str()))
+                .collect();
             writeln!(
                 output,
                 "{}  {}",
@@ -189,6 +195,19 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
             let rows = nodes
                 .iter()
                 .map(|node| {
+                    let mut transport = if node.status == "local" || node.status == "hosted" {
+                        "local".to_owned()
+                    } else {
+                        sync::transport(&node.transport["last"])
+                    };
+                    if let Some(carrier) = node.transport["carrier_id"].as_str()
+                        && carrier != node.id
+                    {
+                        transport = format!(
+                            "{transport} (via {})",
+                            names.get(carrier).copied().unwrap_or(carrier)
+                        );
+                    }
                     vec![
                         node.name.clone(),
                         node.status.clone(),
@@ -200,6 +219,7 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
                             "not paired"
                         }
                         .into(),
+                        transport,
                         if node.is_owner == Some(true) {
                             "owner"
                         } else if node.can_configure {
@@ -213,7 +233,14 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
                 })
                 .collect::<Vec<_>>();
             output.push_str(&table(
-                &["NODE", "STATUS", "ENCRYPTED LINK", "ADMIN", "ID"],
+                &[
+                    "NODE",
+                    "STATUS",
+                    "ENCRYPTED LINK",
+                    "LAST TRANSPORT",
+                    "ADMIN",
+                    "ID",
+                ],
                 &rows,
             ));
             if nodes.is_empty() {
@@ -221,7 +248,7 @@ pub(crate) fn render(view: View, value: &Value) -> Result<String> {
             }
             writeln!(
                 output,
-                "\n  Status reflects recent daemon communication. Use --verbose for connection evidence."
+                "\n  Last transport shows evidence from this daemon session. Mailbox upload confirms relay storage. Use --verbose for timestamps, signed receipts and carrier IDs."
             )?;
         }
         View::Agents => agents::render(&mut output, value)?,

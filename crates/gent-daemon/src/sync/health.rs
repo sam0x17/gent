@@ -2,11 +2,42 @@
 //! peer has read a message, and restart discards previous observations.
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "path", rename_all = "snake_case")]
+pub(crate) enum TransportPath {
+    DirectQuic,
+    ClusterHelper { helper_id: String },
+    ConfiguredRelay,
+    QuicUnknown,
+    QuicMixed,
+    RelayWss,
+    Mailbox,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TransportEvidence {
+    ReceivedPacket,
+    SignedReceipt,
+    MailboxUpload,
+}
+
+#[derive(Serialize)]
+struct Observation {
+    #[serde(flatten)]
+    path: TransportPath,
+    evidence: TransportEvidence,
+    sequence: u64,
+    observed_at: i64,
+    #[serde(skip)]
+    order: u64,
+}
 
 #[derive(Default)]
 pub(crate) struct Health {
@@ -39,8 +70,51 @@ struct Pass {
     watch_last_connection_ms: Option<u64>,
     #[serde(skip)]
     transferring: BTreeSet<Vec<u8>>,
+    #[serde(skip)]
+    transport: BTreeMap<Vec<u8>, BTreeMap<TransportEvidence, Observation>>,
+    #[serde(skip)]
+    observation_order: u64,
 }
 impl Health {
+    /// Call only after packet acceptance, a verified receipt, or acknowledged mailbox storage.
+    pub(crate) fn record_transport(
+        &self,
+        group: &[u8],
+        path: TransportPath,
+        evidence: TransportEvidence,
+        sequence: u64,
+    ) {
+        let mut pass = self.pass.lock().expect("sync health lock poisoned");
+        pass.observation_order += 1;
+        let observation = Observation {
+            path,
+            evidence,
+            sequence,
+            observed_at: crate::store::now(),
+            order: pass.observation_order,
+        };
+        pass.transport
+            .entry(group.to_vec())
+            .or_default()
+            .insert(evidence, observation);
+    }
+
+    /// Resolve observations only through the carrier's currently pinned data-link groups.
+    pub(crate) fn peer_transport(&self, carrier: &str, groups: Option<(&[u8], &[u8])>) -> Value {
+        use TransportEvidence::*;
+        let pass = self.pass.lock().expect("sync health lock poisoned");
+        let incoming = groups.and_then(|(rx, _)| pass.transport.get(rx));
+        let outgoing = groups.and_then(|(_, tx)| pass.transport.get(tx));
+        let received = incoming.and_then(|events| events.get(&ReceivedPacket));
+        let receipt = outgoing.and_then(|events| events.get(&SignedReceipt));
+        let upload = outgoing.and_then(|events| events.get(&MailboxUpload));
+        let last = [received, receipt, upload]
+            .into_iter()
+            .flatten()
+            .max_by_key(|event| event.order);
+        json!({"carrier_id":carrier,"last":last,"last_received_packet":received,
+               "last_signed_receipt":receipt,"last_mailbox_upload":upload})
+    }
     pub(super) fn sweep_request(&self, bytes: usize) {
         let mut pass = self.pass.lock().expect("sync health lock poisoned");
         pass.sweep_http_requests += 1;
@@ -75,6 +149,15 @@ impl Health {
 
     pub(super) fn retain(&self, streams: &[super::Stream], connecting: bool) {
         let mut pass = self.pass.lock().expect("sync health lock poisoned");
+        if !pass.transport.is_empty() {
+            let groups: BTreeSet<&[u8]> = streams
+                .iter()
+                .filter(|s| !s.configuration)
+                .map(|s| s.group.as_slice())
+                .collect();
+            pass.transport
+                .retain(|group, _| groups.contains(group.as_slice()));
+        }
         pass.transferring
             .retain(|group| streams.iter().any(|stream| &stream.group == group));
         pass.connecting = connecting;
@@ -184,6 +267,24 @@ impl Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transport_evidence_follows_pinned_streams_and_orders_same_second_observations() {
+        use TransportEvidence::*;
+        use TransportPath::*;
+        let health = Health::default();
+        let inspect = || health.peer_transport("carrier", Some((b"rx", b"tx")));
+        health.record_transport(b"tx", DirectQuic, SignedReceipt, 17);
+        health.record_transport(b"rx", QuicMixed, ReceivedPacket, 3);
+        health.record_transport(b"tx", Mailbox, MailboxUpload, 18);
+        let observed = inspect();
+        assert_eq!(observed["last"]["evidence"], "mailbox_upload");
+        assert_eq!(observed["last_signed_receipt"]["path"], "direct_quic");
+        assert_eq!(observed["last_received_packet"]["path"], "quic_mixed");
+        assert!(health.peer_transport("new carrier", None)["last"].is_null());
+        assert!(health.peer_transport("carrier", Some((b"new rx", b"new tx")))["last"].is_null());
+        health.retain(&[], false);
+        assert!(inspect()["last"].is_null());
+    }
     #[test]
     fn empty_passes_do_not_claim_contact_and_failures_remain_visible_until_recovery() {
         let health = Health::default();

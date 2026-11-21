@@ -31,7 +31,14 @@ reqwest.workspace = true
 futures-util.workspace = true
 httpdate.workspace = true
 tokio-tungstenite.workspace = true
-iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring"] }
+iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "unstable-net-report"] }
+iroh-relay = { version = "=1.5.0", default-features = false, features = ["server", "tls-ring"] }
+noq = { version = "=1.5.0", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+netdev = "0.47"
+http = "1"
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+x509-parser = "0.18"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

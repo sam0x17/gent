@@ -40,11 +40,13 @@ async fn serve(
     store: SharedStore,
     used: Arc<Mutex<Instant>>,
     metrics: Arc<Metrics>,
+    helper: Option<String>,
 ) -> Result<()> {
     let (mut send, mut recv) = conn.accept_bi().await?;
     loop {
         // The first byte can wait while the peer has no work. Bound the rest
         // of the frame independently so a trickle cannot keep a link alive.
+        let before = path::Frames::read(&conn);
         let mut len = [0; 4];
         recv.read_exact(&mut len[..1]).await?;
         *used.lock().expect("QUIC activity poisoned") = Instant::now();
@@ -53,7 +55,10 @@ async fn serve(
             let bytes = read_frame(&mut recv, len, session::MAX_FRAME_BYTES).await?;
             let receipt = session::accept(
                 store.clone(),
-                session::Peer::Endpoint(conn.remote_id()),
+                session::Peer::ObservedEndpoint(
+                    conn.remote_id(),
+                    path::Frames::read(&conn).received(before, helper.as_deref()),
+                ),
                 &bytes,
             )
             .await?;
@@ -69,6 +74,8 @@ async fn serve(
 
 pub(super) struct Link {
     pub(super) conn: Connection,
+    /// Identifies the relay when frame counters show relay traffic, even after pool removal.
+    pub(super) helper_id: Option<String>,
     used: Arc<Mutex<Instant>>,
     outgoing: AsyncMutex<Option<Streams>>,
     dialed: bool,
@@ -121,10 +128,20 @@ impl Drop for Link {
 }
 
 #[derive(Default)]
-pub(super) struct Pool(Mutex<BTreeMap<EndpointId, Arc<Link>>>);
+pub(super) struct Pool {
+    links: Mutex<BTreeMap<EndpointId, Arc<Link>>>,
+    helper: Option<String>,
+}
 impl Pool {
+    pub(super) fn for_helper(id: String) -> Self {
+        Self {
+            helper: Some(id),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn prune(&self) {
-        self.0
+        self.links
             .lock()
             .expect("QUIC pool poisoned")
             .retain(|_, link| {
@@ -134,7 +151,7 @@ impl Pool {
     }
 
     pub(super) fn get(&self, id: EndpointId) -> Option<Arc<Link>> {
-        let saved = self.0.lock().expect("QUIC pool poisoned");
+        let saved = self.links.lock().expect("QUIC pool poisoned");
         let link = saved.get(&id)?;
         if link.conn.close_reason().is_some() {
             return None;
@@ -151,7 +168,7 @@ impl Pool {
         metrics: Arc<Metrics>,
     ) -> Arc<Link> {
         let id = conn.remote_id();
-        let mut saved = self.0.lock().expect("QUIC pool poisoned");
+        let mut saved = self.links.lock().expect("QUIC pool poisoned");
         // During simultaneous dialing both ends keep the connection initiated
         // by the smaller endpoint ID. A sole incoming link is always usable.
         if let Some(old) = saved.get(&id)
@@ -175,13 +192,15 @@ impl Pool {
             let conn = conn.clone();
             let used = used.clone();
             let metrics = metrics.clone();
+            let helper = self.helper.clone();
             tokio::spawn(async move {
-                let _ = serve(conn.clone(), store, used, metrics).await;
+                let _ = serve(conn.clone(), store, used, metrics, helper).await;
                 conn.close(1u32.into(), b"session stream ended");
             })
         });
         let link = Arc::new(Link {
             conn,
+            helper_id: self.helper.clone(),
             used,
             outgoing: AsyncMutex::new(None),
             dialed,
@@ -190,5 +209,44 @@ impl Pool {
         saved.insert(id, link.clone());
         metrics.connections.fetch_add(1, Ordering::Relaxed);
         link
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn installed_links_keep_their_pool_identity() -> Result<()> {
+        async fn endpoint() -> Result<Endpoint> {
+            Ok(Endpoint::builder(presets::Minimal)
+                .clear_address_lookup()
+                .clear_ip_transports()
+                .bind_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))?
+                .relay_mode(RelayMode::Disabled)
+                .alpns(vec![ALPN.to_vec()])
+                .bind()
+                .await?)
+        }
+        let (a, b) = tokio::try_join!(endpoint(), endpoint())?;
+        let addr = EndpointAddr::new(b.id()).with_ip_addr(b.bound_sockets()[0]);
+        let (outgoing, incoming) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(a.connect(addr, ALPN), async {
+                b.accept().await.unwrap().await
+            })
+        })
+        .await?;
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("node");
+        config::initialize(&home, "pool-id")?;
+        let store = Arc::new(Mutex::new(Store::open(&home)?));
+        let pool = Pool::for_helper("helper-a".to_owned());
+        let link = pool.install(a.id(), outgoing?, true, store.clone(), Arc::default());
+        assert!(Arc::ptr_eq(&link, &pool.get(b.id()).unwrap()));
+        drop(pool);
+        assert_eq!(link.helper_id.as_deref(), Some("helper-a"));
+        let ordinary = Pool::default().install(b.id(), incoming?, false, store, Arc::default());
+        assert!(ordinary.helper_id.is_none());
+        Ok(())
     }
 }

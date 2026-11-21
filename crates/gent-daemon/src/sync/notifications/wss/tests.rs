@@ -62,6 +62,9 @@ fn attempt(
 pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Stream) {
     let [sender, receiver] = stores;
     let group = &stream.group;
+    let sender_health = sender.lock().unwrap().sync_health.clone();
+    let sender_observation = || sender_health.peer_transport("receiver", Some((&[], group)));
+    let receiver_health = receiver.lock().unwrap().sync_health.clone();
     let a = Uuid::parse_str(&receiver.lock().unwrap().session_peer(group, false).unwrap()).unwrap();
     let b = Uuid::parse_str(&sender.lock().unwrap().session_peer(group, true).unwrap()).unwrap();
     let confirmed = || {
@@ -86,6 +89,10 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
     drop(socket);
     assert!(delivery.await.unwrap().1.is_none());
     assert_eq!(baseline, confirmed());
+    assert!(sender_observation()["last"].is_null());
+    let received = receiver_health.peer_transport("sender", Some((group, &[])));
+    assert_eq!(received["last"]["path"], "relay_wss");
+    assert_eq!(received["last"]["evidence"], "received_packet");
 
     // Recipient is unavailable on reconnect. New work for this peer skips
     // WSS immediately, and mailbox storage still needs the original ciphertext.
@@ -146,7 +153,7 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
             sender.clone(),
             relay,
             stream.clone(),
-            Arc::default(),
+            sender_health.clone(),
             &mut prepared,
             &mut transfer::State::default()
         )
@@ -157,6 +164,9 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
     let requests = requests.await.unwrap();
     assert_eq!(Batch::decode(&requests[2].1).unwrap().packets(), canonical);
     assert_eq!(baseline, confirmed());
+    assert_eq!(sender_observation()["last"]["evidence"], "mailbox_upload");
+    assert_eq!(sender_observation()["last"]["sequence"], last);
+    assert!(sender_observation()["last_signed_receipt"].is_null());
 
     // Deliver the retained batch again on a fresh watch. A receipt with the
     // right correlation from a third peer cannot complete the request.
@@ -196,4 +206,33 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
     socket.received(&rewrite(&response, b), sender).unwrap();
     assert_eq!(delivery.await.unwrap().1, Some(last));
     assert_eq!(confirmed().sequence(), last);
+    let observed = sender_observation();
+    assert_eq!(observed["last"]["path"], "relay_wss");
+    assert_eq!(observed["last"]["evidence"], "signed_receipt");
+    assert_eq!(observed["last_mailbox_upload"]["sequence"], last);
+    // A subsequent mailbox sweep can return the very same ACK. It must
+    // not refresh the timestamp or claim the WSS transfer for the mailbox.
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let checkpoint = STANDARD.encode(confirmed().encode().unwrap());
+    let (relay, requests) = test_http::server(vec![
+        (
+            200,
+            serde_json::to_vec(&serde_json::json!({"next":last+1,"checkpoint":checkpoint}))
+                .unwrap(),
+        ),
+        (204, vec![]),
+    ])
+    .await;
+    transfer::run(
+        sender.clone(),
+        relay,
+        stream.clone(),
+        sender_health.clone(),
+        &mut Prepared::new(Arc::default()),
+        &mut transfer::State::default(),
+    )
+    .await
+    .unwrap();
+    requests.await.unwrap();
+    assert_eq!(sender_observation(), observed);
 }

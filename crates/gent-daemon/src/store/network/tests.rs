@@ -16,6 +16,8 @@ mod directory_push_tests;
 mod directory_tests;
 #[path = "group_administration_tests.rs"]
 mod group_administration_tests;
+#[path = "helper_tests.rs"]
+mod helper_tests;
 #[path = "hosted_tests.rs"]
 mod hosted_tests;
 #[path = "node_invite_tests.rs"]
@@ -352,9 +354,19 @@ async fn uploaded_packets_wait_offline_and_replay_until_the_reader_signs() {
     pair.reopen(1);
     let recovered = pair.stores[1].transport_receipt(&group, false).unwrap();
     assert_eq!(recovered, lost);
-    pair.stores[0]
-        .transport_confirm(&group, false, Some(&recovered))
+    let (confirmed, advanced) = pair.stores[0]
+        .transport_confirmation(&group, false, Some(&recovered))
         .unwrap();
+    assert!(advanced);
+    assert_eq!(confirmed.as_ref(), Some(&recovered));
+    for cached in [Some(&recovered), None] {
+        assert!(
+            !pair.stores[0]
+                .transport_confirmation(&group, false, cached)
+                .unwrap()
+                .1
+        );
+    }
     assert!(pair.stores[0].data_outgoing(&group, first).is_err());
     let inbox = pair.agent(1, AgentOp::Inbox).unwrap();
     assert_eq!(inbox.as_array().unwrap().len(), 1);

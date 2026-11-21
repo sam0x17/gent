@@ -1,43 +1,57 @@
 # Native transport
 
-Gent persists outgoing messages before choosing a network path. Native nodes
-try an authenticated QUIC connection when a peer has advertised a reachable
-address. Peers with a compatible relay watch can also exchange packets through
-Cloudflare over that WebSocket. A sleeping or unreachable peer can pick up
-messages from its durable Cloudflare mailbox. All three paths carry the same
-MLS ciphertext and use the receiver's signed receipt to retire history.
+Gent persists each outgoing message before choosing a path. Native nodes try
+QUIC over a reachable LAN, VPN or public IP address. With wire version 7, a
+third enrolled node can introduce the peers to each other and forward traffic
+when they cannot connect directly. If native transport fails, peers can exchange
+packets over their Cloudflare WebSocket or collect them later from the durable
+mailbox. Each path carries the same MLS ciphertext. The receiver signs the
+committed stream head, and the sender verifies that receipt before retiring
+history. A lost reply can cause a replay. The receiver deduplicates packets
+before chat delivery.
 
-On a negotiated binary session either peer can push over the open connection.
-The sender resumes from its last verified receipt and the receiver signs the
-committed head. A lost reply or route change can replay identical packet bytes.
-The receiver deduplicates them before chat delivery. Older peers use the
-original QUIC protocol or the mailbox.
+## Cluster helpers
 
-Direct setup has a 250 ms connection deadline and a three-second total attempt
-deadline. Failed endpoints back off for 30 seconds while mailbox delivery stays
-available. Each daemon has one UDP endpoint and bounded incoming and cached
-outgoing connections. Endpoint keys and addresses travel inside the encrypted
-node stream. Receivers recheck current signed membership and the endpoint-key
-binding on each request. Address advertisements expire after three minutes and
-refresh on address changes or when traffic needs a new binding. An idle binding can expire.
+Each native daemon can advertise its helper's IPv4 addresses and TLS certificate
+in its encrypted address record. A helper admits a connection when the Iroh
+endpoint identity matches the current signed cluster membership and endpoint
+binding. It checks enrolled clients again while they are connected.
 
-The default uses reachable LAN, VPN, or public IP addresses. It does not enable
-router port mapping, public address lookup, or an external Iroh relay. Networks
-that prevent direct UDP communication continue through Cloudflare. This is not
-a claim of universal NAT traversal.
+Both peers must be able to register with the same helper. They can reach it
+through different addresses, for example a LAN address on one side and a public
+address on the other. Gent shortlists helpers using the sum of the two measured
+legs, then times an authenticated round trip to the destination peer through
+each shortlisted candidate. It keeps a working route across small RTT changes. Peers can
+upgrade a helper connection to a direct IP path when their networks allow UDP.
+When UDP is blocked they can still exchange encrypted data through a reachable
+helper over TCP. The cluster can operate without a tailnet.
 
-These optional settings are local to the node in `~/.gent/config.toml`:
+A node maintains up to 16 helper registrations. It tries other advertised
+addresses and helpers when registration fails. In a larger cluster, two peers
+with no common registered helper can still use the Cloudflare fallback.
+
+The helper listens on IPv4 TCP and UDP port 7842 by default. If that port is occupied,
+Gent tries an available port and advertises it. Reachability across a router
+depends on its existing firewall and forwarding rules. A host on a public IP can
+act as a helper for two outbound-only networks when both can reach its listener.
+
+Optional settings in `~/.gent/config.toml` apply after a daemon restart.
 
 ```toml
 [transport]
-direct = "auto" # default; use "off" to require Cloudflare mailboxes
-relays = []     # optional explicit HTTPS Iroh relay URLs, at most four
+direct = "auto" # "off" uses the Cloudflare transport
+helper = "auto" # "off" disables hosting while allowing use of other helpers
+udp = true      # false permits TCP helper connections and disables direct IP paths
+relays = []     # up to four explicitly configured HTTPS Iroh relays
+# helper_port = 7842
+# helper_public_address = "203.0.113.10:7842" # existing public IPv4 port mapping
 ```
 
-Restart the daemon after changing transport settings. Turning direct delivery
-off also takes effect on subsequent requests before restart. A configured Iroh
-relay can help establish paths through NAT and may itself relay encrypted
-traffic. It is separate from Gent's durable Cloudflare mailbox.
+The direct dial budget is 250 ms and a native batch attempt has a three-second
+deadline, including helper selection and the signed reply. Endpoint address
+advertisements expire after three minutes. Queued work and on-demand presence
+checks can refresh them. Older peers continue using their negotiated address
+format and existing transports.
 
 Direct access follows the cluster's signed configuration and its expiry. Cloud
 account suspension denies service access; it does not instantly erase an
@@ -94,6 +108,15 @@ Unsupported servers use the existing individual requests. Authorization errors
 and lost responses do not cause an immediate replay through another route.
 
 ## Inspection
+
+`gent nodes` shows the last observed transfer path alongside presence.
+`gent nodes --verbose` includes the time, sequence, direction of evidence and
+helper ID when known. A signed receipt confirms the recipient committed that
+stream sequence. A mailbox upload confirms the relay accepted ciphertext.
+An exchange that used multiple QUIC paths, or whose STREAM counters could
+not account for the transfer, is labeled accordingly. A hosted web node shows
+its carrier's native transport evidence. Restarting the daemon clears the
+observations.
 
 `gent sync --json` reports mailbox operations and empty batch reads under
 `relay_traffic`, QUIC traffic and dial/receipt failures under `direct_traffic`,
