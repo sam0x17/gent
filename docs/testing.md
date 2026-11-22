@@ -43,6 +43,24 @@ This repository has no macOS Actions job. Test on a Mac deliberately over SSH. A
 
 The private parent has separate Worker and native-tool workspaces; this client workflow does not check them or fetch the parent. Their formatting, strict Clippy and service tests remain separate checks.
 
+## Desktop companion
+
+Linux CI also runs the GTK companion in an isolated D-Bus session, Xvfb display and Openbox window manager. With the desktop dependencies, `gio`, Xvfb, Xauth, xdotool and Openbox installed, run the same smoke test after building the binary.
+
+```sh
+dbus-run-session -- xvfb-run -a sh -c 'openbox >/dev/null 2>&1 & exec /usr/bin/python3 scripts/smoke_desktop_linux.py target/debug/gent'
+```
+
+The test creates its own node and login directories, opens the real tray menu, and checks the status of its foreground daemon after the GUI quits. On a logged-in Mac, the standalone AppKit test exercises the native menu bar and window with a synthetic status snapshot.
+
+```sh
+fixture=$(mktemp -d)
+xcrun --sdk macosx swiftc -swift-version 5 crates/gent-link/src/desktop/macos.swift \
+    scripts/desktop-macos/main.swift -o "$fixture/GentDesktopSmoke"
+"$fixture/GentDesktopSmoke" assets/branding/inkling-128.png
+rm "$fixture/GentDesktopSmoke" && rmdir "$fixture"
+```
+
 ## Automatic update acceptance
 
 Run `python3 scripts/prove_updates.py --cache /absolute/path/to/disposable-cache`

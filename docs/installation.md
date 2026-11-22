@@ -28,6 +28,8 @@ gent doctor
 
 Linux uses systemd user services; macOS uses LaunchAgents. This setup needs a working user service session. Headless systems without one can run `gent daemon run` in the foreground. Shell setup also supports `--shell bash` and `--shell fish`. Integration installation preserves unrelated host settings. New clusters allow registered chats to discover and message each other by default; [explicit restrictions](permissions.md) still apply.
 
+Installing the daemon also registers Gent Desktop for graphical login. Open it with `gent desktop`. Linux desktop users need GTK 3 and the system Python bindings. [Desktop requirements and login options](desktop.md)
+
 Host installation enables [automatic incoming-message delivery](wake.md) by default for Codex and Claude Code. Codex also needs `gent integration start codex` and a conversation attached with `codex --remote unix://`. For its experimental [VS Code route](wake.md#vs-code-delivery), install with `--vscode`, start the server, then reload the editor and open or explicitly resume the original chat. Claude Code needs a host restart to load its plugin. Reinstalling preserves an existing custom socket and VS Code route; automatic delivery is always enabled. Verify a message and reply in the intended chat before leaving it unattended.
 
 For a separate install prefix, add `--root /absolute/install/prefix` to `cargo install`, then use its `bin/gent`. The daemon records the installed executable's absolute path. Keep that executable available while its service or connector entries are installed. Use `--home /absolute/state/path` to isolate Gent state for a trial. The hidden `--cluster` option only asserts that the selected node belongs to that cluster; it never selects a profile.

@@ -133,6 +133,9 @@ pub async fn run_daemon(
     let native_stop = tokio_util::sync::CancellationToken::new();
     let web_stop = tokio_util::sync::CancellationToken::new();
     let maintenance = async {
+        if let Err(error) = crate::service::migrate_desktop(&home).await {
+            eprintln!("Gent Desktop login setup: {error:#}. Retry with gent desktop enable.");
+        }
         let stopped = tokio::select! {
             _ = maintain(&home) => "account renewal",
             _ = crate::node::maintain(&home) => "node removals",

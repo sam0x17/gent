@@ -105,6 +105,7 @@ impl Output {
             Some(C::Version) => "Version",
             Some(C::Update { .. }) => "Updates",
             Some(C::Daemon { .. }) => "Daemon",
+            Some(C::Desktop(_)) => "Desktop",
             Some(C::Setup { .. }) => "Setup",
             Some(C::Auth { .. }) => "Account",
             Some(C::Node { .. }) => "Node",

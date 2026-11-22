@@ -116,6 +116,8 @@ New nodes are admins by default. The `ADMIN` column in `gent nodes` shows `owner
 
 | Command | Behavior |
 | --- | --- |
+| `gent desktop` | Open the daemon status window and tray. |
+| `gent desktop enable` / `gent desktop disable` | Enable or disable graphical login for the companion. |
 | `gent daemon` / `gent daemon status` | Show installation, process, service-manager, and relay connection status. |
 | `gent daemon install` | Register and start a service for the current user, including supported automatic startup. |
 | `gent daemon uninstall` | Stop and remove the service registration, preserving configuration, keys, and stored state. |

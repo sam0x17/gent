@@ -64,6 +64,8 @@ cargo install gent-link && gent daemon install
 
 The Cargo package will be `gent-link` and the CLI binary will be `gent`. macOS and Linux are the first supported platforms. The daemon installer will guide GitHub login and cluster enrollment, offer shell-hook installation, and be safe to rerun. Package publication is still pending.
 
+On macOS and Linux desktops, `gent desktop` opens the daemon status window. It shows sync activity and peer routes, and provides controls for the managed service. [Desktop and graphical-login setup](docs/desktop.md)
+
 The development build implements [daemon lifecycle commands](docs/local-proof.md#daemon-services) through systemd user services and macOS LaunchAgents. After installing from source, `gent daemon install --local demo` initializes a development cluster and starts its service. Existing or joined nodes use `gent daemon install`. Start, stop, restart, status, logs, and uninstall preserve node state; uninstall retains keys and queued messages. Hosted installation guides login and owner/invitation enrollment, with explicit flags for noninteractive use. `gent cluster connect` resumes interrupted setup or replaces an invalid credential. [Shell integration](docs/local-proof.md#shell-integration) provides PATH setup and completion for Zsh, Bash, and Fish through `gent hooks install`, with status and removal commands.
 
 Commands use a consistent noun-first structure:

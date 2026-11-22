@@ -245,6 +245,21 @@ pub(crate) async fn diagnose(home: &Path) -> Result<Value> {
     )
 }
 
+/// Upgrade older managed installations when their new daemon first starts.
+pub(crate) async fn migrate_desktop(home: &Path) -> Result<()> {
+    let service = Service::new(home).await?;
+    let binary = std::env::current_exe()?;
+    let still_installed = || {
+        Ok(service
+            .installed()?
+            .is_some_and(|spec| spec.binary == binary))
+    };
+    if still_installed()? {
+        crate::desktop::migrate(&service.home, still_installed)?;
+    }
+    Ok(())
+}
+
 pub async fn execute(home: &Path, action: DaemonCommand) -> Result<Value> {
     let _progress = crate::ui::Progress::start("Checking daemon service");
     control(home, Kind::Daemon, action.into()).await
@@ -298,10 +313,17 @@ async fn control(home: &Path, kind: Kind, mut action: Action) -> Result<Value> {
                 config::private_dir(&service.home)?;
             }
         }
-        Action::Uninstall if previous.is_none() => return Ok(service.status().await),
+        Action::Uninstall
+            if previous.is_none()
+                && (!matches!(kind, Kind::Daemon)
+                    || !crate::desktop::previously_configured(&service.home)?) =>
+        {
+            return Ok(service.status().await);
+        }
         Action::Install(Install::Gateway(_)) => {
             config::load(&service.home)?;
         }
+        Action::Uninstall => {}
         _ => ensure!(
             previous.is_some(),
             "service is not installed; install it first"
@@ -320,6 +342,12 @@ async fn control(home: &Path, kind: Kind, mut action: Action) -> Result<Value> {
         "loaded service has no Gent-managed file; inspect {}",
         service.path.display()
     );
+    if matches!(action, Action::Uninstall) && previous.is_none() {
+        if matches!(kind, Kind::Daemon) {
+            crate::desktop::removed(&service.home)?;
+        }
+        return Ok(service.status().await);
+    }
     if let Action::Install(Install::Daemon { local }) = &action {
         if !config::path(&service.home).exists() {
             let _daemon = managed_file::lock(&service.home.join("daemon.lock"))?;
@@ -374,6 +402,11 @@ async fn control(home: &Path, kind: Kind, mut action: Action) -> Result<Value> {
                 .await
                 .context("service installation failed; inspect its service status and logs")?;
             service.wait(true).await?;
+            if matches!(kind, Kind::Daemon)
+                && let Err(error) = crate::desktop::installed(&service.home)
+            {
+                eprintln!("Gent Desktop login setup: {error:#}. Retry with gent desktop enable.");
+            }
         }
         Action::Start | Action::Restart => {
             ensure!(
@@ -400,6 +433,9 @@ async fn control(home: &Path, kind: Kind, mut action: Action) -> Result<Value> {
             fs::remove_file(&service.path)?;
             fs::File::open(service.path.parent().unwrap())?.sync_all()?;
             service.manager.reload().await?;
+            if matches!(kind, Kind::Daemon) {
+                crate::desktop::removed(&service.home)?;
+            }
         }
         _ => unreachable!(),
     }
@@ -420,6 +456,10 @@ pub(crate) async fn retire(home: &Path) -> Result<()> {
                 "a Gent service is loaded without its registration; inspect service status before resetting"
             );
             service.no_foreground(&state).await?;
+            if matches!(kind, Kind::Daemon) && crate::desktop::previously_configured(&service.home)?
+            {
+                crate::desktop::removed(&service.home)?;
+            }
         }
     }
     Ok(())

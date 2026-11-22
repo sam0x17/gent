@@ -13,7 +13,41 @@ fn git(root: &std::path::Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+fn build_desktop() {
+    let source = "src/desktop/macos.swift";
+    let main = "src/desktop/main.swift";
+    println!("cargo:rerun-if-changed={source}");
+    println!("cargo:rerun-if-changed={main}");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        _ => panic!("unsupported macOS architecture"),
+    };
+    let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("GentDesktop");
+    let ok = Command::new("xcrun")
+        .args([
+            "--sdk",
+            "macosx",
+            "swiftc",
+            "-swift-version",
+            "5",
+            "-O",
+            "-target",
+        ])
+        .arg(format!("{arch}-apple-macos11.0"))
+        .args([source, main])
+        .arg("-o")
+        .arg(output)
+        .status()
+        .expect("building Gent Desktop requires the Xcode command line tools");
+    assert!(ok.success(), "could not compile the AppKit companion");
+}
+
 fn main() {
+    build_desktop();
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     let root = root.canonicalize().unwrap();
     let commit = git(&root, &["rev-parse", "HEAD"])

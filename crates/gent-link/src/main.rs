@@ -6,6 +6,7 @@ mod build_info;
 mod chats;
 mod cluster;
 mod config_editor;
+mod desktop;
 mod display;
 mod doctor;
 mod enrollment;
@@ -126,6 +127,8 @@ enum Command {
         #[command(subcommand)]
         command: Option<DaemonCommand>,
     },
+    /// Open the desktop window and system tray, or manage startup at graphical login.
+    Desktop(desktop::Options),
     /// Expose Gent to an MCP host.
     Mcp {
         #[command(subcommand)]
@@ -666,6 +669,9 @@ async fn execute(cli: Cli) -> Result<()> {
     }
     let home = node_home::resolve(&root, cli.context.as_deref())?;
     gent_daemon::recovery::ensure_active(&home)?;
+    if let Some(Command::Desktop(options)) = cli.command {
+        return desktop::execute(&home, options, output_format).await;
+    }
     if let Some(Command::Setup { local, setup }) = cli.command {
         let output =
             node_home::provision::install(&home, local, setup, !output_format.raw()).await?;
@@ -867,7 +873,7 @@ async fn execute(cli: Cli) -> Result<()> {
             return Ok(());
         }
         Some(Command::Cluster { .. }) => owner(&home, OwnerOp::Status).await?,
-        Some(Command::Daemon { .. } | Command::Auth { .. }) => unreachable!(),
+        Some(Command::Daemon { .. } | Command::Auth { .. } | Command::Desktop(_)) => unreachable!(),
         Some(Command::Hooks { .. } | Command::Completions { .. }) => unreachable!(),
         Some(Command::Mcp {
             command:
