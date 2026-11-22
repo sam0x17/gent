@@ -61,5 +61,5 @@ jobs:
       - name: Exercise the Linux tray in a disposable graphical session
         run: |
           dbus-run-session -- xvfb-run -a sh -c '
-            openbox >"$RUNNER_TEMP/gent-openbox.log" 2>&1 &
+            openbox &
             exec /usr/bin/python3 scripts/smoke_desktop_linux.py target/debug/gent'
