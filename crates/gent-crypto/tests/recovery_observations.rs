@@ -174,7 +174,10 @@ fn changed_payload_signature_challenge_cluster_and_time_are_rejected() {
     for (pointer, replacement) in [
         ("/observation/version", json!(2)),
         ("/observation/observer", json!(nodes[1].id())),
-        ("/observation/observer_key/0", json!(123)),
+        (
+            "/observation/observer_key/0",
+            json!(signed.observation.observer_key[0] ^ 1),
+        ),
         ("/observation/state/state/name", json!("changed")),
         (
             "/observation/challenge/id",
