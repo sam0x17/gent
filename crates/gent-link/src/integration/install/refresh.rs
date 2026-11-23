@@ -35,7 +35,7 @@ struct Registry {
     version: u8,
     targets: Vec<Target>,
 }
-fn read(home: &Path) -> Result<(Snapshot, Registry)> {
+fn read_index(home: &Path) -> Result<(Snapshot, Registry)> {
     let snapshot = Snapshot::read(&home.join(REGISTRY))?;
     snapshot.private()?;
     let registry: Registry = snapshot
@@ -51,6 +51,11 @@ fn read(home: &Path) -> Result<(Snapshot, Registry)> {
         registry.version == 1 && registry.targets.len() <= MAX_TARGETS,
         "unsupported integration target registry"
     );
+    Ok((snapshot, registry))
+}
+
+fn read(home: &Path) -> Result<(Snapshot, Registry)> {
+    let (snapshot, registry) = read_index(home)?;
     for target in &registry.targets {
         target.layout()?;
     }
@@ -148,16 +153,12 @@ fn refresh_targets(home: &Path, binary: &Path, targets: Vec<Target>) -> Value {
         "next":"Managed files are refreshed automatically. Hosts that cannot reload Gent in place need an MCP reconnect; active turns are not interrupted."})
 }
 
-pub(crate) fn refresh(home: &Path) -> Result<Value> {
-    let home = normalize(home)?;
-    gent_daemon::recovery::ensure_active(&home)?;
-    config::load(&home)?;
-    let binary = std::fs::canonicalize(std::env::current_exe()?)?;
-    let (_, registry) = read(&home)?;
+fn targets(registry: Registry, hosts: &[Host]) -> Vec<Target> {
     let mut targets = registry.targets;
+    targets.retain(|target| hosts.contains(&target.host));
     // Bootstrap pre-registry default installs. Arbitrary custom directories
     // are remembered by install/uninstall from this version onward.
-    for host in [Host::Codex, Host::ClaudeCode] {
+    for &host in hosts {
         let mut layouts = vec![Layout::resolve(host, None)];
         if let Some(user) = std::env::var_os("HOME").map(PathBuf::from) {
             let directory = user.join(if host == Host::Codex {
@@ -194,6 +195,28 @@ pub(crate) fn refresh(home: &Path) -> Result<Value> {
             targets.push(target);
         }
     }
+    targets
+}
+
+/// Runtime reads only completed installs owned by this node, including custom CODEX_HOME profiles.
+pub(crate) fn codex_sockets(home: &Path) -> Result<std::collections::BTreeSet<PathBuf>> {
+    // A moved or edited profile cannot prevent another intact profile from running.
+    let (_, index) = read_index(home)?;
+    Ok(targets(index, &[Host::Codex])
+        .into_iter()
+        .filter_map(|target| target.layout().ok())
+        .filter_map(|layout| codex_runtime_target(home, Some(layout.directory), false).ok())
+        .map(|(_, socket)| socket)
+        .collect())
+}
+
+pub(crate) fn refresh(home: &Path) -> Result<Value> {
+    let home = normalize(home)?;
+    gent_daemon::recovery::ensure_active(&home)?;
+    config::load(&home)?;
+    let binary = std::fs::canonicalize(std::env::current_exe()?)?;
+    let (_, registry) = read(&home)?;
+    let targets = targets(registry, &[Host::Codex, Host::ClaudeCode]);
     let report = refresh_targets(&home, &binary, targets);
     let snapshot = Snapshot::read(&home.join(REPORT))?;
     snapshot.private()?;

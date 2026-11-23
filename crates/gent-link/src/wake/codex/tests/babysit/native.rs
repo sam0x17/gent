@@ -127,7 +127,7 @@ async fn installed_codex_resumes_a_usage_limited_and_an_already_active_goal() ->
             sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        sweep(&node.home, &socket, &registry, &mut None).await?;
+        sweep(&node.home, &registry, &mut None, Sweep::WakeAndGoals).await?;
         while calls.load(Ordering::SeqCst) < 2 {
             sleep(Duration::from_millis(20)).await;
         }
@@ -152,7 +152,7 @@ async fn installed_codex_resumes_a_usage_limited_and_an_already_active_goal() ->
             sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(last(&mut host, &thread).await?["status"], "interrupted");
-        sweep(&node.home, &socket, &registry, &mut None).await?;
+        sweep(&node.home, &registry, &mut None, Sweep::WakeAndGoals).await?;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             host.rpc("thread/goal/get", params).await?["goal"]["status"],

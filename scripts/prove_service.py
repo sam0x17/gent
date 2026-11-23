@@ -95,8 +95,13 @@ def main():
         assert started['daemon']['managed'] and started['daemon']['pid'] != pid
         restarted = call('daemon', 'restart')
         assert restarted['daemon']['pid'] != started['daemon']['pid']
-        os.kill(restarted['daemon']['pid'], signal.SIGKILL)
-        wait(lambda: (s := status())['daemon']['managed'] and s['daemon']['pid'] != restarted['daemon']['pid'])
+        # Gent drains on SIGTERM and exits successfully. Only a manager stop
+        # should leave an installed daemon down.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            previous_pid = restarted['daemon']['pid']
+            os.kill(previous_pid, sig)
+            wait(lambda: (s := status())['daemon']['managed'] and s['daemon']['pid'] != previous_pid)
+            restarted = status()
         inbox, raw = b.call('gent_inbox')
         assert len(inbox) == 1 and inbox[0]['id'] == sent['message_id']
         assert inbox[0]['files'][0]['data_base64'] == PNG

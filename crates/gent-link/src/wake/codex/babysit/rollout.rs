@@ -1,7 +1,7 @@
 //! The only file opened is the rollout returned by the bound thread's host.
 use super::*;
 use rustix::fs::{Mode, OFlags};
-use std::{fs::File, io::BufReader, os::unix::fs::FileExt};
+use std::{collections::HashSet, fs::File, io::BufReader, os::unix::fs::FileExt};
 
 #[derive(Clone, PartialEq)]
 pub(super) struct Evidence {
@@ -53,20 +53,37 @@ impl Evidence {
                 return Ok(None);
             }
             let before = stamp(meta)?;
-            let header = Header::deserialize(&mut serde_json::Deserializer::from_reader(
-                BufReader::new(&file),
-            ))?;
+            let header = Record::<Identity>::deserialize(
+                &mut serde_json::Deserializer::from_reader(BufReader::new(&file)),
+            )?;
             if header.r#type != "session_meta" || header.payload.id != *thread {
                 return Ok(None);
             }
             let mut rows = ReverseLines::new(&file, before.size)?;
             let mut line = Vec::new();
-            if !rows.previous(&mut line)? {
-                return Ok(None);
+            let mut receipt_turns = HashSet::new();
+            loop {
+                if !rows.previous(&mut line)? {
+                    return Ok(None);
+                }
+                let row: Record = serde_json::from_slice(&line)?;
+                if row.completes(&last) {
+                    break;
+                }
+                if row.r#type != "event_msg" || row.payload.r#type != "item_completed" {
+                    return Ok(None);
+                }
+                let Some(id) = serde_json::from_slice::<Record<Receipt>>(&line)
+                    .ok()
+                    .and_then(|r| r.payload.background_turn(thread, &last))
+                else {
+                    return Ok(None);
+                };
+                receipt_turns.insert(id);
             }
-            let end: Record = serde_json::from_slice(&line)?;
-            if !end.completes(&last)
-                || (full && !provider_stop(&mut rows, &mut line, &goal, &last)?)
+            if (full
+                && !(provider_stop(&mut rows, &mut line, &goal, &last)?
+                    && earlier_turns(&mut rows, &mut line, receipt_turns)?))
                 || stamp(std::fs::symlink_metadata(&path)?)? != before
             {
                 return Ok(None);
@@ -90,7 +107,7 @@ impl Evidence {
     }
 }
 
-// Read backwards a block at a time, stopping at the failed turn's start.
+// Read backwards a block at a time.
 // Memory follows the largest individual record, independent of turn length.
 struct ReverseLines<'a> {
     file: &'a File,
@@ -145,18 +162,94 @@ impl<'a> ReverseLines<'a> {
 // Deserialize only native metadata. Tool output, message content, shell input
 // and base instructions are skipped by serde without materializing their text.
 #[derive(Deserialize)]
-struct Header {
-    r#type: String,
-    payload: Identity,
-}
-#[derive(Deserialize)]
 struct Identity {
     id: String,
 }
 #[derive(Deserialize)]
-struct Record {
+struct Record<P = Payload> {
     r#type: String,
-    payload: Payload,
+    payload: P,
+}
+
+// Native ItemCompletedEvent metadata. Commands, output and messages are never
+// used to decide whether a record is a receipt.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Receipt {
+    #[serde(rename = "type")]
+    _kind: String,
+    thread_id: String,
+    turn_id: Uuid,
+    item: ReceiptItem,
+    #[serde(rename = "content_token_count")]
+    _content_token_count: Option<u64>,
+    #[serde(rename = "started_at_ms")]
+    _started_at_ms: Option<i64>,
+    #[serde(rename = "completed_at_ms")]
+    _completed_at_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct ReceiptItem {
+    r#type: String,
+    id: String,
+    kind: Option<String>,
+    status: Option<String>,
+    internal_chat_message_metadata_passthrough: Option<serde::de::IgnoredAny>,
+}
+
+impl Receipt {
+    fn background_turn(&self, thread: &str, last: &Value) -> Option<Uuid> {
+        let turn = self.turn_id;
+        let failed = Uuid::parse_str(last["id"].as_str()?).ok()?;
+        let item = &self.item;
+        (self.thread_id == thread
+            && !turn.is_nil()
+            && turn != failed
+            && !item.id.is_empty()
+            && item.internal_chat_message_metadata_passthrough.is_none()
+            && matches!(
+                (
+                    item.r#type.as_str(),
+                    item.kind.as_deref(),
+                    item.status.as_deref()
+                ),
+                ("SubAgentActivity", Some("completed"), None)
+                    | ("CommandExecution", None, Some("completed"))
+            ))
+        .then_some(turn)
+    }
+}
+
+// provider_stop has already walked back through the failed turn. Only accept
+// delayed receipts for turns that had already completed before that boundary.
+fn earlier_turns(
+    rows: &mut ReverseLines<'_>,
+    line: &mut Vec<u8>,
+    mut pending: HashSet<Uuid>,
+) -> Result<bool> {
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct Boundary {
+        r#type: String,
+        turn_id: Option<String>,
+    }
+    while !pending.is_empty() {
+        if !rows.previous(line)? {
+            return Ok(false);
+        }
+        let row: Record<Boundary> = serde_json::from_slice(line)?;
+        match (row.r#type.as_str(), row.payload.r#type.as_str()) {
+            ("session_meta", _) | ("event_msg", "thread_rolled_back") => return Ok(false),
+            ("event_msg", "task_complete") => {
+                if let Some(id) = row.payload.turn_id.and_then(|s| Uuid::parse_str(&s).ok()) {
+                    pending.remove(&id);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(true)
 }
 
 #[derive(Default, Deserialize)]

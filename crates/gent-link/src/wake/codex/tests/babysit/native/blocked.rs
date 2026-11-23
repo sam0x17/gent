@@ -165,7 +165,7 @@ async fn installed_codex_retries_provider_blocks_once_and_preserves_deliberate_b
                 .await?;
                 assert!(next_block(&mut observer, thread).await?["turnId"].is_null());
             }
-            sweep(&node.home, &socket, &registry, &mut None).await?;
+            sweep(&node.home, &registry, &mut None, Sweep::WakeAndGoals).await?;
             if matches!(outcome, Outcome::Resume | Outcome::LongResume) {
                 while calls.load(Ordering::SeqCst) < 2 {
                     sleep(Duration::from_millis(20)).await;
@@ -173,7 +173,7 @@ async fn installed_codex_retries_provider_blocks_once_and_preserves_deliberate_b
                 let resumed = last(&mut host, thread).await?;
                 assert_eq!(resumed["status"], "inProgress");
                 assert_ne!(resumed["id"], turn["id"]);
-                sweep(&node.home, &socket, &registry, &mut None).await?;
+                sweep(&node.home, &registry, &mut None, Sweep::WakeAndGoals).await?;
                 assert_eq!(last(&mut host, thread).await?["id"], resumed["id"]);
                 assert_eq!(calls.load(Ordering::SeqCst), 2);
                 assert_eq!(node.notices(&registered).await?, 1);

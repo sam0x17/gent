@@ -207,9 +207,25 @@ impl Registry {
     /// A nonblocking lease elects one watcher per endpoint and node/cluster.
     /// The OS releases it on process exit. It never locks a model credential.
     pub(crate) fn coordinator(&self) -> Result<Option<File>> {
+        self.lease("wake")
+    }
+
+    /// Held for the lifetime of a managed endpoint's daemon worker. Attached
+    /// runners only probe this lock and never keep it across a host operation.
+    pub(crate) fn daemon_babysitter(&self) -> Result<Option<File>> {
+        self.lease("daemon-babysitter")
+    }
+
+    /// Standalone endpoints have no installation for the daemon to supervise.
+    /// Elect one fallback per build so a live superseded MCP cannot veto newer code.
+    pub(crate) fn attached_babysitter(&self) -> Result<Option<File>> {
+        self.lease(concat!("attached-babysitter-", env!("GENT_COMMIT")))
+    }
+
+    fn lease(&self, name: &str) -> Result<Option<File>> {
         gent_daemon::recovery::ensure_active(&self.home)?;
         let id = super::digest(&serde_json::json!(self.endpoint));
-        let path = self.folder.join(format!("wake-{id}.lock"));
+        let path = self.folder.join(format!("{name}-{id}.lock"));
         let saved = snapshot(&path)?;
         ensure!(
             saved.text.as_ref().is_none_or(|s| s.is_empty()),

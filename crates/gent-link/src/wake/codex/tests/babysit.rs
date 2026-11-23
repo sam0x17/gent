@@ -8,6 +8,7 @@ struct Node {
     home: PathBuf,
     daemon: tokio::task::JoinHandle<Result<()>>,
     scope: gent_protocol::notifications::Scope,
+    stop: tokio_util::sync::CancellationToken,
 }
 impl Drop for Node {
     fn drop(&mut self) {
@@ -37,12 +38,17 @@ impl Node {
             }))?,
         )?;
         let lock = gent_daemon::DaemonLock::acquire(&home)?;
-        let daemon = tokio::spawn(gent_daemon::run_locked_until(lock, std::future::pending()));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let daemon = tokio::spawn(gent_daemon::run_locked_until(
+            lock,
+            stop.clone().cancelled_owned(),
+        ));
         let node = Self {
             root,
             home,
             daemon,
             scope,
+            stop,
         };
         tokio::time::timeout(Duration::from_secs(5), async {
             while !node.home.join("daemon.sock").exists() {
@@ -125,10 +131,11 @@ fn host(thread: &str, before: Read, after: Read, lose_reply: bool) -> Fixture {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let reads = AtomicUsize::new(0);
     let thread = thread.to_owned();
+    let unbound = Uuid::now_v7().to_string();
     Fixture::respond(move |request| {
         let params = &request["params"];
         if request["method"] == "thread/loaded/list" {
-            return Some(json!({"data":[thread],"nextCursor":null}));
+            return Some(json!({"data":[unbound,thread],"nextCursor":null}));
         }
         assert_eq!(params["threadId"], thread);
         if request["method"] == "thread/read" {
@@ -198,7 +205,7 @@ async fn exercise(
     let host = host(thread, before.clone(), after, lose_reply);
     let (_bindings, registry, registered) = node.register(&host.path, thread).await?;
     for _ in 0..sweeps {
-        sweep(&node.home, &host.path, &registry, &mut None).await?;
+        sweep(&node.home, &registry, &mut None, Sweep::WakeAndGoals).await?;
     }
     let (reads, resumes) = {
         let requests = host.requests.lock().unwrap();
@@ -342,3 +349,4 @@ async fn an_existing_human_stop_or_newer_goal_never_reaches_the_claim_recheck() 
 
 mod native;
 mod rollout;
+mod scheduler;

@@ -20,6 +20,8 @@ use tokio_tungstenite::{
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 mod babysit;
+mod daemon;
+pub(crate) use daemon::maintain_babysitter;
 mod direct;
 pub(crate) mod recovery;
 
@@ -32,6 +34,45 @@ pub(crate) async fn inspect(socket: &Path) -> Result<Value> {
 }
 
 pub(crate) struct Runner(tokio::task::JoinHandle<()>);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sweep {
+    WakeOnly,
+    GoalsOnly,
+    WakeAndGoals,
+}
+
+#[derive(Default)]
+struct Attached {
+    wake: Option<std::fs::File>,
+    goals: Option<std::fs::File>,
+}
+
+impl Attached {
+    fn work(&mut self, registry: &Registry, home: &Path) -> Result<Option<Sweep>> {
+        if self.wake.is_none() {
+            self.wake = registry.coordinator()?;
+        }
+        let goals = self.inspect_goals(registry, home);
+        match (self.wake.is_some(), goals) {
+            (true, Ok(true)) => Ok(Some(Sweep::WakeAndGoals)),
+            // A Babysitter opt-out or election failure must preserve inbox delivery.
+            (true, _) => Ok(Some(Sweep::WakeOnly)),
+            (false, goals) => Ok(goals?.then_some(Sweep::GoalsOnly)),
+        }
+    }
+
+    fn inspect_goals(&mut self, registry: &Registry, home: &Path) -> Result<bool> {
+        if home.join("babysitter-disabled").try_exists()? {
+            self.goals = None;
+        } else if self.goals.is_none() {
+            self.goals = registry.attached_babysitter()?;
+        }
+        // Keep this probe out of the host sweep. The daemon can take ownership
+        // even while a standalone fallback is waiting on a slow host.
+        Ok(self.goals.is_some() && registry.daemon_babysitter()?.is_some())
+    }
+}
+
 impl Drop for Runner {
     fn drop(&mut self) {
         self.0.abort();
@@ -51,30 +92,37 @@ impl Runner {
             .lock()
             .expect("host bindings lock poisoned")
             .enable_wake(&home, &socket)?;
-        Ok(Self(tokio::spawn(async move {
+        let mut attached = Attached::default();
+        Ok(Self::spawn(home, registry, move |registry, home| {
+            attached.work(registry, home)
+        }))
+    }
+
+    fn spawn(
+        home: PathBuf,
+        registry: Registry,
+        mut work: impl FnMut(&Registry, &Path) -> Result<Option<Sweep>> + Send + 'static,
+    ) -> Self {
+        Self(tokio::spawn(async move {
             let mut unavailable = false;
-            let mut lease = None;
             let mut cursor = None;
             loop {
                 let result = async {
-                    if lease.is_none() {
-                        lease = registry.coordinator()?;
-                    }
-                    if lease.is_some() {
-                        sweep(&home, &socket, &registry, &mut cursor).await?;
+                    if let Some(mode) = work(&registry, &home)? {
+                        sweep(&home, &registry, &mut cursor, mode).await?;
                     }
                     Ok::<_, anyhow::Error>(())
                 }
                 .await;
                 if result.is_err() && !unavailable {
                     eprintln!(
-                        "Gent: Codex wake unavailable or submission uncertain; inspect gent wake. Inbox polling remains available."
+                        "Gent: Codex endpoint unavailable or submission uncertain. Inbox polling remains available."
                     );
                 }
                 unavailable = result.is_err();
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
-        })))
+        }))
     }
 }
 
@@ -95,13 +143,15 @@ async fn agent(home: &Path, credential: &str, action: AgentOp) -> Result<Value> 
 
 async fn sweep(
     home: &Path,
-    socket: &Path,
     registry: &Registry,
     cursor: &mut Option<String>,
+    mode: Sweep,
 ) -> Result<()> {
     gent_daemon::recovery::ensure_active(home)?;
+    let socket = &registry.endpoint;
     let mut host = Host::connect(socket).await?;
-    let (threads, next) = host.loaded(cursor.as_deref()).await?;
+    // Cursors belong to the host session. Start over if the host rejects one after a restart.
+    let (threads, next) = host.loaded(cursor.take().as_deref()).await?;
     *cursor = next;
     drop(host);
     let mut failed = false;
@@ -109,9 +159,14 @@ async fn sweep(
         // A stale or unavailable conversation must not starve other bindings.
         match registry.credential(&thread) {
             Ok(Some(credential)) => {
-                failed |= dispatch(home, socket, &thread, &credential).await.is_err();
-                // Older app servers may not implement goal inspection.
-                let _ = babysit::inspect(home, socket, &thread, &credential).await;
+                if mode != Sweep::GoalsOnly {
+                    failed |= dispatch(home, socket, &thread, &credential).await.is_err();
+                }
+                if mode != Sweep::WakeOnly {
+                    let inspection = babysit::inspect(home, socket, &thread, &credential).await;
+                    // Older servers may support inbox delivery without a goal API.
+                    failed |= mode == Sweep::GoalsOnly && inspection.is_err();
+                }
             }
             Ok(None) => {}
             Err(_) => failed = true,
@@ -119,7 +174,7 @@ async fn sweep(
     }
     ensure!(
         !failed,
-        "one or more Codex dispatches unavailable or uncertain"
+        "one or more Codex operations unavailable or uncertain"
     );
     Ok(())
 }

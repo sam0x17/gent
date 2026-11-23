@@ -64,6 +64,32 @@ impl Service {
             self.kind,
         )
     }
+    /// A daemon that execs an update retains its manager PID. Stage its policy
+    /// without starting, enabling or stopping any job. Only systemd can apply
+    /// the definition to the live PID; launchd reads it on the next bootstrap.
+    fn upgrade_running_policy(&self, binary: &Path, state: &State) -> Result<bool> {
+        if !state.running || state.pid != Some(std::process::id()) {
+            return Ok(false);
+        }
+        let candidate = || -> Result<Option<Spec>> {
+            Ok(self.installed()?.filter(|s| {
+                s.kind() == Kind::Daemon
+                    && s.binary == binary
+                    && (s.legacy_daemon() || state.need_reload)
+            }))
+        };
+        if candidate()?.is_none() {
+            return Ok(false);
+        }
+        let _lock = self.lock()?;
+        let Some(spec) = candidate()? else {
+            return Ok(false);
+        };
+        if spec.legacy_daemon() {
+            spec.upgrade_daemon(&self.path)?;
+        }
+        Ok(self.manager.platform == Platform::Systemd)
+    }
     fn lock(&self) -> Result<fs::File> {
         ensure!(
             self.home.is_dir(),
@@ -246,7 +272,7 @@ pub(crate) async fn diagnose(home: &Path) -> Result<Value> {
 }
 
 /// Upgrade older managed installations when their new daemon first starts.
-pub(crate) async fn migrate_desktop(home: &Path) -> Result<()> {
+pub(crate) async fn migrate_installation(home: &Path) -> Result<()> {
     let service = Service::new(home).await?;
     let binary = std::env::current_exe()?;
     let still_installed = || {
@@ -255,7 +281,13 @@ pub(crate) async fn migrate_desktop(home: &Path) -> Result<()> {
             .is_some_and(|spec| spec.binary == binary))
     };
     if still_installed()? {
-        crate::desktop::migrate(&service.home, still_installed)?;
+        if let Err(error) = crate::desktop::migrate(&service.home, still_installed) {
+            eprintln!("Gent Desktop login setup: {error:#}. Retry with gent desktop enable.");
+        }
+        let state = service.manager.inspect().await;
+        if service.upgrade_running_policy(&binary, &state)? {
+            service.manager.reload().await?;
+        }
     }
     Ok(())
 }
@@ -393,12 +425,22 @@ async fn control(home: &Path, kind: Kind, mut action: Action) -> Result<Value> {
             let changed =
                 previous.as_ref().map(|spec| spec.render()).transpose()? != Some(desired.render()?);
             service.prepare_log()?;
-            if changed {
+            let policy_only = previous
+                .as_ref()
+                .filter(|spec| spec.legacy_daemon() && spec.binary == desired.binary);
+            if let Some(legacy) = policy_only {
+                legacy.upgrade_daemon(&service.path)?;
+            } else if changed {
                 files::write(&service.path, &desired)?;
             }
+            let reconfigure = if policy_only.is_some() {
+                before.stopped_launch_agent(&service.path)
+            } else {
+                changed
+            };
             service
                 .manager
-                .install(&service.path, changed, &before)
+                .install(&service.path, reconfigure, &before)
                 .await
                 .context("service installation failed; inspect its service status and logs")?;
             service.wait(true).await?;
@@ -409,14 +451,23 @@ async fn control(home: &Path, kind: Kind, mut action: Action) -> Result<Value> {
             }
         }
         Action::Start | Action::Restart => {
-            ensure!(
-                previous.is_some(),
-                "service was uninstalled; install it again"
-            );
+            let spec = previous.context("service was uninstalled; install it again")?;
+            if spec.legacy_daemon() && spec.binary == std::env::current_exe()? {
+                spec.upgrade_daemon(&service.path)?;
+            }
             service.prepare_log()?;
+            // A loaded, stopped LaunchAgent can still have its old KeepAlive
+            // policy in memory. Bootstrap the on-disk daemon definition.
+            let rebootstrap = kind == Kind::Daemon
+                && service.manager.platform == Platform::Launchd
+                && before.stopped_launch_agent(&service.path);
             service
                 .manager
-                .start(&service.path, &before, matches!(action, Action::Restart))
+                .start(
+                    &service.path,
+                    &before,
+                    matches!(action, Action::Restart) || rebootstrap,
+                )
                 .await?;
             service.wait(true).await?;
         }
@@ -464,3 +515,6 @@ pub(crate) async fn retire(home: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -9,6 +9,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+const DAEMON_VERSION: u8 = 4;
 const MAX_SERVICE_BYTES: usize = 128 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +68,7 @@ pub struct Spec {
 impl Spec {
     pub fn new(platform: Platform, home: PathBuf, binary: PathBuf) -> Result<Self> {
         let spec = Self {
-            version: 3,
+            version: DAEMON_VERSION,
             platform,
             home,
             binary,
@@ -101,7 +102,7 @@ impl Spec {
     }
     fn validate(&self) -> Result<()> {
         ensure!(
-            (matches!(self.version, 1 | 3) && self.gateway.is_none())
+            (matches!(self.version, 1 | 3 | DAEMON_VERSION) && self.gateway.is_none())
                 || (self.version == 2 && self.gateway.is_some()),
             "unsupported Gent service format"
         );
@@ -118,6 +119,40 @@ impl Spec {
         }
         Ok(())
     }
+    pub fn legacy_daemon(&self) -> bool {
+        self.kind() == Kind::Daemon && self.version != DAEMON_VERSION
+    }
+
+    /// Revalidate the exact bytes immediately before replacing a legacy definition.
+    /// The caller holds the service lock. External editors need not take it.
+    pub fn upgrade_daemon(&self, path: &Path) -> Result<()> {
+        ensure!(self.legacy_daemon(), "expected an older managed daemon");
+        let saved = crate::managed_file::Snapshot::read(path)?;
+        saved.private()?;
+        let text = saved.text.as_deref().context("service file disappeared")?;
+        ensure!(
+            self.matches_definition(text)?,
+            "service definition changed during upgrade"
+        );
+        let current = Self::new(self.platform, self.home.clone(), self.binary.clone())?;
+        saved.write(&current.render()?)
+    }
+
+    fn matches_definition(&self, text: &str) -> Result<bool> {
+        let expected = self.render()?;
+        // Release 9164631 changed the description without changing the spec version.
+        // Recognize only that exact generated variant; all other edits still fail.
+        let transitional = self.version == 1
+            && self.platform == Platform::Systemd
+            && self.kind() == Kind::Daemon
+            && expected.replacen(
+                "\nDescription=Gent agent communication daemon\n",
+                "\nDescription=Gent chat communication daemon\n",
+                1,
+            ) == text;
+        Ok(expected == text || transitional)
+    }
+
     pub fn label(&self) -> String {
         self.kind().label(self.platform, &self.home)
     }
@@ -152,14 +187,26 @@ impl Spec {
             "chat communication daemon"
         };
         let log = xml(&format!("{home}/{}.log", self.kind().name()));
+        let persistent = self.version == DAEMON_VERSION;
+        let start_limit = if persistent {
+            "StartLimitIntervalSec=0\n"
+        } else {
+            ""
+        };
+        let restart = if persistent { "always" } else { "on-failure" };
+        let keep_alive = if persistent {
+            "<true/>"
+        } else {
+            "<dict><key>SuccessfulExit</key><false/></dict>"
+        };
         let rendered = match self.platform {
             Platform::Systemd => format!(
-                "# gent-service-v1:{metadata}\n[Unit]\nDescription=Gent {description}\n\n[Service]\nType=simple\nExecStart=/usr/bin/env -- {} --home {} {command}\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=10\nUMask=0077\n\n[Install]\nWantedBy=default.target\n",
+                "# gent-service-v1:{metadata}\n[Unit]\nDescription=Gent {description}\n{start_limit}\n[Service]\nType=simple\nExecStart=/usr/bin/env -- {} --home {} {command}\nRestart={restart}\nRestartSec=3\nTimeoutStopSec=10\nUMask=0077\n\n[Install]\nWantedBy=default.target\n",
                 unit_arg(binary),
                 unit_arg(home)
             ),
             Platform::Launchd => format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- gent-service-v1:{metadata} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array>{arguments}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>LimitLoadToSessionType</key><array><string>Background</string><string>Aqua</string></array>\n<key>ProcessType</key><string>Background</string>\n<key>ThrottleInterval</key><integer>3</integer>\n<key>ExitTimeOut</key><integer>10</integer>\n<key>Umask</key><integer>63</integer>\n<key>StandardOutPath</key><string>{log}</string>\n<key>StandardErrorPath</key><string>{log}</string>\n</dict></plist>\n",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- gent-service-v1:{metadata} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array>{arguments}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key>{keep_alive}\n<key>LimitLoadToSessionType</key><array><string>Background</string><string>Aqua</string></array>\n<key>ProcessType</key><string>Background</string>\n<key>ThrottleInterval</key><integer>3</integer>\n<key>ExitTimeOut</key><integer>10</integer>\n<key>Umask</key><integer>63</integer>\n<key>StandardOutPath</key><string>{log}</string>\n<key>StandardErrorPath</key><string>{log}</string>\n</dict></plist>\n",
                 self.label()
             ),
         };
@@ -299,19 +346,8 @@ pub fn read(
         spec.platform == platform && spec.home == home && spec.kind() == kind,
         "service file belongs to another Gent state directory"
     );
-    let expected = spec.render()?;
-    // Release 9164631 changed the description without changing the spec version.
-    // Recognize only that exact generated variant; all other edits still fail.
-    let transitional = spec.version == 1
-        && spec.platform == Platform::Systemd
-        && spec.kind() == Kind::Daemon
-        && expected.replacen(
-            "\nDescription=Gent agent communication daemon\n",
-            "\nDescription=Gent chat communication daemon\n",
-            1,
-        ) == text;
     ensure!(
-        expected == text || transitional,
+        spec.matches_definition(&text)?,
         "Gent service file was edited; preserve those edits or restore the managed file before retrying"
     );
     Ok(Some(spec))
@@ -360,9 +396,15 @@ mod tests {
                     .unwrap();
                 assert_eq!(previous.version, 1);
                 assert_ne!(previous.render().unwrap(), current.render().unwrap());
+                previous.upgrade_daemon(&path).unwrap();
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    current.render().unwrap()
+                );
                 let edited = text + "# user edit\n";
                 fs::write(&path, &edited).unwrap();
                 assert!(read(&path, platform, &legacy.home, uid, Kind::Daemon).is_err());
+                assert!(previous.upgrade_daemon(&path).is_err());
                 assert_eq!(fs::read_to_string(&path).unwrap(), edited);
             }
             write(&path, &current).unwrap();
@@ -371,10 +413,46 @@ mod tests {
                     .unwrap()
                     .unwrap()
                     .version,
-                3
+                DAEMON_VERSION
             );
         }
     }
+    #[test]
+    fn daemon_policy_restarts_unexpected_exits_without_exhausting_retries() -> Result<()> {
+        for platform in [Platform::Systemd, Platform::Launchd] {
+            let current = Spec::new(platform, "/tmp/node".into(), "/bin/gent".into())?;
+            let text = current.render()?;
+            assert_eq!(current.version, 4);
+            match platform {
+                Platform::Systemd => {
+                    assert!(text.contains("\nStartLimitIntervalSec=0\n\n[Service]\n"));
+                    assert!(text.contains("\nRestart=always\nRestartSec=3\n"));
+                }
+                Platform::Launchd => {
+                    assert!(text.contains("<key>KeepAlive</key><true/>"));
+                    assert!(text.contains("<key>ThrottleInterval</key><integer>3</integer>"));
+                }
+            }
+            for version in [1, 3] {
+                let legacy = Spec {
+                    version,
+                    ..current.clone()
+                };
+                let text = legacy.render()?;
+                match platform {
+                    Platform::Systemd => {
+                        assert!(text.contains("\nRestart=on-failure\nRestartSec=3\n"));
+                        assert!(!text.contains("StartLimitIntervalSec"));
+                    }
+                    Platform::Launchd => {
+                        assert!(text.contains("<key>SuccessfulExit</key><false/>"))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn expansion_cannot_write_an_unreadable_service_or_replace_a_working_one() {
         let root = tempfile::tempdir().unwrap();
@@ -409,7 +487,7 @@ mod tests {
         for platform in [Platform::Systemd, Platform::Launchd] {
             let daemon = Spec::new(platform, root.path().join("node"), "/bin/gent".into()).unwrap();
             let encoded = serde_json::to_value(&daemon).unwrap();
-            assert_eq!(encoded["version"], 3);
+            assert_eq!(encoded["version"], DAEMON_VERSION);
             assert!(encoded.get("gateway").is_none());
             let gateway = Spec::gateway(
                 platform,
@@ -418,6 +496,15 @@ mod tests {
                 options.clone(),
             )
             .unwrap();
+            assert_eq!(gateway.version, 2);
+            let text = gateway.render().unwrap();
+            match platform {
+                Platform::Systemd => {
+                    assert!(text.contains("\nRestart=on-failure\nRestartSec=3\n"));
+                    assert!(!text.contains("StartLimitIntervalSec"));
+                }
+                Platform::Launchd => assert!(text.contains("<key>SuccessfulExit</key><false/>")),
+            }
             assert_ne!(daemon.label(), gateway.label());
             let path = root.path().join("service");
             write(&path, &gateway).unwrap();

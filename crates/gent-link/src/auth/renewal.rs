@@ -133,8 +133,8 @@ pub async fn run_daemon(
     let native_stop = tokio_util::sync::CancellationToken::new();
     let web_stop = tokio_util::sync::CancellationToken::new();
     let maintenance = async {
-        if let Err(error) = crate::service::migrate_desktop(&home).await {
-            eprintln!("Gent Desktop login setup: {error:#}. Retry with gent desktop enable.");
+        if let Err(error) = crate::service::migrate_installation(&home).await {
+            eprintln!("Gent service migration: {error:#}");
         }
         let stopped = tokio::select! {
             _ = super::notifications::publish_loop(&home) => "account notifications",
@@ -142,6 +142,7 @@ pub async fn run_daemon(
             _ = crate::node::maintain(&home) => "node removals",
             _ = crate::integration::recovery::maintain(&home) => "host recovery",
             _ = crate::integration::discovery::maintain(&home) => "chat discovery",
+            _ = crate::wake::codex::maintain_babysitter(&home) => "Codex Babysitter",
         };
         anyhow::bail!("{stopped} stopped unexpectedly")
     };
