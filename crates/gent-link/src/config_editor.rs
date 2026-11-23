@@ -30,7 +30,7 @@ fn arguments(command: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
-fn parse(text: &str) -> Result<config::Config> {
+pub(crate) fn parse(text: &str) -> Result<config::Config> {
     // TOML and policy errors can contain private values. Report only the type
     // of failure, leaving the original text in its private draft.
     let value: config::Config = toml::from_str(text)
@@ -63,6 +63,8 @@ fn protected(before: &config::Config, after: &config::Config) -> Result<()> {
         "profile_setup",
         "gateway_registry",
         "host_recovery",
+        "hosted_parent",
+        "portable_web",
         "local_features",
     ] {
         ensure!(
@@ -71,6 +73,55 @@ fn protected(before: &config::Config, after: &config::Config) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub(crate) fn open(home: &Path) -> Result<Snapshot> {
+    recovery::ensure_active(home)?;
+    let _lock = managed_file::lock(&home.join("config.lock"))?;
+    let original = Snapshot::read(&config::path(home))?;
+    original.private()?;
+    let text = original
+        .text
+        .as_deref()
+        .context("no Gent configuration to edit")?;
+    parse(text)?;
+    Ok(original)
+}
+
+pub(crate) fn save_text(
+    home: &Path,
+    original: &Snapshot,
+    text: &str,
+    verify_draft: impl FnOnce() -> Result<()>,
+) -> Result<Option<Snapshot>> {
+    ensure!(
+        text.len() as u64 <= managed_file::LIMIT,
+        "configuration is too large"
+    );
+    if original.text.as_deref() == Some(text) {
+        return Ok(None);
+    }
+    let before = parse(original.text.as_deref().unwrap())?;
+    let after = parse(text)?;
+    protected(&before, &after)?;
+    let _lock = managed_file::lock(&home.join("config.lock"))?;
+    recovery::ensure_active(home)?;
+    original.verify().map_err(|_| {
+        anyhow::anyhow!(
+            "configuration changed while the editor was open; the current file was preserved"
+        )
+    })?;
+    verify_draft()?;
+    // Snapshot writes retain comments and formatting, publish atomically,
+    // and compare once more immediately before rename. The lock is shared
+    // with daemon projections and local settings commands, never the editor.
+    original.write(text)?;
+    let saved = Snapshot::read(&original.path)?;
+    ensure!(
+        saved.text.as_deref() == Some(text),
+        "configuration changed immediately after saving"
+    );
+    Ok(Some(saved))
 }
 
 struct Draft {
@@ -94,14 +145,8 @@ impl Draft {
             "initialize this node before editing its configuration"
         );
         config::private_dir(&home)?;
-        let _lock = managed_file::lock(&home.join("config.lock"))?;
-        let original = Snapshot::read(&config::path(&home))?;
-        original.private()?;
-        let text = original
-            .text
-            .as_deref()
-            .context("no Gent configuration to edit")?;
-        parse(text)?;
+        let original = open(&home)?;
+        let text = original.text.as_deref().unwrap();
         let directory = tempfile::Builder::new()
             .prefix(".config-edit-")
             .tempdir_in(&home)?;
@@ -121,25 +166,7 @@ impl Draft {
         let draft = Snapshot::read(&self.path)?;
         draft.private()?;
         let text = draft.text.as_deref().context("editor removed the draft")?;
-        if self.original.text.as_deref() == Some(text) {
-            return Ok(false);
-        }
-        let before = parse(self.original.text.as_deref().unwrap())?;
-        let after = parse(text)?;
-        protected(&before, &after)?;
-        let _lock = managed_file::lock(&self.home.join("config.lock"))?;
-        recovery::ensure_active(&self.home)?;
-        self.original.verify().map_err(|_| {
-            anyhow::anyhow!(
-                "configuration changed while the editor was open; the current file was preserved"
-            )
-        })?;
-        draft.verify()?;
-        // Snapshot writes retain comments and formatting, publish atomically,
-        // and compare once more immediately before rename. The lock is shared
-        // with daemon projections and local settings commands, never the editor.
-        self.original.write(text)?;
-        Ok(true)
+        save_text(&self.home, &self.original, text, || draft.verify()).map(|saved| saved.is_some())
     }
 
     fn preserve(self, error: anyhow::Error) -> anyhow::Error {

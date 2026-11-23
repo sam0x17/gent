@@ -12,6 +12,8 @@ import threading
 import time
 
 from gi.repository import Gio, GLib
+from desktop_tabs_linux import exercise_tabs
+from mcp_client import Client
 
 
 def wait_for(check, description):
@@ -109,6 +111,9 @@ def main():
         cli("cluster", "new", "desktop-test", "--local")
         daemon = launch("daemon", "run")
         wait_for(lambda: (home/"daemon.sock").is_socket(), "daemon")
+        fixture = Client(base + ["mcp", "serve", "--binding", str(home / "fixture.key")])
+        cleanup.callback(fixture.close)
+        fixture.call("gent_register", {"name": "Fixture conversation", "provider": "generic-mcp"})
         tray = TrayHost()
         cleanup.callback(tray.close)
         cli("desktop", "enable")
@@ -119,6 +124,8 @@ def main():
         assert "--background" in entry.read_text() and "--background" not in app.read_text()
         click("Open Gent Desktop")
         first = wait_for(visible, "window opened by tray")
+        exercise_tabs(wait_for, cli)
+        assert 'name = "desktop-published"' in (home / "config.toml").read_text()
         cli("desktop")
         assert visible() == first, "second launch duplicated the window"
         subprocess.run(["xdotool","windowactivate","--sync",first,"key","alt+F4"], check=True)
@@ -146,7 +153,7 @@ def main():
         cli("desktop", "disable")
         wait_for(lambda: not (home / "desktop.sock").exists(), "disable closed the running tray")
         assert daemon.poll() is None
-        print("PASS: tray menu, single window, close/reopen, quit, login opt-out, file ownership and daemon independence")
+        print("PASS: chats, nodes, settings, local save and cluster publish, tray menu, single window, close/reopen, quit, login opt-out, file ownership and daemon independence")
 
 
 if __name__ == "__main__":

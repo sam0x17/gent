@@ -16,6 +16,8 @@ fn git(root: &std::path::Path, args: &[&str]) -> Option<String> {
 fn build_desktop() {
     let source = "src/desktop/macos.swift";
     let main = "src/desktop/main.swift";
+    let tabs = "src/desktop/macos_tabs.swift";
+    println!("cargo:rerun-if-changed={tabs}");
     println!("cargo:rerun-if-changed={source}");
     println!("cargo:rerun-if-changed={main}");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
@@ -38,7 +40,7 @@ fn build_desktop() {
             "-target",
         ])
         .arg(format!("{arch}-apple-macos11.0"))
-        .args([source, main])
+        .args([source, tabs, main])
         .arg("-o")
         .arg(output)
         .status()

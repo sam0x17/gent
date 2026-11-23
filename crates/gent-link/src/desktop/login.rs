@@ -271,6 +271,19 @@ pub(super) fn enable(home: &Path) -> Result<()> {
     marker.remove()
 }
 
+/// A running settings window stays open when the user opts out of future logins.
+/// The background entry point checks this marker before loading any UI.
+pub(super) fn set_autostart(home: &Path, enabled: bool) -> Result<()> {
+    let _lock = managed_file::lock(&home.join("desktop-login.lock"))?;
+    let marker = Snapshot::read(&home.join("desktop-disabled"))?;
+    if enabled {
+        reconcile(home, Change::Migrate)?;
+        marker.remove()
+    } else {
+        marker.write("disabled\n")
+    }
+}
+
 pub(super) fn disable(home: &Path) -> Result<()> {
     if !config::path(home).is_file() && !previously_configured(home)? {
         return Ok(());

@@ -33,7 +33,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes zsh fish shellcheck
           sudo apt-get install --no-install-recommends --yes python3-gi gir1.2-gtk-3.0 \
-            gir1.2-ayatanaappindicator3-0.1 dbus-daemon libglib2.0-bin xvfb xauth xdotool openbox
+            gir1.2-ayatanaappindicator3-0.1 python3-pyatspi at-spi2-core dbus-daemon libglib2.0-bin xvfb xauth xdotool openbox
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal \
             --component rustfmt --component clippy --target wasm32-unknown-unknown
       - name: Validate workflow and shell driver

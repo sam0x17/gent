@@ -6,7 +6,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const LIMIT: u64 = 16 * 1024 * 1024;
+pub(crate) const LIMIT: u64 = 16 * 1024 * 1024;
 
 mod locking;
 pub use locking::lock;

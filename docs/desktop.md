@@ -6,6 +6,14 @@ The window shows the node and cluster names, daemon and sync status, queued reco
 
 **Start daemon**, **Stop daemon**, and **Restart** use the same per-user service as `gent daemon`. A foreground daemon can be viewed, but its process owner controls its lifecycle. Closing the window hides it in the tray. **Quit Gent Desktop** exits the companion and leaves the daemon running.
 
+## Chats, Nodes and Settings
+
+**Chats** lists the cluster's known registrations, including chats on offline nodes and retained retired or revoked registrations. Filter by name, node, provider, registration state or ID. **Nodes** lists cluster members, their last known connection status and administrative role, and the carrier for hosted nodes. Open a tab or select **Refresh** to read its directory from the local daemon.
+
+**Settings** controls graphical login, automatic updates, native chat discovery, direct connections, UDP and transport helpers. The discovery switch allows the node to publish supported native chats. Network changes take effect on daemon restart.
+
+Choose **Edit full configuration…** to edit the current node's TOML, including node and cluster names, policy, relay URLs and helper address settings. **Save locally** validates and writes the file. **Save and publish…** additionally submits the shared names and policy for cluster approval. The editor preserves the draft on a validation error and detects changes made while it was open. Identity and service-managed fields use the same protections as `gent config edit`.
+
 ## Graphical login
 
 Installing the daemon registers the companion for graphical login. Existing managed installations register it when the upgraded daemon starts. Linux uses an XDG autostart entry and application launcher. macOS uses an Aqua LaunchAgent. A headless session can run the daemon without loading a GUI.

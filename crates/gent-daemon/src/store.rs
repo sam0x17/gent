@@ -339,6 +339,7 @@ impl Store {
             &request,
             Request::Owner {
                 action: OwnerOp::Status
+                    | OwnerOp::Agents
                     | OwnerOp::Nodes
                     | OwnerOp::WebCheckpoint { .. }
                     | OwnerOp::WebDeliveryDemand { .. }

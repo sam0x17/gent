@@ -1,7 +1,11 @@
 import AppKit
 
 // Keep all AppKit updates on the main thread. Gent writes a JSON object per line.
-final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabViewDelegate, NSTableViewDataSource, NSTableViewDelegate {
+    let tabs = NSTabView()
+    let chats = DirectoryTab(page: "chats")
+    let nodes = DirectoryTab(page: "nodes")
+    let settings = SettingsTab()
     let icon: NSImage?
     let openAtLaunch: Bool
     var statusItem: NSStatusItem!
@@ -45,7 +49,23 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableV
         menu.addItem(withTitle: "Open Gent Desktop", action: #selector(show), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Gent Desktop", action: #selector(quit), keyEquivalent: "q").target = self
+        menu.insertItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",", at: 3).target = self
         statusItem.menu = menu
+        let main = NSMenu()
+        let edit = NSMenu(title: "Edit")
+        for (title, action, key) in [("Undo","undo:","z"), ("Cut","cut:","x"), ("Copy","copy:","c"),
+                                     ("Paste","paste:","v"), ("Select All","selectAll:","a")] {
+            edit.addItem(withTitle: title, action: Selector(action), keyEquivalent: key)
+        }
+        let application = NSMenu(title: "Gent Desktop")
+        application.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
+        application.addItem(withTitle: "Quit Gent Desktop", action: #selector(quit), keyEquivalent: "q").target = self
+        for submenu in [application, edit] {
+            let item = NSMenuItem()
+            main.addItem(item)
+            item.submenu = submenu
+        }
+        NSApp.mainMenu = main
         makeWindow()
         if openAtLaunch { show() } else { request("refresh") }
 
@@ -65,8 +85,27 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableV
     @objc func show() {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        request("refresh")
+        loadTab(tabs.selectedTabViewItem)
     }
+
+    func loadTab(_ item: NSTabViewItem?) {
+        switch item?.identifier as? String {
+        case "Chats": chats.load()
+        case "Nodes": nodes.load()
+        case "Settings": settings.load()
+        default: request("refresh")
+        }
+    }
+
+    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        loadTab(tabViewItem)
+    }
+
+    @objc func showSettings() {
+        tabs.selectTabViewItem(withIdentifier: "Settings")
+        show()
+    }
+
     @objc func quit() { NSApp.terminate(nil) }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
@@ -82,15 +121,23 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableV
     }
 
     func makeWindow() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 410),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 510),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Gent Desktop"
-        window.minSize = NSSize(width: 440, height: 330)
+        window.minSize = NSSize(width: 510, height: 400)
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.center()
-        let content = window.contentView!
+        let content = NSView()
+        for (title, child) in [("Overview", content), ("Chats", chats.view), ("Nodes", nodes.view), ("Settings", settings.view)] {
+            let tab = NSTabViewItem(identifier: title)
+            tab.label = title
+            tab.view = child
+            tabs.addTabViewItem(tab)
+        }
+        tabs.delegate = self
+        window.contentView = tabs
         let image = NSImageView()
         image.image = icon
         image.imageScaling = .scaleProportionallyUpOrDown
@@ -194,6 +241,12 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableV
     }
 
     func receive(_ m: [String: Any]) {
+        switch m["page"] as? String {
+        case "chats": chats.receive(m); return
+        case "nodes": nodes.receive(m); return
+        case "settings": settings.receive(m); return
+        default: break
+        }
         if m["show"] as? Bool == true { show(); return }
         if m["quit"] as? Bool == true { quit(); return }
         pending = false

@@ -19,6 +19,7 @@ use tokio::{
 
 mod login;
 mod model;
+mod pages;
 pub(crate) use login::{installed, migrate, previously_configured, removed};
 
 #[derive(Args)]
@@ -97,7 +98,16 @@ fn claim(home: &Path, background: bool) -> Result<Option<UnixDatagram>> {
 #[cfg(target_os = "linux")]
 fn frontend(_home: &Path) -> Result<Command> {
     let mut cmd = Command::new("/usr/bin/python3");
-    cmd.args(["-I", "-c", include_str!("desktop/linux.py")]);
+    cmd.args([
+        "-I",
+        "-c",
+        concat!(
+            include_str!("desktop/linux.py"),
+            "\n",
+            include_str!("desktop/tabs.py"),
+            "\ndesktop = Desktop()\nGtk.main()\n"
+        ),
+    ]);
     Ok(cmd)
 }
 
@@ -170,6 +180,7 @@ async fn supervise(home: &Path, socket: &UnixDatagram, background: bool) -> Resu
         .context("cannot start Gent Desktop")?;
     let mut input = child.stdin.take().unwrap();
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut pages = pages::Pages::default();
     let mut activation = [0; 16];
     loop {
         let message = tokio::select! {
@@ -180,16 +191,20 @@ async fn supervise(home: &Path, socket: &UnixDatagram, background: bool) -> Resu
             },
             line = events.next_line() => {
                 let Some(line) = line? else { break };
-                let action = match line.as_str() {
-                    "refresh" => DaemonCommand::Status,
-                    "start" => DaemonCommand::Start,
-                    "stop" => DaemonCommand::Stop,
-                    "restart" => DaemonCommand::Restart,
-                    _ => continue,
-                };
-                match service::execute(home, action).await {
-                    Ok(status) => model::snapshot(&status),
-                    Err(e) => json!({"error":format!("{e:#}")}),
+                if line.starts_with('{') {
+                    pages.respond(home, &line).await
+                } else {
+                    let action = match line.as_str() {
+                        "refresh" => DaemonCommand::Status,
+                        "start" => DaemonCommand::Start,
+                        "stop" => DaemonCommand::Stop,
+                        "restart" => DaemonCommand::Restart,
+                        _ => continue,
+                    };
+                    match service::execute(home, action).await {
+                        Ok(status) => model::snapshot(&status),
+                        Err(e) => json!({"error":format!("{e:#}")}),
+                    }
                 }
             }
         };

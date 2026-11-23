@@ -537,6 +537,23 @@ async fn configure(home: &std::path::Path, id: &str, edit: ConfigurationEdit) ->
     );
     Ok(value)
 }
+async fn publish_config(
+    home: &std::path::Path,
+    request_id: &str,
+    proposed: config::Config,
+) -> Result<Value> {
+    configure(
+        home,
+        request_id,
+        ConfigurationEdit::Replace {
+            cluster_name: proposed.cluster.name,
+            node_name: proposed.node.name,
+            policy: proposed.policy,
+        },
+    )
+    .await
+}
+
 fn selector(value: String) -> Result<Selector> {
     Ok(match value.as_str() {
         "*" => Selector::All,
@@ -1104,16 +1121,7 @@ async fn execute(cli: Cli) -> Result<()> {
             command: Some(ConfigCommand::Apply),
         }) => {
             let proposed = config::load(&home)?;
-            configure(
-                &home,
-                &request_id,
-                ConfigurationEdit::Replace {
-                    cluster_name: proposed.cluster.name,
-                    node_name: proposed.node.name,
-                    policy: proposed.policy,
-                },
-            )
-            .await?
+            publish_config(&home, &request_id, proposed).await?
         }
         Some(Command::Config {
             command: Some(ConfigCommand::Requests),

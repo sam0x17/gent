@@ -32,14 +32,14 @@ class Desktop:
         self.model = {}
         self.last_read = 0.0
         self.window = Gtk.Window(title="Gent Desktop")
-        self.window.set_default_size(530, 430)
+        self.window.set_default_size(780, 530)
         self.window.set_icon_from_file(ICON)
         self.window.connect("delete-event", lambda *_: self.window.hide_on_delete())
         header = Gtk.HeaderBar(title="Gent Desktop", show_close_button=True)
         self.refresh = Gtk.Button.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON)
         self.refresh.set_tooltip_text("Refresh status")
         self.refresh.get_accessible().set_name("Refresh status")
-        self.refresh.connect("clicked", lambda *_: self.send("refresh"))
+        self.refresh.connect("clicked", lambda *_: self.refresh_tab())
         header.pack_end(self.refresh)
         self.window.set_titlebar(header)
         header.show_all()
@@ -48,7 +48,9 @@ class Desktop:
         css.load_from_data(b".node-title { font-size: 1.6em; font-weight: bold; } .metric { font-size: 1.45em; font-weight: bold; } .section { font-weight: bold; } .quiet { opacity: .72; }")
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, border_width=20)
-        self.window.add(outer)
+        self.tabs = Gtk.Notebook()
+        self.window.add(self.tabs)
+        self.tabs.append_page(outer, Gtk.Label(label="Overview"))
         identity = Gtk.Box(spacing=12)
         identity.pack_start(Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(ICON, 46, 46, True)), False, False, 0)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -95,7 +97,14 @@ class Desktop:
         self.restart.connect("clicked", lambda *_: self.send("restart"))
         actions.pack_start(self.restart, False, False, 0)
         outer.pack_end(actions, False, False, 0)
-        outer.show_all()
+        self.pages = {
+            "chats": DirectoryPane("chats"), "nodes": DirectoryPane("nodes"),
+            "settings": SettingsPane(),
+        }
+        for name, page in self.pages.items():
+            self.tabs.append_page(page, Gtk.Label(label=name.title()))
+        self.tabs.show_all()
+        self.tabs.connect("switch-page", lambda _, page, index: page.load() if index else self.send("refresh"))
         self.scroll.hide()
         self.error.hide()
         self.buttons()
@@ -140,7 +149,14 @@ class Desktop:
 
     def show(self):
         self.window.present()
-        self.send("refresh")
+        self.refresh_tab()
+
+    def refresh_tab(self):
+        index = self.tabs.get_current_page()
+        if index > 0:
+            self.tabs.get_nth_page(index).load()
+        else:
+            self.send("refresh")
 
     def buttons(self):
         self.toggle.set_label("Stop daemon" if self.model.get("running") or self.model.get("can_stop") else "Start daemon")
@@ -168,6 +184,9 @@ class Desktop:
         while b"\n" in self.buffer:
             line, _, self.buffer = self.buffer.partition(b"\n")
             message = json.loads(line)
+            if "page" in message:
+                self.pages[message["page"]].receive(message)
+                continue
             if message.get("quit"):
                 Gtk.main_quit()
                 return False
@@ -198,7 +217,3 @@ class Desktop:
             self.empty.set_text("No peers in the directory." if model["running"] else "Daemon status is unavailable." if model["state"] != "Stopped" else "The daemon is stopped.")
             self.empty.set_visible(not model["peers"])
         self.buttons()
-
-
-desktop = Desktop()
-Gtk.main()

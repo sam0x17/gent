@@ -126,6 +126,8 @@ fn managed_local_metadata_and_service_routing_cannot_be_reassigned() {
         "profile_setup",
         "gateway_registry",
         "host_recovery",
+        "hosted_parent",
+        "portable_web",
         "local_features",
     ] {
         let mut after = before.clone();
@@ -170,4 +172,14 @@ fn recovery_guard_prevents_preparation_and_late_saves() {
             .contains("offline recovery")
     );
     assert_eq!(fs::read(config::path(root.path())).unwrap(), original);
+}
+
+#[test]
+fn over_limit_in_memory_edit_preserves_the_readable_configuration() {
+    let root = home();
+    let original = open(root.path()).unwrap();
+    let oversized = "#".repeat(managed_file::LIMIT as usize + 1);
+    let error = save_text(root.path(), &original, &oversized, || Ok(())).unwrap_err();
+    assert!(error.to_string().contains("too large"));
+    original.verify().unwrap();
 }
