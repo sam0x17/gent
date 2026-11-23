@@ -89,6 +89,53 @@ def select_row(id_):
         assert table.addRowSelection(index)
 
 
+def check_node_action_row(node_id):
+    select_row(node_id)
+    titles = ("Add node…", "Rename node…", "Change role…", "Remove node…")
+    buttons = [get(title) for title in titles]
+    frame = get("Gent Desktop", "frame").queryComponent()
+    coords = pyatspi.DESKTOP_COORDS
+    window = frame.getExtents(coords)
+    rects = [button.queryComponent().getExtents(coords) for button in buttons]
+    assert all(r.y == rects[0].y and r.height == rects[0].height for r in rects), rects
+    assert all(a.x + a.width <= b.x for a, b in zip(rects, rects[1:])), rects
+    row_end = rects[-1].x + rects[-1].width
+    assert window.x <= rects[0].x and row_end <= window.x + window.width
+    assert window.y <= rects[0].y and rects[0].y + rects[0].height <= window.y + window.height
+    xid = subprocess.check_output(["xdotool", "getactivewindow"], text=True).strip()
+
+    def resize(width):
+        subprocess.run(["xdotool", "windowsize", xid, str(width), str(window.height)], check=True)
+
+    # Tab through a real overflow, and click each button only after GTK scrolls it into view.
+    try:
+        resize(420)
+        wait_for(lambda: frame.getExtents(coords).width < row_end - rects[0].x, "window narrower than action row")
+        assert buttons[0].queryComponent().grabFocus()
+        row_y = buttons[0].queryComponent().getExtents(coords).y
+        for index, button in enumerate(buttons):
+            if index:
+                subprocess.run(["xdotool", "key", "Tab"], check=True)
+            wait_for(lambda: button.getState().contains(pyatspi.STATE_FOCUSED), "keyboard focus on " + button.name)
+
+            def visible_rect():
+                r = button.queryComponent().getExtents(coords)
+                viewport = frame.getExtents(coords)
+                if viewport.x <= r.x and r.x + r.width <= viewport.x + viewport.width:
+                    return r
+
+            r = wait_for(visible_rect, "entire button in view: " + button.name)
+            assert r.y == row_y and r.height == rects[0].height
+            subprocess.run(["xdotool", "mousemove", str(r.x + r.width // 2), str(r.y + r.height // 2),
+                            "click", "1"], check=True)
+            title = button.name.rstrip("…")
+            get(title, "dialog")
+            click("Cancel")
+            wait_for(lambda: not find(title, "dialog"), "dismissed " + title)
+    finally:
+        resize(window.width)
+
+
 def assert_default_cluster():
     item = get("Status", "page tab")
     assert [page.name for page in item.parent] == ["Status", "Dashboard", "Chats", "Settings", "Permissions", "About"]
@@ -265,6 +312,7 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     select_row(parent["id"])
     for title in ("Remove node…", "Change role…"):
         assert not get(title).getState().contains(pyatspi.STATE_SENSITIVE)
+    check_node_action_row(remote["id"])
     tab("Chats")
     get("Fixture conversation", "table cell")
     tab("Dashboard")

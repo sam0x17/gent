@@ -31,12 +31,44 @@ func column(_ children: [NSView]) -> NSStackView {
     return stack
 }
 
+private final class NodeActionScrollView: NSScrollView {
+    private var rowHeight: NSLayoutConstraint?
+
+    init(row: NSStackView) {
+        super.init(frame: .zero)
+        drawsBackground = false
+        hasHorizontalScroller = true
+        autohidesScrollers = true
+        documentView = row
+        row.translatesAutoresizingMaskIntoConstraints = false
+        rowHeight = heightAnchor.constraint(equalTo: row.heightAnchor)
+        rowHeight?.isActive = true
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            row.topAnchor.constraint(equalTo: contentView.topAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        guard let row = documentView, let rowHeight = rowHeight else { return }
+        let overflow = row.fittingSize.width > bounds.width
+        let gutter = NSScrollView.frameSize(forContentSize: .zero,
+                                            horizontalScrollerClass: overflow ? NSScroller.self : nil,
+                                            verticalScrollerClass: nil, borderType: .noBorder,
+                                            controlSize: .regular, scrollerStyle: scrollerStyle).height
+        if rowHeight.constant != gutter { rowHeight.constant = gutter }
+    }
+}
+
 final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     let view = NSView()
     let table = NSTableView()
     let search = NSSearchField()
     let status = NSTextField(labelWithString: "")
-    let actions: ActionBar
+    let actions = ActionBar()
     let page: String
     let columns: [(String, String, CGFloat)]
     var rows: [[String: Any]] = []
@@ -47,7 +79,6 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     init(page: String) {
         self.page = page
         let members = page == "nodes"
-        actions = ActionBar(pairedRows: members)
         columns = page == "chats"
             ? [("name", "Chat", 185), ("node", "Node", 120), ("provider", "Provider", 95),
                ("state", "Registration", 100), ("id", "Chat ID", 270)]
@@ -72,15 +103,19 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         scroll.hasHorizontalScroller = true
         scroll.borderType = .bezelBorder
         let bar: NSStackView
+        let actionRow: NSView
         if members {
             let title = NSTextField(labelWithString: "Nodes")
             title.font = .systemFont(ofSize: 18, weight: .semibold)
             bar = NSStackView(views: [title, search])
             table.columnAutoresizingStyle = .noColumnAutoresizing
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
+
+            actionRow = NodeActionScrollView(row: actions.view)
         } else {
             let refresh = NSButton(title: "Refresh", target: self, action: #selector(loadChats))
             bar = NSStackView(views: [search, refresh])
+            actionRow = actions.view
             actions.reload = { [weak self] in self?.loadChats() }
         }
         status.textColor = .secondaryLabelColor
@@ -88,7 +123,7 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
             guard let self = self, self.filtered.indices.contains(self.table.selectedRow) else { return nil }
             return self.filtered[self.table.selectedRow]
         }
-        let body = column([bar, scroll, status, actions.view, actions.notice])
+        let body = column([bar, scroll, status, actionRow, actions.notice])
         if members { body.distribution = .fill }
         pin(body, in: view, inset: members ? 0 : 12)
     }

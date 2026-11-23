@@ -65,8 +65,8 @@ func checkCluster(_ desktop: Desktop, open: () -> Void) {
     checkMembers(desktop, stopped: stopped)
 }
 
-func resizeCluster(_ desktop: Desktop, height: CGFloat) {
-    let size = NSSize(width: 510, height: height)
+func resizeCluster(_ desktop: Desktop, width: CGFloat = 510, height: CGFloat) {
+    let size = NSSize(width: width, height: height)
     desktop.window.setContentSize(size)
     // A screenless SSH session constrains the window frame. Size its native content view directly there.
     if desktop.window.screen == nil { desktop.tabs.setFrameSize(size) }
@@ -132,12 +132,44 @@ func checkSetup(_ desktop: Desktop, stopped: [String: Any]) {
             && requests { desktop.toggle.performClick(nil) } == [.command("start")], "stopped daemon can be started")
 }
 
+func checkNodeActionRow(_ desktop: Desktop, width: CGFloat, height: CGFloat) {
+    resizeCluster(desktop, width: width, height: height)
+    let row = desktop.nodes.actions.view
+    let scroll = row.enclosingScrollView!
+    let titles = ["Add node…", "Rename node…", "Change role…", "Remove node…"]
+    let buttons = row.arrangedSubviews.compactMap { $0 as? NSButton }
+    require(buttons.map { $0.title } == titles, "four node action labels in supervisor order")
+    let table = desktop.nodes.table.enclosingScrollView!
+    let page = scroll.enclosingScrollView!.documentView!
+    require(scroll.convert(scroll.bounds, to: page).minY >= table.convert(table.bounds, to: page).maxY,
+            "node actions below the table")
+    let frames = buttons.map { $0.convert($0.bounds, to: row) }
+    for (index, button) in buttons.enumerated() {
+        require(button.image == nil && !button.isHiddenOrHasHiddenAncestor
+                && button.bounds.width >= button.intrinsicContentSize.width - 1
+                && abs(frames[index].midY - frames[0].midY) <= 1
+                && (index == 0 || frames[index].minX >= frames[index - 1].maxX),
+                "full text button on one row at width \(width): " + button.title)
+    }
+    if width == 850 {
+        require(frames.allSatisfy { scroll.documentVisibleRect.contains($0) }
+                && abs(scroll.bounds.height - scroll.contentSize.height) <= 1
+                && abs(scroll.bounds.height - row.fittingSize.height) <= 1,
+                "default width fits all node buttons without scrollbar height")
+    }
+    let trailing = frames.last!
+    row.scrollToVisible(trailing)
+    let center = row.convert(NSPoint(x: trailing.midX, y: trailing.midY), to: scroll)
+    require(scroll.documentVisibleRect.contains(trailing) && scroll.contentView.hitTest(center) === buttons.last,
+            "trailing Remove node button reachable at width \(width)")
+}
+
 func checkMembers(_ desktop: Desktop, stopped: [String: Any]) {
     let nodes = desktop.nodes
     let ids = (0..<3).map { _ in UUID().uuidString.lowercased() }
     let renameSpec: [String: Any] = ["kind": "rename_node", "title": "Rename node…", "submit": "Rename", "row": true,
                                     "fields": [["key": "name", "title": "New node name"]]]
-    let actions: [[String: Any]] = [renameSpec, ["kind": "invite", "title": "Add node…"],
+    let actions: [[String: Any]] = [["kind": "invite", "title": "Add node…"], renameSpec,
         ["kind": "node_role", "title": "Change role…", "row": true],
         ["kind": "remove_node", "title": "Remove node…", "row": true, "confirm": "Remove?"]]
     let presence = "Waiting for a fresh encrypted round trip"
@@ -178,7 +210,16 @@ func checkMembers(_ desktop: Desktop, stopped: [String: Any]) {
     receiveRows()
 
     receiveRows(extraMembers: (1...50).map { ["id": UUID().uuidString, "name": "Member \($0)", "state": "offline", "role": "Member"] })
-    desktop.window.contentView?.layoutSubtreeIfNeeded()
+    let actionScroll = nodes.actions.view.enclosingScrollView!
+    let originalStyle = actionScroll.scrollerStyle
+    let minimum = desktop.window.contentRect(forFrameRect: NSRect(origin: .zero, size: desktop.window.minSize)).size
+    for style in [NSScroller.Style.legacy, .overlay] {
+        actionScroll.scrollerStyle = style
+        checkNodeActionRow(desktop, width: 850, height: 605)
+        checkNodeActionRow(desktop, width: minimum.width, height: minimum.height)
+    }
+    actionScroll.scrollerStyle = originalStyle
+    desktop.tabs.layoutSubtreeIfNeeded()
     let scroll = desktop.tabs.selectedTabViewItem!.view as! NSScrollView
     let clip = scroll.contentView
     let memberScroll = nodes.table.enclosingScrollView!
@@ -186,7 +227,7 @@ func checkMembers(_ desktop: Desktop, stopped: [String: Any]) {
             && nodes.table.rect(ofColumn: 6).maxX > memberScroll.contentSize.width, "member columns scroll within the page")
     require(scroll.documentView!.bounds.height > clip.bounds.height && abs(scroll.documentView!.bounds.width - clip.bounds.width) <= 1,
             "Status fits the narrow viewport and scrolls vertically")
-    for button in descendants(nodes.actions.view, of: NSButton.self) + descendants(desktop.account.actions.view, of: NSButton.self) {
+    for button in descendants(desktop.account.actions.view, of: NSButton.self) {
         let rect = button.convert(button.bounds, to: clip)
         require(rect.width > 0 && rect.minX >= clip.bounds.minX && rect.maxX <= clip.bounds.maxX,
                 "action fits narrow window: " + button.title)
