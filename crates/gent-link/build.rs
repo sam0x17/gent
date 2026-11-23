@@ -1,4 +1,8 @@
-use std::{env, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn git(root: &std::path::Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
@@ -32,7 +36,17 @@ fn build_desktop() {
         Ok("x86_64") => "x86_64",
         _ => panic!("unsupported macOS architecture"),
     };
-    let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("GentDesktop");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let target = format!("{arch}-apple-macos11.0");
+    swiftc(
+        &target,
+        &[source, tabs, management, dashboard, main],
+        &out.join("GentDesktop"),
+    );
+    build_notification_app(&out, &target);
+}
+
+fn swiftc(target: &str, sources: &[&str], output: &Path) {
     let ok = Command::new("xcrun")
         .args([
             "--sdk",
@@ -42,14 +56,66 @@ fn build_desktop() {
             "5",
             "-O",
             "-target",
+            target,
         ])
-        .arg(format!("{arch}-apple-macos11.0"))
-        .args([source, tabs, management, dashboard, main])
+        .args(sources)
         .arg("-o")
         .arg(output)
         .status()
         .expect("building Gent Desktop requires the Xcode command line tools");
-    assert!(ok.success(), "could not compile the AppKit companion");
+    assert!(ok.success(), "could not compile {}", output.display());
+}
+
+fn build_notification_app(out: &Path, target: &str) {
+    let app = out.join("Gent.app");
+    let contents = app.join("Contents");
+    let bin = contents.join("MacOS");
+    let resources = contents.join("Resources");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&resources).unwrap();
+    let src = "src/desktop/notifications";
+    println!("cargo:rerun-if-changed={src}");
+    fs::copy(format!("{src}/Info.plist"), contents.join("Info.plist")).unwrap();
+    swiftc(
+        target,
+        &[
+            &format!("{src}/Delivery.swift"),
+            &format!("{src}/main.swift"),
+        ],
+        &bin.join("GentNotifications"),
+    );
+
+    let iconset = out.join("Inkling.iconset");
+    fs::create_dir_all(&iconset).unwrap();
+    for (name, pixels) in [
+        ("16x16", 16),
+        ("16x16@2x", 32),
+        ("32x32", 32),
+        ("32x32@2x", 64),
+        ("128x128", 128),
+        ("128x128@2x", 256),
+        ("256x256", 256),
+        ("256x256@2x", 512),
+        ("512x512", 512),
+    ] {
+        let png = format!("../../assets/branding/inkling-{pixels}.png");
+        println!("cargo:rerun-if-changed={png}");
+        fs::copy(png, iconset.join(format!("icon_{name}.png"))).unwrap();
+    }
+    let ok = Command::new("/usr/bin/iconutil")
+        .args(["-c", "icns"])
+        .arg(&iconset)
+        .arg("-o")
+        .arg(resources.join("Inkling.icns"))
+        .status()
+        .unwrap();
+    assert!(ok.success(), "could not package the Inkling icon");
+    let ok = Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-", "--timestamp=none"])
+        .arg(&app)
+        .status()
+        .unwrap();
+    assert!(ok.success(), "could not sign the notification sender");
 }
 
 fn main() {

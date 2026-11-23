@@ -20,7 +20,11 @@ use tokio::{
 mod admin;
 mod login;
 mod model;
+#[cfg(target_os = "macos")]
+pub(crate) mod notification_app;
 mod pages;
+#[cfg(target_os = "linux")]
+pub(crate) use login::label as desktop_entry_id;
 pub(crate) use login::{installed, migrate, previously_configured, removed};
 
 #[derive(Args)]
@@ -214,7 +218,7 @@ async fn supervise(
 ) -> Result<()> {
     let icon = install_icon(runtime)?;
     let mut child = frontend(runtime)?
-        .arg(icon)
+        .arg(&icon)
         .arg(if background {
             "tray"
         } else if configured {
@@ -230,7 +234,7 @@ async fn supervise(
     let mut input = child.stdin.take().unwrap();
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut pages = pages::Pages::default();
-    let watch = crate::auth::notifications::desktop_loop(home);
+    let watch = crate::auth::notifications::desktop_loop(home, &icon);
     tokio::pin!(watch);
     let mut jobs = tokio::task::JoinSet::new();
     let mut activation = [0; 16];

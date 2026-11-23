@@ -156,7 +156,7 @@ fn entries(_: &Path, _: &Path, _: &str) -> Result<Vec<Entry>> {
     anyhow::bail!("unsupported desktop platform")
 }
 
-fn label(home: &Path) -> String {
+pub(crate) fn label(home: &Path) -> String {
     use sha2::{Digest, Sha256};
     let hash = format!("{:x}", Sha256::digest(home.as_os_str().as_encoded_bytes()));
     format!("link.gent.desktop.{}", &hash[..32])

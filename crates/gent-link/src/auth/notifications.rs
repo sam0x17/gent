@@ -44,7 +44,7 @@ async fn directory_name(home: &Path, op: OwnerOp, id: uuid::Uuid) -> String {
         .unwrap_or(id)
 }
 
-async fn display(home: &Path, notice: &Notice) -> Result<()> {
+async fn display(home: &Path, icon: &Path, notice: &Notice) -> Result<()> {
     let (title, message) = match &notice.event {
         Event::GoalResumed { chat, reason, .. } => {
             let name = directory_name(home, OwnerOp::Agents, *chat).await;
@@ -65,29 +65,36 @@ async fn display(home: &Path, notice: &Notice) -> Result<()> {
         }
     };
     #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut c = tokio::process::Command::new("/usr/bin/osascript");
-        c.args(["-e","on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run","--",title,&message]);
-        c
-    };
+    {
+        crate::desktop::notification_app::display(icon, notice.id, title, &message).await
+    }
     #[cfg(not(target_os = "macos"))]
     let mut command = {
         let mut c = tokio::process::Command::new("notify-send");
-        c.args(["--app-name=Gent", "--", title, &message]);
+        c.arg("--app-name=Gent");
+        #[cfg(target_os = "linux")]
+        c.arg(format!(
+            "--hint=string:desktop-entry:{}",
+            crate::desktop::desktop_entry_id(home)
+        ));
+        c.arg("--icon").arg(icon).args(["--", title, &message]);
         c
     };
-    let result = tokio::time::timeout(
-        Duration::from_secs(5),
-        command
-            .kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status(),
-    )
-    .await??;
-    ensure!(result.success(), "desktop notification unavailable");
-    Ok(())
+    #[cfg(not(target_os = "macos"))]
+    {
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            command
+                .kill_on_drop(true)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status(),
+        )
+        .await??;
+        ensure!(result.success(), "desktop notification unavailable");
+        Ok(())
+    }
 }
 
 async fn publish(home: &Path) -> Result<()> {
@@ -174,7 +181,7 @@ fn supported(value: &Value) -> Result<Option<Notice>> {
         _ => Ok(None),
     }
 }
-async fn collect(home: &Path, login: &Saved) -> Result<()> {
+async fn collect(home: &Path, login: &Saved, icon: &Path) -> Result<()> {
     let path = cursor_path(home, login)?;
     let url = origin(&login.service)?.join("v1/notifications")?;
     let client = client()?;
@@ -207,7 +214,7 @@ async fn collect(home: &Path, login: &Saved) -> Result<()> {
             let seq = row["sequence"].as_u64().context("invalid inbox sequence")?;
             ensure!(seq > after, "invalid inbox order");
             if let Some(notice) = supported(&row["notice"])? {
-                display(home, &notice).await?;
+                display(home, icon, &notice).await?;
             }
             let state = Snapshot::read(&path)?;
             state.private()?;
@@ -220,7 +227,7 @@ async fn collect(home: &Path, login: &Saved) -> Result<()> {
     }
 }
 
-async fn watch(home: &Path, login: &Saved) -> Result<()> {
+async fn watch(home: &Path, login: &Saved, icon: &Path) -> Result<()> {
     let mut url = origin(&login.service)?.join("v1/notifications/watch")?;
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
         .map_err(|_| anyhow::anyhow!("invalid watch URL"))?;
@@ -236,12 +243,12 @@ async fn watch(home: &Path, login: &Saved) -> Result<()> {
         connect_async_with_config(request, Some(config), true),
     )
     .await??;
-    collect(home, login).await?;
+    collect(home, login, icon).await?;
     let mut auth_tick = tokio::time::interval(Duration::from_secs(15));
     loop {
         tokio::select! {
             frame=socket.next()=>match frame.context("watch closed")??{
-                Message::Text(text) if text=="changed"=>collect(home,login).await?,
+                Message::Text(text) if text=="changed"=>collect(home,login,icon).await?,
                 Message::Ping(_) | Message::Pong(_)=>{},
                 _=>anyhow::bail!("account watch ended"),
             },
@@ -249,12 +256,12 @@ async fn watch(home: &Path, login: &Saved) -> Result<()> {
         }
     }
 }
-pub(crate) async fn desktop_loop(home: &Path) {
+pub(crate) async fn desktop_loop(home: &Path, icon: &Path) {
     let mut backoff = 1;
     loop {
         if let Ok(Some(login)) = active(home) {
             let since = std::time::Instant::now();
-            let result = watch(home, &login).await;
+            let result = watch(home, &login, icon).await;
             backoff = if result.is_ok() || since.elapsed().as_secs() > 60 {
                 1
             } else {
@@ -266,6 +273,9 @@ pub(crate) async fn desktop_loop(home: &Path) {
         tokio::time::sleep(Duration::from_secs(backoff)).await;
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests;

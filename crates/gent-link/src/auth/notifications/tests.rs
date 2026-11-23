@@ -29,6 +29,12 @@ async fn device_cursor_survives_reconnect_and_skips_future_event_kinds() {
     };
     let root = Path::new(&root);
     let home = root.join("node");
+    let icon = root.join("Gent Desktop icon.png");
+    fs::write(
+        &icon,
+        include_bytes!("../../../../../assets/branding/inkling-512.png"),
+    )
+    .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let login = Saved {
@@ -55,25 +61,45 @@ async fn device_cursor_survives_reconnect_and_skips_future_event_kinds() {
                 "0" => json!([{"sequence":1,"notice":{"event":{"kind":"future_event"}}},
                     {"sequence":2,"notice":{"event":{"kind":"goal_resumed","reason":"future_reason"}}},
                     {"sequence":3,"notice":{"id":uuid::Uuid::new_v4(),"created_at":now().unwrap(),
-                    "event":{"kind":"update_installed","node":uuid::Uuid::new_v4(),"commit":"a".repeat(40)}}}]),
-                "3" => json!([]),
+                    "event":{"kind":"update_installed","node":uuid::Uuid::new_v4(),"commit":"a".repeat(40)}}},
+                    {"sequence":4,"notice":{"id":uuid::Uuid::new_v4(),"created_at":now().unwrap(),
+                    "event":{"kind":"goal_resumed","node":uuid::Uuid::new_v4(),"chat":uuid::Uuid::new_v4(),"reason":"request_payload"}}}]),
+                "4" => json!([]),
                 cursor => panic!("unexpected cursor {cursor}"),
             };
             Json(rows)
         }
     }));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    collect(&home, &login).await.unwrap();
-    collect(&home, &login).await.unwrap();
+    collect(&home, &login, &icon).await.unwrap();
+    collect(&home, &login, &icon).await.unwrap();
     let cursor = cursor_path(&home, &login).unwrap();
-    assert_eq!(fs::read_to_string(&cursor).unwrap(), "3");
+    assert_eq!(fs::read_to_string(&cursor).unwrap(), "4");
     let banners = root.join("banners");
     let first = fs::read_to_string(&banners).unwrap();
-    assert_eq!(first.lines().filter(|l| *l == "Gent updated").count(), 1);
-    assert!(first.contains(" updated to aaaaaaaaaaaa."));
+    let args: Vec<_> = first.lines().collect();
+    assert_eq!(args.len(), 14);
+    let hint = format!(
+        "--hint=string:desktop-entry:{}",
+        crate::desktop::desktop_entry_id(&home)
+    );
+    for (banner, title) in args.chunks_exact(7).zip(["Gent updated", "Goal resumed"]) {
+        assert_eq!(
+            banner[..6],
+            [
+                "--app-name=Gent",
+                hint.as_str(),
+                "--icon",
+                icon.to_str().unwrap(),
+                "--",
+                title
+            ]
+        );
+    }
+    assert!(args[6].ends_with(" updated to aaaaaaaaaaaa."));
     save(&session, None).unwrap();
     fs::remove_file(&cursor).unwrap();
-    collect(&home, &login).await.unwrap();
+    collect(&home, &login, &icon).await.unwrap();
     assert!(!cursor.exists());
     assert_eq!(fs::read_to_string(banners).unwrap(), first);
     server.abort();

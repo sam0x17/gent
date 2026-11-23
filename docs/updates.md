@@ -63,7 +63,7 @@ The Git discovery/build backend is separate from publication and activation so a
 
 Gent requests one native system notification after an automatic update has been installed and the new daemon has reported readiness. Unchanged versions, failed builds, rollbacks and manual updates do not generate an update notification.
 
-macOS uses Notification Center through the system `osascript` command. Linux uses `notify-send` and the current desktop notification service. Notifications need a graphical user session and the relevant OS notification permissions; a headless server or a system-level service may have neither. A notification failure is logged and does not undo a successful update. Delivery is best effort: OS settings, Focus/Do Not Disturb and a crash after activation can prevent the notification from appearing.
+Gent Desktop uses its Inkling icon for update and goal-resumed notifications. On macOS, allow notifications from **Gent** when prompted. To change that choice later, open **Notifications** in System Settings and select **Gent**. On Linux, Gent passes its icon and desktop entry to `notify-send`. Banners require a graphical session and follow the desktop’s notification and Focus settings.
 
 ## Terminal output
 
