@@ -78,12 +78,14 @@ async fn device_cursor_survives_reconnect_and_skips_future_event_kinds() {
     let banners = root.join("banners");
     let first = fs::read_to_string(&banners).unwrap();
     let args: Vec<_> = first.lines().collect();
-    assert_eq!(args.len(), 14);
+    let (banners_sent, remainder) = args.as_chunks::<7>();
+    assert!(remainder.is_empty());
+    assert_eq!(banners_sent.len(), 2);
     let hint = format!(
         "--hint=string:desktop-entry:{}",
         crate::desktop::desktop_entry_id(&home)
     );
-    for (banner, title) in args.chunks_exact(7).zip(["Gent updated", "Goal resumed"]) {
+    for (banner, title) in banners_sent.iter().zip(["Gent updated", "Goal resumed"]) {
         assert_eq!(
             banner[..6],
             [
