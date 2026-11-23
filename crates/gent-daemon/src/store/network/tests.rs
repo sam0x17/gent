@@ -37,6 +37,8 @@ mod retries;
 #[path = "wire_tests.rs"]
 mod wire_tests;
 
+#[path = "dashboard_tests.rs"]
+mod dashboard_tests;
 struct OwnerPeer<'a>(&'a mut Store, String);
 impl Peer for OwnerPeer<'_> {
     async fn call(&mut self, action: PairingOp) -> Result<Value> {

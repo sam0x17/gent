@@ -20,10 +20,13 @@ use tokio::sync::Notify;
 mod activity;
 mod administration;
 mod agents;
+mod babysitter;
 mod configuration;
+mod notifications;
 mod wire;
 pub(crate) use configuration::pending::schema as pending_configuration_schema;
 pub(crate) use configuration::routing::schema as configuration_routing_schema;
+mod dashboards;
 mod diagnostics;
 pub mod direct;
 pub(crate) mod directory;
@@ -161,6 +164,9 @@ impl Store {
         directory::schema(&db)?;
         activity::schema(&db)?;
         wire::schema(&db)?;
+        dashboards::schema(&db)?;
+        babysitter::schema(&db)?;
+        notifications::schema(&db)?;
         hosted::schema(&db)?;
         directory_sync::schema(&db)?;
         direct::schema(&db)?;
@@ -335,12 +341,27 @@ impl Store {
         // Idle service probes and removal polling must not force a disk flush
         // or wake the encrypted transport on every observation. Pending config
         // projection retains its usual repair path.
+        let projection_pending = runtime::projection_pending(&self.db)?;
+        let local_only = matches!(
+            &request,
+            Request::Agent {
+                action: AgentOp::BabysitterClaim { .. }
+                    | AgentOp::BabysitterCheck { .. }
+                    | AgentOp::BabysitterSubmitted { .. },
+                ..
+            } | Request::Owner {
+                action: OwnerOp::NotificationPut { .. } | OwnerOp::NotificationSent { .. },
+                ..
+            }
+        );
         let read_only = (matches!(
             &request,
             Request::Owner {
                 action: OwnerOp::Status
                     | OwnerOp::Agents
                     | OwnerOp::Nodes
+                    | OwnerOp::Dashboards { .. }
+                    | OwnerOp::NotificationPending { .. }
                     | OwnerOp::WebCheckpoint { .. }
                     | OwnerOp::WebDeliveryDemand { .. }
                     | OwnerOp::NodeRemovals { .. }
@@ -348,7 +369,7 @@ impl Store {
                 ..
             }
         ) || matches!(&request, Request::HostedStatus { .. }))
-            && !runtime::projection_pending(&self.db)?;
+            && !projection_pending;
         let tx = self.db.transaction_with_behavior(if read_only {
             TransactionBehavior::Deferred
         } else {
@@ -451,7 +472,7 @@ impl Store {
         if status_request {
             value["sync"] = self.synchronization_status()?;
         }
-        if read_only {
+        if read_only || (local_only && !projection_pending) {
             return Ok(value);
         }
         // Also wakes directory/message publication after a committed agent RPC.
@@ -940,6 +961,20 @@ impl StoreSession<'_> {
                 administrator,
                 before,
             } => self.administration_history(administrator.as_deref(), before, true),
+            OwnerOp::NotificationPending { scope } => self.pending_notices(&scope),
+            OwnerOp::NotificationPut { notice, scope } => self.enqueue_notice(&notice, scope),
+            OwnerOp::NotificationSent { id } => {
+                self.db
+                    .execute("DELETE FROM account_outbox WHERE id=?1", [id.to_string()])?;
+                Ok(json!({}))
+            }
+            OwnerOp::Dashboards { after } => self.dashboards(after.as_deref()),
+            OwnerOp::DashboardClick {
+                agent,
+                revision,
+                widget,
+                request_id,
+            } => self.dashboard_click(&agent, revision, &widget, &request_id),
             OwnerOp::PermissionRules => Ok(json!({"rules":self.state.state().policy.rules,
                 "groups":self.state.state().policy.groups.keys().collect::<Vec<_>>()})),
             OwnerOp::PermissionExplain { actor, peer } => self.permission_explain(&actor, &peer),
@@ -1120,7 +1155,10 @@ impl StoreSession<'_> {
         );
         if !matches!(
             &action,
-            AgentOp::WakePending
+            AgentOp::BabysitterClaim { .. }
+                | AgentOp::BabysitterCheck { .. }
+                | AgentOp::BabysitterSubmitted { .. }
+                | AgentOp::WakePending
                 | AgentOp::WakeClaim { .. }
                 | AgentOp::WakeCheck { .. }
                 | AgentOp::WakeSubmitted { .. }
@@ -1144,6 +1182,23 @@ impl StoreSession<'_> {
                 self.rename_agent(&who.id, &name, expected_generation)?;
                 self.agent_identity(&who.id)
             }
+            AgentOp::Babysit { enabled } => self.babysit(&who, enabled),
+            AgentOp::BabysitterClaim {
+                goal,
+                turn,
+                failed_at,
+                reason,
+            } => self.babysitter_claim(&who, &goal, turn, failed_at, reason),
+            AgentOp::BabysitterCheck { attempt } => {
+                Ok(json!({"eligible":self.babysitter_check(&who,attempt)?}))
+            }
+            AgentOp::BabysitterSubmitted { attempt, scope } => {
+                self.babysitter_submitted(&who, attempt, scope)
+            }
+            AgentOp::DashboardGet => self.dashboard_get(&who),
+            op @ (AgentOp::DashboardDefine { .. }
+            | AgentOp::DashboardUpdate { .. }
+            | AgentOp::DashboardDelete { .. }) => self.dashboard_mutate(&who, op),
             AgentOp::Agents => self.visible_agents(&who),
             AgentOp::Resolve {
                 name,

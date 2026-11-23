@@ -375,6 +375,98 @@ async fn http_boundary_rejects_wrong_authority_origin_auth_proxy_and_oversized_p
 }
 
 #[tokio::test]
+async fn web_dashboard_tools_use_the_bound_chat() {
+    let f = Fixture::new();
+    let daemon = Daemon::start(&f.home).await;
+    let server = f.start().await;
+    let client = client();
+    for name in ["trainer", "observer"] {
+        server
+            .call(
+                &client,
+                &f.token,
+                name,
+                "gent_register",
+                json!({"name":name,"provider":"web"}),
+            )
+            .await;
+    }
+    let board = json!({"title":"Training","widgets":[{"id":"step","kind":"progress","label":"Step","value":10}]});
+    let define = json!({"expected_revision":0,"board":board});
+    assert_eq!(
+        server
+            .call(
+                &client,
+                &f.token,
+                "trainer",
+                "gent_dashboard_define",
+                define
+            )
+            .await["revision"],
+        1
+    );
+    assert_eq!(
+        server
+            .call(
+                &client,
+                &f.token,
+                "observer",
+                "gent_dashboard_get",
+                json!({})
+            )
+            .await["board"],
+        Value::Null
+    );
+    assert_eq!(
+        server
+            .call(
+                &client,
+                &f.token,
+                "trainer",
+                "gent_dashboard_update",
+                json!({"expected_revision":1,"values":{"step":50}})
+            )
+            .await["revision"],
+        2
+    );
+    let list = owner(&f.home, OwnerOp::Dashboards { after: None }).await;
+    assert_eq!(list["rows"][0]["board"]["widgets"][0]["value"], 50);
+    server
+        .call(
+            &client,
+            &f.token,
+            "trainer",
+            "gent_dashboard_delete",
+            json!({"expected_revision":2}),
+        )
+        .await;
+    assert_eq!(
+        owner(&f.home, OwnerOp::Dashboards { after: None }).await["rows"],
+        json!([])
+    );
+    assert_eq!(
+        server
+            .call(
+                &client,
+                &f.token,
+                "trainer",
+                "gent_babysit",
+                json!({"enabled":false})
+            )
+            .await["enabled"],
+        false
+    );
+    assert_eq!(
+        server
+            .call(&client, &f.token, "observer", "gent_babysit", json!({}))
+            .await["enabled"],
+        true
+    );
+    server.close().await;
+    daemon.close(&f.home).await;
+}
+
+#[tokio::test]
 async fn agents_exchange_images_receipts_and_relay_turns_across_gateway_and_daemon_restarts() {
     let f = Fixture::new();
     let daemon = Daemon::start(&f.home).await;

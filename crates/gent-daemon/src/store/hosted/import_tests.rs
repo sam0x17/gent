@@ -569,6 +569,68 @@ fn row_merge_preserves_both_acknowledgments_and_sender_retry_fingerprints() {
 }
 
 #[test]
+fn dashboard_import_merges_child_retry_state_and_skips_unrelated_cached_boards() -> Result<()> {
+    let mut pair = Pair::new();
+    let local = pair.agents[0].clone();
+    let web = pair.agents[1].clone();
+    placeholder(&pair.parent.db, &pair.child.db, &local);
+    placeholder(&pair.child.db, &pair.parent.db, &web);
+    let board =
+        r#"{"title":"Child","widgets":[{"id":"x","label":"X","kind":"text","value":"yes"}]}"#;
+    let fingerprint = "a".repeat(64);
+    pair.parent.db.execute(
+        "INSERT INTO dashboards VALUES(?1,2,?2,NULL)",
+        params![web, board],
+    )?;
+    pair.parent
+        .db
+        .execute("INSERT INTO dashboards VALUES(?1,1,NULL,NULL)", [&local])?;
+    pair.child.db.execute(
+        "INSERT INTO dashboards VALUES(?1,2,?2,?3)",
+        params![web, board, fingerprint],
+    )?;
+    pair.child.db.execute(
+        "INSERT INTO dashboards VALUES(?1,7,?2,NULL)",
+        params![local, board],
+    )?;
+    pair.import()?;
+    pair.import()?;
+    assert_eq!(
+        pair.parent.db.query_row(
+            "SELECT mutation FROM dashboards WHERE agent=?1",
+            [&web],
+            |r| r.get::<_, String>(0)
+        )?,
+        fingerprint
+    );
+    assert_eq!(
+        pair.parent.db.query_row(
+            "SELECT revision FROM dashboards WHERE agent=?1",
+            [&local],
+            |r| r.get::<_, u64>(0)
+        )?,
+        1
+    );
+    pair.child.db.execute(
+        "UPDATE dashboards SET revision=3,body=NULL WHERE agent=?1",
+        [&web],
+    )?;
+    pair.import()?;
+    let before = rows(&pair.parent.db, "dashboards");
+    pair.child.db.execute(
+        "UPDATE dashboards SET body=?2 WHERE agent=?1",
+        params![web, board],
+    )?;
+    assert!(pair.import().is_err());
+    assert_eq!(rows(&pair.parent.db, "dashboards"), before);
+    // Older native children have no such table at all.
+    pair.child.db.execute_batch("DROP TABLE dashboards")?;
+    pair.import()?;
+    assert_eq!(rows(&pair.parent.db, "dashboards"), before);
+    Ok(())
+}
+
+#[test]
 fn row_copy_rejects_secondary_unique_and_immutable_conflicts() {
     let parent = Connection::open_in_memory().unwrap();
     let source = Connection::open_in_memory().unwrap();

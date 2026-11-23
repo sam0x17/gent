@@ -129,6 +129,9 @@ pub(super) fn import(
             copy(parent_tx, &snapshot, table, child_id)
                 .with_context(|| format!("hosted migration table {table}"))?;
         }
+        if snapshot.table_exists(None, "dashboards")? {
+            dashboards(parent_tx, &snapshot, child_id)?;
+        }
         // Counts may differ on each peer. Count the union without decreasing
         // either retained count, which may include already retired messages.
         let mut exchanges = snapshot.prepare("SELECT id FROM exchanges")?;
@@ -326,6 +329,65 @@ fn columns(db: &Connection, table: &str) -> Result<Vec<(String, bool)>> {
         .prepare(&format!("PRAGMA table_info({table})"))?
         .query_map([], |r| Ok((r.get(1)?, r.get::<_, u32>(5)? != 0)))?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Only the publishing child's records are authoritative. Its directory can
+/// also contain replicas of native boards belonging to this parent or peers.
+pub(super) fn dashboards(parent: &Connection, source: &Connection, child: &str) -> Result<()> {
+    use gent_protocol::dashboard::Board;
+    ensure!(
+        columns(source, "dashboards")? == columns(parent, "dashboards")?,
+        "unsupported hosted dashboard schema"
+    );
+    let mut query = source.prepare(
+        "SELECT d.agent,d.revision,d.body,d.mutation FROM dashboards d
+        JOIN agents a ON a.id=d.agent WHERE a.node_id=?1",
+    )?;
+    let mut rows = query.query([child])?;
+    while let Some(row) = rows.next()? {
+        let id = row.get_ref(0)?.as_str()?;
+        let revision: u64 = row.get(1)?;
+        ensure!(
+            (1..=gent_protocol::MAX_REGISTRATION_GENERATION).contains(&revision),
+            "invalid hosted dashboard revision"
+        );
+        let body: Option<&str> = row.get_ref(2)?.as_str_or_null()?;
+        let decode = |raw: &str| -> Result<Board> {
+            ensure!(raw.len() <= 32 * 1024, "hosted dashboard exceeds 32 KiB");
+            let board: Board = serde_json::from_str(raw)?;
+            board.validate().map_err(anyhow::Error::msg)?;
+            Ok(board)
+        };
+        let board = body.map(decode).transpose()?;
+        let mutation = row.get_ref(3)?.as_str_or_null()?;
+        ensure!(
+            mutation.is_none_or(|v| v.len() == 64
+                && v.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+            "invalid hosted dashboard retry fingerprint"
+        );
+        let previous: Option<(u64, Option<String>, Option<String>)> = parent
+            .query_row(
+                "SELECT revision,body,mutation FROM dashboards WHERE agent=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((old, previous, op)) = previous {
+            ensure!(old <= revision, "hosted dashboard revision regressed");
+            if old == revision {
+                ensure!(
+                    previous.as_deref().map(decode).transpose()? == board
+                        && op.as_deref().is_none_or(|v| Some(v) == mutation),
+                    "conflicting hosted dashboard revision"
+                );
+            }
+        }
+        parent.execute("INSERT INTO dashboards(agent,revision,body,mutation) VALUES(?1,?2,?3,?4)
+            ON CONFLICT(agent) DO UPDATE SET revision=excluded.revision,body=excluded.body,mutation=excluded.mutation",
+            params![id,revision,body,mutation])?;
+    }
+    Ok(())
 }
 
 // Only primary-key matches can merge. Other UNIQUE/CHECK/FK failures propagate;

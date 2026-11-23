@@ -2,6 +2,89 @@
 // permissions and durable Gent reply identities. CONFIG contains no secrets.
 let timer;
 let polling = false;
+let activeTurn;
+let resuming;
+let generation = 0;
+let writes = Promise.resolve();
+const cancelled = new Set();
+const babysitterKey = session => `gent-babysitter/v2/${CONFIG.installation_id}/${session}`;
+const resumePrefix = 'Continue working on the current goal.\n\n[Gent goal resume ';
+
+// Serialize store mutations: a slow failure write must precede a later input's deletion.
+function writeStall(op) {
+  writes = writes.then(op).then(() => true, () => false);
+  return writes;
+}
+function discardStall($, session) {
+  cancelled.add(session);
+  return writeStall(() => $.store.delete(babysitterKey(session)));
+}
+function cancelStall($, session) {
+  generation++;
+  activeTurn = undefined;
+  return discardStall($, session);
+}
+async function captureFailure($, event) {
+  const turn = activeTurn;
+  const before = generation;
+  const observed_ms = Date.now();
+  if (!turn || event.agent_id || typeof event.transcript_path !== 'string') return;
+  const session = await turn.session;
+  if (event.session_id !== session || before !== generation) return;
+  // Claude can omit error_details. On StopFailure it renders the provider
+  // error as the hook's final message, prefixed "API Error:".
+  const rendered = event.last_assistant_message;
+  const details = event.error_details ||
+    (typeof rendered === 'string' && rendered.startsWith('API Error: ') ? rendered : '');
+  const operation = {action:'babysit_capture', turn:turn.id, started_ms:turn.started,
+    path:event.transcript_path, observed_ms,
+    code:String(event.error || '').slice(0,128), details:String(details).slice(0,4096)};
+  async function observe(retry) {
+    if (before !== generation || await $.session.id() !== session) return;
+    const answer = await bridge($, session, operation).catch(() => ({pending:true}));
+    if (await $.session.id() !== session || before !== generation) return;
+    if (answer.failure) {
+      const stored = await writeStall(() => $.store.set(babysitterKey(session), answer.failure));
+      if (stored && before === generation) cancelled.delete(session);
+    } else if (answer.pending && retry < 2) {
+      // Claude may flush the goal and native error after StopFailure returns.
+      // Both retries use the original turn, observation time and input generation.
+      $.clock.after(retry === 0 ? 500 : 2000, () => observe(retry+1).catch(() => {}));
+    }
+  }
+  await observe(0);
+}
+async function recoverGoal($, session) {
+  const before = generation;
+  await writes;
+  if (before !== generation || cancelled.has(session)) return;
+  const failure = await $.store.get(babysitterKey(session));
+  if (!failure || before !== generation) return;
+  if (Date.now()/1000 - failure.failed_at > 7200) {
+    await cancelStall($,session);
+    return;
+  }
+  const answer = await bridge($, session, {action:'babysit_claim', failure});
+  if (await $.session.id() !== session || before !== generation) return;
+  if (answer.obsolete) { await cancelStall($,session); return; }
+  if (!answer.claim) return;
+  // A committed claim cannot be repeated, even if submission or its reply is lost.
+  cancelled.add(session);
+  await writeStall(() => $.store.delete(babysitterKey(session)));
+  const check = await bridge($, session, {action:'babysit_check', attempt:answer.claim, failure});
+  if (check.text !== resumePrefix + CONFIG.installation_id + ' ' + answer.claim + ']'
+      || await $.session.id() !== session || before !== generation) return;
+  const ticket = {session, before, text:check.text};
+  resuming = ticket;
+  try {
+    const result = await $.prompt.submit({text:ticket.text,asUser:true});
+    if (!result.drop && result.text === ticket.text && result.origin?.kind === 'plugin'
+        && result.origin.name === 'gent-wake' && result.origin.asUser === true)
+      await bridge($,session,{action:'babysit_submitted',attempt:answer.claim});
+  } finally {
+    if (resuming === ticket) resuming = undefined;
+  }
+}
 let pending;
 let admitted;
 let flushCursor;
@@ -58,6 +141,7 @@ async function poll($) {
     const session = await $.session.id();
     await flush($, session);
     if (pending || admitted) return;
+    try { await recoverGoal($,session); } catch (_) { /* Retry only before a durable claim. */ }
     const answer = await bridge($, session, {action:'claim_direct'});
     if (!answer.dispatch) return;
     const item = answer.dispatch;
@@ -94,9 +178,44 @@ function start($) {
   if (!timer) timer = $.clock.every(5000, () => poll($));
 }
 export function register(on) {
-  on('session.start', ($, event, next) => { start($); return next(event); });
+  on('session.start', ($, event, next) => {
+    start($);
+    // Discard legacy raw failures; they carry no failure-time provenance.
+    void (async () => {
+      for (const key of await $.store.keys())
+        if (key.startsWith('gent-babysitter/v1/')) await $.store.delete(key);
+    })().catch(() => {});
+    return next(event);
+  });
+  on('prompt.submit', async ($, event, next) => {
+    if (event.origin?.name === 'gent-wake' && event.origin.kind === 'plugin'
+        && event.origin.asUser === true && event.text.startsWith(resumePrefix)) {
+      if (!resuming || resuming.before !== generation || resuming.text !== event.text)
+        return {drop:'Gent goal continuation is no longer eligible.'};
+    } else if (!event.agentId) {
+      const before = ++generation;
+      activeTurn = undefined;
+      void Promise.resolve().then(() => $.session.id()).then(session => {
+        if (before === generation) return discardStall($,session);
+      }).catch(() => {});
+    }
+    return next(event);
+  });
+  on('classic.StopFailure', async ($,event,next) => {
+    const observation = captureFailure($,event).catch(() => {});
+    const result = await next(event);
+    await observation;
+    return result;
+  });
   on('classic.UserPromptSubmit', async ($, event, next) => {
     start($);
+    if (event.prompt.startsWith(resumePrefix)) {
+      if (event.agent_id || !resuming || resuming.before !== generation
+          || resuming.session !== event.session_id || resuming.text !== event.prompt)
+        return {block:'Gent goal continuation is no longer eligible.'};
+      return next(event); // The independent native guard checks the transcript and consumes the ticket.
+    }
+    if (!event.agent_id) void cancelStall($,event.session_id);
     if (!event.prompt.includes('\n\n[Gent delivery ')
         && !event.prompt.startsWith('Gent has a pending message.')) return next(event);
     const item = pending;
@@ -116,7 +235,16 @@ export function register(on) {
 
   on('turn.start', async ($, event, next) => {
     const item = admitted;
-    if (!event.agentId) admitted = undefined;
+    if (!event.agentId) {
+      admitted = undefined;
+      const before = ++generation;
+      const session = Promise.resolve().then(() => $.session.id()).catch(() => undefined);
+      activeTurn = {session, id:event.turnId, started:Date.now()};
+      // An unavailable babysitter store/session must never hold a host turn.
+      void session.then(id => {
+        if (id && before === generation) return discardStall($,id);
+      });
+    }
     if (item?.guarded && !event.agentId && nativeInput(event.text, item.text)
         && await $.session.id() === item.session_id) {
       item.guarded = false;
@@ -133,6 +261,8 @@ export function register(on) {
     const result = await next(event);
     if (event.agentId) return result;
     const session = await $.session.id();
+    if ((event.isAborted || event.reason !== 'error') && activeTurn?.id === event.turnId)
+      void cancelStall($,session);
     const keys = (await routes($, session)).filter(key => key.endsWith('/' + event.turnId));
     if (keys.length !== 1) return result;
     const key = keys[0];

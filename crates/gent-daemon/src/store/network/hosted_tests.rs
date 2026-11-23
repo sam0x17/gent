@@ -1,6 +1,213 @@
 //! A logical web node uses only its parent's existing encrypted native link.
 use super::*;
 
+#[tokio::test]
+async fn dashboard_congestion_retries_after_drain_and_refreshes_a_replaced_key() -> Result<()> {
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let recipient = pair.stores[1].identity.node.id().to_owned();
+    let key = pair.stores[1].identity.node.public_key();
+    let agent = pair.agents[0].clone();
+    let version = crate::messages::wire::DASHBOARD_VERSION;
+    let board = serde_json::from_value(json!({"title":"Queued","widgets":[
+        {"id":"status","kind":"text","label":"State","value":"old"}]}))?;
+    pair.stores[0].db.execute_batch("WITH RECURSIVE slots(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM slots WHERE i<16384)
+        INSERT INTO network_events(id,peer,body,traffic) SELECT 'filler-'||i,'capacity-test',X'7b7d','control' FROM slots;")?;
+    assert_eq!(
+        pair.agent(
+            0,
+            AgentOp::DashboardDefine {
+                expected_revision: 0,
+                board
+            }
+        )?["revision"],
+        1
+    );
+    assert_eq!(
+        pair.agent(
+            0,
+            AgentOp::DashboardUpdate {
+                expected_revision: 1,
+                values: BTreeMap::from([("status".into(), json!("new"))])
+            }
+        )?["revision"],
+        2
+    );
+    let s = &pair.stores[0];
+    let confirmed = |s: &Store| -> Result<()> {
+        let tx = s.db.unchecked_transaction()?;
+        s.network_session(&tx, s.identity.state(&tx)?)
+            .confirm_wire_version(&recipient, version)?;
+        tx.commit()?;
+        Ok(())
+    };
+    s.db.execute("DELETE FROM wire_peers WHERE peer=?1", [&recipient])?;
+    confirmed(s)?;
+    assert_eq!(
+        s.db.query_row(
+            "SELECT version FROM wire_peers WHERE peer=?1",
+            [&recipient],
+            |r| r.get::<_, u8>(0)
+        )?,
+        version
+    );
+    assert_eq!(
+        s.db.query_row("SELECT count(*) FROM dashboard_sent", [], |r| r
+            .get::<_, u32>(0))?,
+        0
+    );
+    assert_eq!(
+        s.db.query_row(
+            "SELECT count(*) FROM presence_requests WHERE peer=?1",
+            [&recipient],
+            |r| r.get::<_, u32>(0)
+        )?,
+        1
+    );
+    s.db.execute("DELETE FROM network_events WHERE peer='capacity-test'", [])?;
+    pair.reopen(0);
+    pair.stores[0]
+        .db
+        .execute("UPDATE node_presence SET next_probe_at=?1", [now() - 1])?;
+    pair.stores[0].presence_tick()?;
+    pair.pump();
+    let body: String = pair.stores[1].db.query_row(
+        "SELECT body FROM dashboards WHERE agent=?1 AND revision=2",
+        [&agent],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&body)?["widgets"][0]["value"],
+        "new"
+    );
+    let sent = |s: &Store| -> Result<String> {
+        Ok(s.db.query_row(
+            "SELECT event FROM dashboard_sent WHERE agent=?1",
+            [&agent],
+            |r| r.get(0),
+        )?)
+    };
+    let s = &pair.stores[0];
+    let old = sent(s)?;
+    s.db.execute("UPDATE dashboard_sent SET peer_key=zeroblob(32)", [])?;
+    s.db.execute("DELETE FROM wire_peers WHERE peer=?1", [&recipient])?;
+    s.db.execute(
+        "UPDATE network_links SET peer_key=zeroblob(32) WHERE peer=?1",
+        [&recipient],
+    )?;
+    confirmed(s)?;
+    assert_eq!(sent(s)?, old);
+    assert!(
+        !s.db
+            .prepare("SELECT 1 FROM wire_peers WHERE peer=?1")?
+            .exists([&recipient])?
+    );
+    s.db.execute(
+        "UPDATE network_links SET peer_key=?2 WHERE peer=?1",
+        params![recipient, key],
+    )?;
+    confirmed(s)?;
+    let replacement = sent(s)?;
+    assert_ne!(replacement, old);
+    assert_eq!(
+        s.db.query_row(
+            "SELECT peer_key FROM dashboard_sent WHERE agent=?1",
+            [&agent],
+            |r| r.get::<_, Vec<u8>>(0)
+        )?,
+        key
+    );
+    confirmed(s)?;
+    assert_eq!(sent(s)?, replacement);
+    // While the returning peer's replay is in flight, intermediate
+    // revisions coalesce. Even deletion must survive that interval.
+    pair.agent(
+        0,
+        AgentOp::DashboardUpdate {
+            expected_revision: 2,
+            values: BTreeMap::from([("status".into(), json!("superseded"))]),
+        },
+    )?;
+    pair.agent(
+        0,
+        AgentOp::DashboardDelete {
+            expected_revision: 3,
+        },
+    )?;
+    assert_eq!(sent(&pair.stores[0])?, replacement);
+    pair.pump();
+    pair.stores[0]
+        .db
+        .execute("UPDATE node_presence SET next_probe_at=?1", [now() - 1])?;
+    pair.stores[0].presence_tick()?;
+    pair.pump();
+    assert!(
+        pair.stores[1]
+            .db
+            .prepare("SELECT 1 FROM dashboards WHERE agent=?1 AND revision=4 AND body IS NULL")?
+            .exists([&agent])?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unchanged_dashboard_survives_cleanup_and_restart_until_peer_returns() -> Result<()> {
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let board = serde_json::from_value(json!({"title":"Offline","widgets":[
+        {"id":"s","label":"State","kind":"text","value":"pending"}]}))?;
+    pair.agent(
+        0,
+        AgentOp::DashboardDefine {
+            expected_revision: 0,
+            board,
+        },
+    )?;
+    let s = &pair.stores[0];
+    let queued = |s: &Store| -> Result<(String, Option<i64>, bool)> {
+        Ok(s.db.query_row(
+            "SELECT e.id,e.retire_after,e.announcement FROM network_events e
+             JOIN dashboard_sent d ON d.event=e.id",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    };
+    let (id, expiry, watermarked) = queued(s)?;
+    assert_eq!((expiry, watermarked), (None, true));
+    // Recreate the prior on-disk cursor and retention deadline with an
+    // undelivered dashboard. Startup must migrate both in one transaction.
+    s.db.execute("ALTER TABLE dashboard_sent DROP COLUMN peer_key", [])?;
+    let old_deadline = now() + 86400 + history::RETENTION;
+    s.db.execute(
+        "UPDATE network_events SET announcement=0,retire_after=?2 WHERE id=?1",
+        params![id, old_deadline],
+    )?;
+    pair.reopen(0);
+    assert_eq!(queued(&pair.stores[0])?, (id.clone(), None, true));
+    super::super::retention::clean(&pair.stores[0].db, old_deadline + 1, false)?;
+    pair.reopen(0);
+    assert!(
+        pair.stores[0]
+            .db
+            .prepare("SELECT 1 FROM network_events WHERE id=?1")?
+            .exists([&id])?
+    );
+    pair.pump();
+    assert!(
+        !pair.stores[0]
+            .db
+            .prepare("SELECT 1 FROM network_sent WHERE id=?1")?
+            .exists([id])?
+    );
+    let revision: u64 = pair.stores[1].db.query_row(
+        "SELECT revision FROM dashboards WHERE agent=?1",
+        [&pair.agents[0]],
+        |r| r.get(0),
+    )?;
+    assert_eq!(revision, 1);
+    Ok(())
+}
+
 fn owner(store: &mut Store, home: &Path, action: OwnerOp) -> Value {
     store
         .execute(Request::Owner {

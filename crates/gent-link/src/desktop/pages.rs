@@ -11,21 +11,34 @@ use std::{collections::HashMap, path::Path};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    Dashboard,
+    DashboardClick {
+        agent: String,
+        revision: u64,
+        widget: String,
+    },
     About,
     Cluster,
     Permissions,
     Chats,
     Nodes,
     Settings,
-    Set { key: Preference, enabled: bool },
+    Set {
+        key: Preference,
+        enabled: bool,
+    },
     Edit,
     Discard,
-    Save { text: String, publish: bool },
+    Save {
+        text: String,
+        publish: bool,
+    },
 }
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Preference {
+    Babysitter,
     Login,
     Updates,
     Discovery,
@@ -38,6 +51,7 @@ fn settings(home: &Path) -> Result<Value> {
     let cfg = crate::node_home::inspect(home)?;
     let transport = cfg.transport()?;
     Ok(json!({
+        "babysitter": !home.join("babysitter-disabled").try_exists()?,
         "login": login::autostarts(home)?,
         "updates": cfg.updates()?.enabled,
         "discovery": cfg.discovery()?.enabled,
@@ -58,6 +72,14 @@ async fn set(home: &Path, key: Preference, enabled: bool) -> Result<()> {
             };
             update::execute(home, op).await?;
             Ok(())
+        }
+        Preference::Babysitter => {
+            let marker = Snapshot::read(&home.join("babysitter-disabled"))?;
+            if enabled {
+                marker.remove()
+            } else {
+                marker.write("disabled\n")
+            }
         }
         Preference::Discovery => discovery::configure(home, enabled),
         Preference::Direct | Preference::Udp | Preference::Helper => {
@@ -153,6 +175,7 @@ impl Pages {
             return json!({"page":"settings","error":"Invalid desktop request"});
         };
         let page = match request {
+            Request::Dashboard | Request::DashboardClick { .. } => "dashboard",
             Request::About => "about",
             Request::Cluster => "cluster",
             Request::Permissions => "permissions",
@@ -171,6 +194,51 @@ impl Pages {
 
     async fn handle(&mut self, home: &Path, request: Request) -> Result<Value> {
         match request {
+            Request::Dashboard => {
+                let mut after = None;
+                let mut rows = Vec::new();
+                loop {
+                    let mut page = owner(
+                        home,
+                        OwnerOp::Dashboards {
+                            after: after.clone(),
+                        },
+                    )
+                    .await?;
+                    rows.append(
+                        page["rows"]
+                            .as_array_mut()
+                            .context("invalid dashboard page")?,
+                    );
+                    let Some(cursor) = page["next"].as_str() else {
+                        break;
+                    };
+                    ensure!(
+                        after.as_deref().is_none_or(|a| a < cursor),
+                        "invalid dashboard cursor"
+                    );
+                    after = Some(cursor.to_owned());
+                }
+                rows.sort_by_cached_key(|r| r["chat"].as_str().unwrap_or_default().to_lowercase());
+                Ok(json!({"rows":rows}))
+            }
+            Request::DashboardClick {
+                agent,
+                revision,
+                widget,
+            } => {
+                owner(
+                    home,
+                    OwnerOp::DashboardClick {
+                        agent,
+                        revision,
+                        widget,
+                        request_id: uuid::Uuid::now_v7().to_string(),
+                    },
+                )
+                .await?;
+                Ok(json!({"notice":"Action sent to chat."}))
+            }
             Request::About => Ok(super::admin::about()),
             Request::Cluster => super::admin::cluster(home),
             Request::Permissions => super::admin::permissions(home).await,

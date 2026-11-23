@@ -417,6 +417,14 @@ impl StoreSession<'_> {
             )?;
         }
         match event {
+            Event::Dashboard {
+                agent,
+                revision,
+                board,
+            } => {
+                self.import_registration(peer, &agent)?;
+                self.dashboard_receive(&agent.id, revision, board)
+            }
             Event::UnregisterChat { agent, generation } => {
                 self.authorize_remote_unregister(peer)?;
                 self.unregister_local(&agent.to_string(), generation)

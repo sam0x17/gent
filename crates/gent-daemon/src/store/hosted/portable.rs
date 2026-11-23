@@ -20,9 +20,9 @@ impl StoreSession<'_> {
                 .is_some_and(|n| n.hosted_by.as_deref().is_some_and(|host| host != carrier))
         };
         let obsolete = match event {
-            Event::Registration { agent } | Event::ConversationActivity { agent, .. } => {
-                moved(&agent.node, peer)
-            }
+            Event::Dashboard { agent, .. }
+            | Event::Registration { agent }
+            | Event::ConversationActivity { agent, .. } => moved(&agent.node, peer),
             Event::Message {
                 sender, message, ..
             } => {
@@ -134,9 +134,9 @@ impl StoreSession<'_> {
     ) -> Result<()> {
         use crate::messages::Event;
         let node = match event {
-            Event::Registration { agent } | Event::ConversationActivity { agent, .. } => {
-                Some(agent.node.clone())
-            }
+            Event::Dashboard { agent, .. }
+            | Event::Registration { agent }
+            | Event::ConversationActivity { agent, .. } => Some(agent.node.clone()),
             Event::Message { sender, .. } => Some(sender.node.clone()),
             // Rejected incoming messages need negative receipts even when no
             // message row was admitted. Database failures still propagate.
@@ -303,6 +303,10 @@ impl StoreSession<'_> {
         )?;
         self.db.execute(
             "DELETE FROM hosted_message_gates WHERE node=?1 AND revision<=?2",
+            params![node, revision],
+        )?;
+        self.db.execute(
+            "DELETE FROM hosted_dashboard_gates WHERE node=?1 AND revision<=?2",
             params![node, revision],
         )?;
         self.db.execute("DELETE FROM hosted_directory AS old WHERE node=?1 AND revision < (

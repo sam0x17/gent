@@ -1,10 +1,12 @@
-//! Best-effort local desktop notification, only after automatic activation.
+//! Publish the newly activated build to the node's account inbox.
 use crate::build_info::Build;
-use std::time::Duration;
-use tokio::process::Command;
+use gent_protocol::{
+    OwnerOp,
+    notifications::{Event, Notice},
+};
+use std::path::Path;
 
-pub(super) async fn installed(build: &Build) {
-    let message = format!("Updated to {}. Gent is ready.", &build.commit[..12]);
+pub(super) async fn installed(home: &Path, build: &Build) {
     #[cfg(feature = "test-updates")]
     if let Some(log) = std::env::var_os("GENT_TEST_UPDATE_NOTIFICATIONS") {
         use std::io::Write;
@@ -17,23 +19,24 @@ pub(super) async fn installed(build: &Build) {
         }
         return;
     }
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = Command::new("/usr/bin/osascript");
-        command.args([
-            "-e",
-            "on run argv\ndisplay notification (item 1 of argv) with title \"Gent\"\nend run",
-            &message,
-        ]);
-        command
-    };
-    #[cfg(not(target_os = "macos"))]
-    let mut command = {
-        let mut command = Command::new("notify-send");
-        command.args(["--app-name=Gent", "Gent updated", &message]);
-        command
-    };
-    if let Err(error) = super::process::capture(&mut command, 4096, Duration::from_secs(5)).await {
-        eprintln!("Gent updated; desktop notification unavailable: {error}");
+    if let Ok(cfg) = gent_daemon::config::load(home)
+        && let Ok(node) = uuid::Uuid::parse_str(&cfg.node.id)
+    {
+        let notice = Notice {
+            id: uuid::Uuid::new_v4(),
+            created_at: chrono::Utc::now().timestamp(),
+            event: Event::UpdateInstalled {
+                node,
+                commit: build.commit.clone(),
+            },
+        };
+        let _ = crate::owner(
+            home,
+            OwnerOp::NotificationPut {
+                notice,
+                scope: crate::auth::notifications::scope(home),
+            },
+        )
+        .await;
     }
 }

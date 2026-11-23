@@ -77,6 +77,111 @@ fn sent(pair: &mut Pair) -> String {
 }
 
 #[test]
+fn dashboard_restore_rewinds_only_hosted_boards_and_their_replication_cursors() -> Result<()> {
+    let mut pair = fixture();
+    let web = pair.child.identity.node.id().to_owned();
+    let define = |title: &str| AgentOp::DashboardDefine {
+        expected_revision: 0,
+        board: serde_json::from_value(json!({
+        "title":title,"widgets":[{"id":"status","kind":"text","label":"Status","value":"ready"}]}))
+        .unwrap(),
+    };
+    call(&mut pair, 0, define("native"))?;
+    let initial = snapshot::export(pair.homes[0].path(), &web)?;
+    assert!(
+        serde_json::to_value(&initial)?["tables"]
+            .get("dashboards")
+            .is_none()
+    );
+    let mutation = define("hosted");
+    call(&mut pair, 1, mutation.clone())?;
+    let published = snapshot::export(pair.homes[0].path(), &web)?;
+    call(&mut pair, 1, mutation.clone())?;
+    assert_eq!(
+        snapshot::export(pair.homes[0].path(), &web)?.revision,
+        published.revision
+    );
+    assert_eq!(
+        owner(&mut pair, OwnerOp::Dashboards { after: None })["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    owner(
+        &mut pair,
+        OwnerOp::WebCommit {
+            epoch: None,
+            node_id: web.clone(),
+            revision: published.revision,
+        },
+    );
+    assert_eq!(
+        owner(&mut pair, OwnerOp::Dashboards { after: None })["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    call(
+        &mut pair,
+        1,
+        AgentOp::DashboardDelete {
+            expected_revision: 1,
+        },
+    )?;
+    let tombstone = snapshot::export(pair.homes[0].path(), &web)?;
+    let restore = |pair: &mut Pair, snap: &snapshot::Snapshot| -> Result<()> {
+        let tx = pair.parent.db.transaction()?;
+        snapshot::restore(&tx, snap, pair.state.anchor(), &web)?;
+        tx.commit()?;
+        Ok(())
+    };
+    for id in &pair.agents[..2] {
+        pair.parent.db.execute(
+            "INSERT INTO dashboard_sent(peer,agent,revision,event) VALUES('test',?1,2,'queued')",
+            [id],
+        )?;
+    }
+    restore(&mut pair, &published)?;
+    assert_eq!(
+        call(&mut pair, 1, AgentOp::DashboardGet)?["board"]["title"],
+        "hosted"
+    );
+    assert_eq!(call(&mut pair, 1, mutation)?["revision"], 1);
+    let retained: String =
+        pair.parent
+            .db
+            .query_row("SELECT agent FROM dashboard_sent", [], |r| r.get(0))?;
+    assert_eq!(retained, pair.agents[0]);
+    restore(&mut pair, &tombstone)?;
+    assert_eq!(
+        call(&mut pair, 1, AgentOp::DashboardGet)?,
+        json!({"revision":2,"board":null})
+    );
+    let mut foreign = serde_json::to_value(&published)?;
+    foreign["tables"]["dashboards"]["rows"][0][0]["value"] = json!(pair.agents[0]);
+    assert!(restore(&mut pair, &serde_json::from_value(foreign)?).is_err());
+    let mut malformed = serde_json::to_value(&published)?;
+    malformed["tables"]["dashboards"]["rows"][0][2]["value"] =
+        json!(r#"{"title":"bad","widgets":[]}"#);
+    assert!(restore(&mut pair, &serde_json::from_value(malformed)?).is_err());
+    assert_eq!(call(&mut pair, 1, AgentOp::DashboardGet)?["revision"], 2);
+    // An original V1 checkpoint has no dashboards entry; restore treats it
+    // as an empty set for this logical web node.
+    restore(&mut pair, &initial)?;
+    assert_eq!(
+        call(&mut pair, 1, AgentOp::DashboardGet)?,
+        json!({"revision":0,"board":null})
+    );
+    assert_eq!(
+        call(&mut pair, 0, AgentOp::DashboardGet)?["board"]["title"],
+        "native"
+    );
+    Ok(())
+}
+
+#[test]
 fn native_message_after_idle_marks_web_checkpoint_once() {
     let mut pair = fixture();
     let node = pair.child.identity.node.id().to_owned();

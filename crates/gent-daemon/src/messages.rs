@@ -52,6 +52,11 @@ impl Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
+    Dashboard {
+        agent: Registration,
+        revision: u64,
+        board: Option<gent_protocol::dashboard::Board>,
+    },
     UnregisterChat {
         agent: Uuid,
         generation: u64,
@@ -112,7 +117,8 @@ impl Event {
     pub(crate) fn permits_compression(&self) -> bool {
         match self {
             Self::Message { attachments, .. } => attachments.is_empty(),
-            Self::UnregisterChat { .. }
+            Self::Dashboard { .. }
+            | Self::UnregisterChat { .. }
             | Self::Presence { .. }
             | Self::Receipt { .. }
             | Self::Registration { .. }

@@ -3,10 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub mod administration;
 pub mod configuration_log;
+pub mod dashboard;
 pub mod directory;
 pub mod file_objects;
 pub mod history;
 pub mod hosted_mcp;
+pub mod notifications;
 pub mod owner_transfer;
 pub mod permissions;
 pub mod service;
@@ -248,6 +250,34 @@ pub struct Message {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentOp {
+    DashboardGet,
+    Babysit {
+        enabled: Option<bool>,
+    },
+    BabysitterClaim {
+        goal: String,
+        turn: uuid::Uuid,
+        failed_at: i64,
+        reason: notifications::Failure,
+    },
+    BabysitterSubmitted {
+        attempt: uuid::Uuid,
+        scope: Option<notifications::Scope>,
+    },
+    BabysitterCheck {
+        attempt: uuid::Uuid,
+    },
+    DashboardDefine {
+        expected_revision: u64,
+        board: dashboard::Board,
+    },
+    DashboardUpdate {
+        expected_revision: u64,
+        values: BTreeMap<String, serde_json::Value>,
+    },
+    DashboardDelete {
+        expected_revision: u64,
+    },
     Register {
         name: String,
         provider: String,
@@ -607,6 +637,25 @@ pub enum ConfigurationEdit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOp {
+    Dashboards {
+        after: Option<String>,
+    },
+    NotificationPut {
+        notice: notifications::Notice,
+        scope: Option<notifications::Scope>,
+    },
+    NotificationPending {
+        scope: notifications::Scope,
+    },
+    NotificationSent {
+        id: uuid::Uuid,
+    },
+    DashboardClick {
+        agent: String,
+        revision: u64,
+        widget: String,
+        request_id: String,
+    },
     /// Scoped proof for the hosted checkpoint service; never exports a signing key.
     WebAdmission {
         node_id: String,

@@ -7,7 +7,7 @@ use gent_protocol::{Effect, OwnerOp, Permission, Policy, Rule, Selector};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 fn home() -> tempfile::TempDir {
-    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let dir = tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     config::initialize(dir.path(), "claude-wake-test").unwrap();
     dir
@@ -413,4 +413,92 @@ async fn bridge_scenario(direct: bool) {
             .join("skills/gent-wake/hooks/register.ts")
             .exists()
     );
+}
+
+/// Run explicitly on a machine with Node. The host fixture loads the installed
+/// register.ts; only the Claude host APIs are simulated. Every bridge request
+/// goes through the normal installation, binding and local daemon checks.
+#[tokio::test]
+#[ignore = "requires Node.js for the synthetic Claude plugin host"]
+async fn babysitter_installed_plugin_and_native_transcript() {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let home = home();
+    let directory = home.path().join("claude");
+    install::change(
+        home.path(),
+        install::Args {
+            host: Host::ClaudeCode,
+            config_dir: Some(directory.clone()),
+            wake: true,
+            wake_socket: None,
+            vscode: false,
+            no_vscode: false,
+            vscode_settings: None,
+        },
+        true,
+    )
+    .unwrap();
+    let session = uuid::Uuid::new_v4().to_string();
+    let mut bindings = Bindings::new(home.path(), Host::ClaudeCode).unwrap();
+    let key = bind(home.path(), &mut bindings, &session, None);
+    let node = home.path().to_owned();
+    let _daemon = Daemon(tokio::spawn(async move { gent_daemon::run(&node).await }));
+    for _ in 0..200 {
+        if home.path().join("daemon.sock").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    rpc(
+        home.path(),
+        &key,
+        AgentOp::Register {
+            name: "fixture".into(),
+            provider: "claude-code".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let mut host = tokio::process::Command::new("node")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/integration/claude_wake/babysit/proof.mjs"
+        ))
+        .arg(&directory)
+        .arg(&session)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = tokio::io::BufReader::new(host.stdout.take().unwrap()).lines();
+    let mut stdin = host.stdin.take().unwrap();
+    let fixture = async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            let reply = if let Some(event) = frame.get("guard_event") {
+                guard_event(home.path(), &directory, event).await
+            } else {
+                run(
+                    home.path(),
+                    &directory,
+                    serde_json::from_value(frame).unwrap(),
+                )
+                .await
+            };
+            let frame = match reply {
+                Ok(value) => json!({"exitCode":0, "stdout":value.to_string()}),
+                Err(_) => json!({"exitCode":1, "stdout":""}),
+            };
+            stdin
+                .write_all(format!("{frame}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        assert!(host.wait().await.unwrap().success());
+    };
+    tokio::time::timeout(Duration::from_secs(60), fixture)
+        .await
+        .unwrap();
 }

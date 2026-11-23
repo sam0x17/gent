@@ -15,6 +15,19 @@ impl Drop for Fixture {
 }
 impl Fixture {
     fn new(thread: String, status: &str, direct: bool, response: Value) -> Self {
+        let status = status.to_owned();
+        Self::respond(move |request| {
+            Some(match request["method"].as_str().unwrap() {
+                "thread/read" => {
+                    json!({"thread":{"id":thread,"status":{"type":status},"canAcceptDirectInput":direct}})
+                }
+                "turn/start" | "thread/loaded/list" => response.clone(),
+                method => panic!("forbidden host operation: {method}"),
+            })
+        })
+    }
+
+    fn respond(reply: impl Fn(&Value) -> Option<Value> + Send + 'static) -> Self {
         let root = tempfile::tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = root.path().join("host.sock");
@@ -22,33 +35,32 @@ impl Fixture {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = requests.clone();
-        let status = status.to_owned();
         let task = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut stream = tokio_tungstenite::accept_async(stream).await.unwrap();
-            while let Some(Ok(Message::Text(text))) = stream.next().await {
-                let request: Value = serde_json::from_str(&text).unwrap();
-                seen.lock().unwrap().push(request.clone());
-                let Some(id) = request.get("id") else {
-                    continue;
-                };
-                let result = match request["method"].as_str().unwrap() {
-                    "initialize" => json!({}),
-                    "thread/read" => {
-                        json!({"thread":{"id":thread,"status":{"type":status},"canAcceptDirectInput":direct}})
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+                while let Some(Ok(Message::Text(text))) = stream.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    seen.lock().unwrap().push(request.clone());
+                    let Some(id) = request.get("id") else {
+                        continue;
+                    };
+                    let result = if request["method"] == "initialize" {
+                        json!({})
+                    } else if let Some(result) = reply(&request) {
+                        result
+                    } else {
+                        break;
+                    };
+                    if stream
+                        .send(Message::Text(
+                            json!({"id":id,"result":result}).to_string().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
                     }
-                    "turn/start" => response.clone(),
-                    "thread/loaded/list" => response.clone(),
-                    method => panic!("forbidden host operation: {method}"),
-                };
-                if stream
-                    .send(Message::Text(
-                        json!({"id":id,"result":result}).to_string().into(),
-                    ))
-                    .await
-                    .is_err()
-                {
-                    break;
                 }
             }
         });
@@ -196,3 +208,5 @@ async fn server_approval_requests_are_never_answered() {
         .unwrap()
         .unwrap();
 }
+
+mod babysit;

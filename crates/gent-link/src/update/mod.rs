@@ -143,7 +143,7 @@ async fn monitor(home: &Path, installation: &Installation) {
     };
     integrations::refresh(home, installation).await;
     if let Some(build) = notification {
-        notification::installed(&build).await;
+        notification::installed(home, &build).await;
     }
     let interval = CHECK_INTERVAL;
     #[cfg(feature = "test-updates")]

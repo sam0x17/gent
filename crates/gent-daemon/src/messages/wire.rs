@@ -10,8 +10,18 @@ mod value;
 pub const ZSTD_VERSION: u8 = 6;
 pub const HELPERS_VERSION: u8 = 7;
 pub const ADMIN_VERSION: u8 = 8;
-pub const CURRENT: u8 = ADMIN_VERSION;
-pub const NEGOTIATED: &[u8] = &[2, 3, 4, 5, ZSTD_VERSION, HELPERS_VERSION, ADMIN_VERSION];
+pub const DASHBOARD_VERSION: u8 = 9;
+pub const CURRENT: u8 = DASHBOARD_VERSION;
+pub const NEGOTIATED: &[u8] = &[
+    2,
+    3,
+    4,
+    5,
+    ZSTD_VERSION,
+    HELPERS_VERSION,
+    ADMIN_VERSION,
+    DASHBOARD_VERSION,
+];
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,6 +110,9 @@ fn v2(event: &mut Value, encode: bool) -> Result<(), String> {
 impl Serialize for Record {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut event = serde_json::to_value(&self.event).map_err(ser::Error::custom)?;
+        if self.version < DASHBOARD_VERSION && matches!(&self.event, Event::Dashboard { .. }) {
+            return Err(ser::Error::custom("dashboard requires protocol 9"));
+        }
         let admin_event = matches!(self.event, Event::UnregisterChat { .. })
             || matches!(&self.event, Event::ConfigurationRequest { edit, .. } if matches!(edit.as_ref(), gent_protocol::ConfigurationEdit::SetPermissionRule { .. }));
         if self.version < ADMIN_VERSION && admin_event {
@@ -152,6 +165,9 @@ impl Serialize for Record {
 impl<'de> Deserialize<'de> for Record {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut envelope = Envelope::deserialize(deserializer)?;
+        if envelope.version < DASHBOARD_VERSION && envelope.event["kind"] == "dashboard" {
+            return Err(de::Error::custom("dashboard requires protocol 9"));
+        }
         if envelope.version < ADMIN_VERSION
             && (envelope.event["kind"] == "unregister_chat"
                 || (envelope.event["kind"] == "configuration_request"

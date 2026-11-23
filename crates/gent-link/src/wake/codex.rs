@@ -19,6 +19,7 @@ use tokio_tungstenite::{
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
+mod babysit;
 mod direct;
 pub(crate) mod recovery;
 
@@ -108,7 +109,9 @@ async fn sweep(
         // A stale or unavailable conversation must not starve other bindings.
         match registry.credential(&thread) {
             Ok(Some(credential)) => {
-                failed |= dispatch(home, socket, &thread, &credential).await.is_err()
+                failed |= dispatch(home, socket, &thread, &credential).await.is_err();
+                // Older app servers may not implement goal inspection.
+                let _ = babysit::inspect(home, socket, &thread, &credential).await;
             }
             Ok(None) => {}
             Err(_) => failed = true,

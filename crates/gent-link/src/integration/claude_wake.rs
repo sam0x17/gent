@@ -1,5 +1,7 @@
 //! Local native plugin bridge. The model never supplies these inputs or reads
 //! credentials. Every operation validates the pinned installation and session.
+mod babysit;
+mod reservation;
 use super::{claude_binding::credential, install, wake};
 use anyhow::{Context, Result, ensure};
 use gent_daemon::config;
@@ -75,6 +77,37 @@ async fn guard_event(home: &Path, directory: &Path, event: &Value) -> Result<Val
         "unexpected Claude guard event"
     );
     let prompt = event["prompt"].as_str().context("missing prompt")?;
+    if let Some(marker) = prompt.strip_prefix(reservation::PREFIX) {
+        let (install, id) = marker
+            .strip_suffix(']')
+            .and_then(|s| s.split_once(' '))
+            .context("invalid goal continuation")?;
+        let attempt = uuid::Uuid::parse_str(id)?;
+        ensure!(
+            wake::valid_thread(install)
+                && prompt == reservation::prompt(install, attempt)
+                && event.get("agent_id").is_none(),
+            "invalid primary goal continuation"
+        );
+        let answer = run(
+            home,
+            directory,
+            Input {
+                installation_id: install.to_owned(),
+                session_id: event["session_id"]
+                    .as_str()
+                    .context("missing session")?
+                    .into(),
+                operation: Operation::BabysitAdmit { attempt },
+            },
+        )
+        .await?;
+        ensure!(
+            answer["eligible"] == true,
+            "goal continuation is no longer eligible"
+        );
+        return Ok(json!({"continue":true}));
+    }
     if let Some((_, trailer)) = prompt.rsplit_once("\n\n[Gent delivery ") {
         let fields: Vec<_> = trailer
             .strip_suffix(']')
@@ -174,14 +207,35 @@ pub(crate) async fn guard_execute(home: &Path, directory: &Path) -> Value {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Input {
+struct Input {
     pub installation_id: String,
     pub session_id: String,
     pub operation: Operation,
 }
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum Operation {
+enum Operation {
+    BabysitCapture {
+        turn: uuid::Uuid,
+        path: std::path::PathBuf,
+        started_ms: i64,
+        observed_ms: i64,
+        code: String,
+        details: String,
+    },
+    BabysitClaim {
+        failure: babysit::Record,
+    },
+    BabysitCheck {
+        failure: babysit::Record,
+        attempt: uuid::Uuid,
+    },
+    BabysitAdmit {
+        attempt: uuid::Uuid,
+    },
+    BabysitSubmitted {
+        attempt: uuid::Uuid,
+    },
     Claim,
     ClaimDirect,
     CheckDirect {
@@ -241,7 +295,7 @@ async fn validate_installation(home: &Path, directory: &Path, id: &str) -> Resul
     crate::managed_file::retry_read(|| install::claude_wake(home, directory, id)).await
 }
 
-pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<Value> {
+async fn run(home: &Path, directory: &Path, input: Input) -> Result<Value> {
     ensure!(
         wake::valid_thread(&input.session_id),
         "invalid Claude session ID"
@@ -262,7 +316,89 @@ pub(super) async fn run(home: &Path, directory: &Path, input: Input) -> Result<V
     let target = WakeTarget::ClaudeCode {
         session_id: input.session_id.clone(),
     };
+    let reservation_path = || {
+        super::scope_path(home, &cfg, super::Host::ClaudeCode).join(format!(
+            "{}.resume",
+            super::session_key(&input.session_id, None)
+        ))
+    };
     let result = match input.operation {
+        Operation::BabysitCapture {
+            turn,
+            path,
+            started_ms,
+            observed_ms,
+            code,
+            details,
+        } => {
+            let reason = crate::babysitter::classify(&code, &details);
+            if let Some(reason) = reason
+                && !home.join("babysitter-disabled").try_exists()?
+            {
+                let failure =
+                    babysit::capture(directory, &input.session_id, &path, started_ms, observed_ms)?
+                        .map(|source| babysit::Record {
+                            turn,
+                            reason,
+                            failed_at: observed_ms / 1000,
+                            source,
+                        });
+                json!({"pending": failure.is_none(), "failure":failure})
+            } else {
+                json!({"failure":null})
+            }
+        }
+        Operation::BabysitClaim { failure } => {
+            if home.join("babysitter-disabled").try_exists()?
+                || failure
+                    .current(directory, &input.session_id, None)?
+                    .is_none()
+            {
+                json!({"obsolete":true})
+            } else {
+                rpc(
+                    home,
+                    &key,
+                    AgentOp::BabysitterClaim {
+                        goal: failure.source.goal,
+                        turn: failure.turn,
+                        failed_at: failure.failed_at,
+                        reason: failure.reason,
+                    },
+                )
+                .await?
+            }
+        }
+        Operation::BabysitCheck { attempt, failure } => {
+            let checked = rpc(home, &key, AgentOp::BabysitterCheck { attempt }).await?;
+            if checked["eligible"] == true
+                && !home.join("babysitter-disabled").try_exists()?
+                && let Some(end) = failure.current(directory, &input.session_id, None)?
+            {
+                reservation::Reservation::arm(&reservation_path(), attempt, failure, end)?;
+                json!({"text":reservation::prompt(&installation.id, attempt)})
+            } else {
+                json!({"text":null})
+            }
+        }
+        Operation::BabysitAdmit { attempt } => {
+            let checked = rpc(home, &key, AgentOp::BabysitterCheck { attempt }).await?;
+            json!({"eligible": checked["eligible"] == true && !home.join("babysitter-disabled").try_exists()?
+                && reservation::Reservation::admit(&reservation_path(), attempt, directory,
+                    &input.session_id, &reservation::prompt(&installation.id, attempt))?})
+        }
+        Operation::BabysitSubmitted { attempt } => {
+            reservation::Reservation::confirm(&reservation_path(), attempt)?;
+            rpc(
+                home,
+                &key,
+                AgentOp::BabysitterSubmitted {
+                    attempt,
+                    scope: crate::auth::notifications::scope(home),
+                },
+            )
+            .await?
+        }
         Operation::Observe {
             message_id,
             attempt_id,

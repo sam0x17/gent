@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""Run under dbus-run-session and Xvfb, with GTK 3, AyatanaAppIndicator, xdotool and a WM."""
+"""Run under dbus-run-session and Xvfb with GTK 3, python3-gi-cairo, AT-SPI, AyatanaAppIndicator, xdotool and a WM."""
 import argparse
 from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
 from queue import Queue
+import secrets
+import socket
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
 
 from gi.repository import Gio, GLib
 from desktop_tabs_linux import exercise_tabs
 from mcp_client import Client
 
 
-def wait_for(check, description):
-    end = time.monotonic() + 12
+def wait_for(check, description, timeout=12):
+    end = time.monotonic() + timeout
     while time.monotonic() < end:
         result = check()
         if result:
@@ -35,15 +38,21 @@ class TrayHost:
     </interface></node>"""
 
     def __init__(self):
-        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
         self.registrations = Queue()
         iface = Gio.DBusNodeInfo.new_for_xml(self.xml).interfaces[0]
-        self.object_id = self.bus.register_object("/StatusNotifierWatcher", iface, self.register,
-                                                  lambda *_: GLib.Variant("b", True), None)
         acquired = threading.Event()
-        self.owner = Gio.bus_own_name_on_connection(self.bus, self.name, Gio.BusNameOwnerFlags.DO_NOT_QUEUE,
-                                                     lambda *_: acquired.set(), None)
-        self.loop = GLib.MainLoop()
+        # AT-SPI uses the main thread's default context. Keep its callbacks off the tray thread.
+        context = GLib.MainContext.new()
+        context.push_thread_default()
+        try:
+            self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+            self.object_id = self.bus.register_object("/StatusNotifierWatcher", iface, self.register,
+                                                      lambda *_: GLib.Variant("b", True), None)
+            self.owner = Gio.bus_own_name_on_connection(self.bus, self.name, Gio.BusNameOwnerFlags.DO_NOT_QUEUE,
+                                                        lambda *_: acquired.set(), None)
+        finally:
+            context.pop_thread_default()
+        self.loop = GLib.MainLoop.new(context, False)
         self.thread = threading.Thread(target=self.loop.run, daemon=True)
         self.thread.start()
         assert acquired.wait(5), "use a fresh D-Bus session for the fixture tray"
@@ -91,32 +100,81 @@ def stop(process):
             process.wait()
 
 
+def host_fixture_node(binary, home, created):
+    """Enroll over local stdio, then activate the real signed host mapping."""
+    child = home.parent / "web"
+    shim = home.parent / "bin"
+    shim.mkdir()
+    ssh = shim / "ssh"
+    ssh.write_text('#!/bin/sh\nexec "$FIXTURE_GENT" --home "$FIXTURE_OWNER" cluster pairing-serve\n')
+    ssh.chmod(0o700)
+    joined = subprocess.run(
+        [binary, "--home", child, "--json", "cluster", "join", created["cluster"]["id"],
+         "--via", "fixture", "--name", "fixture-web"],
+        env=dict(os.environ, PATH=f'{shim}:{os.environ["PATH"]}', FIXTURE_GENT=str(binary),
+                 FIXTURE_OWNER=str(home)), stdout=subprocess.PIPE, check=True, timeout=30)
+    node = json.loads(joined.stdout)["node"]
+    parent = created["node"]
+
+    def owner(action):
+        body = {"role": "owner", "credential": (home / "owner.key").read_text().strip(), "action": action}
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(15)
+            sock.connect(str(home / "daemon.sock"))
+            sock.sendall(json.dumps(body).encode() + b"\n")
+            with sock.makefile("rb") as response:
+                result = json.loads(response.readline())
+        assert result["status"] == "ok", result
+        return result["data"]
+
+    prepared = owner({"op": "prepare_hosted_node", "node_id": node["id"], "home": str(child)})
+    assert prepared["prepared"] and prepared["hosted_by"] == parent["id"], prepared
+    signed = owner({"op": "configure", "request_id": str(uuid.uuid4()), "edit": {
+        "op": "host_node", "node_id": node["id"], "parent": parent["id"]}})
+    assert signed["applied"], signed
+    return node
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="gent-desk-") as folder, ExitStack() as cleanup:
         home = Path(folder) / 'node with % space'
-        env = dict(os.environ, HOME=folder, XDG_DATA_HOME=folder+"/data", XDG_CONFIG_HOME=folder+"/config")
-        base = [str(args.binary.resolve()), "--home", str(home)]
+        os.environ.update(HOME=folder, XDG_DATA_HOME=folder+"/data", XDG_CONFIG_HOME=folder+"/config",
+                          XDG_CACHE_HOME=folder+"/cache")
+        binary = args.binary.resolve()
+        base = [str(binary), "--home", str(home)]
         def cli(*args, **kwargs):
-            return subprocess.run(base + list(args), env=env, timeout=20, check=True, capture_output=True, **kwargs)
+            return subprocess.run(base + list(args), timeout=20, check=True, capture_output=True, **kwargs)
         def launch(*args):
-            process = subprocess.Popen(base + list(args), env=env)
+            process = subprocess.Popen(base + list(args))
             cleanup.callback(stop, process)
             return process
         def visible():
             return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Gent Desktop$"],
                                   text=True, capture_output=True).stdout.strip()
-        cli("cluster", "new", "desktop-test", "--local")
+        created = json.loads(cli("--json", "cluster", "new", "desktop-test", "--local").stdout)
+        # Stdio enrollment requires a configuration relay in the parent's snapshot.
+        key = home / "fixture-relay.key"
+        key.touch(mode=0o600)
+        key.write_text(secrets.token_hex(32))
+        with (home / "config.toml").open("a") as cfg:
+            cfg.write('\n[relay]\nendpoint = "http://127.0.0.1:9"\ncredential_file = "fixture-relay.key"\n'
+                      '\n[transport]\ndirect = "off"\nrelays = []\n')
         daemon = launch("daemon", "run")
         wait_for(lambda: (home/"daemon.sock").is_socket(), "daemon")
+        hosted = host_fixture_node(binary, home, created)
         fixture = Client(base + ["mcp", "serve", "--binding", str(home / "fixture.key")])
         cleanup.callback(fixture.close)
-        fixture.call("gent_register", {"name": "Fixture conversation", "provider": "generic-mcp"})
+        agent = fixture.call("gent_register", {"name": "Fixture conversation", "provider": "generic-mcp"})[0]["agent"]
         tray = TrayHost()
         cleanup.callback(tray.close)
         cli("desktop", "enable")
+        def close_desktop():
+            if (home / "desktop.sock").exists():
+                cli("desktop", "disable")
+        cleanup.callback(close_desktop)
         click = tray.menu("Daemon running")
         assert not visible(), "autostart opened the window"
         app, = (Path(folder)/"data/applications").glob("*.desktop")
@@ -124,14 +182,14 @@ def main():
         assert "--background" in entry.read_text() and "--background" not in app.read_text()
         click("Open Gent Desktop")
         first = wait_for(visible, "window opened by tray")
-        exercise_tabs(wait_for, cli)
+        exercise_tabs(wait_for, cli, fixture, agent, hosted, created["node"])
         assert 'name = "desktop-published"' in (home / "config.toml").read_text()
         cli("desktop")
         assert visible() == first, "second launch duplicated the window"
         subprocess.run(["xdotool","windowactivate","--sync",first,"key","alt+F4"], check=True)
         wait_for(lambda: not visible(), "window hidden")
         # Launch the generated .desktop file with the freedesktop Exec parser.
-        subprocess.run(["gio", "launch", str(app)], env=env, check=True, timeout=8)
+        subprocess.run(["gio", "launch", str(app)], check=True, timeout=8)
         assert wait_for(visible, "launcher reopened window") == first
         click("Quit Gent Desktop")
         wait_for(lambda: not visible(), "tray quit")
@@ -144,7 +202,7 @@ def main():
 
         # Preserve unrelated entries even if one occupies our expected filename.
         app.write_text("[Desktop Entry]\nName=User's application\n")
-        refused = subprocess.run(base + ["desktop", "enable"], env=env, capture_output=True, timeout=10)
+        refused = subprocess.run(base + ["desktop", "enable"], capture_output=True, timeout=10)
         assert refused.returncode != 0 and b"unmanaged desktop login entry" in refused.stderr
         assert "User's application" in app.read_text() and not entry.exists()
         app.unlink()
@@ -153,7 +211,7 @@ def main():
         cli("desktop", "disable")
         wait_for(lambda: not (home / "desktop.sock").exists(), "disable closed the running tray")
         assert daemon.poll() is None
-        print("PASS: chats, nodes, settings, local save and cluster publish, tray menu, single window, close/reopen, quit, login opt-out, file ownership and daemon independence")
+        print("PASS: hosted node on Status and Nodes, MCP dashboard widgets, button inbox delivery, live update/delete, chats, settings, cluster publish, tray and login lifecycle")
 
 
 if __name__ == "__main__":

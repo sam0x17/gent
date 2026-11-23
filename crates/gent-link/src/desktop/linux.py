@@ -49,6 +49,7 @@ class Desktop:
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, border_width=20)
         self.tabs = Gtk.Notebook()
+        self.tabs.set_scrollable(True)
         self.window.add(self.tabs)
         self.tabs.append_page(outer, Gtk.Label(label="Status"))
         identity = Gtk.Box(spacing=12)
@@ -100,8 +101,8 @@ class Desktop:
         actions.pack_start(self.restart, False, False, 0)
         outer.pack_end(actions, False, False, 0)
         self.pages = {
-            "chats": DirectoryPane("chats"), "nodes": DirectoryPane("nodes"),
-            "settings": SettingsPane(),
+            "dashboard": DashboardPane(), "chats": DirectoryPane("chats"),
+            "nodes": DirectoryPane("nodes"), "settings": SettingsPane(),
             **{name: ManagementPane(name) for name in ("cluster", "permissions", "about")},
         }
         for name, page in self.pages.items():
@@ -176,6 +177,8 @@ class Desktop:
             print(action, flush=True)
 
     def tick(self):
+        if self.window.get_visible() and self.tabs.get_nth_page(self.tabs.get_current_page()) is self.pages["dashboard"]:
+            self.pages["dashboard"].load()
         if self.window.get_visible() or time.monotonic() - self.last_read >= 60:
             self.send("refresh")
         return True

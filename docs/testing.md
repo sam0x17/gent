@@ -33,6 +33,22 @@ Rust commands keep `Cargo.lock` fixed. The smoke checks use disposable state and
 
 Four tests that require local account/relay Workers remain explicitly ignored in the default suite. Run those through the service fixtures in the private parent. Default CI also does not establish native systemd/launchd lifecycle, real provider behavior, hosted OAuth, remote storage, GUI/mobile support or release installation. Those have separate acceptance checks.
 
+## Goal recovery
+
+With Codex 0.170.0 on `PATH`, run the following from the client checkout. The tests launch isolated app-servers and loopback providers. They exercise quota recovery, continuation of an idle goal, a user interruption, and an explicit user block after a provider failure.
+
+```sh
+cargo test --locked -p gent-link installed_codex_ -- --ignored
+```
+
+With Node.js on `PATH`, run the Claude Code adapter proof. A synthetic host loads the installed plugin and drives its hooks through the native Gent bridge and a disposable daemon.
+
+```sh
+cargo test --locked -p gent-link babysitter_installed_plugin_and_native_transcript -- --ignored
+```
+
+The private parent also includes a live Claude Code test. From the parent checkout, run `python3 scripts/prove_claude_babysitter.py --gent gent/target/debug/gent` with Claude Code on `PATH`. It creates a disposable goal, returns a provider error over loopback, and checks Claude's transcript for the resumed turn and completed goal.
+
 ## GitHub Actions
 
 The `Linux checks` workflow runs on pushes to `main`, pull requests and manual dispatch. It uses one Ubuntu 24.04 job with a 30-minute timeout and cancels superseded runs on the same ref. It validates the workflow with checksum-pinned actionlint and the driver with ShellCheck before running `scripts/check.sh`.
@@ -57,8 +73,10 @@ The test creates its own node and login directories, opens the real tray menu, a
 fixture=$(mktemp -d)
 xcrun --sdk macosx swiftc -swift-version 5 crates/gent-link/src/desktop/macos.swift \
     crates/gent-link/src/desktop/macos_tabs.swift \
+    crates/gent-link/src/desktop/management.swift \
+    crates/gent-link/src/desktop/dashboard.swift \
     scripts/desktop-macos/main.swift -o "$fixture/GentDesktopSmoke"
-"$fixture/GentDesktopSmoke" assets/branding/inkling-128.png
+"$fixture/GentDesktopSmoke" assets/branding/inkling-512.png
 rm "$fixture/GentDesktopSmoke" && rmdir "$fixture"
 ```
 

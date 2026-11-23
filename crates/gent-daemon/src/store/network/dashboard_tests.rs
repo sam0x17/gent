@@ -1,0 +1,251 @@
+use super::*;
+
+#[tokio::test]
+async fn dashboard_pages_include_every_publisher_once() {
+    let mut pair = Pair::new().await;
+    let board: gent_protocol::dashboard::Board =
+        serde_json::from_value(json!({"title":"Run","widgets":[
+            {"id":"state","kind":"text","label":"Status","value":"Working"}
+        ]}))
+        .unwrap();
+    let mut publishers = std::collections::BTreeSet::new();
+    for i in 1..=33 {
+        let credential = format!("{i:064x}");
+        let register = Request::Agent {
+            credential: credential.clone(),
+            action: AgentOp::Register {
+                name: format!("Run {i}"),
+                provider: "test".into(),
+            },
+        };
+        let entry = pair.stores[0].execute(register).unwrap();
+        publishers.insert(entry["agent"]["id"].as_str().unwrap().to_owned());
+        pair.stores[0]
+            .execute(Request::Agent {
+                credential,
+                action: AgentOp::DashboardDefine {
+                    expected_revision: 0,
+                    board: board.clone(),
+                },
+            })
+            .unwrap();
+    }
+    let first = pair.owner(0, OwnerOp::Dashboards { after: None }).unwrap();
+    assert_eq!(first["rows"].as_array().unwrap().len(), 32);
+    let next = first["next"].as_str().unwrap();
+    assert_eq!(first["rows"][31]["agent"], next);
+    let last = pair
+        .owner(
+            0,
+            OwnerOp::Dashboards {
+                after: Some(next.into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(last["rows"].as_array().unwrap().len(), 1);
+    assert!(last["next"].is_null());
+    for page in [first, last] {
+        for entry in page["rows"].as_array().unwrap() {
+            assert!(publishers.remove(entry["agent"].as_str().unwrap()));
+        }
+    }
+    assert!(publishers.is_empty());
+}
+
+#[tokio::test]
+async fn dashboard_lifecycle_replicates_and_routes_button_to_publisher() {
+    let mut pair = Pair::new().await;
+    let policy = Policy::cluster_default();
+    pair.owner(0, OwnerOp::SetPolicy { policy }).unwrap();
+    directory_push_tests::negotiate(&mut pair);
+    let board = serde_json::from_value(json!({"title":"Training","widgets":[
+        {"id":"trend","label":"Loss","kind":"graph","value":[1.0,0.5]},
+        {"id":"inspect","label":"Inspect","kind":"button","value":"Report the latest checkpoint."}
+    ]}))
+    .unwrap();
+    let define = AgentOp::DashboardDefine {
+        expected_revision: 0,
+        board,
+    };
+    for _ in 0..2 {
+        assert_eq!(pair.agent(1, define.clone()).unwrap()["revision"], 1);
+    }
+    pair.pump();
+    assert_eq!(
+        pair.owner(0, OwnerOp::Dashboards { after: None }).unwrap()["rows"][0]["board"]["title"],
+        "Training"
+    );
+    let id = pair.agents[1].clone();
+    let click = OwnerOp::DashboardClick {
+        agent: id.clone(),
+        revision: 1,
+        widget: "inspect".into(),
+        request_id: Uuid::now_v7().to_string(),
+    };
+    let sent = pair.owner(0, click.clone()).unwrap();
+    assert_eq!(
+        pair.owner(0, click).unwrap()["message_id"],
+        sent["message_id"]
+    );
+    pair.pump();
+    let message: String = pair.stores[1]
+        .db
+        .query_row(
+            "SELECT payload FROM messages WHERE id=?1",
+            [sent["message_id"].as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(message.contains("Report the latest checkpoint."));
+    let update = |v| AgentOp::DashboardUpdate {
+        expected_revision: 1,
+        values: BTreeMap::from([("trend".into(), v)]),
+    };
+    assert!(pair.agent(1, update(json!(["bad"]))).is_err());
+    assert_eq!(pair.agent(1, update(json!([0.25]))).unwrap()["revision"], 2);
+    assert!(pair.agent(1, define).is_err());
+    pair.pump();
+    pair.reopen(0);
+    assert_eq!(
+        pair.owner(0, OwnerOp::Dashboards { after: None }).unwrap()["rows"][0]["board"]["widgets"]
+            [0]["value"],
+        json!([0.25])
+    );
+    pair.agent(
+        1,
+        AgentOp::DashboardDelete {
+            expected_revision: 2,
+        },
+    )
+    .unwrap();
+    pair.pump();
+    assert_eq!(
+        pair.owner(0, OwnerOp::Dashboards { after: None }).unwrap()["rows"],
+        json!([])
+    );
+}
+
+#[tokio::test]
+async fn babysitter_deduplicates_resume_across_restart_and_queues_one_account_event() {
+    use gent_protocol::notifications::{Failure, Scope};
+    let mut pair = Pair::new().await;
+    let clock = now();
+    let goal = "a".repeat(64);
+    let claim = |turn| AgentOp::BabysitterClaim {
+        goal: goal.clone(),
+        turn,
+        failed_at: clock,
+        reason: Failure::Capacity,
+    };
+    let first = claim(Uuid::new_v4());
+    let attempt: Uuid =
+        serde_json::from_value(pair.agent(0, first.clone()).unwrap()["claim"].clone()).unwrap();
+    pair.reopen(0);
+    assert!(pair.agent(0, first.clone()).unwrap()["claim"].is_null());
+    assert_eq!(
+        pair.agent(0, AgentOp::BabysitterCheck { attempt }).unwrap()["eligible"],
+        true
+    );
+    let finish = AgentOp::BabysitterSubmitted {
+        attempt,
+        scope: Some(Scope {
+            account: "a".into(),
+            origin: "https://example.test".into(),
+        }),
+    };
+    assert!(pair.agent(1, finish.clone()).is_err());
+    for _ in 0..2 {
+        pair.agent(0, finish.clone()).unwrap();
+    }
+    let pending = |account: &str| OwnerOp::NotificationPending {
+        scope: Scope {
+            account: account.into(),
+            origin: "https://example.test/".into(),
+        },
+    };
+    assert_eq!(pair.owner(0, pending("other")).unwrap(), json!([]));
+    let out = pair.owner(0, pending("a")).unwrap();
+    assert_eq!(out.as_array().unwrap().len(), 1);
+    assert_eq!(out[0]["event"]["chat"], pair.agents[0]);
+    let second = claim(Uuid::new_v4());
+    assert!(pair.agent(0, second.clone()).unwrap()["claim"].is_null());
+    let wait: i64 = pair.stores[0]
+        .db
+        .query_row("SELECT delay FROM babysitter_attempts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(wait, 15);
+    pair.agent(
+        0,
+        AgentOp::Babysit {
+            enabled: Some(false),
+        },
+    )
+    .unwrap();
+    assert!(pair.agent(0, claim(Uuid::new_v4())).unwrap()["claim"].is_null());
+    pair.agent(
+        0,
+        AgentOp::Babysit {
+            enabled: Some(true),
+        },
+    )
+    .unwrap();
+    assert!(pair.agent(0, second).unwrap()["claim"].is_null());
+}
+
+#[tokio::test]
+async fn babysitter_recovers_fifteen_failures_in_one_goal_across_a_day() {
+    use gent_protocol::notifications::{Failure, Scope};
+
+    let mut pair = Pair::new().await;
+    let start = now() + 60;
+    let scope = Scope {
+        account: "training".into(),
+        origin: "https://example.test/".into(),
+    };
+    let advance = |pair: &mut Pair, time: i64| {
+        pair.stores[0]
+            .db
+            .execute("UPDATE request_clock SET floor=?1", [time])
+            .unwrap();
+    };
+    for incident in 0..5 {
+        let mut failed_at = start + incident * 4 * 3600;
+        for (reason, delay) in [
+            (Failure::Capacity, 0),
+            (Failure::Connection, 15),
+            (Failure::ToolSchema, 30),
+        ] {
+            let claim = AgentOp::BabysitterClaim {
+                goal: "b".repeat(64),
+                turn: Uuid::new_v4(),
+                failed_at,
+                reason,
+            };
+            advance(&mut pair, failed_at);
+            if delay > 0 {
+                assert!(pair.agent(0, claim.clone()).unwrap()["claim"].is_null());
+                // A daemon restart during backoff must preserve the deadline.
+                pair.reopen(0);
+                advance(&mut pair, failed_at + delay - 1);
+                assert!(pair.agent(0, claim.clone()).unwrap()["claim"].is_null());
+                advance(&mut pair, failed_at + delay);
+            }
+            let result = pair.agent(0, claim.clone()).unwrap();
+            let attempt = serde_json::from_value(result["claim"].clone()).unwrap();
+            pair.agent(
+                0,
+                AgentOp::BabysitterSubmitted {
+                    attempt,
+                    scope: Some(scope.clone()),
+                },
+            )
+            .unwrap();
+            assert!(pair.agent(0, claim).unwrap()["claim"].is_null());
+            failed_at += delay + 5;
+        }
+    }
+    let events = pair
+        .owner(0, OwnerOp::NotificationPending { scope })
+        .unwrap();
+    assert_eq!(events.as_array().unwrap().len(), 15);
+}

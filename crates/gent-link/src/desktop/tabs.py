@@ -72,7 +72,7 @@ class DirectoryPane(Gtk.Box):
 class SettingsPane(Gtk.Box):
     options = (("login", "Start Gent Desktop at graphical login"),
                ("updates", "Automatically update Gent"),
-               ("discovery", "Discover and publish native chats"),
+               ("babysitter", "Resume goals after provider failures"), ("discovery", "Discover and publish native chats"),
                ("direct", "Prefer direct connections"), ("udp", "Allow UDP for direct connections"),
                ("helper", "Offer this node as a transport helper"))
 

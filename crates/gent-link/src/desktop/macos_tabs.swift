@@ -136,7 +136,7 @@ final class SettingsTab: NSObject {
     override init() {
         super.init()
         let options = [("login", "Start Gent Desktop at graphical login"), ("updates", "Automatically update Gent"),
-                       ("discovery", "Discover and publish native chats"), ("direct", "Prefer direct connections"),
+                       ("babysitter", "Resume goals after provider failures"), ("discovery", "Discover and publish native chats"), ("direct", "Prefer direct connections"),
                        ("udp", "Allow UDP for direct connections"), ("helper", "Offer this node as a transport helper")]
         var fields: [NSView] = []
         for (key, title) in options {

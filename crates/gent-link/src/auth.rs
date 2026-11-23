@@ -1,4 +1,5 @@
 //! Native account login. Service credentials never grant cluster key authority.
+pub(crate) mod notifications;
 mod pairing;
 pub mod renewal;
 pub(crate) mod source;

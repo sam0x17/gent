@@ -61,7 +61,19 @@ impl StoreSession<'_> {
             return Ok(());
         }
         let member = self.state.state().nodes.get(peer).context("unknown peer")?;
-        self.db.execute("INSERT INTO wire_peers VALUES(?1,?2,?3,?4) ON CONFLICT(peer) DO UPDATE SET peer_key=excluded.peer_key,version=excluded.version,confirmed_at=excluded.confirmed_at",params![peer,member.signing_key.as_slice(),version,self.timestamp])?;
+        let confirmed = self.db.execute(
+            "INSERT INTO wire_peers(peer,peer_key,version,confirmed_at)
+             SELECT peer,peer_key,?3,?4 FROM network_links WHERE peer=?1 AND peer_key=?2
+             ON CONFLICT(peer) DO UPDATE SET peer_key=excluded.peer_key,
+                version=excluded.version,confirmed_at=excluded.confirmed_at",
+            params![peer, member.signing_key.as_slice(), version, self.timestamp],
+        )?;
+        if confirmed == 1
+            && version >= crate::messages::wire::DASHBOARD_VERSION
+            && network::active_peer(&self.state, peer, &member.signing_key, self.timestamp).is_ok()
+        {
+            self.dashboard_sync(peer, &member.signing_key)?;
+        }
         Ok(())
     }
 }

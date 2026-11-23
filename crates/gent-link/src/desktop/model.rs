@@ -41,10 +41,22 @@ pub(super) fn snapshot(status: &Value) -> Value {
             ))
         })
         .collect();
-    let peers: Vec<_> = sync["directory"]["peers"]
+    let members: HashMap<_, _> = status["members"]
         .as_array()
         .into_iter()
         .flatten()
+        .filter_map(|m| Some((m["id"].as_str()?, m)))
+        .collect();
+    let mut peers: Vec<_> = sync["directory"]["peers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|peer| {
+            peer["node_id"]
+                .as_str()
+                .and_then(|id| members.get(id))
+                .is_none_or(|m| m["hosted_by"].is_null())
+        })
         .map(|peer| {
             json!({
                 "name": peer["node_name"],
@@ -53,6 +65,15 @@ pub(super) fn snapshot(status: &Value) -> Value {
             })
         })
         .collect();
+    for member in status["members"].as_array().into_iter().flatten() {
+        if let Some(host) = member["hosted_by"].as_str() {
+            let carrier = members
+                .get(host)
+                .and_then(|m| m["name"].as_str())
+                .unwrap_or(host);
+            peers.push(json!({"name":member["name"],"state":member["status"],"route":format!("Hosted by {carrier}")}));
+        }
+    }
     let mut connection = Vec::new();
     if let Some(online) = sync["notifications_connected"].as_bool() {
         connection.push(format!(
@@ -101,6 +122,32 @@ mod tests {
             assert_eq!(gui["peers"], json!([]));
             assert!(gui["queue"].is_null());
         }
+    }
+
+    #[test]
+    fn status_includes_hosted_members_without_native_streams() {
+        let value = snapshot(
+            &json!({"members":[{"id":"n","name":"Studio"},{"name":"claude-web","status":"connected","hosted_by":"n"}]}),
+        );
+        assert_eq!(
+            value["peers"],
+            json!([{"name":"claude-web","state":"connected","route":"Hosted by Studio"}])
+        );
+    }
+
+    #[test]
+    fn status_uses_current_carrier_when_a_cached_peer_entry_exists() {
+        let mut status = json!({
+            "members":[{"id":"a","name":"Laptop"},{"id":"b","name":"Studio"},
+                       {"id":"w","name":"claude-web","status":"unknown","hosted_by":"a"}],
+            "sync":{"directory":{"peers":[{"node_id":"w","node_name":"claude-web","state":"matched"}]}}
+        });
+        assert_eq!(
+            snapshot(&status)["peers"],
+            json!([{"name":"claude-web","state":"unknown","route":"Hosted by Laptop"}])
+        );
+        status["members"][2]["hosted_by"] = json!("b");
+        assert_eq!(snapshot(&status)["peers"][0]["route"], "Hosted by Studio");
     }
 
     #[test]

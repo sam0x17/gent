@@ -115,6 +115,8 @@ fn frontend(_home: &Path) -> Result<Command> {
             include_str!("desktop/tabs.py"),
             "\n",
             include_str!("desktop/management.py"),
+            "\n",
+            include_str!("desktop/dashboard.py"),
             "\ndesktop = Desktop()\nGtk.main()\n"
         ),
     ]);
@@ -212,10 +214,13 @@ async fn supervise(
     let mut input = child.stdin.take().unwrap();
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut pages = pages::Pages::default();
+    let watch = crate::auth::notifications::desktop_loop(home);
+    tokio::pin!(watch);
     let mut jobs = tokio::task::JoinSet::new();
     let mut activation = [0; 16];
     loop {
         let message = tokio::select! {
+            _=&mut watch=>anyhow::bail!("account notification watch stopped"),
             Some(result) = jobs.join_next() => result?,
             size = socket.recv(&mut activation) => match &activation[..size?] {
                 b"show" => json!({"show":true}),
@@ -244,7 +249,12 @@ async fn supervise(
                         _ => continue,
                     };
                     match service::execute(home, action).await {
-                        Ok(status) => model::snapshot(&status),
+                        Ok(mut status) => {
+                            if status["daemon"]["running"]==true {
+                                status["members"]=crate::owner(home,gent_protocol::OwnerOp::Nodes).await.unwrap_or_default();
+                            }
+                            model::snapshot(&status)
+                        },
                         Err(e) => json!({"error":format!("{e:#}")}),
                     }
                 }

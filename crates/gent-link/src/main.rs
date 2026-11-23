@@ -1,6 +1,7 @@
 mod agent;
 mod agent_recovery;
 mod auth;
+mod babysitter;
 mod backup;
 mod build_info;
 mod chats;

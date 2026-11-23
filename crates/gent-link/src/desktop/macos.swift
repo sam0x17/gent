@@ -6,6 +6,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     let chats = DirectoryTab(page: "chats")
     let nodes = DirectoryTab(page: "nodes")
     let settings = SettingsTab()
+    let dashboard = DashboardTab()
     let clusterPage = ManagementTab(page: "cluster")
     let permissions = ManagementTab(page: "permissions")
     lazy var about = ManagementTab(page: "about", icon: icon)
@@ -77,6 +78,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         if openAtLaunch { show() } else { request("refresh") }
 
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            if let self = self, self.window.isVisible && self.tabs.selectedTabViewItem?.label == "Dashboard" { self.dashboard.load() }
             if let self = self, self.window.isVisible || Date().timeIntervalSince(self.lastRead) >= 60 { self.request("refresh") }
         }
         DispatchQueue.global(qos: .userInitiated).async {
@@ -97,6 +99,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
 
     func loadTab(_ item: NSTabViewItem?) {
         switch item?.identifier as? String {
+        case "Dashboard": dashboard.load()
         case "Cluster": clusterPage.load()
         case "Permissions": permissions.load()
         case "About": about.load()
@@ -140,7 +143,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         window.delegate = self
         window.center()
         let content = NSView()
-        for (title, child) in [("Status", content), ("Chats", chats.view), ("Nodes", nodes.view), ("Settings", settings.view), ("Cluster", clusterPage.view), ("Permissions", permissions.view), ("About", about.view)] {
+        for (title, child) in [("Status", content), ("Dashboard", dashboard.view), ("Chats", chats.view), ("Nodes", nodes.view), ("Settings", settings.view), ("Cluster", clusterPage.view), ("Permissions", permissions.view), ("About", about.view)] {
             let tab = NSTabViewItem(identifier: title)
             tab.label = title
             tab.view = child
@@ -255,6 +258,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         switch m["page"] as? String {
         case "cluster": clusterPage.receive(m); return
         case "permissions": permissions.receive(m); return
+        case "dashboard": dashboard.receive(m); return
         case "about": about.receive(m); return
         case "chats": chats.receive(m); return
         case "nodes": nodes.receive(m); return

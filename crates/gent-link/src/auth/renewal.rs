@@ -137,6 +137,7 @@ pub async fn run_daemon(
             eprintln!("Gent Desktop login setup: {error:#}. Retry with gent desktop enable.");
         }
         let stopped = tokio::select! {
+            _ = super::notifications::publish_loop(&home) => "account notifications",
             _ = maintain(&home) => "account renewal",
             _ = crate::node::maintain(&home) => "node removals",
             _ = crate::integration::recovery::maintain(&home) => "host recovery",

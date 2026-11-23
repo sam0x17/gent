@@ -58,16 +58,23 @@ fn usage(db: &Connection, traffic: &str) -> Result<(u64, u64, u64)> {
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?)
 }
 
-fn capacity(db: &Connection, traffic: &str, bytes: usize, announcement: bool) -> Result<()> {
+#[derive(Debug)]
+pub(in crate::store) struct QueueFull(String);
+impl std::fmt::Display for QueueFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for QueueFull {}
+
+fn capacity(db: &Connection, traffic: &str, bytes: usize, watermarked: bool) -> Result<()> {
     let (events, used, retries) = usage(db, traffic)?;
-    ensure!(
-        events < MAX_EVENTS && used.saturating_add(bytes as u64) <= MAX_BYTES,
-        "{traffic} node event queue quota exhausted; inspect gent history status and let pending delivery drain"
-    );
-    ensure!(
-        announcement || retries < MAX_RETRIES,
-        "{traffic} node event retry quota exhausted; inspect gent history status and clean expired history; legacy retries remain retained"
-    );
+    if events >= MAX_EVENTS || used.saturating_add(bytes as u64) > MAX_BYTES {
+        return Err(QueueFull(format!("{traffic} node event queue quota exhausted; inspect gent history status and let pending delivery drain")).into());
+    }
+    if !watermarked && retries >= MAX_RETRIES {
+        return Err(QueueFull(format!("{traffic} node event retry quota exhausted; inspect gent history status and clean expired history; legacy retries remain retained")).into());
+    }
     Ok(())
 }
 
@@ -97,6 +104,7 @@ impl StoreSession<'_> {
                 Some(receipt_expires.context("receipt lacks a retention deadline")?),
                 None,
             ),
+            Event::Dashboard { .. } => ("control", None, None),
             Event::ConversationActivity { .. } => ("control", Some(timestamp + 86400), None),
             Event::Direct { address } => ("control", Some(address.expires_at), None),
             Event::Registration { agent } => {
@@ -118,6 +126,10 @@ impl StoreSession<'_> {
                 })
                 .transpose()?
         };
+        // The per-peer dashboard revision serves the same deduplication role
+        // as an announcement generation. Keep queued snapshots until they
+        // enter the ordered stream; neither needs a sent retry ID per change.
+        let watermarked = announcement.is_some() || matches!(event, Event::Dashboard { .. });
         // Replayed expired messages must not recreate negative receipts forever.
         // The same check prevents old local message snapshots from requeueing.
         if deadline.is_some_and(|d| d <= timestamp) {
@@ -179,9 +191,9 @@ impl StoreSession<'_> {
             "node event exceeds transport record limit"
         );
         clean(self.db, timestamp, false)?;
-        capacity(self.db, traffic, body.len(), announcement.is_some())?;
+        capacity(self.db, traffic, body.len(), watermarked)?;
         self.db.execute("INSERT INTO network_events(id,peer,body,subject,traffic,retire_after,announcement,compress) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![id,peer,body,subject,traffic,deadline,announcement.is_some(),compress])?;
+            params![id,peer,body,subject,traffic,deadline,watermarked,compress])?;
         if let Some(snapshot) = directory {
             self.directory_admitted(peer, &snapshot)?;
         }

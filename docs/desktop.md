@@ -2,15 +2,17 @@
 
 Run `gent desktop` from your graphical session to open the local daemon window. On macOS, use the Gent icon in the menu bar to reopen it. On Linux, use the tray menu or the **Gent Desktop** application launcher. Opening it twice brings the same window forward.
 
-**Status** shows the node and cluster names, daemon and sync status, queued records, known chats, notification connection and retrying streams. The peer table shows each peer's directory state and its last observed transport. A dash means the daemon has no observation for that field. Opening or refreshing the window reads local status. It does not initiate network presence probes.
+**Status** shows the node and cluster names, daemon and sync status, queued records, known chats, notification connection and retrying streams. The peer table shows each peer's directory state and its last observed transport. Hosted nodes such as `claude-web` appear with their current carrier. A dash means the daemon has no observation for that field. Opening or refreshing the window reads local status. It does not initiate network presence probes.
 
 **Start daemon**, **Stop daemon**, and **Restart** use the same per-user service as `gent daemon`. A foreground daemon can be viewed, but its process owner controls its lifecycle. Closing the window hides it in the tray. **Quit Gent Desktop** exits the companion and leaves the daemon running.
 
-## Chats, Nodes and Settings
+## Dashboard, Chats, Nodes and Settings
+
+**Dashboard** shows the boards that chats have published. Click a board button to send its action to that chat. See [Chat dashboards and goal recovery](dashboards.md).
 
 **Chats** lists the cluster's known registrations, including chats on offline nodes and retained retired or revoked registrations. Filter by name, node, provider, registration state or ID. **Nodes** lists cluster members, their last known connection status and administrative role, and the carrier for hosted nodes. Open a tab or select **Refresh** to read its directory from the local daemon.
 
-**Settings** controls graphical login, automatic updates, native chat discovery, direct connections, UDP and transport helpers. The discovery switch allows the node to publish supported native chats. Network changes take effect on daemon restart.
+**Settings** controls graphical login, automatic updates, automatic goal recovery, native chat discovery, direct connections, UDP and transport helpers. The discovery switch allows the node to publish supported native chats. Network changes take effect on daemon restart.
 
 Choose **Edit full configuration…** to edit the current node's TOML, including node and cluster names, policy, relay URLs and helper address settings. **Save locally** validates and writes the file. **Save and publish…** additionally submits the shared names and policy for cluster approval. The editor preserves the draft on a validation error and detects changes made while it was open. Identity and service-managed fields use the same protections as `gent config edit`.
 
@@ -42,4 +44,4 @@ On a Linux desktop already logged in during an upgrade, run `gent desktop` to op
 
 macOS uses AppKit. Building Gent from source on macOS requires the Swift compiler included with the Xcode command-line tools.
 
-Linux uses GTK 3 and PyGObject for the system Python at `/usr/bin/python3`. For example, on Debian or Ubuntu install `python3-gi`, `gir1.2-gtk-3.0` and `gir1.2-ayatanaappindicator3-0.1`. A StatusNotifier/AppIndicator host displays the tray menu on supported Wayland and X11 desktops. On GNOME this usually requires the AppIndicator shell extension. An X11 notification area can also host the legacy GTK status icon. The window can be opened from the CLI or application launcher on desktops without a tray host.
+Linux uses GTK 3 and PyGObject for the system Python at `/usr/bin/python3`. For example, on Debian or Ubuntu install `python3-gi`, `python3-gi-cairo` for graphs, `libnotify-bin` for desktop notifications, `gir1.2-gtk-3.0` and `gir1.2-ayatanaappindicator3-0.1`. A StatusNotifier/AppIndicator host displays the tray menu on supported Wayland and X11 desktops. On GNOME this usually requires the AppIndicator shell extension. An X11 notification area can also host the legacy GTK status icon. The window can be opened from the CLI or application launcher on desktops without a tray host.

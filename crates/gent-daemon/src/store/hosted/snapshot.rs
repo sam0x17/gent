@@ -25,6 +25,7 @@ const TABLES: &[(&str, &str)] = &[
         "message_id IN (SELECT message_id FROM work_entries WHERE agent IN wa)",
     ),
     ("wake_dispatches", "agent IN wa"),
+    ("dashboards", "agent IN wa"),
     ("file_objects", "id IN wf"),
     ("agent_files", "object_id IN wf"),
     ("file_imports", "agent IN wa"),
@@ -170,6 +171,9 @@ fn export_scoped(home: &Path, node: &str, epoch: Option<u64>) -> Result<Snapshot
     let mut tables = BTreeMap::new();
     for &(table, predicate) in TABLES {
         let names = columns(&tx, table)?;
+        if table == "dashboards" && names.is_empty() {
+            continue;
+        }
         let mut rows = tx
             .prepare(&format!("{SCOPE} SELECT * FROM {table} WHERE {predicate}"))?
             .query_map([node], |r| {
@@ -178,6 +182,9 @@ fn export_scoped(home: &Path, node: &str, epoch: Option<u64>) -> Result<Snapshot
                     .collect::<rusqlite::Result<Vec<_>>>()
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        if table == "dashboards" && rows.is_empty() {
+            continue;
+        }
         for row in &mut rows {
             if table == "agents" && !matches!(&row[2], Cell::Text(n) if n == node) {
                 let Cell::Text(id) = &row[0] else {
@@ -261,11 +268,24 @@ pub(in crate::store) fn restore(
         snapshot.version == 1
             && snapshot.cluster == anchor.cluster_id
             && snapshot.node == node
-            && snapshot.tables.len() == TABLES.len(),
+            && snapshot
+                .tables
+                .keys()
+                .all(|t| TABLES.iter().any(|(name, _)| *name == t)),
         "web checkpoint scope or version mismatch"
     );
     let source = Connection::open_in_memory()?;
     for &(table, _) in TABLES {
+        // DDL comes exclusively from the local trusted schema, never the bundle.
+        let ddl: String = parent.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |r| r.get(0),
+        )?;
+        source.execute_batch(&ddl)?;
+        if table == "dashboards" && !snapshot.tables.contains_key(table) {
+            continue;
+        }
         let incoming = snapshot
             .tables
             .get(table)
@@ -274,13 +294,6 @@ pub(in crate::store) fn restore(
             incoming.columns == columns(parent, table)?,
             "web checkpoint schema mismatch"
         );
-        // DDL comes exclusively from the local trusted schema, never the bundle.
-        let ddl: String = parent.query_row(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
-            [table],
-            |r| r.get(0),
-        )?;
-        source.execute_batch(&ddl)?;
         let marks = (1..=incoming.columns.len())
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
@@ -298,7 +311,9 @@ pub(in crate::store) fn restore(
     // Enforce each selection predicate again before importing any data.
     for &(table, predicate) in TABLES {
         let outside: bool = source.query_row(
-            &format!("{SCOPE} SELECT EXISTS(SELECT 1 FROM {table} WHERE NOT ({predicate}))"),
+            &format!(
+                "{SCOPE} SELECT EXISTS(SELECT 1 FROM {table} WHERE ({predicate}) IS NOT TRUE)"
+            ),
             [node],
             |r| r.get(0),
         )?;
@@ -343,7 +358,11 @@ pub(in crate::store) fn restore(
         }
     }
     for &(table, _) in &TABLES[2..] {
-        import::copy(parent, &source, table, node)?;
+        if table == "dashboards" {
+            import::dashboards(parent, &source, node)?;
+        } else {
+            import::copy(parent, &source, table, node)?;
+        }
     }
     for (id, final_message) in finals {
         parent.execute(
@@ -443,6 +462,15 @@ fn rollback_speculative(parent: &Connection, source: &Connection, node: &str) ->
             "work_events",
             "message_id IN (SELECT message_id FROM work_entries WHERE agent IN (SELECT id FROM agents WHERE node_id=?1))",
         ),
+        (
+            "dashboards",
+            "agent IN (SELECT id FROM agents WHERE node_id=?1)",
+        ),
+        (
+            "dashboard_sent",
+            "agent IN (SELECT id FROM agents WHERE node_id=?1)",
+        ),
+        ("hosted_dashboard_gates", "node=?1"),
         (
             "work_entries",
             "agent IN (SELECT id FROM agents WHERE node_id=?1)",
