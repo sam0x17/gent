@@ -6,7 +6,7 @@ use gent_daemon::config::{self, Direct};
 use gent_protocol::{OwnerOp, directory::Entry};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -21,7 +21,6 @@ enum Request {
     Cluster,
     Permissions,
     Chats,
-    Nodes,
     Settings,
     Set {
         key: Preference,
@@ -126,43 +125,6 @@ fn chats(value: Value) -> Result<Value> {
     Ok(json!(rows))
 }
 
-fn nodes(value: Value) -> Result<Value> {
-    let members = value.as_array().context("invalid node directory")?;
-    let names: HashMap<_, _> = members
-        .iter()
-        .filter_map(|member| Some((member["id"].as_str()?, member["name"].as_str()?)))
-        .collect();
-    let mut rows: Vec<_> = members
-        .iter()
-        .map(|node| {
-            let role = if node["is_owner"] == true {
-                "Owner"
-            } else if node["can_configure"] == true {
-                "Admin"
-            } else {
-                "Member"
-            };
-            let host = node["hosted_by"]
-                .as_str()
-                .map(|id| names.get(id).copied().unwrap_or(id));
-            json!({
-                "name": node["name"],
-                "state": node["status"],
-                "role": role,
-                "id": node["id"],
-                "host": host,
-            })
-        })
-        .collect();
-    rows.sort_by_cached_key(|r| {
-        (
-            r["name"].as_str().unwrap_or_default().to_lowercase(),
-            r["id"].to_string(),
-        )
-    });
-    Ok(json!(rows))
-}
-
 #[derive(Default)]
 pub(super) struct Pages {
     // A private, in-memory edit session. The snapshot detects concurrent CLI or daemon writes.
@@ -180,7 +142,6 @@ impl Pages {
             Request::Cluster => "cluster",
             Request::Permissions => "permissions",
             Request::Chats => "chats",
-            Request::Nodes => "nodes",
             _ => "settings",
         };
         match self.handle(home, request).await {
@@ -244,9 +205,6 @@ impl Pages {
             Request::Permissions => super::admin::permissions(home).await,
             Request::Chats => Ok(
                 json!({"rows":chats(owner(home, OwnerOp::Agents).await?)?, "actions":super::admin::directory_actions(true)}),
-            ),
-            Request::Nodes => Ok(
-                json!({"rows":nodes(owner(home, OwnerOp::Nodes).await?)?, "actions":super::admin::directory_actions(false)}),
             ),
             Request::Settings => Ok(json!({"values":settings(home)?})),
             Request::Set { key, enabled } => {
@@ -372,17 +330,10 @@ mod tests {
     }
 
     #[test]
-    fn inventories_include_retired_chats_and_hosted_nodes() {
+    fn chat_inventory_includes_retired_chats() {
         let old = json!({"id":"c","name":"Old","node_id":"remote","provider":"codex","last_seen":1,"revoked":false,"retired":true});
         let chat = &chats(json!([old])).unwrap()[0];
         assert_eq!(chat["state"], "Retired");
         assert_eq!(chat["node"], "remote");
-        let cluster = nodes(
-            json!([{"name":"Local","id":"a","is_owner":true,"status":"local"},
-                                  {"name":"Hosted","id":"b","hosted_by":"a","status":"hosted"}]),
-        )
-        .unwrap();
-        assert_eq!(cluster[0]["host"], "Local");
-        assert_eq!(cluster[1]["role"], "Owner");
     }
 }

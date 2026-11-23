@@ -8,22 +8,42 @@ final class ActionBar: NSObject {
     var reload: () -> Void = {}
     private var specs: [[String: Any]] = []
     private var busy = false
+    private let pairedRows: Bool
+    private var buttons: [NSButton] = []
+
+    init(pairedRows: Bool = false) {
+        self.pairedRows = pairedRows
+        super.init()
+        if pairedRows {
+            view.orientation = .vertical
+            view.alignment = .leading
+            view.spacing = 4
+        }
+    }
 
     func configure(_ specs: [[String: Any]]) {
+        guard !NSArray(array: self.specs).isEqual(to: specs) else { update(); return }
         self.specs = specs
+        buttons.removeAll()
         for child in view.arrangedSubviews { view.removeArrangedSubview(child); child.removeFromSuperview() }
+        var row = view
         for (index, spec) in specs.enumerated() {
             let button = NSButton(title: spec["title"] as? String ?? "", target: self, action: #selector(open(_:)))
             button.tag = index
-            view.addArrangedSubview(button)
+            if pairedRows && index.isMultiple(of: 2) {
+                row = NSStackView()
+                view.addArrangedSubview(row)
+            }
+            row.addArrangedSubview(button)
+            buttons.append(button)
         }
-        view.addArrangedSubview(NSView())
+        if !pairedRows { view.addArrangedSubview(NSView()) }
         update()
     }
 
     func update() {
         let row = selection()
-        for case let button as NSButton in view.arrangedSubviews {
+        for button in buttons {
             let spec = specs[button.tag]
             var enabled = true
             if spec["row"] as? Bool == true {
@@ -194,6 +214,47 @@ final class ManagementTab: NSObject {
         busy = false
         title.stringValue = reply["title"] as? String ?? page.capitalized
         detail.string = (reply["error"] ?? reply["detail"]) as? String ?? ""
+        actions.configure(reply["actions"] as? [[String: Any]] ?? [])
+    }
+}
+
+// The account page has its own read cadence. Its sign-in state and setup actions
+// can arrive before the first status snapshot or while a daemon command is running.
+final class AccountSection {
+    let title = NSTextField(labelWithString: "Loading account…")
+    let detail = NSTextField(wrappingLabelWithString: "")
+    let actions = ActionBar(pairedRows: true)
+    let view: NSStackView
+    private var loading = false
+    private var reloadAfterRead = false
+
+    init() {
+        title.font = .systemFont(ofSize: 18, weight: .semibold)
+        detail.isSelectable = true
+        view = column([title, detail, actions.view, actions.notice])
+    }
+
+    func load() {
+        guard !loading else { return }
+        loading = true
+        sendPage("cluster")
+    }
+
+    func receive(_ reply: [String: Any]) {
+        if reply["operation"] as? Bool == true {
+            actions.completed(reply)
+            if loading { reloadAfterRead = true }
+            else { load() }
+            return
+        }
+        loading = false
+        if reloadAfterRead {
+            reloadAfterRead = false
+            load()
+            return
+        }
+        title.stringValue = reply["title"] as? String ?? "Account"
+        detail.stringValue = (reply["error"] ?? reply["detail"]) as? String ?? ""
         actions.configure(reply["actions"] as? [[String: Any]] ?? [])
     }
 }

@@ -2,29 +2,31 @@
 
 Run `gent desktop` from your graphical session to open the local daemon window. On macOS, use the Gent icon in the menu bar to reopen it. On Linux, use the tray menu or the **Gent Desktop** application launcher. Opening it twice brings the same window forward.
 
-**Status** shows the node and cluster names, daemon and sync status, queued records, known chats, notification connection and retrying streams. The peer table shows each peer's directory state and its last observed transport. Hosted nodes such as `claude-web` appear with their current carrier. A dash means the daemon has no observation for that field. Opening or refreshing the window reads local status. It does not initiate network presence probes.
+## Cluster
 
-**Start daemon**, **Stop daemon**, and **Restart** use the same per-user service as `gent daemon`. A foreground daemon can be viewed, but its process owner controls its lifecycle. Closing the window hides it in the tray. **Quit Gent Desktop** exits the companion and leaves the daemon running.
+**Cluster** opens first. On an enrolled machine it shows the cluster and local node names, daemon and sync status, queued records, known chats, notification connection, and retrying streams. **Start daemon**, **Stop daemon**, and **Restart** control the per-user service. A foreground daemon can be viewed here and is controlled by its process owner.
 
-## Dashboard, Chats, Nodes and Settings
+The member table lists the local node first. Each row shows the member’s role and last known connection status. Hover over the status for its evidence, such as a recent encrypted round trip or a timed-out presence check. For native peers, the directory column shows whether their chat directories agree, and the transport column shows the last observed route. For hosted members such as `claude-web`, **Hosted by** identifies the current carrier. A dash means there is no observation for that field. Filtering or refreshing the table uses the local daemon’s data.
+
+Choose **Add node…** to create a private invitation. On the new machine, open Gent Desktop, sign in with the same GitHub account, and choose **Join with invitation…** within 15 minutes. Choose **Create cluster…** to start a new cluster. Signed-in users can also sign out here. Enrolled machines have an **Install or repair daemon…** action.
+
+To rename a member, select its row and choose **Rename node…**. The dialog identifies the member by name and ID, including when you select a hosted connector. An administrator can also change a selected member’s role or remove it. If a change is queued, refresh after it is applied to see the result.
+
+Closing the window hides it in the tray. **Quit Gent Desktop** exits the companion and leaves the daemon running.
+
+## Dashboard, Chats and Settings
 
 **Dashboard** shows the boards that chats have published. Click a board button to send its action to that chat. See [Chat dashboards and goal recovery](dashboards.md).
 
-**Chats** lists the cluster's known registrations, including chats on offline nodes and retained retired or revoked registrations. Filter by name, node, provider, registration state or ID. **Nodes** lists cluster members, their last known connection status and administrative role, and the carrier for hosted nodes. Open a tab or select **Refresh** to read its directory from the local daemon.
+**Chats** lists the cluster's known registrations, including chats on offline nodes and retained retired or revoked registrations. Filter by name, node, provider, registration state or ID. Open the tab or choose **Refresh** to read the directory from the local daemon.
+
+In **Chats**, select the conversation and choose **Unregister chat…**. The confirmation identifies the chat and its ID. Revocation disables its Gent registration and preserves the conversation in the provider app. A remote host handles the request over its authenticated node link and publishes the updated registration. Remote unregistration requires node protocol 8 on the host and carrier.
 
 **Settings** controls graphical login, automatic updates, automatic goal recovery, native chat discovery, direct connections, UDP and transport helpers. The discovery switch allows the node to publish supported native chats. Network changes take effect on daemon restart.
 
 Choose **Edit full configuration…** to edit the current node's TOML, including node and cluster names, policy, relay URLs and helper address settings. **Save locally** validates and writes the file. **Save and publish…** additionally submits the shared names and policy for cluster approval. The editor preserves the draft on a validation error and detects changes made while it was open. Identity and service-managed fields use the same protections as `gent config edit`.
 
-## Cluster, Permissions and About
-
-On a new machine, run `gent desktop` and open **Cluster**. Sign in to your Gent account with GitHub in your browser. Choose **Create cluster…** to name a new cluster or **Join with invitation…** to enter a code. Both flows install and start the per-user daemon. On an enrolled node, Cluster shows your account and current membership and lets you sign out or repair the daemon installation.
-
-In **Nodes**, choose **Add node…** to name the new machine, choose its role and create a private one-time invitation. Enter the code on the new machine within 15 minutes using the same Gent account. Selecting an existing node lets an administrator change its role or confirm removal from the cluster.
-
-To rename a local, remote or hosted member, select its row and choose **Rename node…**. The dialog shows the selected member’s ID and current name. Enter the new name and choose **Rename**. The node running Gent Desktop needs cluster configuration authority. If the change is queued, choose **Refresh** after it is applied to see the new name.
-
-In **Chats**, select the conversation and choose **Unregister chat…**. The confirmation identifies the chat and its ID. Revocation disables its Gent registration and preserves the conversation in the provider app. A remote host handles the request over its authenticated node link and publishes the updated registration. Remote unregistration requires node protocol 8 on the host and carrier.
+## Permissions and About
 
 **Permissions** shows the signed communication rules. Select **Edit permission…**, choose the source, destination, permission and decision, then apply. Selectors include individual chats, nodes, groups, all chats and chats on the same node. **Inherit** removes the exact override. Other matching denies still apply.
 

@@ -2,15 +2,123 @@
 from collections import Counter
 import json
 import re
+import subprocess
+import time
 
 import gi
 import pyatspi
 
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk
+gi.require_version("GdkX11", "3.0")
+from gi.repository import Gdk, GdkX11
 
 
-def exercise_dashboard(wait_for, find, get, click, fixture, agent, cli):
+def wait_for(check, description, timeout=12):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        result = check()
+        if result:
+            return result
+        time.sleep(.1)
+    raise RuntimeError("Timed out waiting for " + description)
+
+
+def find(name, role=None):
+    def match(child):
+        return (child.getState().contains(pyatspi.STATE_SHOWING)
+                and (name is None or child.name == name)
+                and (role is None or child.getRoleName() == role))
+    return pyatspi.findDescendant(pyatspi.Registry.getDesktop(0), match)
+
+
+def get(name, role=None, timeout=12):
+    return wait_for(lambda: find(name, role), name or role, timeout)
+
+
+def tab(name):
+    item = get(name, "page tab")
+    assert item.parent.querySelection().selectChild(item.getIndexInParent())
+
+
+def click(name):
+    button = wait_for(lambda: pyatspi.findDescendant(pyatspi.Registry.getDesktop(0), lambda c:
+                       c.name == name and c.getRole() == pyatspi.ROLE_PUSH_BUTTON
+                       and c.getState().contains(pyatspi.STATE_SHOWING)
+                       and c.getState().contains(pyatspi.STATE_SENSITIVE)), name)
+    assert button.queryAction().doAction(0), name
+
+
+def member_table():
+    return get(None, "table").queryTable()
+
+
+def row(node_id):
+    table = member_table()
+    for index in range(table.nRows):
+        if table.getAccessibleAt(index, table.nColumns - 1).name == node_id:
+            return [table.getAccessibleAt(index, col).name for col in range(table.nColumns)]
+
+
+def selected_member():
+    table = member_table()
+    selected, = table.getSelectedRows()
+    return table.getAccessibleAt(selected, table.nColumns - 1).name
+
+
+def check_member_tooltip(cell):
+    # GTK's tooltip popup is visible on X11 but isn't exported in the AT-SPI tree.
+    def tooltip_visible():
+        ids = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--pid", str(cell.get_process_id())])
+        for xid in ids.split():
+            window = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), int(xid))
+            if window and window.get_type_hint() == Gdk.WindowTypeHint.TOOLTIP:
+                return True
+        return False
+
+    x, y, width, height = cell.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+    subprocess.run(["xdotool", "mousemove", str(x + width // 2), str(y + height // 2)], check=True)
+    wait_for(tooltip_visible, "hosted member tooltip")
+    subprocess.run(["xdotool", "mousemove", "0", "0"], check=True)
+
+
+def select_row(id_):
+    cell = get(id_, "table cell")
+    table = cell.parent.queryTable()
+    index = table.getRowAtIndex(cell.getIndexInParent())
+    if not table.isRowSelected(index):
+        assert table.addRowSelection(index)
+
+
+def assert_default_cluster():
+    item = get("Cluster", "page tab")
+    assert [page.name for page in item.parent] == ["Cluster", "Dashboard", "Chats", "Settings", "Permissions", "About"]
+    assert item.getState().contains(pyatspi.STATE_SELECTED)
+
+
+def exercise_setup():
+    assert_default_cluster()
+    get("Set up this node")
+    get("Gent account: Signed out", "label")
+    for title in ("Sign in with GitHub", "Create cluster…", "Join with invitation…"):
+        get(title)
+    assert not find("Members") and not find(None, "table") and not find("Known chats")
+    click("Join with invitation…")
+    get("Invitation code", "label")
+    click("Cancel")
+
+
+def exercise_enrolled_without_daemon(node):
+    click("Refresh status")
+    get("desktop-test", "label")
+    get("Local node · " + node["name"], "label")
+    get("Start daemon")
+    get("Members", "label")
+    assert get("Account", "toggle button").queryAction().doAction(0)
+    get("Install or repair daemon…")
+    assert not find("Create cluster…") and not find("Join with invitation…")
+
+
+def exercise_dashboard(fixture, agent, cli):
     instruction = "Report the synthetic job status."
     board = {"title": "Fixture job", "widgets": [
         {"id": "inspect", "kind": "button", "label": "Inspect job", "value": instruction},
@@ -75,7 +183,7 @@ def exercise_dashboard(wait_for, find, get, click, fixture, agent, cli):
     assert fixture.call("gent_inbox")[0] == []
 
 
-def exercise_node_rename(wait_for, find, get, click, row, select_row, cli, remote, hosted, parent):
+def exercise_node_rename(cli, remote, hosted, parent):
     def open_rename(node):
         select_row(node["id"])
         click("Rename node…")
@@ -88,6 +196,9 @@ def exercise_node_rename(wait_for, find, get, click, row, select_row, cli, remot
     def members():
         return {n["id"]: n for n in json.loads(cli("--json", "nodes").stdout)}
 
+    search = get("Filter members")
+    search.queryEditableText().setTextContents(hosted["id"])
+    get("1 of 3 members", "label")
     open_rename(hosted).setTextContents("cancelled fixture edit")
     click("Cancel")
     wait_for(lambda: not find("Rename node", "dialog"), "cancelled rename dialog dismissed")
@@ -95,73 +206,69 @@ def exercise_node_rename(wait_for, find, get, click, row, select_row, cli, remot
 
     open_rename(hosted).setTextContents("x" * 129)
     click("Rename")
-    wait_for(lambda: pyatspi.findDescendant(pyatspi.Registry.getDesktop(0), lambda c:
+    invalid = wait_for(lambda: pyatspi.findDescendant(pyatspi.Registry.getDesktop(0), lambda c:
              c.getRoleName() == "label" and c.getState().contains(pyatspi.STATE_SHOWING)
              and "1-128 bytes" in c.name), "rename validation error")
+    notice = invalid.name
     assert row(hosted["id"])[0] == members()[hosted["id"]]["name"] == hosted["name"]
+
+    changed = "Fixture CLI rename"
+    cli("node", "rename", hosted["id"], changed)
+    click("Refresh status")
+    wait_for(lambda: row(hosted["id"])[0] == changed, "external rename in the refreshed table")
+    get(notice, "label")
+    assert selected_member() == hosted["id"] and search.queryText().getText(0, -1) == hosted["id"]
+    hosted = dict(hosted, name=changed)
 
     expected = {node["id"]: node["name"] for node in (parent, remote, hosted)}
     for node, name in ((hosted, "Renamed web"), (remote, "Renamed remote"), (parent, "Renamed owner")):
         open_rename(node).setTextContents(name)
         click("Rename")
         wait_for(lambda: row(node["id"])[0] == name, "renamed row " + name)
+        assert selected_member() == node["id"]
+        if node == hosted:
+            assert search.queryText().getText(0, -1) == hosted["id"]
+            get("1 of 3 members", "label")
+            search.queryEditableText().setTextContents("")
+            get("3 of 3 members", "label")
         expected[node["id"]] = name
         directory = members()
         assert {key: member["name"] for key, member in directory.items()} == expected
         assert directory[hosted["id"]]["hosted_by"] == parent["id"]
-    assert row(hosted["id"])[3] == expected[parent["id"]]
+    assert row(hosted["id"])[5] == expected[parent["id"]]
 
 
-def exercise_tabs(wait_for, cli, fixture, agent, remote, hosted, parent):
+def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     desktop = pyatspi.Registry.getDesktop(0)
 
-    def find(name, role=None):
-        def match(child):
-            return child.getState().contains(pyatspi.STATE_SHOWING) and (name is None or child.name == name) and (role is None or child.getRoleName() == role)
-        return pyatspi.findDescendant(desktop, match)
-
-    def get(name, role=None, timeout=12):
-        return wait_for(lambda: find(name, role), name or role, timeout)
-
-    def tab(name):
-        item = get(name, "page tab")
-        assert item.parent.querySelection().selectChild(item.getIndexInParent())
-
-    def click(name):
-        button = wait_for(lambda: pyatspi.findDescendant(desktop, lambda c:
-                           c.name == name and c.getRole() == pyatspi.ROLE_PUSH_BUTTON
-                           and c.getState().contains(pyatspi.STATE_SHOWING)
-                           and c.getState().contains(pyatspi.STATE_SENSITIVE)), name)
-        assert button.queryAction().doAction(0), name
-
-    def row(name):
-        cell = get(name, "table cell")
-        table = cell.parent.queryTable()
-        index = table.getRowAtIndex(cell.getIndexInParent())
-        return [table.getAccessibleAt(index, col).name for col in range(table.nColumns)]
-
-    def select_row(id_):
-        cell = get(id_, "table cell")
-        table = cell.parent.queryTable()
-        index = table.getRowAtIndex(cell.getIndexInParent())
-        if not table.isRowSelected(index):
-            assert table.addRowSelection(index)
-
-    notebook = get("Status", "page tab").parent
-    assert [page.name for page in notebook][:2] == ["Status", "Dashboard"]
-    tab("Status")
-    assert row(hosted["name"]) == [hosted["name"], "Hosted", "Hosted by " + parent["name"]]
+    assert_default_cluster()
+    get("desktop-test", "label")
+    get("Daemon running", "label")
+    get("Stop daemon")
+    get("Known chats", "label")
+    get("3 of 3 members", "label")
+    visible_tables = pyatspi.findAllDescendants(desktop, lambda c:
+                      c.getRoleName() == "table" and c.getState().contains(pyatspi.STATE_SHOWING))
+    assert len(visible_tables) == 1
+    table = member_table()
+    assert [table.getColumnHeader(c).name for c in range(table.nColumns)] == [
+        "Node", "Status", "Role", "Directory", "Last transport", "Hosted by", "Node ID"]
+    signed = json.loads(cli("--json", "nodes").stdout)
+    assert table.nRows == len(signed) == 3
+    for member in signed:
+        cells = row(member["id"])
+        role = "Owner" if member["is_owner"] else "Admin" if member["can_configure"] else "Member"
+        assert cells[:3] == [member["name"], member["status"], role], cells
+    assert row(hosted["id"])[3:] == ["—", "—", parent["name"], hosted["id"]]
+    assert row(parent["id"])[1] == "local"
+    check_member_tooltip(get(hosted["name"], "table cell"))
+    select_row(parent["id"])
+    for title in ("Remove node…", "Change role…"):
+        assert not get(title).getState().contains(pyatspi.STATE_SENSITIVE)
     tab("Chats")
     get("Fixture conversation", "table cell")
-    tab("Nodes")
-    get("local", "table cell")
-    member, = [n for n in json.loads(cli("--json", "nodes").stdout) if n["id"] == hosted["id"]]
-    assert member["hosted_by"] == parent["id"] and member["status"] == "hosted"
-    role = "Admin" if member["can_configure"] else "Member"
-    details = row(hosted["name"])
-    assert details == [hosted["name"], "hosted", role, parent["name"], hosted["id"]], details
     tab("Dashboard")
-    exercise_dashboard(wait_for, find, get, click, fixture, agent, cli)
+    exercise_dashboard(fixture, agent, cli)
     tab("Settings")
     toggle = get("Automatically update Gent", "check box")
     assert toggle.getState().contains(pyatspi.STATE_CHECKED)
@@ -199,8 +306,10 @@ def exercise_tabs(wait_for, cli, fixture, agent, remote, hosted, parent):
     wait_for(lambda: pyatspi.findDescendant(desktop, lambda c: c.getRoleName() == "label" and
              "Version " in c.name and "Copyright" in c.name), "build version and copyright")
     tab("Cluster")
+    assert get("Account", "toggle button").queryAction().doAction(0)
     get("Gent account: Signed out")
     get("Sign in with GitHub")
+    assert get("Account", "toggle button").queryAction().doAction(0)
     tab("Permissions")
     click("Edit permission…")
     get("Apply rule")
@@ -224,9 +333,8 @@ def exercise_tabs(wait_for, cli, fixture, agent, remote, hosted, parent):
     open_unregister()
     click("Unregister chat")
     wait_for(fixture_revoked, "confirmed unregistration")
-    tab("Nodes")
+    tab("Cluster")
     click("Add node…")
     get("New node name", "label")
     click("Cancel")
-    exercise_node_rename(wait_for, find, get, click, row, select_row, cli, remote, hosted, parent)
-    tab("Status")
+    exercise_node_rename(cli, remote, hosted, parent)

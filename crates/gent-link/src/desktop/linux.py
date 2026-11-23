@@ -25,9 +25,104 @@ def label(text="", style=None):
     return widget
 
 
+def notice_label():
+    widget = label()
+    widget.set_line_wrap(True)
+    widget.set_no_show_all(True)
+    widget.connect("notify::label", lambda w, _: w.set_visible(bool(w.get_text())))
+    return widget
+
+
+class ClusterPane(Gtk.ScrolledWindow):
+    def __init__(self, send, refresh_after_operation):
+        super().__init__()
+        self.send = send
+        self.enrolled = MODE != "setup"
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, border_width=16)
+        self.add(outer)
+        self.health = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer.pack_start(self.health, False, False, 0)
+
+        identity = Gtk.Box(spacing=12)
+        identity.pack_start(Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(ICON, 42, 42, True)), False, False, 0)
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.cluster = label("", "node-title")
+        self.node = label("", "quiet")
+        titles.pack_start(self.cluster, False, False, 0)
+        titles.pack_start(self.node, False, False, 0)
+        identity.pack_start(titles, True, True, 0)
+        self.health.pack_start(identity, False, False, 0)
+
+        daemon = Gtk.Box(spacing=8)
+        self.state = label("", "section")
+        daemon.pack_start(self.state, False, False, 0)
+        self.toggle = Gtk.Button()
+        self.toggle.connect("clicked", lambda *_: self.send("stop" if self.can_stop else "start"))
+        daemon.pack_start(self.toggle, False, False, 0)
+        self.restart = Gtk.Button(label="Restart")
+        self.restart.connect("clicked", lambda *_: self.send("restart"))
+        daemon.pack_start(self.restart, False, False, 0)
+        self.health.pack_start(daemon, False, False, 0)
+
+        metrics = Gtk.Box(spacing=20)
+        self.values = {}
+        for key, title in (("sync", "Sync"), ("queue", "Queued"), ("chats", "Known chats")):
+            metric = Gtk.Box(spacing=6)
+            metric.pack_start(label(title, "quiet"), False, False, 0)
+            self.values[key] = label("—", "section")
+            metric.pack_start(self.values[key], False, False, 0)
+            metrics.pack_start(metric, False, False, 0)
+        self.health.pack_start(metrics, False, False, 0)
+        self.connection = label("", "quiet")
+        self.health.pack_start(self.connection, False, False, 0)
+
+        self.error = label()
+        self.error.set_line_wrap(True)
+        outer.pack_start(self.error, False, False, 0)
+        self.account = ManagementPane("cluster", refresh_after_operation)
+        self.account.set_border_width(0)
+        self.account.expander.set_expanded(not self.enrolled)
+        outer.pack_start(self.account, False, False, 0)
+        self.members = DirectoryPane("nodes", refresh_after_operation)
+        self.members.set_border_width(0)
+        outer.pack_start(self.members, True, True, 0)
+
+    def load(self):
+        self.account.load()
+        self.send("refresh")
+
+    def buttons(self, model, pending):
+        self.can_stop = bool(model.get("can_stop"))
+        self.toggle.set_label("Stop daemon" if model.get("running") or self.can_stop else "Start daemon")
+        self.toggle.set_sensitive(not pending and bool(model.get("can_start") or self.can_stop))
+        self.restart.set_sensitive(not pending and self.can_stop)
+
+    def update(self, model):
+        self.error.set_text(model.get("error") or "")
+        self.error.set_visible(bool(model.get("error")))
+        if "state" not in model:
+            return
+        self.cluster.set_text(model.get("cluster") or "Cluster")
+        self.node.set_text("Local node · " + (model.get("node") or "—"))
+        self.state.set_text("Daemon " + model["state"].lower())
+        for key, value in self.values.items():
+            raw = model.get(key)
+            value.set_text("—" if raw is None else str(raw).capitalize())
+        self.connection.set_text(model.get("connection") or "")
+        self.connection.set_visible(bool(model.get("connection")))
+        self.members.receive(model["nodes"])
+        enrolled = model["enrolled"]
+        self.health.set_visible(enrolled)
+        self.members.set_visible(enrolled)
+        if enrolled != self.enrolled:
+            self.enrolled = enrolled
+            self.account.expander.set_expanded(not enrolled)
+
+
 class Desktop:
     def __init__(self):
         self.pending = False
+        self.refresh_queued = False
         self.buffer = bytearray()
         self.model = {}
         self.last_read = 0.0
@@ -45,78 +140,30 @@ class Desktop:
         header.show_all()
 
         css = Gtk.CssProvider()
-        css.load_from_data(b".node-title { font-size: 1.6em; font-weight: bold; } .metric { font-size: 1.45em; font-weight: bold; } .section { font-weight: bold; } .quiet { opacity: .72; }")
+        css.load_from_data(b".node-title { font-size: 1.6em; font-weight: bold; } .section { font-weight: bold; } .quiet { opacity: .72; }")
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, border_width=20)
         self.tabs = Gtk.Notebook()
         self.tabs.set_scrollable(True)
         self.window.add(self.tabs)
-        self.tabs.append_page(outer, Gtk.Label(label="Status"))
-        identity = Gtk.Box(spacing=12)
-        identity.pack_start(Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(ICON, 46, 46, True)), False, False, 0)
-        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.node = label("Gent", "node-title")
-        self.cluster = label("", "quiet")
-        titles.pack_start(self.node, True, True, 0)
-        titles.pack_start(self.cluster, True, True, 0)
-        identity.pack_start(titles, True, True, 0)
-        self.state = label("Connecting…", "section")
-        identity.pack_end(self.state, False, False, 0)
-        outer.pack_start(identity, False, False, 0)
-        outer.pack_start(Gtk.Separator(), False, False, 0)
-
-        metrics = Gtk.Box(spacing=24, homogeneous=True)
-        self.values = {}
-        for key, title in (("sync", "Sync"), ("queue", "Queued"), ("chats", "Known chats")):
-            column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            column.pack_start(label(title, "quiet"), False, False, 0)
-            self.values[key] = label("—", "metric")
-            column.pack_start(self.values[key], False, False, 0)
-            metrics.pack_start(column, True, True, 0)
-        outer.pack_start(metrics, False, False, 0)
-        self.table = Gtk.ListStore(str, str, str)
-        view = Gtk.TreeView(model=self.table)
-        for i, title in enumerate(("Peer", "Directory", "Last transport")):
-            column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=i)
-            column.set_expand(i == 0)
-            column.set_resizable(True)
-            view.append_column(column)
-        self.empty = label("Waiting for daemon status…", "quiet")
-        self.scroll = Gtk.ScrolledWindow()
-        self.scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.scroll.add(view)
-        outer.pack_start(self.scroll, True, True, 0)
-        outer.pack_start(self.empty, True, True, 0)
-        self.connection = label("", "quiet")
-        outer.pack_start(self.connection, False, False, 0)
-        self.error = label()
-        self.error.set_line_wrap(True)
-        outer.pack_start(self.error, False, False, 0)
-        actions = Gtk.Box(spacing=8)
-        self.toggle = Gtk.Button(label="Start daemon")
-        self.toggle.connect("clicked", lambda *_: self.send("stop" if self.model.get("can_stop") else "start"))
-        actions.pack_start(self.toggle, False, False, 0)
-        self.restart = Gtk.Button(label="Restart")
-        self.restart.connect("clicked", lambda *_: self.send("restart"))
-        actions.pack_start(self.restart, False, False, 0)
-        outer.pack_end(actions, False, False, 0)
-        self.pages = {
-            "dashboard": DashboardPane(), "chats": DirectoryPane("chats"),
-            "nodes": DirectoryPane("nodes"), "settings": SettingsPane(),
-            **{name: ManagementPane(name) for name in ("cluster", "permissions", "about")},
+        self.cluster = ClusterPane(self.send, self.refresh_after_operation)
+        self.dashboard = DashboardPane()
+        pages = {
+            "Cluster": self.cluster, "Dashboard": self.dashboard, "Chats": DirectoryPane("chats"),
+            "Settings": SettingsPane(), "Permissions": ManagementPane("permissions"), "About": ManagementPane("about"),
         }
-        for name, page in self.pages.items():
-            self.tabs.append_page(page, Gtk.Label(label=name.title()))
+        for title, page in pages.items():
+            self.tabs.append_page(page, Gtk.Label(label=title))
+        self.replies = {title.lower(): page for title, page in pages.items()}
+        self.replies.update(cluster=self.cluster.account, nodes=self.cluster.members)
         self.tabs.show_all()
-        self.tabs.connect("switch-page", lambda _, page, index: page.load() if index else self.send("refresh"))
-        self.scroll.hide()
-        self.error.hide()
-        self.buttons()
+        self.cluster.health.hide()
+        self.cluster.members.hide()
+        self.cluster.error.hide()
+        self.tabs.connect("switch-page", lambda _, page, index: page.load())
+        self.cluster.buttons(self.model, self.pending)
         self.install_tray()
         GLib.io_add_watch(0, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.receive)
         GLib.timeout_add_seconds(15, self.tick)
-        if MODE == "setup":
-            self.tabs.set_current_page(self.tabs.page_num(self.pages["cluster"]))
         if MODE in ("window", "setup"):
             self.show()
         else:
@@ -158,27 +205,24 @@ class Desktop:
         self.refresh_tab()
 
     def refresh_tab(self):
-        index = self.tabs.get_current_page()
-        if index > 0:
-            self.tabs.get_nth_page(index).load()
+        self.tabs.get_nth_page(self.tabs.get_current_page()).load()
+
+    def refresh_after_operation(self):
+        # An in-flight snapshot may predate the mutation.
+        if self.pending:
+            self.refresh_queued = True
         else:
             self.send("refresh")
-
-    def buttons(self):
-        self.toggle.set_label("Stop daemon" if self.model.get("running") or self.model.get("can_stop") else "Start daemon")
-        self.toggle.set_sensitive(not self.pending and bool(self.model.get("can_start") or self.model.get("can_stop")))
-        self.restart.set_sensitive(not self.pending and bool(self.model.get("can_stop")))
-        self.refresh.set_sensitive(not self.pending)
 
     def send(self, action):
         if not self.pending:
             self.pending = True
-            self.buttons()
+            self.cluster.buttons(self.model, self.pending)
             print(action, flush=True)
 
     def tick(self):
-        if self.window.get_visible() and self.tabs.get_nth_page(self.tabs.get_current_page()) is self.pages["dashboard"]:
-            self.pages["dashboard"].load()
+        if self.window.get_visible() and self.tabs.get_nth_page(self.tabs.get_current_page()) is self.dashboard:
+            self.dashboard.load()
         if self.window.get_visible() or time.monotonic() - self.last_read >= 60:
             self.send("refresh")
         return True
@@ -193,7 +237,7 @@ class Desktop:
             line, _, self.buffer = self.buffer.partition(b"\n")
             message = json.loads(line)
             if "page" in message:
-                self.pages[message["page"]].receive(message)
+                self.replies[message["page"]].receive(message)
                 continue
             if message.get("quit"):
                 Gtk.main_quit()
@@ -207,22 +251,12 @@ class Desktop:
     def update(self, model):
         self.pending = False
         self.last_read = time.monotonic()
-        self.error.set_text(model.get("error", ""))
-        self.error.set_visible(bool(model.get("error")))
-        if "error" not in model:
+        self.cluster.update(model)
+        if "state" in model:
             self.model = model
-            self.node.set_text(model.get("node") or "Gent")
-            self.cluster.set_text(model.get("cluster") or "Local daemon")
-            self.state.set_text(model["state"])
             self.tray_state.set_label("Daemon " + model["state"].lower())
-            for k, value in self.values.items():
-                raw = model.get(k)
-                value.set_text("—" if raw is None else str(raw).capitalize())
-            self.connection.set_text(model.get("connection") or "")
-            self.table.clear()
-            for peer in model["peers"]:
-                self.table.append((peer["name"] or "Unknown", (peer["state"] or "Unknown").capitalize(), peer["route"] or "—"))
-            self.scroll.set_visible(bool(model["peers"]))
-            self.empty.set_text("No peers in the directory." if model["running"] else "Daemon status is unavailable." if model["state"] != "Stopped" else "The daemon is stopped.")
-            self.empty.set_visible(not model["peers"])
-        self.buttons()
+        if self.refresh_queued:
+            self.refresh_queued = False
+            self.send("refresh")
+        else:
+            self.cluster.buttons(self.model, self.pending)

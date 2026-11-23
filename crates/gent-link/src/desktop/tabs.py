@@ -4,26 +4,38 @@ def page_request(op, **fields):
 
 
 class DirectoryPane(Gtk.Box):
-    def __init__(self, name):
+    def __init__(self, name, refresh_snapshot=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10, border_width=16)
         self.name = name
+        self.refresh_snapshot = refresh_snapshot
         self.busy = False
-        self.rows = []
+        self.rows = None
+        self.error = None
         self.columns = ([("name", "Chat"), ("node", "Node"), ("provider", "Provider"),
                          ("state", "Registration"), ("id", "Chat ID")] if name == "chats" else
                         [("name", "Node"), ("state", "Status"), ("role", "Role"),
+                         ("directory", "Directory"), ("route", "Last transport"),
                          ("host", "Hosted by"), ("id", "Node ID")])
-        self.search = Gtk.SearchEntry(placeholder_text="Filter " + name)
+        if name == "nodes":
+            self.pack_start(label("Members", "section"), False, False, 0)
+        placeholder = "Filter members" if name == "nodes" else "Filter chats"
+        self.search = Gtk.SearchEntry(placeholder_text=placeholder)
+        self.search.get_accessible().set_name(placeholder)
         self.search.connect("search-changed", lambda *_: self.render())
         self.pack_start(self.search, False, False, 0)
-        self.store = Gtk.ListStore(*([str] * len(self.columns)))
+        # GtkTreeView can take row tooltips from a non-displayed markup column.
+        self.store = Gtk.ListStore(*([str] * (len(self.columns) + (name == "nodes"))))
         view = self.table = Gtk.TreeView(model=self.store)
+        if name == "nodes":
+            view.set_tooltip_column(len(self.columns))
         for i, (_, title) in enumerate(self.columns):
             column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=i)
             column.set_resizable(True)
             column.set_sort_column_id(i)
             view.append_column(column)
         scroll = Gtk.ScrolledWindow()
+        if name == "nodes":
+            scroll.set_min_content_height(135)
         scroll.add(view)
         self.pack_start(scroll, True, True, 0)
         self.status = label()
@@ -32,8 +44,7 @@ class DirectoryPane(Gtk.Box):
         self.actions = ActionBar(self)
         self.pack_start(self.actions, False, False, 0)
         self.table.get_selection().connect("changed", self.actions.update)
-        self.notice = label()
-        self.notice.set_line_wrap(True)
+        self.notice = notice_label()
         self.pack_start(self.notice, False, False, 0)
 
     def selection(self):
@@ -43,30 +54,47 @@ class DirectoryPane(Gtk.Box):
         return dict(zip((key for key, _ in self.columns), model[selected]))
 
     def load(self):
-        if not self.busy:
+        if self.refresh_snapshot is not None:
+            self.refresh_snapshot()
+        elif not self.busy:
             self.busy = True
             self.status.set_text("Loading…")
-            page_request(self.name)
+            page_request("chats")
 
     def receive(self, reply):
         if reply.get("operation"):
             self.actions.completed(reply)
+            if "error" not in reply:
+                self.load()
             return
         self.busy = False
         self.actions.configure(reply.get("actions", []))
-        self.rows = reply.get("rows", [])
-        self.render()
-        if "error" in reply:
-            self.status.set_text(reply["error"])
+        rows = reply.get("rows", [])
+        self.error = reply.get("error")
+        if rows != self.rows:
+            self.rows = rows
+            self.render()
+        else:
+            self.update_count()
 
     def render(self):
+        selected = self.selection()
         self.store.clear()
         query = self.search.get_text().strip().casefold()
-        for row in self.rows:
+        for row in self.rows or []:
             cells = [str(row.get(key) or "—") for key, _ in self.columns]
             if any(query in cell.casefold() for cell in cells):
-                self.store.append(cells)
-        self.status.set_text(f"{len(self.store)} of {len(self.rows)} {self.name}")
+                if self.name == "nodes":
+                    detail = row.get("status_detail")
+                    cells.append(GLib.markup_escape_text(detail) if detail else None)
+                item = self.store.append(cells)
+                if selected and row["id"] == selected["id"]:
+                    self.table.get_selection().select_iter(item)
+        self.update_count()
+
+    def update_count(self):
+        noun = "members" if self.name == "nodes" else "chats"
+        self.status.set_text(self.error or f"{len(self.store)} of {len(self.rows or [])} {noun}")
 
 
 class SettingsPane(Gtk.Box):

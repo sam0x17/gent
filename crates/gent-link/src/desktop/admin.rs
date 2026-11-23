@@ -255,19 +255,18 @@ pub(super) fn cluster(home: &Path) -> Result<Value> {
         actions.push(json!({"kind":"sign_out","title":"Sign out","confirm":"Sign out of the Gent account on this machine?"}));
     }
     let title = if config::path(home).try_exists()? {
-        let cfg = node_home::inspect(home)?;
         actions.push(json!({"kind":"finish_setup","title":"Install or repair daemon…","confirm":"Install and start the user service for this node?"}));
-        format!("{} · {}", cfg.cluster.name, cfg.node.name)
+        "Account"
     } else {
         actions.push(json!({"kind":"create","title":"Create cluster…","submit":"Create cluster",
             "fields":[{"key":"name","title":"Cluster name"}],"hint":"Create a cluster with your Gent account and start this node’s daemon."}));
         actions.push(json!({"kind":"join","title":"Join with invitation…","submit":"Join cluster",
             "fields":[{"key":"code","title":"Invitation code","secret":true}],
-            "hint":"Use the one-time code from Nodes on an enrolled machine. Sign in to the same Gent account first."}));
+            "hint":"Use the one-time code from Add node on an enrolled machine. Sign in to the same Gent account first."}));
         if enrollment::pending(home)?.is_some() {
             actions.push(json!({"kind":"join","title":"Resume pending join","values":{"code":""}}));
         }
-        "Set up this node".into()
+        "Set up this node"
     };
     let login = account["login"]
         .as_str()

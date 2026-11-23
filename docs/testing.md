@@ -67,7 +67,7 @@ Linux CI also runs the GTK companion in an isolated D-Bus session, Xvfb display 
 dbus-run-session -- xvfb-run -a sh -c 'openbox >/dev/null 2>&1 & exec /usr/bin/python3 scripts/smoke_desktop_linux.py target/debug/gent'
 ```
 
-The GTK test creates its own node and login directories. It renames local, remote and hosted members through the Nodes tab, checks their IDs and carrier in the daemon directory, and exercises cancel and invalid input. It also opens the real tray menu and checks the foreground daemon after the GUI quits. On a logged-in Mac, the standalone AppKit test exercises the native menu bar and window with synthetic supervisor replies.
+The GTK test creates its own node and login directories. It renames local, remote and hosted members in the Cluster tab’s member table, checks their IDs and carrier in the daemon directory, and exercises cancel and invalid input. It also opens the real tray menu and checks the foreground daemon after the GUI quits. On a logged-in Mac, the standalone AppKit test exercises the native menu bar and window with synthetic supervisor replies.
 
 ```sh
 fixture=$(mktemp -d)
@@ -80,7 +80,7 @@ xcrun --sdk macosx swiftc -swift-version 5 crates/gent-link/src/desktop/macos.sw
 rm "$fixture/GentDesktopSmoke" && rmdir "$fixture"
 ```
 
-To run just the Nodes tab proof on the Mac Studio over SSH, append `--nodes` after the icon path when running the fixture binary. This opens the native dialog, checks the selected UUID in each submitted request, and verifies cancel, error and refreshed rows without starting a menu-bar session.
+To run the Cluster page proof on the Mac Studio over SSH, append `--cluster` after the icon path. It exercises setup, daemon controls, member filtering, and native action dialogs, including selection by UUID across a refresh.
 
 ## Automatic update acceptance
 

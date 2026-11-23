@@ -11,22 +11,11 @@ import socket
 import subprocess
 import tempfile
 import threading
-import time
 import uuid
 
 from gi.repository import Gio, GLib
-from desktop_tabs_linux import exercise_tabs
+from desktop_tabs_linux import exercise_enrolled_without_daemon, exercise_setup, exercise_tabs, wait_for
 from mcp_client import Client
-
-
-def wait_for(check, description, timeout=12):
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        result = check()
-        if result:
-            return result
-        time.sleep(.1)
-    raise RuntimeError("Timed out waiting for " + description)
 
 
 class TrayHost:
@@ -158,7 +147,16 @@ def main():
         def visible():
             return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Gent Desktop$"],
                                   text=True, capture_output=True).stdout.strip()
+        tray = TrayHost()
+        cleanup.callback(tray.close)
+        setup = launch("desktop")
+        exercise_setup()
+        assert not (home / "config.toml").exists()
+        quit_setup = tray.menu("Quit Gent Desktop")
         created = json.loads(cli("--json", "cluster", "new", "desktop-test", "--local").stdout)
+        exercise_enrolled_without_daemon(created["node"])
+        quit_setup("Quit Gent Desktop")
+        assert setup.wait(timeout=12) == 0
         # Stdio enrollment requires a configuration relay in the parent's snapshot.
         key = home / "fixture-relay.key"
         key.touch(mode=0o600)
@@ -172,8 +170,6 @@ def main():
         fixture = Client(base + ["mcp", "serve", "--binding", str(home / "fixture.key")])
         cleanup.callback(fixture.close)
         agent = fixture.call("gent_register", {"name": "Fixture conversation", "provider": "generic-mcp"})[0]["agent"]
-        tray = TrayHost()
-        cleanup.callback(tray.close)
         cli("desktop", "enable")
         def close_desktop():
             if (home / "desktop.sock").exists():
@@ -186,7 +182,7 @@ def main():
         assert "--background" in entry.read_text() and "--background" not in app.read_text()
         click("Open Gent Desktop")
         first = wait_for(visible, "window opened by tray")
-        exercise_tabs(wait_for, cli, fixture, agent, remote, hosted, created["node"])
+        exercise_tabs(cli, fixture, agent, remote, hosted, created["node"])
         assert 'name = "desktop-published"' in (home / "config.toml").read_text()
         cli("desktop")
         assert visible() == first, "second launch duplicated the window"
@@ -215,7 +211,7 @@ def main():
         cli("desktop", "disable")
         wait_for(lambda: not (home / "desktop.sock").exists(), "disable closed the running tray")
         assert daemon.poll() is None
-        print("PASS: local, remote and hosted node rename, cancel and validation error, hosted Status, MCP dashboard widgets, button delivery, live update/delete, chats, settings, cluster publish, tray and login lifecycle")
+        print("PASS: local, remote and hosted node rename, cancel and validation error, fresh setup, stopped daemon, unified member rows and selection, MCP dashboard widgets, button delivery, live update/delete, chats, settings, cluster publish, tray and login lifecycle")
 
 
 if __name__ == "__main__":

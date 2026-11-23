@@ -189,6 +189,22 @@ async fn run(home: &Path, background: bool) -> Result<()> {
     result
 }
 
+async fn cluster_status(home: &Path, action: DaemonCommand) -> Result<serde_json::Value> {
+    let mut status = service::execute(home, action).await?;
+    let enrolled = config::path(home).try_exists()?;
+    status["enrolled"] = enrolled.into();
+    if status["daemon"]["running"] == true {
+        // Read cached membership only. Opening the overview must not probe peers.
+        status["members"] = crate::owner(home, gent_protocol::OwnerOp::Nodes)
+            .await
+            .unwrap_or_default();
+    } else if enrolled && let Ok(cfg) = crate::node_home::inspect(home) {
+        status["node"]["name"] = cfg.node.name.into();
+        status["cluster"]["name"] = cfg.cluster.name.into();
+    }
+    Ok(model::snapshot(&status))
+}
+
 async fn supervise(
     home: &Path,
     runtime: &Path,
@@ -248,15 +264,7 @@ async fn supervise(
                         "restart" => DaemonCommand::Restart,
                         _ => continue,
                     };
-                    match service::execute(home, action).await {
-                        Ok(mut status) => {
-                            if status["daemon"]["running"]==true {
-                                status["members"]=crate::owner(home,gent_protocol::OwnerOp::Nodes).await.unwrap_or_default();
-                            }
-                            model::snapshot(&status)
-                        },
-                        Err(e) => json!({"error":format!("{e:#}")}),
-                    }
+                    cluster_status(home, action).await.unwrap_or_else(|e| json!({"error":format!("{e:#}")}))
                 }
             }
         };

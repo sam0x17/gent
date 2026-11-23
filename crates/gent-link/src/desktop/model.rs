@@ -14,6 +14,83 @@ fn route(path: &str) -> &str {
     }
 }
 
+fn presence_detail(reason: &str) -> &str {
+    match reason {
+        "local_daemon" => "This machine runs the local daemon.",
+        "local_hosting_daemon" => "This machine hosts the connector.",
+        "not_paired" => "No paired data link to this node’s carrier.",
+        "stale_authority" => "Cluster authority is out of date.",
+        "local_node_not_enrolled" => "The local node lacks current cluster authorization.",
+        "relay_not_configured" => "The local node has no relay configured.",
+        "recent_encrypted_round_trip" => {
+            "Recent encrypted round trip with the node or its carrier."
+        }
+        "probe_timed_out" => "A recent presence check timed out.",
+        "no_recent_encrypted_round_trip" => {
+            "No recent encrypted round trip with the node or its carrier."
+        }
+        "awaiting_fresh_round_trip" => "Waiting for a fresh encrypted round trip.",
+        "awaiting_first_round_trip" => "Waiting for the first encrypted round trip.",
+        _ => reason,
+    }
+}
+
+/// Membership determines which rows may be managed. Sync observations only
+/// describe native peers and may outlive a removal or a hosted carrier change.
+fn node_rows(members: &[Value], sync: &Value) -> Vec<Value> {
+    let names: HashMap<_, _> = members
+        .iter()
+        .filter_map(|m| Some((m["id"].as_str()?, m["name"].as_str()?)))
+        .collect();
+    let directory: HashMap<_, _> = sync["directory"]["peers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p["node_id"].as_str()?, p["state"].as_str()?)))
+        .collect();
+    let mut rows: Vec<_> = members
+        .iter()
+        .map(|node| {
+            let host = node["hosted_by"]
+                .as_str()
+                .map(|id| names.get(id).copied().unwrap_or(id));
+            let peer = node["id"]
+                .as_str()
+                .filter(|_| host.is_none() && node["status"] != "local");
+            let transport = &node["transport"];
+            let path = peer
+                .filter(|id| transport["carrier_id"] == *id)
+                .and_then(|_| transport["last"]["path"].as_str())
+                .map(route);
+            let role = if node["is_owner"] == true {
+                "Owner"
+            } else if node["can_configure"] == true {
+                "Admin"
+            } else {
+                "Member"
+            };
+            let mut row = json!({
+                "id": node["id"], "name": node["name"], "state": node["status"],
+                "role": role, "host": host,
+                "directory": peer.and_then(|id| directory.get(id)),
+                "route": path,
+            });
+            if let Some(reason) = node["presence"]["reason"].as_str() {
+                row["status_detail"] = presence_detail(reason).into();
+            }
+            row
+        })
+        .collect();
+    rows.sort_by_cached_key(|n| {
+        (
+            n["state"] != "local",
+            n["name"].as_str().unwrap_or_default().to_lowercase(),
+            n["id"].to_string(),
+        )
+    });
+    rows
+}
+
 pub(super) fn snapshot(status: &Value) -> Value {
     let daemon = &status["daemon"];
     let service = &status["service"];
@@ -30,50 +107,6 @@ pub(super) fn snapshot(status: &Value) -> Value {
     } else {
         "Unavailable"
     };
-    let routes: HashMap<_, _> = sync["peer_transports"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|peer| {
-            Some((
-                peer["carrier_id"].as_str()?,
-                route(peer["last"]["path"].as_str()?),
-            ))
-        })
-        .collect();
-    let members: HashMap<_, _> = status["members"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| Some((m["id"].as_str()?, m)))
-        .collect();
-    let mut peers: Vec<_> = sync["directory"]["peers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|peer| {
-            peer["node_id"]
-                .as_str()
-                .and_then(|id| members.get(id))
-                .is_none_or(|m| m["hosted_by"].is_null())
-        })
-        .map(|peer| {
-            json!({
-                "name": peer["node_name"],
-                "state": peer["state"],
-                "route": peer["node_id"].as_str().and_then(|id| routes.get(id)),
-            })
-        })
-        .collect();
-    for member in status["members"].as_array().into_iter().flatten() {
-        if let Some(host) = member["hosted_by"].as_str() {
-            let carrier = members
-                .get(host)
-                .and_then(|m| m["name"].as_str())
-                .unwrap_or(host);
-            peers.push(json!({"name":member["name"],"state":member["status"],"route":format!("Hosted by {carrier}")}));
-        }
-    }
     let mut connection = Vec::new();
     if let Some(online) = sync["notifications_connected"].as_bool() {
         connection.push(format!(
@@ -84,7 +117,26 @@ pub(super) fn snapshot(status: &Value) -> Value {
     if let Some(retries) = sync["retrying_streams"].as_u64() {
         connection.push(format!("Retrying streams: {retries}"));
     }
+    if sync["local_error"] == true {
+        connection.push("Local sync error".into());
+    }
+    if sync["control_error"] == true {
+        connection.push("Sync control error".into());
+    }
+    let nodes = match status["members"].as_array() {
+        Some(members) => {
+            json!({"rows":node_rows(members, sync), "actions":super::admin::directory_actions(false)})
+        }
+        None => {
+            let mut nodes = json!({"rows":[], "actions":[]});
+            if running {
+                nodes["error"] = "Node directory unavailable. Refresh to try again.".into();
+            }
+            nodes
+        }
+    };
     json!({
+        "enrolled": status["enrolled"],
         "connection":connection.join(" · "),
         "running": running,
         "state": state,
@@ -95,7 +147,7 @@ pub(super) fn snapshot(status: &Value) -> Value {
         "queue": sync["records_waiting_to_send"],
         "chats": sync["directory"]["known_chats"],
         "sync": sync["state"],
-        "peers": peers,
+        "nodes": nodes,
     })
 }
 
@@ -119,50 +171,56 @@ mod tests {
             assert_eq!(gui["state"], state);
             assert_eq!(gui["can_start"], start);
             assert_eq!(gui["can_stop"], stop);
-            assert_eq!(gui["peers"], json!([]));
+            assert_eq!(gui["nodes"]["rows"], json!([]));
             assert!(gui["queue"].is_null());
         }
     }
 
     #[test]
-    fn status_includes_hosted_members_without_native_streams() {
-        let value = snapshot(
-            &json!({"members":[{"id":"n","name":"Studio"},{"name":"claude-web","status":"connected","hosted_by":"n"}]}),
-        );
-        assert_eq!(
-            value["peers"],
-            json!([{"name":"claude-web","state":"connected","route":"Hosted by Studio"}])
-        );
-    }
-
-    #[test]
-    fn status_uses_current_carrier_when_a_cached_peer_entry_exists() {
+    fn member_rows_join_presence_directory_and_transport_by_id() {
         let mut status = json!({
-            "members":[{"id":"a","name":"Laptop"},{"id":"b","name":"Studio"},
-                       {"id":"w","name":"claude-web","status":"unknown","hosted_by":"a"}],
-            "sync":{"directory":{"peers":[{"node_id":"w","node_name":"claude-web","state":"matched"}]}}
+            "daemon":{"running":true},
+            "members":[
+                {"id":"local","name":"Laptop","is_owner":true,"status":"local"},
+                {"id":"web","name":"Claude","status":"hosted","hosted_by":"local",
+                 "transport":{"carrier_id":"local","last":{"path":"direct_quic"}}},
+                {"id":"peer","name":"Studio","can_configure":true,"status":"connected",
+                 "transport":{"carrier_id":"peer","last":{"path":"relay_wss"}}},
+                {"id":"other","name":"Studio","status":"disconnected"}
+            ],
+            "sync":{
+                "records_waiting_to_send":0, "directory":{"known_chats":3,"peers":[
+                    {"node_id":"peer","node_name":"old name","state":"matched"},
+                    {"node_id":"web","state":"checking"},{"node_id":"removed","state":"matched"}]}
+            }
         });
-        assert_eq!(
-            snapshot(&status)["peers"],
-            json!([{"name":"claude-web","state":"unknown","route":"Hosted by Laptop"}])
-        );
-        status["members"][2]["hosted_by"] = json!("b");
-        assert_eq!(snapshot(&status)["peers"][0]["route"], "Hosted by Studio");
-    }
-
-    #[test]
-    fn only_attributes_transport_to_its_observed_peer() {
-        let gui = snapshot(&json!({"sync": {
-            "directory": {"known_chats": 3, "peers": [
-                {"node_id": "a", "node_name": "A", "state": "matched"},
-                {"node_id": "b", "node_name": "B", "state": "checking"}
-            ]},
-            "peer_transports": [{"carrier_id": "b", "last": {"path": "relay_wss"}}],
-            "records_waiting_to_send": 0
-        }}));
-        assert!(gui["peers"][0]["route"].is_null());
-        assert_eq!(gui["peers"][1]["route"], "Relay WebSocket");
+        let gui = snapshot(&status);
         assert_eq!(gui["queue"], 0);
         assert_eq!(gui["chats"], 3);
+        assert_eq!(
+            gui["nodes"]["rows"],
+            json!([
+                {"id":"local","name":"Laptop","state":"local","role":"Owner","host":null,"directory":null,"route":null},
+                {"id":"web","name":"Claude","state":"hosted","role":"Member","host":"Laptop","directory":null,"route":null},
+                {"id":"other","name":"Studio","state":"disconnected","role":"Member","host":null,"directory":null,"route":null},
+                {"id":"peer","name":"Studio","state":"connected","role":"Admin","host":null,"directory":"matched","route":"Relay WebSocket"}
+            ])
+        );
+        status["members"][1]["presence"]["reason"] = "awaiting_fresh_round_trip".into();
+        assert_eq!(
+            snapshot(&status)["nodes"]["rows"][1]["status_detail"],
+            "Waiting for a fresh encrypted round trip."
+        );
+        status["members"][1]["hosted_by"] = "peer".into();
+        assert_eq!(snapshot(&status)["nodes"]["rows"][1]["host"], "Studio");
+    }
+
+    #[test]
+    fn directory_failure_preserves_health_and_offers_no_member_actions() {
+        let status = snapshot(&json!({"daemon":{"running":true}, "sync":{"state":"idle"}}));
+        assert_eq!(status["state"], "Running");
+        assert_eq!(status["sync"], "idle");
+        assert!(status["nodes"]["error"].is_string());
+        assert_eq!(status["nodes"]["actions"], json!([]));
     }
 }

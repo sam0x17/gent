@@ -36,19 +36,23 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     let table = NSTableView()
     let search = NSSearchField()
     let status = NSTextField(labelWithString: "")
-    let actions = ActionBar()
+    let actions: ActionBar
     let page: String
     let columns: [(String, String, CGFloat)]
     var rows: [[String: Any]] = []
     private var filtered: [[String: Any]] = []
+    private var readError: String?
     private var loading = false
 
     init(page: String) {
         self.page = page
+        let members = page == "members"
+        actions = ActionBar(pairedRows: members)
         columns = page == "chats"
             ? [("name", "Chat", 185), ("node", "Node", 120), ("provider", "Provider", 95),
                ("state", "Registration", 100), ("id", "Chat ID", 270)]
             : [("name", "Node", 150), ("state", "Status", 100), ("role", "Role", 70),
+               ("directory", "Directory", 110), ("route", "Last transport", 135),
                ("host", "Hosted by", 120), ("id", "Node ID", 270)]
         super.init()
         search.placeholderString = "Filter " + page
@@ -67,31 +71,46 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.borderType = .bezelBorder
-        let refresh = NSButton(title: "Refresh", target: self, action: #selector(load))
-        let bar = NSStackView(views: [search, refresh])
+        let bar: NSStackView
+        if members {
+            let title = NSTextField(labelWithString: "Members")
+            title.font = .systemFont(ofSize: 18, weight: .semibold)
+            bar = NSStackView(views: [title, search])
+            table.columnAutoresizingStyle = .noColumnAutoresizing
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
+        } else {
+            let refresh = NSButton(title: "Refresh", target: self, action: #selector(loadChats))
+            bar = NSStackView(views: [search, refresh])
+            actions.reload = { [weak self] in self?.loadChats() }
+        }
         status.textColor = .secondaryLabelColor
         actions.selection = { [weak self] in
             guard let self = self, self.filtered.indices.contains(self.table.selectedRow) else { return nil }
             return self.filtered[self.table.selectedRow]
         }
-        actions.reload = { [weak self] in self?.load() }
-        pin(column([bar, scroll, status, actions.view, actions.notice]), in: view, inset: 12)
+        let body = column([bar, scroll, status, actions.view, actions.notice])
+        if members { body.distribution = .fill }
+        pin(body, in: view, inset: members ? 0 : 12)
     }
 
-    @objc func load() {
+    @objc func loadChats() {
         guard !loading else { return }
         loading = true
         status.stringValue = "Loading…"
-        sendPage(page)
+        sendPage("chats")
     }
 
     func receive(_ reply: [String: Any]) {
         if reply["operation"] as? Bool == true { actions.completed(reply); return }
         loading = false
+        display(reply)
+    }
+
+    func display(_ reply: [String: Any]) {
         actions.configure(reply["actions"] as? [[String: Any]] ?? [])
         rows = reply["rows"] as? [[String: Any]] ?? []
+        readError = reply["error"] as? String
         filter()
-        if let error = reply["error"] as? String { status.stringValue = error }
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) { actions.update() }
@@ -99,14 +118,18 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     func controlTextDidChange(_ notification: Notification) { filter() }
 
     private func filter() {
+        let selectedID = page == "members" ? actions.selection()?["id"] as? String : nil
         let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         filtered = query.isEmpty ? rows : rows.filter { row in
             columns.contains { (row[$0.0] as? String)?.localizedCaseInsensitiveContains(query) == true }
         }
         table.deselectAll(nil)
         table.reloadData()
+        if let id = selectedID, let index = filtered.firstIndex(where: { $0["id"] as? String == id }) {
+            table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        }
         actions.update()
-        status.stringValue = "\(filtered.count) of \(rows.count) \(page)"
+        status.stringValue = readError ?? "\(filtered.count) of \(rows.count) \(page)"
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
@@ -117,7 +140,11 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         cell.identifier = id
         cell.stringValue = filtered[row][id.rawValue] as? String ?? "—"
         cell.lineBreakMode = .byTruncatingTail
-        cell.toolTip = cell.stringValue
+        if page == "members" && id.rawValue == "state", let detail = filtered[row]["status_detail"] as? String {
+            cell.toolTip = detail
+        } else {
+            cell.toolTip = cell.stringValue
+        }
         return cell
     }
 }

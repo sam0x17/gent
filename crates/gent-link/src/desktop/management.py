@@ -7,6 +7,8 @@ class ActionBar(Gtk.Box):
         self.busy = False
 
     def configure(self, specs):
+        if specs == [spec for _, spec in self.buttons]:
+            return
         for button, _ in self.buttons:
             button.destroy()
         self.buttons = []
@@ -112,8 +114,6 @@ class ActionBar(Gtk.Box):
             dialog.connect("response", lambda window, _: window.destroy())
             dialog.show_all()
             code.select_region(0, -1)
-        if "error" not in reply:
-            self.pane.load()
 
 
 class AboutLogo(Gtk.Layout):
@@ -135,18 +135,28 @@ class AboutLogo(Gtk.Layout):
 
 
 class ManagementPane(Gtk.Box):
-    def __init__(self, name):
+    def __init__(self, name, refresh_snapshot=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=12, border_width=18)
         self.name = name
         self.loading = False
+        self.reload_queued = False
+        self.refresh_snapshot = refresh_snapshot
         body = self
         if name == "about":
             self.set_orientation(Gtk.Orientation.HORIZONTAL)
             self.pack_start(AboutLogo(), True, True, 0)
             body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, valign=Gtk.Align.CENTER)
             self.pack_start(body, False, False, 0)
-        self.title = label("", "node-title")
-        body.pack_start(self.title, False, False, 0)
+        if name == "cluster":
+            self.expander = Gtk.Expander()
+            self.title = label("Account", "section")
+            self.expander.set_label_widget(self.title)
+            self.pack_start(self.expander, False, False, 0)
+            body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_start=18)
+            self.expander.add(body)
+        else:
+            self.title = label("", "node-title")
+            body.pack_start(self.title, False, False, 0)
         self.detail = label()
         self.detail.set_selectable(True)
         self.detail.set_line_wrap(True)
@@ -163,9 +173,8 @@ class ManagementPane(Gtk.Box):
             body.pack_start(link, False, False, 0)
         self.actions = ActionBar(self)
         body.pack_start(self.actions, False, False, 0)
-        self.notice = label()
-        self.notice.set_line_wrap(True)
-        body.pack_start(self.notice, False, False, 0)
+        self.notice = notice_label()
+        (self if name == "cluster" else body).pack_start(self.notice, False, False, 0)
 
     def load(self):
         if not self.loading:
@@ -175,8 +184,20 @@ class ManagementPane(Gtk.Box):
     def receive(self, reply):
         if reply.get("operation"):
             self.actions.completed(reply)
+            if self.refresh_snapshot is not None:
+                if "error" not in reply:
+                    self.refresh_snapshot()
+                if self.loading:
+                    self.reload_queued = True
+                else:
+                    self.load()
+            elif "error" not in reply:
+                self.load()
             return
         self.loading = False
         self.title.set_text(reply.get("title", self.name.title()))
         self.detail.set_text(reply.get("error") or reply.get("detail", ""))
         self.actions.configure(reply.get("actions", []))
+        if self.reload_queued:
+            self.reload_queued = False
+            self.load()
