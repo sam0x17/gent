@@ -6,6 +6,10 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     let chats = DirectoryTab(page: "chats")
     let nodes = DirectoryTab(page: "nodes")
     let settings = SettingsTab()
+    let clusterPage = ManagementTab(page: "cluster")
+    let permissions = ManagementTab(page: "permissions")
+    lazy var about = ManagementTab(page: "about", icon: icon)
+    let setupAtLaunch: Bool
     let icon: NSImage?
     let openAtLaunch: Bool
     var statusItem: NSStatusItem!
@@ -16,6 +20,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     let cluster = NSTextField(labelWithString: "")
     let state = NSTextField(labelWithString: "Connecting…")
     let empty = NSTextField(labelWithString: "Waiting for daemon status…")
+    let connection = NSTextField(labelWithString: "")
     let errorMessage = NSTextField(wrappingLabelWithString: "")
     let table = NSTableView()
     let scroll = NSScrollView()
@@ -29,9 +34,10 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     var canStop = false
     var pending = false
 
-    init(iconPath: String, openAtLaunch: Bool) {
+    init(iconPath: String, openAtLaunch: Bool, setup: Bool = false) {
         self.icon = NSImage(contentsOfFile: iconPath)
         self.openAtLaunch = openAtLaunch
+        self.setupAtLaunch = setup
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -67,6 +73,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         }
         NSApp.mainMenu = main
         makeWindow()
+        if setupAtLaunch { tabs.selectTabViewItem(withIdentifier: "Cluster") }
         if openAtLaunch { show() } else { request("refresh") }
 
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
@@ -90,6 +97,9 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
 
     func loadTab(_ item: NSTabViewItem?) {
         switch item?.identifier as? String {
+        case "Cluster": clusterPage.load()
+        case "Permissions": permissions.load()
+        case "About": about.load()
         case "Chats": chats.load()
         case "Nodes": nodes.load()
         case "Settings": settings.load()
@@ -121,7 +131,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     }
 
     func makeWindow() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 510),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 850, height: 605),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Gent Desktop"
@@ -130,7 +140,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         window.delegate = self
         window.center()
         let content = NSView()
-        for (title, child) in [("Overview", content), ("Chats", chats.view), ("Nodes", nodes.view), ("Settings", settings.view)] {
+        for (title, child) in [("Status", content), ("Chats", chats.view), ("Nodes", nodes.view), ("Settings", settings.view), ("Cluster", clusterPage.view), ("Permissions", permissions.view), ("About", about.view)] {
             let tab = NSTabViewItem(identifier: title)
             tab.label = title
             tab.view = child
@@ -192,7 +202,8 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         errorMessage.isHidden = true
         let actions = stack([toggle, restart, NSView(), refresh])
         for b in [refresh, toggle, restart] { b.target = self; b.action = #selector(clicked(_:)); b.bezelStyle = .rounded }
-        let body = stack([identity, divider, stats, area, errorMessage, actions], vertical: true, spacing: 14)
+        connection.textColor = .secondaryLabelColor
+        let body = stack([identity, divider, stats, area, connection, errorMessage, actions], vertical: true, spacing: 14)
         content.addSubview(body)
         body.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -201,7 +212,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
             body.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
             body.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
         ])
-        for view in [identity, divider, stats, area, errorMessage, actions] as [NSView] {
+        for view in [identity, divider, stats, area, connection, errorMessage, actions] as [NSView] {
             view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         }
         area.setContentHuggingPriority(.defaultLow, for: .vertical)
@@ -242,6 +253,9 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
 
     func receive(_ m: [String: Any]) {
         switch m["page"] as? String {
+        case "cluster": clusterPage.receive(m); return
+        case "permissions": permissions.receive(m); return
+        case "about": about.receive(m); return
         case "chats": chats.receive(m); return
         case "nodes": nodes.receive(m); return
         case "settings": settings.receive(m); return
@@ -262,6 +276,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
                 if let n = m[key] as? NSNumber { field.stringValue = n.stringValue }
                 else { field.stringValue = (m[key] as? String)?.capitalized ?? "—" }
             }
+            connection.stringValue = m["connection"] as? String ?? ""
             peers = m["peers"] as? [[String: Any]] ?? []
             table.reloadData()
             scroll.isHidden = peers.isEmpty

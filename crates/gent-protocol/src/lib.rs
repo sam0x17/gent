@@ -550,6 +550,12 @@ pub enum ConfigurationEdit {
         request_id: String,
         changes: Vec<administration::GroupChange>,
     },
+    SetPermissionRule {
+        actor: Selector,
+        peer: Selector,
+        permission: Permission,
+        effect: Option<Effect>,
+    },
     Policy {
         policy: Policy,
     },
@@ -673,6 +679,7 @@ pub enum OwnerOp {
     },
     /// Read-only local-owner diagnostics; never advances clocks or projects files.
     Diagnose,
+    PermissionRules,
     PermissionExplain {
         actor: String,
         peer: String,

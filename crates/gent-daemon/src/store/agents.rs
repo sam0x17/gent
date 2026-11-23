@@ -56,6 +56,70 @@ impl StoreSession<'_> {
             "remote_ready":self.remote_ready()?}))
     }
 
+    pub(super) fn authorize_remote_unregister(&self, origin: &str) -> Result<()> {
+        let member = self
+            .state
+            .state()
+            .nodes
+            .get(origin)
+            .context("unknown requesting node")?;
+        self.state
+            .authorize_node(origin, &member.signing_key, self.timestamp as u64)?;
+        ensure!(
+            member.can_configure || self.configuration_writer().is_ok_and(|id| id == origin),
+            "remote unregistration requires cluster administration"
+        );
+        Ok(())
+    }
+
+    pub(super) fn unregister_local(&self, id: &str, generation: u64) -> Result<()> {
+        self.ensure_local_origin(id)?;
+        let agent = self.get_agent(id)?;
+        if agent.revoked {
+            return Ok(());
+        }
+        ensure!(
+            generation == self.registration_generation(&agent)?
+                && generation < MAX_REGISTRATION_GENERATION,
+            "registration changed; refresh Chats before unregistering"
+        );
+        self.db
+            .execute("UPDATE agents SET revoked=1 WHERE id=?1", [id])?;
+        self.db.execute(
+            "UPDATE network_origins SET generation=generation+1 WHERE agent=?1",
+            [id],
+        )?;
+        self.announce(id)
+    }
+
+    pub(super) fn request_unregister(&self, id: &str) -> Result<Value> {
+        let agent = self.get_agent(id)?;
+        if agent.revoked {
+            return Ok(json!({"revoked":true}));
+        }
+        let generation = self.registration_generation(&agent)?;
+        let host = self.state.transport_host(&agent.node_id)?;
+        if self.local_node(&agent.node_id) {
+            self.unregister_local(id, generation)?;
+            return Ok(json!({"revoked":true}));
+        }
+        self.authorize_remote_unregister(self.identity.node.id())?;
+        let event = gent_crypto::scoped_id(
+            b"gent/unregister-chat/v1\0",
+            &[host.as_bytes(), id.as_bytes(), &generation.to_be_bytes()],
+        );
+        self.queue(
+            host,
+            event,
+            crate::messages::Event::UnregisterChat {
+                agent: uuid::Uuid::parse_str(id)?,
+                generation,
+            },
+            None,
+        )?;
+        Ok(json!({"state":"queued","node_id":host}))
+    }
+
     pub(super) fn rename_agent(&self, id: &str, name: &str, expected: u64) -> Result<()> {
         config::label(name)?;
         ensure!(

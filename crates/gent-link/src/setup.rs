@@ -56,6 +56,16 @@ pub struct Options {
     discover_chats: Option<bool>,
 }
 
+impl Options {
+    pub(crate) fn desktop(new_cluster: Option<String>) -> Self {
+        Self {
+            new_cluster,
+            no_input: true,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Plan {
     Existing,

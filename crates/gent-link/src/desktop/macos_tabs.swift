@@ -9,7 +9,7 @@ func sendPage(_ op: String, _ fields: [String: Any] = [:]) {
     FileHandle.standardOutput.write(bytes)
 }
 
-private func pin(_ child: NSView, in parent: NSView, inset: CGFloat = 0) {
+func pin(_ child: NSView, in parent: NSView, inset: CGFloat = 0) {
     parent.addSubview(child)
     child.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
@@ -20,7 +20,7 @@ private func pin(_ child: NSView, in parent: NSView, inset: CGFloat = 0) {
     ])
 }
 
-private func column(_ children: [NSView]) -> NSStackView {
+func column(_ children: [NSView]) -> NSStackView {
     let stack = NSStackView(views: children)
     stack.orientation = .vertical
     stack.alignment = .leading
@@ -36,6 +36,7 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     let table = NSTableView()
     let search = NSSearchField()
     let status = NSTextField(labelWithString: "")
+    let actions = ActionBar()
     let page: String
     let columns: [(String, String, CGFloat)]
     var rows: [[String: Any]] = []
@@ -69,7 +70,12 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         let refresh = NSButton(title: "Refresh", target: self, action: #selector(load))
         let bar = NSStackView(views: [search, refresh])
         status.textColor = .secondaryLabelColor
-        pin(column([bar, scroll, status]), in: view, inset: 12)
+        actions.selection = { [weak self] in
+            guard let self = self, self.filtered.indices.contains(self.table.selectedRow) else { return nil }
+            return self.filtered[self.table.selectedRow]
+        }
+        actions.reload = { [weak self] in self?.load() }
+        pin(column([bar, scroll, status, actions.view, actions.notice]), in: view, inset: 12)
     }
 
     @objc func load() {
@@ -80,11 +86,15 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     }
 
     func receive(_ reply: [String: Any]) {
+        if reply["operation"] as? Bool == true { actions.completed(reply); return }
         loading = false
+        actions.configure(reply["actions"] as? [[String: Any]] ?? [])
         rows = reply["rows"] as? [[String: Any]] ?? []
         filter()
         if let error = reply["error"] as? String { status.stringValue = error }
     }
+
+    func tableViewSelectionDidChange(_ notification: Notification) { actions.update() }
 
     func controlTextDidChange(_ notification: Notification) { filter() }
 
@@ -93,7 +103,9 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         filtered = query.isEmpty ? rows : rows.filter { row in
             columns.contains { (row[$0.0] as? String)?.localizedCaseInsensitiveContains(query) == true }
         }
+        table.deselectAll(nil)
         table.reloadData()
+        actions.update()
         status.stringValue = "\(filtered.count) of \(rows.count) \(page)"
     }
 

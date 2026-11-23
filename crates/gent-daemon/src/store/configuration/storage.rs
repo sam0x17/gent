@@ -62,6 +62,7 @@ enum Summary {
         request_id: String,
         changes: Vec<gent_protocol::administration::GroupChange>,
     },
+    SetPermissionRule,
     Policy,
     Replace,
     RenameNode {
@@ -133,6 +134,7 @@ impl From<&ConfigurationEdit> for Summary {
                 request_id: request_id.clone(),
                 changes: changes.clone(),
             },
+            ConfigurationEdit::SetPermissionRule { .. } => Self::SetPermissionRule,
             ConfigurationEdit::Policy { .. } => Self::Policy,
             ConfigurationEdit::Replace { .. } => Self::Replace,
             ConfigurationEdit::RenameNode { name } => Self::RenameNode { name: name.clone() },

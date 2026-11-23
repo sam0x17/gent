@@ -543,3 +543,87 @@ async fn invalid_saved_legacy_provenance_cannot_publish_a_rename() {
     );
     assert_eq!(details(&mut pair, 1, 0)["name"], before["name"]);
 }
+
+#[tokio::test]
+async fn remote_unregistration_requires_admin_and_converges_after_restart() {
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let chat = pair.agents[0].clone();
+    let caller = pair.stores[1].identity.node.id().to_owned();
+    let action = OwnerOp::Revoke { agent_id: chat };
+    for allow in [false, true] {
+        pair.owner(
+            0,
+            OwnerOp::DelegateConfiguration {
+                node_id: caller.clone(),
+                allow,
+            },
+        )
+        .unwrap();
+        pair.pump();
+        if !allow {
+            assert!(pair.owner(1, action.clone()).is_err());
+        }
+    }
+    assert_eq!(pair.owner(1, action.clone()).unwrap()["state"], "queued");
+    pair.reopen(1);
+    pair.pump();
+    assert_eq!(details(&mut pair, 0, 0)["revoked"], true);
+    let changed = details(&mut pair, 1, 0);
+    assert_eq!(changed["revoked"], true);
+    assert_eq!(pair.owner(1, action).unwrap()["revoked"], true);
+    assert_eq!(details(&mut pair, 1, 0), changed);
+}
+
+#[tokio::test]
+async fn remote_permission_edit_replaces_one_selector_rule_and_inherit_removes_it() {
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let caller = pair.stores[1].identity.node.id().to_string();
+    pair.owner(
+        0,
+        OwnerOp::DelegateConfiguration {
+            node_id: caller,
+            allow: true,
+        },
+    )
+    .unwrap();
+    pair.pump();
+    let actor = Selector::Agent(pair.agents[0].clone());
+    let peer = Selector::Agent(pair.agents[1].clone());
+    let original = pair.owner(0, OwnerOp::PermissionRules).unwrap()["rules"].clone();
+    let original: Vec<Rule> = serde_json::from_value(original).unwrap();
+    let unrelated =
+        |r: &Rule| r.actor != actor || r.peer != peer || r.permission != Permission::Send;
+    for effect in [Some(Effect::Deny), Some(Effect::Allow), None] {
+        let action = OwnerOp::Configure {
+            request_id: Uuid::new_v4().to_string(),
+            edit: ConfigurationEdit::SetPermissionRule {
+                actor: actor.clone(),
+                peer: peer.clone(),
+                permission: Permission::Send,
+                effect,
+            },
+        };
+        pair.owner(1, action.clone()).unwrap();
+        pair.pump();
+        assert_eq!(pair.owner(1, action).unwrap()["state"], "applied");
+        let expected: Vec<_> = original
+            .iter()
+            .filter(|r| unrelated(r))
+            .cloned()
+            .chain(effect.map(|effect| Rule {
+                actor: actor.clone(),
+                peer: peer.clone(),
+                permission: Permission::Send,
+                effect,
+            }))
+            .collect();
+        for node in [0, 1] {
+            assert_eq!(
+                pair.owner(node, OwnerOp::PermissionRules).unwrap()["rules"],
+                json!(expected)
+            );
+        }
+    }
+}

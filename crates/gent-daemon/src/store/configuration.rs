@@ -91,6 +91,26 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
             administration::request_id(administrator, request_id)?;
             administration::groups::validate_changes(changes)?;
         }
+        ConfigurationEdit::SetPermissionRule {
+            actor,
+            peer,
+            permission,
+            effect,
+        } => {
+            let mut policy = Policy::default();
+            for selector in [actor, peer] {
+                if let Selector::Group(name) = selector {
+                    policy.groups.insert(name.clone(), vec![]);
+                }
+            }
+            policy.rules.push(gent_protocol::Rule {
+                actor: actor.clone(),
+                peer: peer.clone(),
+                permission: *permission,
+                effect: effect.unwrap_or(gent_protocol::Effect::Allow),
+            });
+            gent_crypto::validate_policy(&policy)?;
+        }
         ConfigurationEdit::Policy { policy } => gent_crypto::validate_policy(policy)?,
         ConfigurationEdit::Replace {
             cluster_name,
@@ -491,6 +511,26 @@ impl StoreSession<'_> {
                         || self.state.state().retired_admin_grants.contains(grant_id),
                     "unknown group administration grant ID"
                 );
+                self.state.set_policy(owner, policy, timestamp)
+            }
+            ConfigurationEdit::SetPermissionRule {
+                actor,
+                peer,
+                permission,
+                effect,
+            } => {
+                let mut policy = self.state.state().policy.clone();
+                policy.rules.retain(|r| {
+                    r.actor != *actor || r.peer != *peer || r.permission != *permission
+                });
+                if let Some(effect) = effect {
+                    policy.rules.push(gent_protocol::Rule {
+                        actor: actor.clone(),
+                        peer: peer.clone(),
+                        permission: *permission,
+                        effect: *effect,
+                    });
+                }
                 self.state.set_policy(owner, policy, timestamp)
             }
             ConfigurationEdit::Policy { policy } => {

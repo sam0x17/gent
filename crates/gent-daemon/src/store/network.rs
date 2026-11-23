@@ -417,6 +417,10 @@ impl StoreSession<'_> {
             )?;
         }
         match event {
+            Event::UnregisterChat { agent, generation } => {
+                self.authorize_remote_unregister(peer)?;
+                self.unregister_local(&agent.to_string(), generation)
+            }
             Event::Direct { address } => self.receive_direct(peer, address),
             Event::Directory { envelope } => self.receive_directory(peer, *envelope),
             Event::NodeInvite { envelope } => self.receive_node_invite(peer, *envelope),

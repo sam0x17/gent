@@ -17,7 +17,7 @@ class DirectoryPane(Gtk.Box):
         self.search.connect("search-changed", lambda *_: self.render())
         self.pack_start(self.search, False, False, 0)
         self.store = Gtk.ListStore(*([str] * len(self.columns)))
-        view = Gtk.TreeView(model=self.store)
+        view = self.table = Gtk.TreeView(model=self.store)
         for i, (_, title) in enumerate(self.columns):
             column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=i)
             column.set_resizable(True)
@@ -29,6 +29,19 @@ class DirectoryPane(Gtk.Box):
         self.status = label()
         self.pack_start(self.status, False, False, 0)
 
+        self.actions = ActionBar(self)
+        self.pack_start(self.actions, False, False, 0)
+        self.table.get_selection().connect("changed", self.actions.update)
+        self.notice = label()
+        self.notice.set_line_wrap(True)
+        self.pack_start(self.notice, False, False, 0)
+
+    def selection(self):
+        model, selected = self.table.get_selection().get_selected()
+        if selected is None:
+            return None
+        return dict(zip((key for key, _ in self.columns), model[selected]))
+
     def load(self):
         if not self.busy:
             self.busy = True
@@ -36,7 +49,11 @@ class DirectoryPane(Gtk.Box):
             page_request(self.name)
 
     def receive(self, reply):
+        if reply.get("operation"):
+            self.actions.completed(reply)
+            return
         self.busy = False
+        self.actions.configure(reply.get("actions", []))
         self.rows = reply.get("rows", [])
         self.render()
         if "error" in reply:

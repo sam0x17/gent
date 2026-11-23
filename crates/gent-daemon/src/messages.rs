@@ -52,6 +52,10 @@ impl Registration {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
+    UnregisterChat {
+        agent: Uuid,
+        generation: u64,
+    },
     Direct {
         address: crate::store::direct::Address,
     },
@@ -108,7 +112,8 @@ impl Event {
     pub(crate) fn permits_compression(&self) -> bool {
         match self {
             Self::Message { attachments, .. } => attachments.is_empty(),
-            Self::Presence { .. }
+            Self::UnregisterChat { .. }
+            | Self::Presence { .. }
             | Self::Receipt { .. }
             | Self::Registration { .. }
             | Self::ConversationActivity { .. }

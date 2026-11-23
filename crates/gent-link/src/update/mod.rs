@@ -53,7 +53,17 @@ fn eligible(build: &Build) -> bool {
 }
 
 async fn check(installation: &Installation) -> Result<Value> {
-    let installed = install::inspect(&installation.binary).await?;
+    compare_stable(install::inspect(&installation.binary).await?).await
+}
+
+pub(crate) async fn desktop_check() -> Result<Value> {
+    match Installation::discover()? {
+        Some(installation) => check(&installation).await,
+        None => compare_stable(build_info::current()).await,
+    }
+}
+
+async fn compare_stable(installed: Build) -> Result<Value> {
     let _progress = crate::ui::Progress::start("Checking GitHub stable");
     let blessed = release::resolve().await?;
     Ok(

@@ -137,6 +137,11 @@ impl StoreSession<'_> {
                     params![target, member.signing_key.as_slice()],
                     |r| r.get(0),
                 )?;
+                if matches!(&edit, ConfigurationEdit::SetPermissionRule { .. })
+                    && self.wire_version(target)? < crate::messages::wire::ADMIN_VERSION
+                {
+                    continue;
+                }
                 if !linked {
                     continue;
                 }

@@ -489,12 +489,46 @@ impl Service {
     }
 }
 
+pub(crate) fn desktop_account(home: &Path) -> Result<Value> {
+    let directory = source::directory(home)?;
+    let Some(saved) = read(&directory.join("session.json"))? else {
+        return Ok(json!({"state":"Signed out"}));
+    };
+    let now = now()?;
+    let state = match saved.phase {
+        Phase::Revoking => "Sign-out pending",
+        Phase::Pending => "Sign-in pending",
+        Phase::Active if saved.session.as_ref().is_some_and(|s| s.expires_at > now) => "Signed in",
+        Phase::Active => "Expired",
+    };
+    Ok(json!({"state":state,"login":saved.session.map(|s| s.github_login)}))
+}
+
+pub(crate) async fn desktop_login(home: &Path) -> Result<Value> {
+    let directory = source::directory(home)?;
+    let service = if gent_daemon::config::path(home).try_exists()? {
+        crate::node_home::inspect(home)?.service.map(|s| s.origin)
+    } else {
+        None
+    };
+    execute_at(
+        &directory,
+        Command::Login {
+            headless: false,
+            no_browser: false,
+            service,
+        },
+        true,
+    )
+    .await
+}
+
 pub async fn execute(home: &Path, command: Command) -> Result<Value> {
     if matches!(command, Command::Renew) {
         return renewal::renew(home, None).await;
     }
     let directory = source::directory(home)?;
-    let result = execute_at(&directory, command).await?;
+    let result = execute_at(&directory, command, false).await?;
     Ok(result)
 }
 
@@ -555,7 +589,7 @@ pub(crate) async fn diagnose(
     }
 }
 
-async fn execute_at(directory: &Path, command: Command) -> Result<Value> {
+async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result<Value> {
     let path = directory.join("session.json");
     let client = client()?;
     if matches!(command, Command::Status) {
@@ -642,12 +676,13 @@ async fn execute_at(directory: &Path, command: Command) -> Result<Value> {
         "invalid GitHub client ID"
     );
     let github = github_origin(&base)?;
-    let device = headless || (!no_browser && std::env::var_os("SSH_CONNECTION").is_some());
+    let device =
+        headless || (!desktop && !no_browser && std::env::var_os("SSH_CONNECTION").is_some());
     let credential = if device {
         Credential::Token(device_login(&client, &github, &config.github_client_id).await?)
     } else {
         let (code, verifier, redirect) =
-            browser_login(&github, &config.github_client_id, no_browser).await?;
+            browser_login(&github, &config.github_client_id, no_browser, desktop).await?;
         Credential::Code {
             code,
             verifier,
@@ -810,6 +845,7 @@ async fn browser_login(
     github: &Url,
     client_id: &str,
     no_browser: bool,
+    desktop: bool,
 ) -> Result<(String, String, String)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let redirect = format!(
@@ -828,18 +864,23 @@ async fn browser_login(
         ("code_challenge", challenge.as_str()),
         ("code_challenge_method", "S256"),
     ]);
-    eprintln!("Open this URL to sign in:\n{url}");
+    if !desktop {
+        eprintln!("Open this URL to sign in:\n{url}");
+    }
     if !no_browser {
         let program = if cfg!(target_os = "macos") {
             "open"
         } else {
             "xdg-open"
         };
-        let _ = std::process::Command::new(program)
+        let opened = std::process::Command::new(program)
             .arg(url.as_str())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
+        if desktop {
+            opened.context("could not open the sign-in browser")?;
+        }
     }
     let code = timeout(Duration::from_secs(600), async {
         loop {

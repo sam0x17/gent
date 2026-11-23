@@ -11,6 +11,9 @@ use std::{collections::HashMap, path::Path};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    About,
+    Cluster,
+    Permissions,
     Chats,
     Nodes,
     Settings,
@@ -150,6 +153,9 @@ impl Pages {
             return json!({"page":"settings","error":"Invalid desktop request"});
         };
         let page = match request {
+            Request::About => "about",
+            Request::Cluster => "cluster",
+            Request::Permissions => "permissions",
             Request::Chats => "chats",
             Request::Nodes => "nodes",
             _ => "settings",
@@ -165,8 +171,15 @@ impl Pages {
 
     async fn handle(&mut self, home: &Path, request: Request) -> Result<Value> {
         match request {
-            Request::Chats => Ok(json!({"rows":chats(owner(home, OwnerOp::Agents).await?)?})),
-            Request::Nodes => Ok(json!({"rows":nodes(owner(home, OwnerOp::Nodes).await?)?})),
+            Request::About => Ok(super::admin::about()),
+            Request::Cluster => super::admin::cluster(home),
+            Request::Permissions => super::admin::permissions(home).await,
+            Request::Chats => Ok(
+                json!({"rows":chats(owner(home, OwnerOp::Agents).await?)?, "actions":super::admin::directory_actions(true)}),
+            ),
+            Request::Nodes => Ok(
+                json!({"rows":nodes(owner(home, OwnerOp::Nodes).await?)?, "actions":super::admin::directory_actions(false)}),
+            ),
             Request::Settings => Ok(json!({"values":settings(home)?})),
             Request::Set { key, enabled } => {
                 set(home, key, enabled).await?;

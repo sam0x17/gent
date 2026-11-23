@@ -10,7 +10,7 @@ def exercise_tabs(wait_for, cli):
 
     def find(name, role=None):
         def match(child):
-            return (name is None or child.name == name) and (role is None or child.getRoleName() == role)
+            return child.getState().contains(pyatspi.STATE_SHOWING) and (name is None or child.name == name) and (role is None or child.getRoleName() == role)
         return pyatspi.findDescendant(desktop, match)
 
     def get(name, role=None):
@@ -21,7 +21,10 @@ def exercise_tabs(wait_for, cli):
         assert item.parent.querySelection().selectChild(item.getIndexInParent())
 
     def click(name):
-        return get(name).queryAction().doAction(0)
+        button = wait_for(lambda: pyatspi.findDescendant(desktop, lambda c:
+                           c.name == name and c.getRole() == pyatspi.ROLE_PUSH_BUTTON
+                           and c.getState().contains(pyatspi.STATE_SHOWING)), name)
+        return button.queryAction().doAction(0)
 
     tab("Chats")
     get("Fixture conversation", "table cell")
@@ -58,4 +61,33 @@ def exercise_tabs(wait_for, cli):
     click("Save and publish")
     wait_for(lambda: json.loads(cli("daemon", "status", "--json").stdout)["cluster"]["name"] == "desktop-published",
              "published cluster name")
-    tab("Overview")
+    tab("About")
+    get("Check for updates")
+    get("https://gent.link")
+    wait_for(lambda: pyatspi.findDescendant(desktop, lambda c: c.getRoleName() == "label" and
+             "Version " in c.name and "Copyright" in c.name), "build version and copyright")
+    tab("Cluster")
+    get("Gent account: Signed out")
+    get("Sign in with GitHub")
+    tab("Permissions")
+    click("Edit permission…")
+    get("Apply rule")
+    click("Cancel")
+    click("Edit permission…")
+    click("Apply rule")
+    wait_for(lambda: any(r["effect"] == "deny" and r["permission"] == "send" for r in
+                         json.loads(cli("--json", "config").stdout)["policy"]["rules"]), "changed signed send rule")
+    tab("Chats")
+    chat = get("Fixture conversation", "table cell")
+    assert chat.parent.queryTable().addRowSelection(0)
+    click("Unregister chat…")
+    click("Cancel")
+    assert not json.loads(cli("--json", "agents").stdout)[0]["revoked"]
+    click("Unregister chat…")
+    click("Unregister chat")
+    wait_for(lambda: json.loads(cli("--json", "agents").stdout)[0]["revoked"], "confirmed unregistration")
+    tab("Nodes")
+    click("Add node…")
+    get("New node name", "label")
+    click("Cancel")
+    tab("Status")

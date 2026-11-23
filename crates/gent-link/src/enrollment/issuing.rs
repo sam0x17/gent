@@ -18,6 +18,17 @@ pub struct AddArgs {
     code_out: Option<PathBuf>,
 }
 
+impl AddArgs {
+    pub(crate) fn invitation(name: String, configure: bool, output: PathBuf) -> Self {
+        Self {
+            name,
+            no_configure: !configure,
+            code_out: Some(output),
+            web: false,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Saved {

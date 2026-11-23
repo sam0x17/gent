@@ -2,7 +2,7 @@
 
 Run `gent desktop` from your graphical session to open the local daemon window. On macOS, use the Gent icon in the menu bar to reopen it. On Linux, use the tray menu or the **Gent Desktop** application launcher. Opening it twice brings the same window forward.
 
-The window shows the node and cluster names, daemon and sync status, queued records, and known chat count. The peer table shows each peer's directory state and its last observed transport. A dash means the daemon has no observation for that field. Opening or refreshing the window reads local status. It does not initiate network presence probes.
+**Status** shows the node and cluster names, daemon and sync status, queued records, known chats, notification connection and retrying streams. The peer table shows each peer's directory state and its last observed transport. A dash means the daemon has no observation for that field. Opening or refreshing the window reads local status. It does not initiate network presence probes.
 
 **Start daemon**, **Stop daemon**, and **Restart** use the same per-user service as `gent daemon`. A foreground daemon can be viewed, but its process owner controls its lifecycle. Closing the window hides it in the tray. **Quit Gent Desktop** exits the companion and leaves the daemon running.
 
@@ -13,6 +13,18 @@ The window shows the node and cluster names, daemon and sync status, queued reco
 **Settings** controls graphical login, automatic updates, native chat discovery, direct connections, UDP and transport helpers. The discovery switch allows the node to publish supported native chats. Network changes take effect on daemon restart.
 
 Choose **Edit full configuration…** to edit the current node's TOML, including node and cluster names, policy, relay URLs and helper address settings. **Save locally** validates and writes the file. **Save and publish…** additionally submits the shared names and policy for cluster approval. The editor preserves the draft on a validation error and detects changes made while it was open. Identity and service-managed fields use the same protections as `gent config edit`.
+
+## Cluster, Permissions and About
+
+On a new machine, run `gent desktop` and open **Cluster**. Sign in to your Gent account with GitHub in your browser. Choose **Create cluster…** to name a new cluster or **Join with invitation…** to enter a code. Both flows install and start the per-user daemon. On an enrolled node, Cluster shows your account and current membership and lets you sign out or repair the daemon installation.
+
+In **Nodes**, choose **Add node…** to name the new machine, choose its role and create a private one-time invitation. Enter the code on the new machine within 15 minutes using the same Gent account. Selecting an existing node lets an administrator change its role or confirm removal from the cluster.
+
+In **Chats**, select the conversation and choose **Unregister chat…**. The confirmation identifies the chat and its ID. Revocation disables its Gent registration and preserves the conversation in the provider app. A remote host handles the request over its authenticated node link and publishes the updated registration. Remote unregistration requires node protocol 8 on the host and carrier.
+
+**Permissions** shows the signed communication rules. Select **Edit permission…**, choose the source, destination, permission and decision, then apply. Selectors include individual chats, nodes, groups, all chats and chats on the same node. **Inherit** removes the exact override. Other matching denies still apply.
+
+**About** displays the Inkling logo, version and build revision, copyright and project website. **Check for updates** compares the installed build with the stable release when clicked.
 
 ## Graphical login
 

@@ -940,6 +940,8 @@ impl StoreSession<'_> {
                 administrator,
                 before,
             } => self.administration_history(administrator.as_deref(), before, true),
+            OwnerOp::PermissionRules => Ok(json!({"rules":self.state.state().policy.rules,
+                "groups":self.state.state().policy.groups.keys().collect::<Vec<_>>()})),
             OwnerOp::PermissionExplain { actor, peer } => self.permission_explain(&actor, &peer),
             OwnerOp::PermissionAdmins => {
                 Ok(json!({"grants":self.state.state().policy.admin_grants,
@@ -1079,21 +1081,7 @@ impl StoreSession<'_> {
                 ConfigurationEdit::RenameNode { name },
             ),
             OwnerOp::PrepareHostedNode { .. } => unreachable!("handled before session"),
-            OwnerOp::Revoke { agent_id } => {
-                self.ensure_local_origin(&agent_id)?;
-                ensure!(
-                    self.db
-                        .execute("UPDATE agents SET revoked=1 WHERE id=?1", params![agent_id])?
-                        == 1,
-                    "unknown chat"
-                );
-                self.db.execute(
-                    "UPDATE network_origins SET generation=generation+1 WHERE agent=?1",
-                    [&agent_id],
-                )?;
-                self.announce(&agent_id)?;
-                Ok(json!({"revoked":true}))
-            }
+            OwnerOp::Revoke { agent_id } => self.request_unregister(&agent_id),
         }
     }
 

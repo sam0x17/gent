@@ -32,7 +32,7 @@ class Desktop:
         self.model = {}
         self.last_read = 0.0
         self.window = Gtk.Window(title="Gent Desktop")
-        self.window.set_default_size(780, 530)
+        self.window.set_default_size(850, 605)
         self.window.set_icon_from_file(ICON)
         self.window.connect("delete-event", lambda *_: self.window.hide_on_delete())
         header = Gtk.HeaderBar(title="Gent Desktop", show_close_button=True)
@@ -50,7 +50,7 @@ class Desktop:
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, border_width=20)
         self.tabs = Gtk.Notebook()
         self.window.add(self.tabs)
-        self.tabs.append_page(outer, Gtk.Label(label="Overview"))
+        self.tabs.append_page(outer, Gtk.Label(label="Status"))
         identity = Gtk.Box(spacing=12)
         identity.pack_start(Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(ICON, 46, 46, True)), False, False, 0)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -86,6 +86,8 @@ class Desktop:
         self.scroll.add(view)
         outer.pack_start(self.scroll, True, True, 0)
         outer.pack_start(self.empty, True, True, 0)
+        self.connection = label("", "quiet")
+        outer.pack_start(self.connection, False, False, 0)
         self.error = label()
         self.error.set_line_wrap(True)
         outer.pack_start(self.error, False, False, 0)
@@ -100,6 +102,7 @@ class Desktop:
         self.pages = {
             "chats": DirectoryPane("chats"), "nodes": DirectoryPane("nodes"),
             "settings": SettingsPane(),
+            **{name: ManagementPane(name) for name in ("cluster", "permissions", "about")},
         }
         for name, page in self.pages.items():
             self.tabs.append_page(page, Gtk.Label(label=name.title()))
@@ -111,7 +114,9 @@ class Desktop:
         self.install_tray()
         GLib.io_add_watch(0, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.receive)
         GLib.timeout_add_seconds(15, self.tick)
-        if MODE == "window":
+        if MODE == "setup":
+            self.tabs.set_current_page(self.tabs.page_num(self.pages["cluster"]))
+        if MODE in ("window", "setup"):
             self.show()
         else:
             self.send("refresh")
@@ -210,6 +215,7 @@ class Desktop:
             for k, value in self.values.items():
                 raw = model.get(k)
                 value.set_text("—" if raw is None else str(raw).capitalize())
+            self.connection.set_text(model.get("connection") or "")
             self.table.clear()
             for peer in model["peers"]:
                 self.table.append((peer["name"] or "Unknown", (peer["state"] or "Unknown").capitalize(), peer["route"] or "—"))

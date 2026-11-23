@@ -17,6 +17,8 @@ fn build_desktop() {
     let source = "src/desktop/macos.swift";
     let main = "src/desktop/main.swift";
     let tabs = "src/desktop/macos_tabs.swift";
+    let management = "src/desktop/management.swift";
+    println!("cargo:rerun-if-changed={management}");
     println!("cargo:rerun-if-changed={tabs}");
     println!("cargo:rerun-if-changed={source}");
     println!("cargo:rerun-if-changed={main}");
@@ -40,7 +42,7 @@ fn build_desktop() {
             "-target",
         ])
         .arg(format!("{arch}-apple-macos11.0"))
-        .args([source, tabs, main])
+        .args([source, tabs, management, main])
         .arg("-o")
         .arg(output)
         .status()

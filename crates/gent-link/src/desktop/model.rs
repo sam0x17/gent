@@ -53,7 +53,18 @@ pub(super) fn snapshot(status: &Value) -> Value {
             })
         })
         .collect();
+    let mut connection = Vec::new();
+    if let Some(online) = sync["notifications_connected"].as_bool() {
+        connection.push(format!(
+            "Notifications {}",
+            if online { "connected" } else { "disconnected" }
+        ));
+    }
+    if let Some(retries) = sync["retrying_streams"].as_u64() {
+        connection.push(format!("Retrying streams: {retries}"));
+    }
     json!({
+        "connection":connection.join(" · "),
         "running": running,
         "state": state,
         "node": status["node"]["name"],

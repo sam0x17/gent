@@ -17,6 +17,7 @@ use tokio::{
     process::Command,
 };
 
+mod admin;
 mod login;
 mod model;
 mod pages;
@@ -58,8 +59,15 @@ fn socket(home: &Path) -> std::path::PathBuf {
 }
 
 pub(super) fn signal(home: &Path, bytes: &[u8]) -> Result<bool> {
-    let path = socket(home);
-    match fs::symlink_metadata(&path) {
+    // A first-run window lives inside the auth-only area until enrollment finishes.
+    if send_signal(&socket(home), bytes)? {
+        return Ok(true);
+    }
+    send_signal(&socket(&home.join("auth/desktop")), bytes)
+}
+
+fn send_signal(path: &Path, bytes: &[u8]) -> Result<bool> {
+    match fs::symlink_metadata(path) {
         Ok(meta) => ensure!(
             meta.file_type().is_socket(),
             "unexpected file at {}",
@@ -79,16 +87,16 @@ pub(super) fn signal(home: &Path, bytes: &[u8]) -> Result<bool> {
     }
 }
 
-fn claim(home: &Path, background: bool) -> Result<Option<UnixDatagram>> {
+fn claim(home: &Path, runtime: &Path, background: bool) -> Result<Option<UnixDatagram>> {
     // Serialize probing and replacing a socket left by a crashed GUI.
-    let _lock = managed_file::lock(&home.join("desktop-login.lock"))?;
+    let _lock = managed_file::lock(&runtime.join("desktop-login.lock"))?;
     if background && !login::autostarts(home)? {
         return Ok(None);
     }
     if signal(home, if background { b"present" } else { b"show" })? {
         return Ok(None);
     }
-    let path = socket(home);
+    let path = socket(runtime);
     if fs::symlink_metadata(&path).is_ok() {
         fs::remove_file(&path)?;
     }
@@ -105,6 +113,8 @@ fn frontend(_home: &Path) -> Result<Command> {
             include_str!("desktop/linux.py"),
             "\n",
             include_str!("desktop/tabs.py"),
+            "\n",
+            include_str!("desktop/management.py"),
             "\ndesktop = Desktop()\nGtk.main()\n"
         ),
     ]);
@@ -133,7 +143,7 @@ fn frontend(_home: &Path) -> Result<Command> {
 
 fn install_icon(home: &Path) -> Result<std::path::PathBuf> {
     let icon = home.join("desktop-icon.png");
-    let image = include_bytes!("../../../assets/branding/inkling-128.png");
+    let image = include_bytes!("../../../assets/branding/inkling-512.png");
     if fs::read(&icon).ok().as_deref() != Some(image) {
         config::write_private(&icon, image)?;
     }
@@ -147,19 +157,28 @@ async fn run(home: &Path, background: bool) -> Result<()> {
         }
         bail!("open Gent Desktop from a graphical login session");
     }
-    ensure!(
-        config::path(home).is_file(),
-        "set up this node first with gent setup"
-    );
+    let configured = config::path(home).try_exists()?;
+    if background && !configured {
+        return Ok(());
+    }
     config::private_dir(home)?;
-    let Some(channel) = claim(home, background)? else {
+    let runtime = if configured {
+        home.to_owned()
+    } else {
+        let auth = home.join("auth");
+        config::private_dir(&auth)?;
+        let runtime = auth.join("desktop");
+        config::private_dir(&runtime)?;
+        runtime
+    };
+    let Some(channel) = claim(home, &runtime, background)? else {
         return Ok(());
     };
     // Keep the bound socket alive through unlink. Other launchers can reclaim
     // its name only after the socket closes (or after a crash).
-    let path = socket(home);
+    let path = socket(&runtime);
     let bound = fs::symlink_metadata(&path)?;
-    let result = supervise(home, &channel, background).await;
+    let result = supervise(home, &runtime, &channel, background, configured).await;
     if let Ok(current) = fs::symlink_metadata(&path)
         && (bound.dev(), bound.ino()) == (current.dev(), current.ino())
     {
@@ -168,11 +187,23 @@ async fn run(home: &Path, background: bool) -> Result<()> {
     result
 }
 
-async fn supervise(home: &Path, socket: &UnixDatagram, background: bool) -> Result<()> {
-    let icon = install_icon(home)?;
-    let mut child = frontend(home)?
+async fn supervise(
+    home: &Path,
+    runtime: &Path,
+    socket: &UnixDatagram,
+    background: bool,
+    configured: bool,
+) -> Result<()> {
+    let icon = install_icon(runtime)?;
+    let mut child = frontend(runtime)?
         .arg(icon)
-        .arg(if background { "tray" } else { "window" })
+        .arg(if background {
+            "tray"
+        } else if configured {
+            "window"
+        } else {
+            "setup"
+        })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .kill_on_drop(true)
@@ -181,9 +212,11 @@ async fn supervise(home: &Path, socket: &UnixDatagram, background: bool) -> Resu
     let mut input = child.stdin.take().unwrap();
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut pages = pages::Pages::default();
+    let mut jobs = tokio::task::JoinSet::new();
     let mut activation = [0; 16];
     loop {
         let message = tokio::select! {
+            Some(result) = jobs.join_next() => result?,
             size = socket.recv(&mut activation) => match &activation[..size?] {
                 b"show" => json!({"show":true}),
                 b"quit" => json!({"quit":true}),
@@ -192,7 +225,16 @@ async fn supervise(home: &Path, socket: &UnixDatagram, background: bool) -> Resu
             line = events.next_line() => {
                 let Some(line) = line? else { break };
                 if line.starts_with('{') {
-                    pages.respond(home, &line).await
+                    if let Ok(admin::Request::Manage { action }) = serde_json::from_str(&line) {
+                        if jobs.is_empty() {
+                            let home = home.to_owned();
+                            jobs.spawn(async move { action.respond(&home).await });
+                            continue;
+                        }
+                        action.error("Another desktop operation is in progress")
+                    } else {
+                        pages.respond(home, &line).await
+                    }
                 } else {
                     let action = match line.as_str() {
                         "refresh" => DaemonCommand::Status,

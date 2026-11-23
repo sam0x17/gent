@@ -9,8 +9,9 @@ mod value;
 
 pub const ZSTD_VERSION: u8 = 6;
 pub const HELPERS_VERSION: u8 = 7;
-pub const CURRENT: u8 = HELPERS_VERSION;
-pub const NEGOTIATED: &[u8] = &[2, 3, 4, 5, ZSTD_VERSION, HELPERS_VERSION];
+pub const ADMIN_VERSION: u8 = 8;
+pub const CURRENT: u8 = ADMIN_VERSION;
+pub const NEGOTIATED: &[u8] = &[2, 3, 4, 5, ZSTD_VERSION, HELPERS_VERSION, ADMIN_VERSION];
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +100,13 @@ fn v2(event: &mut Value, encode: bool) -> Result<(), String> {
 impl Serialize for Record {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut event = serde_json::to_value(&self.event).map_err(ser::Error::custom)?;
+        let admin_event = matches!(self.event, Event::UnregisterChat { .. })
+            || matches!(&self.event, Event::ConfigurationRequest { edit, .. } if matches!(edit.as_ref(), gent_protocol::ConfigurationEdit::SetPermissionRule { .. }));
+        if self.version < ADMIN_VERSION && admin_event {
+            return Err(ser::Error::custom(
+                "the target node must negotiate Gent protocol 8 before this administration request",
+            ));
+        }
         if self.version < 5 && matches!(self.event, Event::Direct { .. }) {
             return Err(ser::Error::custom(
                 "direct transport requires node record version 5",
@@ -144,6 +152,15 @@ impl Serialize for Record {
 impl<'de> Deserialize<'de> for Record {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut envelope = Envelope::deserialize(deserializer)?;
+        if envelope.version < ADMIN_VERSION
+            && (envelope.event["kind"] == "unregister_chat"
+                || (envelope.event["kind"] == "configuration_request"
+                    && envelope.event["edit"]["op"] == "set_permission_rule"))
+        {
+            return Err(de::Error::custom(
+                "remote administration requires Gent protocol 8",
+            ));
+        }
         if envelope.version < 5 && envelope.event["kind"] == "direct" {
             return Err(de::Error::custom(
                 "direct transport requires node record version 5",
