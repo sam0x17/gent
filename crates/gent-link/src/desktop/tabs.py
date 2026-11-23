@@ -17,8 +17,8 @@ class DirectoryPane(Gtk.Box):
                          ("directory", "Directory"), ("route", "Last transport"),
                          ("host", "Hosted by"), ("id", "Node ID")])
         if name == "nodes":
-            self.pack_start(label("Members", "section"), False, False, 0)
-        placeholder = "Filter members" if name == "nodes" else "Filter chats"
+            self.pack_start(label("Nodes", "section"), False, False, 0)
+        placeholder = "Filter " + name
         self.search = Gtk.SearchEntry(placeholder_text=placeholder)
         self.search.get_accessible().set_name(placeholder)
         self.search.connect("search-changed", lambda *_: self.render())
@@ -93,8 +93,7 @@ class DirectoryPane(Gtk.Box):
         self.update_count()
 
     def update_count(self):
-        noun = "members" if self.name == "nodes" else "chats"
-        self.status.set_text(self.error or f"{len(self.store)} of {len(self.rows or [])} {noun}")
+        self.status.set_text(self.error or f"{len(self.store)} of {len(self.rows or [])} {self.name}")
 
 
 class SettingsPane(Gtk.Box):

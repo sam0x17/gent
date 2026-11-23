@@ -148,7 +148,7 @@ class Desktop:
         self.cluster = ClusterPane(self.send, self.refresh_after_operation)
         self.dashboard = DashboardPane()
         pages = {
-            "Cluster": self.cluster, "Dashboard": self.dashboard, "Chats": DirectoryPane("chats"),
+            "Status": self.cluster, "Dashboard": self.dashboard, "Chats": DirectoryPane("chats"),
             "Settings": SettingsPane(), "Permissions": ManagementPane("permissions"), "About": ManagementPane("about"),
         }
         for title, page in pages.items():

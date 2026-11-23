@@ -56,9 +56,9 @@ func actionButton(_ bar: ActionBar, _ title: String) -> NSButton {
 }
 
 func checkCluster(_ desktop: Desktop, open: () -> Void) {
-    require(desktop.tabs.tabViewItems.map { $0.label } == ["Cluster", "Dashboard", "Chats", "Settings", "Permissions", "About"]
-            && desktop.tabs.selectedTabViewItem?.label == "Cluster", "Cluster is the first and selected tab")
-    require(requests(during: open) == [snapshotRead, accountRead], "opening Cluster reads snapshot and account once")
+    require(desktop.tabs.tabViewItems.map { $0.label } == ["Status", "Dashboard", "Chats", "Settings", "Permissions", "About"]
+            && desktop.tabs.selectedTabViewItem?.label == "Status", "Status is the first and selected tab")
+    require(requests(during: open) == [snapshotRead, accountRead], "opening Status reads snapshot and account once")
     let stopped: [String: Any] = ["enrolled": true, "node": "Studio", "cluster": "Local fixture", "state": "Stopped",
                                   "can_start": true, "nodes": ["rows": [], "actions": []]]
     checkSetup(desktop, stopped: stopped)
@@ -113,8 +113,8 @@ func checkSetup(_ desktop: Desktop, stopped: [String: Any]) {
     desktop.receive(firstRun)
     desktop.receive(setup)
     desktop.tabs.selectTabViewItem(withIdentifier: "Chats")
-    require(requests { desktop.tabs.selectTabViewItem(withIdentifier: "Cluster") } == [snapshotRead, accountRead],
-            "selecting Cluster reads both")
+    require(requests { desktop.tabs.selectTabViewItem(withIdentifier: "Status") } == [snapshotRead, accountRead],
+            "selecting Status reads both")
     desktop.receive(firstRun)
     require(requests { actionButton(account.actions, "Sign in with GitHub").performClick(nil) }
             == [.json(["op": "manage", "action": ["kind": "sign_in"]])], "sign-in can be retried")
@@ -155,6 +155,8 @@ func checkMembers(_ desktop: Desktop, stopped: [String: Any]) {
                          "nodes": directory])
     }
     require(requests { receiveRows() }.isEmpty, "ordinary snapshot renders without follow-up requests")
+    require(nodes.search.placeholderString == "Filter nodes" && nodes.status.stringValue == "3 of 3 nodes",
+            "node search and count labels")
     require(!nodes.view.isHidden && nodes.table.numberOfRows == 3 && nodes.table.tableColumns.map { $0.title }
             == ["Node", "Status", "Role", "Directory", "Last transport", "Hosted by", "Node ID"], "signed members in one table")
     require(cell(nodes.table, "state", row: 0) == "local" && cell(nodes.table, "role", row: 0) == "Owner"
@@ -183,7 +185,7 @@ func checkMembers(_ desktop: Desktop, stopped: [String: Any]) {
     require(abs(memberScroll.bounds.width - (clip.bounds.width - 32)) <= 1 && memberScroll.hasHorizontalScroller
             && nodes.table.rect(ofColumn: 6).maxX > memberScroll.contentSize.width, "member columns scroll within the page")
     require(scroll.documentView!.bounds.height > clip.bounds.height && abs(scroll.documentView!.bounds.width - clip.bounds.width) <= 1,
-            "Cluster fits the narrow viewport and scrolls vertically")
+            "Status fits the narrow viewport and scrolls vertically")
     for button in descendants(nodes.actions.view, of: NSButton.self) + descendants(desktop.account.actions.view, of: NSButton.self) {
         let rect = button.convert(button.bounds, to: clip)
         require(rect.width > 0 && rect.minX >= clip.bounds.minX && rect.maxX <= clip.bounds.maxX,
@@ -364,7 +366,7 @@ let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
 if CommandLine.arguments.dropFirst(2).contains(where: { ["--cluster", "--nodes"].contains($0) }) {
     desktop.makeWindow()
     checkCluster(desktop) { desktop.show() }
-    print("PASS: native Cluster setup, status, member search, guarded actions, rename dialogs and refresh requests")
+    print("PASS: native Status tab, setup, node search, guarded actions, rename dialogs and refresh requests")
     exit(0)
 }
 app.delegate = desktop
@@ -401,7 +403,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
     desktop.settings.saveLocal()
     desktop.receive(["page":"settings","saved":true,"values":["updates":true]])
     require(desktop.settings.text.isHiddenOrHasHiddenAncestor, "successful save returns to settings")
-    desktop.tabs.selectTabViewItem(withIdentifier: "Cluster")
+    desktop.tabs.selectTabViewItem(withIdentifier: "Status")
     desktop.receive(["page":"cluster","title":"Account","detail":"Gent account: Signed in · @fixture",
                      "actions":[["title":"Sign out","kind":"sign_out","confirm":"Sign out?"]]])
     require(desktop.account.detail.stringValue.contains("@fixture"), "account displayed")
@@ -431,7 +433,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
         require(false, "Quit menu item")
         return
     }
-    FileHandle.standardError.write(Data("PASS: AppKit menu bar, consolidated Cluster setup, daemon controls, member search and actions, Dashboard resizing and button dispatch, directories, editable settings, account confirmation, permissions, about, update check, close, reopen and quit\n".utf8))
+    FileHandle.standardError.write(Data("PASS: AppKit menu bar, Status tab, setup, daemon controls, node search and actions, Dashboard resizing and button dispatch, directories, editable settings, account confirmation, permissions, about, update check, close, reopen and quit\n".utf8))
     _ = app.sendAction(stop, to: quit.target, from: quit)
 }
 app.run()

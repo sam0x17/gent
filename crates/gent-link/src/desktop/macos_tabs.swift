@@ -46,7 +46,7 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
 
     init(page: String) {
         self.page = page
-        let members = page == "members"
+        let members = page == "nodes"
         actions = ActionBar(pairedRows: members)
         columns = page == "chats"
             ? [("name", "Chat", 185), ("node", "Node", 120), ("provider", "Provider", 95),
@@ -73,7 +73,7 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         scroll.borderType = .bezelBorder
         let bar: NSStackView
         if members {
-            let title = NSTextField(labelWithString: "Members")
+            let title = NSTextField(labelWithString: "Nodes")
             title.font = .systemFont(ofSize: 18, weight: .semibold)
             bar = NSStackView(views: [title, search])
             table.columnAutoresizingStyle = .noColumnAutoresizing
@@ -118,7 +118,7 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     func controlTextDidChange(_ notification: Notification) { filter() }
 
     private func filter() {
-        let selectedID = page == "members" ? actions.selection()?["id"] as? String : nil
+        let selectedID = page == "nodes" ? actions.selection()?["id"] as? String : nil
         let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         filtered = query.isEmpty ? rows : rows.filter { row in
             columns.contains { (row[$0.0] as? String)?.localizedCaseInsensitiveContains(query) == true }
@@ -140,7 +140,7 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
         cell.identifier = id
         cell.stringValue = filtered[row][id.rawValue] as? String ?? "—"
         cell.lineBreakMode = .byTruncatingTail
-        if page == "members" && id.rawValue == "state", let detail = filtered[row]["status_detail"] as? String {
+        if page == "nodes" && id.rawValue == "state", let detail = filtered[row]["status_detail"] as? String {
             cell.toolTip = detail
         } else {
             cell.toolTip = cell.stringValue

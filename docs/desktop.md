@@ -2,15 +2,15 @@
 
 Run `gent desktop` from your graphical session to open the local daemon window. On macOS, use the Gent icon in the menu bar to reopen it. On Linux, use the tray menu or the **Gent Desktop** application launcher. Opening it twice brings the same window forward.
 
-## Cluster
+## Status
 
-**Cluster** opens first. On an enrolled machine it shows the cluster and local node names, daemon and sync status, queued records, known chats, notification connection, and retrying streams. **Start daemon**, **Stop daemon**, and **Restart** control the per-user service. A foreground daemon can be viewed here and is controlled by its process owner.
+**Status** opens first. On an enrolled machine it shows the cluster and local node names, daemon and sync status, queued records, known chats, notification connection, and retrying streams. **Start daemon**, **Stop daemon**, and **Restart** control the per-user service. A foreground daemon can be viewed here and is controlled by its process owner.
 
-The member table lists the local node first. Each row shows the member’s role and last known connection status. Hover over the status for its evidence, such as a recent encrypted round trip or a timed-out presence check. For native peers, the directory column shows whether their chat directories agree, and the transport column shows the last observed route. For hosted members such as `claude-web`, **Hosted by** identifies the current carrier. A dash means there is no observation for that field. Filtering or refreshing the table uses the local daemon’s data.
+The **Nodes** table lists the local node first. Each row shows the node’s role and last known connection status. Hover over the status for its evidence, such as a recent encrypted round trip or a timed-out presence check. For native peers, the directory column shows whether their chat directories agree, and the transport column shows the last observed route. For hosted members such as `claude-web`, **Hosted by** identifies the current carrier. A dash means there is no observation for that field. Filtering or refreshing the table uses the local daemon’s data.
 
 Choose **Add node…** to create a private invitation. On the new machine, open Gent Desktop, sign in with the same GitHub account, and choose **Join with invitation…** within 15 minutes. Choose **Create cluster…** to start a new cluster. Signed-in users can also sign out here. Enrolled machines have an **Install or repair daemon…** action.
 
-To rename a member, select its row and choose **Rename node…**. The dialog identifies the member by name and ID, including when you select a hosted connector. An administrator can also change a selected member’s role or remove it. If a change is queued, refresh after it is applied to see the result.
+To rename a node, select its row and choose **Rename node…**. The dialog identifies the member by name and ID, including when you select a hosted connector. An administrator can also change a selected member’s role or remove it. If a change is queued, refresh after it is applied to see the result.
 
 Closing the window hides it in the tray. **Quit Gent Desktop** exits the companion and leaves the daemon running.
 

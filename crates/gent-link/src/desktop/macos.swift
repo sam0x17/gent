@@ -8,7 +8,7 @@ private final class ClusterDocument: NSView {
 final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabViewDelegate {
     let tabs = NSTabView()
     let chats = DirectoryTab(page: "chats")
-    let nodes = DirectoryTab(page: "members")
+    let nodes = DirectoryTab(page: "nodes")
     let settings = SettingsTab()
     let dashboard = DashboardTab()
     let account = AccountSection()
@@ -105,7 +105,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     func loadTab(_ item: NSTabViewItem?) {
         switch item?.identifier as? String {
         case "Dashboard": dashboard.load()
-        case "Cluster": refreshCluster()
+        case "Status": refreshCluster()
         case "Permissions": permissions.load()
         case "About": about.load()
         case "Chats": chats.loadChats()
@@ -139,7 +139,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         window.delegate = self
         window.center()
         let content = NSScrollView()
-        for (title, child) in [("Cluster", content), ("Dashboard", dashboard.view), ("Chats", chats.view), ("Settings", settings.view), ("Permissions", permissions.view), ("About", about.view)] {
+        for (title, child) in [("Status", content), ("Dashboard", dashboard.view), ("Chats", chats.view), ("Settings", settings.view), ("Permissions", permissions.view), ("About", about.view)] {
             let tab = NSTabViewItem(identifier: title)
             tab.label = title
             tab.view = child

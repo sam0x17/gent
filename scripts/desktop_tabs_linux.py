@@ -90,8 +90,8 @@ def select_row(id_):
 
 
 def assert_default_cluster():
-    item = get("Cluster", "page tab")
-    assert [page.name for page in item.parent] == ["Cluster", "Dashboard", "Chats", "Settings", "Permissions", "About"]
+    item = get("Status", "page tab")
+    assert [page.name for page in item.parent] == ["Status", "Dashboard", "Chats", "Settings", "Permissions", "About"]
     assert item.getState().contains(pyatspi.STATE_SELECTED)
 
 
@@ -101,7 +101,7 @@ def exercise_setup():
     get("Gent account: Signed out", "label")
     for title in ("Sign in with GitHub", "Create cluster…", "Join with invitation…"):
         get(title)
-    assert not find("Members") and not find(None, "table") and not find("Known chats")
+    assert not find("Nodes") and not find(None, "table") and not find("Known chats")
     click("Join with invitation…")
     get("Invitation code", "label")
     click("Cancel")
@@ -112,7 +112,7 @@ def exercise_enrolled_without_daemon(node):
     get("desktop-test", "label")
     get("Local node · " + node["name"], "label")
     get("Start daemon")
-    get("Members", "label")
+    get("Nodes", "label")
     assert get("Account", "toggle button").queryAction().doAction(0)
     get("Install or repair daemon…")
     assert not find("Create cluster…") and not find("Join with invitation…")
@@ -196,9 +196,9 @@ def exercise_node_rename(cli, remote, hosted, parent):
     def members():
         return {n["id"]: n for n in json.loads(cli("--json", "nodes").stdout)}
 
-    search = get("Filter members")
+    search = get("Filter nodes")
     search.queryEditableText().setTextContents(hosted["id"])
-    get("1 of 3 members", "label")
+    get("1 of 3 nodes", "label")
     open_rename(hosted).setTextContents("cancelled fixture edit")
     click("Cancel")
     wait_for(lambda: not find("Rename node", "dialog"), "cancelled rename dialog dismissed")
@@ -228,9 +228,9 @@ def exercise_node_rename(cli, remote, hosted, parent):
         assert selected_member() == node["id"]
         if node == hosted:
             assert search.queryText().getText(0, -1) == hosted["id"]
-            get("1 of 3 members", "label")
+            get("1 of 3 nodes", "label")
             search.queryEditableText().setTextContents("")
-            get("3 of 3 members", "label")
+            get("3 of 3 nodes", "label")
         expected[node["id"]] = name
         directory = members()
         assert {key: member["name"] for key, member in directory.items()} == expected
@@ -246,7 +246,7 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     get("Daemon running", "label")
     get("Stop daemon")
     get("Known chats", "label")
-    get("3 of 3 members", "label")
+    get("3 of 3 nodes", "label")
     visible_tables = pyatspi.findAllDescendants(desktop, lambda c:
                       c.getRoleName() == "table" and c.getState().contains(pyatspi.STATE_SHOWING))
     assert len(visible_tables) == 1
@@ -305,7 +305,7 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     get("https://gent.link")
     wait_for(lambda: pyatspi.findDescendant(desktop, lambda c: c.getRoleName() == "label" and
              "Version " in c.name and "Copyright" in c.name), "build version and copyright")
-    tab("Cluster")
+    tab("Status")
     assert get("Account", "toggle button").queryAction().doAction(0)
     get("Gent account: Signed out")
     get("Sign in with GitHub")
@@ -333,7 +333,7 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     open_unregister()
     click("Unregister chat")
     wait_for(fixture_revoked, "confirmed unregistration")
-    tab("Cluster")
+    tab("Status")
     click("Add node…")
     get("New node name", "label")
     click("Cancel")
