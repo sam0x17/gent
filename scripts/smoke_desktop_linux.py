@@ -100,20 +100,24 @@ def stop(process):
             process.wait()
 
 
-def host_fixture_node(binary, home, created):
-    """Enroll over local stdio, then activate the real signed host mapping."""
-    child = home.parent / "web"
+def enroll_fixture_nodes(binary, home, created):
+    """Enroll two peers over local stdio and activate a signed host mapping for one."""
     shim = home.parent / "bin"
     shim.mkdir()
     ssh = shim / "ssh"
     ssh.write_text('#!/bin/sh\nexec "$FIXTURE_GENT" --home "$FIXTURE_OWNER" cluster pairing-serve\n')
     ssh.chmod(0o700)
-    joined = subprocess.run(
-        [binary, "--home", child, "--json", "cluster", "join", created["cluster"]["id"],
-         "--via", "fixture", "--name", "fixture-web"],
-        env=dict(os.environ, PATH=f'{shim}:{os.environ["PATH"]}', FIXTURE_GENT=str(binary),
-                 FIXTURE_OWNER=str(home)), stdout=subprocess.PIPE, check=True, timeout=30)
-    node = json.loads(joined.stdout)["node"]
+    def join(child):
+        joined = subprocess.run(
+            [binary, "--home", child, "--json", "cluster", "join", created["cluster"]["id"],
+             "--via", "fixture", "--name", "fixture-" + child.name],
+            env=dict(os.environ, PATH=f'{shim}:{os.environ["PATH"]}', FIXTURE_GENT=str(binary),
+                     FIXTURE_OWNER=str(home)), stdout=subprocess.PIPE, check=True, timeout=30)
+        return json.loads(joined.stdout)["node"]
+
+    remote = join(home.parent / "remote")
+    child = home.parent / "web"
+    node = join(child)
     parent = created["node"]
 
     def owner(action):
@@ -132,7 +136,7 @@ def host_fixture_node(binary, home, created):
     signed = owner({"op": "configure", "request_id": str(uuid.uuid4()), "edit": {
         "op": "host_node", "node_id": node["id"], "parent": parent["id"]}})
     assert signed["applied"], signed
-    return node
+    return remote, node
 
 
 def main():
@@ -164,7 +168,7 @@ def main():
                       '\n[transport]\ndirect = "off"\nrelays = []\n')
         daemon = launch("daemon", "run")
         wait_for(lambda: (home/"daemon.sock").is_socket(), "daemon")
-        hosted = host_fixture_node(binary, home, created)
+        remote, hosted = enroll_fixture_nodes(binary, home, created)
         fixture = Client(base + ["mcp", "serve", "--binding", str(home / "fixture.key")])
         cleanup.callback(fixture.close)
         agent = fixture.call("gent_register", {"name": "Fixture conversation", "provider": "generic-mcp"})[0]["agent"]
@@ -182,7 +186,7 @@ def main():
         assert "--background" in entry.read_text() and "--background" not in app.read_text()
         click("Open Gent Desktop")
         first = wait_for(visible, "window opened by tray")
-        exercise_tabs(wait_for, cli, fixture, agent, hosted, created["node"])
+        exercise_tabs(wait_for, cli, fixture, agent, remote, hosted, created["node"])
         assert 'name = "desktop-published"' in (home / "config.toml").read_text()
         cli("desktop")
         assert visible() == first, "second launch duplicated the window"
@@ -211,7 +215,7 @@ def main():
         cli("desktop", "disable")
         wait_for(lambda: not (home / "desktop.sock").exists(), "disable closed the running tray")
         assert daemon.poll() is None
-        print("PASS: hosted node on Status and Nodes, MCP dashboard widgets, button inbox delivery, live update/delete, chats, settings, cluster publish, tray and login lifecycle")
+        print("PASS: local, remote and hosted node rename, cancel and validation error, hosted Status, MCP dashboard widgets, button delivery, live update/delete, chats, settings, cluster publish, tray and login lifecycle")
 
 
 if __name__ == "__main__":

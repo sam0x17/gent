@@ -138,8 +138,12 @@ pub(crate) async fn add(parent: &Path, name: &str, out: Option<&Path>) -> Result
         cfg.service.is_some(),
         "web nodes need a Gent service cluster"
     );
-    if let Some(node) = management::resolve(parent, name).await? {
-        let mut result = management::execute(parent, &node, out, false, false).await?;
+    let directory = storage::directory(parent)?;
+    let lock = managed_file::lock(&directory.join("setup.lock"))?;
+    let members = owner(parent, OwnerOp::Nodes).await?;
+    if let Some(node) = management::resolve(&members, name)? {
+        drop(lock);
+        let mut result = management::execute(parent, node, out, false, false).await?;
         result["ready"] = true.into();
         result["cluster"] = cfg.cluster.name.into();
         result["next"] =
@@ -147,14 +151,12 @@ pub(crate) async fn add(parent: &Path, name: &str, out: Option<&Path>) -> Result
                 .into();
         return Ok(result);
     }
-    let directory = storage::directory(parent)?;
-    let lock = managed_file::lock(&directory.join("setup.lock"))?;
-    let home = storage::home(parent, name);
+    let (home, saved) = storage::setup_home(parent, name, &members)?;
     ensure!(
         home.join("gateway/control.sock").as_os_str().len() < 104,
         "Gent state path is too long for hosted node sockets; use a shorter state directory"
     );
-    let mut record = match storage::read(parent, &home)? {
+    let mut record = match saved {
         Some(record) => {
             ensure!(
                 record.name == name,
@@ -249,6 +251,7 @@ pub(crate) async fn execute(parent: &Path, command: Command) -> Result<Value> {
                     .map(|n| n["name"].clone())
                     .unwrap_or(Value::Null);
                 if let Some(saved) = nodes.iter_mut().find(|n| n["node_id"] == node["id"]) {
+                    saved["name"] = node["name"].clone();
                     saved["host_node_id"] = host.clone();
                     saved["host_node_name"] = host_name;
                     if host.as_str() != Some(parent_config.node.id.as_str()) {
@@ -279,27 +282,19 @@ pub(crate) async fn execute(parent: &Path, command: Command) -> Result<Value> {
     if !revoke {
         output_allowed(out.as_deref())?;
     }
+    let members = owner(parent, OwnerOp::Nodes).await?;
+    let node = management::resolve(&members, &name)?.context("unknown web node in this cluster")?;
     if node_home::inspect(parent)?.service.is_some() {
-        let node = management::resolve(parent, &name)
-            .await?
-            .context("unknown web node in this cluster")?;
-        return management::execute(parent, &node, out.as_deref(), rotate, revoke).await;
+        return management::execute(parent, node, out.as_deref(), rotate, revoke).await;
     }
     let directory = storage::directory(parent)?;
     let _lock = managed_file::lock(&directory.join("setup.lock"))?;
-    let mut matches = storage::list(parent)?
+    let id = node["id"].as_str().context("missing web node ID")?;
+    let name = node["name"].as_str().context("missing web node name")?;
+    let (home, mut record) = storage::list(parent)?
         .into_iter()
-        .filter(|(_, record)| record.name == name || record.node.as_deref() == Some(&name))
-        .collect::<Vec<_>>();
-    ensure!(
-        matches.len() <= 1,
-        "web node name is ambiguous; use its node ID"
-    );
-    let (home, mut record) = matches.pop().context("unknown web node name")?;
-    ensure!(
-        record.node.is_some(),
-        "web node setup is incomplete; repeat node add"
-    );
+        .find(|(_, record)| record.node.as_deref() == Some(id))
+        .context("web node runtime unavailable on this machine")?;
     let portable = node_home::inspect(&home)?.portable_web()?;
     if portable
         && revoke

@@ -351,6 +351,33 @@ fn configure(store: &mut Store, edit: ConfigurationEdit) -> Commit {
 }
 
 #[test]
+fn member_rename_updates_only_the_signed_hosted_member() {
+    let mut f = Fixture::new();
+    f.activate();
+    configure(
+        &mut f.store,
+        ConfigurationEdit::HostNode {
+            node_id: f.peer.id().into(),
+            parent: config::load(f.home.path()).unwrap().node.id,
+        },
+    );
+    let before = f.store.identity.state(&f.store.db).unwrap();
+    let mut expected = before.state().nodes.clone();
+    expected.get_mut(f.peer.id()).unwrap().name = "Hosted tablet".into();
+    configure(
+        &mut f.store,
+        ConfigurationEdit::RenameMember {
+            node_id: f.peer.id().into(),
+            name: "Hosted tablet".into(),
+        },
+    );
+    let after = f.store.identity.state(&f.store.db).unwrap();
+    assert_eq!(after.state().nodes, expected);
+    assert_eq!(json!(after.state().policy), json!(before.state().policy));
+    assert_eq!(after.state().name, before.state().name);
+}
+
+#[test]
 fn offline_member_catches_migration_then_administers_and_enrolls_without_creator() {
     let mut f = Fixture::new();
     let state = f.store.identity.state(&f.store.db).unwrap();

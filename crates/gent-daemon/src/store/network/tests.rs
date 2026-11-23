@@ -1265,6 +1265,71 @@ impl Pair {
         })
     }
 }
+
+#[tokio::test]
+async fn member_rename_from_joined_admin_checks_writer_grant_and_pins_target() -> Result<()> {
+    let mut pair = Pair::new().await;
+    let target = pair.stores[0].identity.node.id().to_owned();
+    let caller = pair.stores[1].identity.node.id().to_owned();
+    let id = Uuid::new_v4().to_string();
+    let rename = |request_id: &str, node_id: &str, name: &str| OwnerOp::Configure {
+        request_id: request_id.into(),
+        edit: ConfigurationEdit::RenameMember {
+            node_id: node_id.into(),
+            name: name.into(),
+        },
+    };
+    let action = rename(&id, &target, "Studio");
+    let queued = pair.owner(1, action.clone())?;
+    assert_eq!(queued["state"], "queued");
+    assert_eq!(queued["node_id"], target);
+    // Keep the request across restart without placing an unsupported record on the stream.
+    assert!(
+        !pair.stores[1]
+            .db
+            .prepare("SELECT 1 FROM configuration_routes WHERE id=?1")?
+            .exists([&id])?
+    );
+    pair.reopen(1);
+    directory_push_tests::negotiate(&mut pair);
+    pair.stores[1].reconcile_configuration()?;
+    pair.pump();
+    let applied = pair.owner(1, action)?;
+    assert_eq!(applied["state"], "applied");
+    assert_eq!(applied["name"], "Studio");
+    assert_eq!(config::load(pair.homes[0].path())?.node.name, "Studio");
+    assert_eq!(config::load(pair.homes[1].path())?.node.name, "joined");
+    for i in 0..2 {
+        let nodes = pair.owner(i, OwnerOp::Nodes)?;
+        assert!(
+            nodes
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["id"] == target && n["name"] == "Studio")
+        );
+    }
+    assert!(pair.owner(1, rename(&id, &caller, "Studio")).is_err());
+
+    let pending = rename(&Uuid::new_v4().to_string(), &target, "Forbidden");
+    assert_eq!(pair.owner(1, pending.clone())?["state"], "queued");
+    pair.owner(
+        0,
+        OwnerOp::DelegateConfiguration {
+            node_id: caller,
+            allow: false,
+        },
+    )?;
+    pair.pump();
+    assert_eq!(pair.owner(1, pending)?["state"], "rejected");
+    assert!(
+        pair.owner(1, rename(&Uuid::new_v4().to_string(), &target, "Forbidden"))
+            .is_err()
+    );
+    assert_eq!(config::load(pair.homes[0].path())?.node.name, "Studio");
+    Ok(())
+}
+
 #[tokio::test]
 async fn configuration_proposal_revision_and_result_recover_atomically_after_storage_failures() {
     let mut pair = Pair::new().await;

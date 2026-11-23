@@ -11,7 +11,8 @@ pub const ZSTD_VERSION: u8 = 6;
 pub const HELPERS_VERSION: u8 = 7;
 pub const ADMIN_VERSION: u8 = 8;
 pub const DASHBOARD_VERSION: u8 = 9;
-pub const CURRENT: u8 = DASHBOARD_VERSION;
+pub const NODE_RENAME_VERSION: u8 = 10;
+pub const CURRENT: u8 = NODE_RENAME_VERSION;
 pub const NEGOTIATED: &[u8] = &[
     2,
     3,
@@ -21,7 +22,29 @@ pub const NEGOTIATED: &[u8] = &[
     HELPERS_VERSION,
     ADMIN_VERSION,
     DASHBOARD_VERSION,
+    NODE_RENAME_VERSION,
 ];
+
+/// Older peers cannot decode new configuration edits on their ordered streams.
+pub(crate) fn configuration_version(edit: &gent_protocol::ConfigurationEdit) -> u8 {
+    match edit {
+        gent_protocol::ConfigurationEdit::SetPermissionRule { .. } => ADMIN_VERSION,
+        gent_protocol::ConfigurationEdit::RenameMember { .. } => NODE_RENAME_VERSION,
+        _ => 1,
+    }
+}
+
+fn check_configuration_version(event: &Event, version: u8) -> Result<(), String> {
+    if let Event::ConfigurationRequest { edit, .. } = event {
+        let required = configuration_version(edit);
+        if version < required {
+            return Err(format!(
+                "the configuration writer must negotiate Gent protocol {required} before this administration request"
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,9 +136,8 @@ impl Serialize for Record {
         if self.version < DASHBOARD_VERSION && matches!(&self.event, Event::Dashboard { .. }) {
             return Err(ser::Error::custom("dashboard requires protocol 9"));
         }
-        let admin_event = matches!(self.event, Event::UnregisterChat { .. })
-            || matches!(&self.event, Event::ConfigurationRequest { edit, .. } if matches!(edit.as_ref(), gent_protocol::ConfigurationEdit::SetPermissionRule { .. }));
-        if self.version < ADMIN_VERSION && admin_event {
+        check_configuration_version(&self.event, self.version).map_err(ser::Error::custom)?;
+        if self.version < ADMIN_VERSION && matches!(self.event, Event::UnregisterChat { .. }) {
             return Err(ser::Error::custom(
                 "the target node must negotiate Gent protocol 8 before this administration request",
             ));
@@ -168,11 +190,7 @@ impl<'de> Deserialize<'de> for Record {
         if envelope.version < DASHBOARD_VERSION && envelope.event["kind"] == "dashboard" {
             return Err(de::Error::custom("dashboard requires protocol 9"));
         }
-        if envelope.version < ADMIN_VERSION
-            && (envelope.event["kind"] == "unregister_chat"
-                || (envelope.event["kind"] == "configuration_request"
-                    && envelope.event["edit"]["op"] == "set_permission_rule"))
-        {
+        if envelope.version < ADMIN_VERSION && envelope.event["kind"] == "unregister_chat" {
             return Err(de::Error::custom(
                 "remote administration requires Gent protocol 8",
             ));
@@ -210,6 +228,7 @@ impl<'de> Deserialize<'de> for Record {
             _ => return Err(de::Error::custom("unsupported node record version")),
         }
         let event: Event = serde_json::from_value(envelope.event).map_err(de::Error::custom)?;
+        check_configuration_version(&event, envelope.version).map_err(de::Error::custom)?;
         Ok(Self {
             version: envelope.version,
             authority: envelope.authority,
@@ -227,6 +246,20 @@ impl<'de> Deserialize<'de> for Record {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn targeted_rename_requires_a_compatible_writer_on_the_ordered_stream() {
+        let mut value = json!({"version":NODE_RENAME_VERSION,
+            "authority":{"revision":1,"state_hash":vec![0;32]},
+            "event":{"kind":"configuration_request","request_id":uuid::Uuid::new_v4(),
+                "edit":{"op":"rename_member","node_id":uuid::Uuid::new_v4(),"name":"Studio"}}});
+        let mut record: Record = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&record).unwrap(), value);
+        record.version = NODE_RENAME_VERSION - 1;
+        value["version"] = json!(record.version);
+        assert!(serde_json::to_value(&record).is_err());
+        assert!(serde_json::from_value::<Record>(value).is_err());
+    }
 
     #[test]
     fn helper_fields_are_negotiated_without_changing_legacy_direct_addresses() {

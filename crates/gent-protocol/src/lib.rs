@@ -597,6 +597,11 @@ pub enum ConfigurationEdit {
     RenameNode {
         name: String,
     },
+    /// Rename this enrolled member in signed configuration, independently of the proposer.
+    RenameMember {
+        node_id: String,
+        name: String,
+    },
     Renew,
     GrantRelay {
         grant_id: String,

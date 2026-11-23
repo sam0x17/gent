@@ -75,7 +75,44 @@ def exercise_dashboard(wait_for, find, get, click, fixture, agent, cli):
     assert fixture.call("gent_inbox")[0] == []
 
 
-def exercise_tabs(wait_for, cli, fixture, agent, hosted, parent):
+def exercise_node_rename(wait_for, find, get, click, row, select_row, cli, remote, hosted, parent):
+    def open_rename(node):
+        select_row(node["id"])
+        click("Rename node…")
+        dialog = get("Rename node", "dialog")
+        get(node["name"] + "\n" + node["id"], "label")
+        entry = pyatspi.findDescendant(dialog, lambda c: c.getRoleName() == "text")
+        assert entry.queryText().getText(0, -1) == node["name"]
+        return entry.queryEditableText()
+
+    def members():
+        return {n["id"]: n for n in json.loads(cli("--json", "nodes").stdout)}
+
+    open_rename(hosted).setTextContents("cancelled fixture edit")
+    click("Cancel")
+    wait_for(lambda: not find("Rename node", "dialog"), "cancelled rename dialog dismissed")
+    assert members()[hosted["id"]]["name"] == hosted["name"]
+
+    open_rename(hosted).setTextContents("x" * 129)
+    click("Rename")
+    wait_for(lambda: pyatspi.findDescendant(pyatspi.Registry.getDesktop(0), lambda c:
+             c.getRoleName() == "label" and c.getState().contains(pyatspi.STATE_SHOWING)
+             and "1-128 bytes" in c.name), "rename validation error")
+    assert row(hosted["id"])[0] == members()[hosted["id"]]["name"] == hosted["name"]
+
+    expected = {node["id"]: node["name"] for node in (parent, remote, hosted)}
+    for node, name in ((hosted, "Renamed web"), (remote, "Renamed remote"), (parent, "Renamed owner")):
+        open_rename(node).setTextContents(name)
+        click("Rename")
+        wait_for(lambda: row(node["id"])[0] == name, "renamed row " + name)
+        expected[node["id"]] = name
+        directory = members()
+        assert {key: member["name"] for key, member in directory.items()} == expected
+        assert directory[hosted["id"]]["hosted_by"] == parent["id"]
+    assert row(hosted["id"])[3] == expected[parent["id"]]
+
+
+def exercise_tabs(wait_for, cli, fixture, agent, remote, hosted, parent):
     desktop = pyatspi.Registry.getDesktop(0)
 
     def find(name, role=None):
@@ -102,6 +139,13 @@ def exercise_tabs(wait_for, cli, fixture, agent, hosted, parent):
         table = cell.parent.queryTable()
         index = table.getRowAtIndex(cell.getIndexInParent())
         return [table.getAccessibleAt(index, col).name for col in range(table.nColumns)]
+
+    def select_row(id_):
+        cell = get(id_, "table cell")
+        table = cell.parent.queryTable()
+        index = table.getRowAtIndex(cell.getIndexInParent())
+        if not table.isRowSelected(index):
+            assert table.addRowSelection(index)
 
     notebook = get("Status", "page tab").parent
     assert [page.name for page in notebook][:2] == ["Status", "Dashboard"]
@@ -170,11 +214,7 @@ def exercise_tabs(wait_for, cli, fixture, agent, hosted, parent):
     def fixture_revoked():
         return next(a["revoked"] for a in json.loads(cli("--json", "agents").stdout) if a["id"] == agent["id"])
     def open_unregister():
-        chat = get(agent["name"], "table cell")
-        table = chat.parent.queryTable()
-        index = table.getRowAtIndex(chat.getIndexInParent())
-        if not table.isRowSelected(index):
-            assert table.addRowSelection(index)
+        select_row(agent["id"])
         click("Unregister chat…")
         get(agent["name"] + "\n" + agent["id"], "label")
     open_unregister()
@@ -188,4 +228,5 @@ def exercise_tabs(wait_for, cli, fixture, agent, hosted, parent):
     click("Add node…")
     get("New node name", "label")
     click("Cancel")
+    exercise_node_rename(wait_for, find, get, click, row, select_row, cli, remote, hosted, parent)
     tab("Status")

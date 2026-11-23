@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
 use clap::Subcommand;
 use gent_protocol::{OwnerOp, owner_transfer::OwnerTransferOp};
 use serde_json::Value;
@@ -17,22 +17,6 @@ pub enum Command {
     Resume { request: String },
 }
 
-fn resolve_node(nodes: &Value, requested: &str) -> Result<String> {
-    let nodes = nodes.as_array().context("invalid node list")?;
-    if let Some(node) = nodes.iter().find(|node| node["id"] == requested) {
-        return Ok(node["id"].as_str().context("missing node ID")?.into());
-    }
-    let matches: Vec<_> = nodes
-        .iter()
-        .filter(|node| node["name"] == requested)
-        .collect();
-    ensure!(
-        matches.len() == 1,
-        "node name is missing or ambiguous; use an ID from gent nodes"
-    );
-    Ok(matches[0]["id"].as_str().context("missing node ID")?.into())
-}
-
 pub async fn execute(home: &Path, request_id: &str, command: Option<Command>) -> Result<Value> {
     let action = match command.unwrap_or(Command::Status { request: None }) {
         Command::Status { request } => OwnerTransferOp::Status {
@@ -40,7 +24,8 @@ pub async fn execute(home: &Path, request_id: &str, command: Option<Command>) ->
         },
         Command::Prepare { node } => OwnerTransferOp::Prepare {
             request_id: request_id.into(),
-            node_id: resolve_node(&crate::owner(home, OwnerOp::Nodes).await?, &node)?,
+            node_id: crate::node::resolve_id(&crate::owner(home, OwnerOp::Nodes).await?, &node)?
+                .into(),
         },
         Command::Commit { request } => OwnerTransferOp::Commit {
             request_id: request,
@@ -117,26 +102,5 @@ pub fn print(value: &Value) {
                 "The daemon will continue automatically. Retry progress: gent cluster owner resume {id}"
             ),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn owner_transfer_requires_an_exact_id_or_unique_node_name() {
-        let nodes = json!([
-            {"id":"a", "name":"shared"},
-            {"id":"b", "name":"shared"},
-            {"id":"c", "name":"studio"},
-            {"id":"d", "name":"a"}
-        ]);
-        assert!(resolve_node(&nodes, "shared").is_err());
-        assert!(resolve_node(&nodes, "missing").is_err());
-        assert_eq!(resolve_node(&nodes, "studio").unwrap(), "c");
-        // An ID wins even if another node has that name.
-        assert_eq!(resolve_node(&nodes, "a").unwrap(), "a");
     }
 }

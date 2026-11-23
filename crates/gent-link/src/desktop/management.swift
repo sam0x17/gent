@@ -81,6 +81,7 @@ final class ActionBar: NSObject {
                 control = popup
             } else {
                 let input: NSTextField = field["secret"] as? Bool == true ? NSSecureTextField() : NSTextField()
+                input.stringValue = row?[key] as? String ?? ""
                 readers.append((key, { input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }))
                 control = input
             }

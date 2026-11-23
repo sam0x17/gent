@@ -32,7 +32,6 @@ async fn run(
             parent,
             home,
             &child.node.id,
-            &child.node.name,
             create,
             stop,
             budget,
@@ -106,7 +105,6 @@ async fn run(
             parent,
             home,
             &child.node.id,
-            &child.node.name,
             true,
             stop,
             budget,
@@ -162,7 +160,7 @@ pub(crate) async fn maintain(parent: &Path, stop: CancellationToken) {
                         let revoked:std::collections::BTreeSet<_>=records.iter().filter(|(_,r)|r.revoked)
                             .filter_map(|(_,r)|r.node.clone()).collect();
                         let known:std::collections::BTreeSet<_>=records.iter().filter_map(|(_,r)|r.node.clone()).collect();
-                        let mut desired: BTreeMap<PathBuf,Option<(String,String)>> = records.into_iter()
+                        let mut desired: BTreeMap<PathBuf,Option<String>> = records.into_iter()
                             .filter(|(_, r)| r.node.is_some() && !r.revoked)
                             .map(|(home, _)| (home,None)).collect();
                         if let Ok(cfg)=node_home::inspect(parent)
@@ -171,11 +169,11 @@ pub(crate) async fn maintain(parent: &Path, stop: CancellationToken) {
                             && let Some(nodes)=nodes.as_array()
                             && nodes.iter().any(|n|n["id"]==cfg.node.id && n["can_configure"]==true) {
                             for node in nodes.iter().filter(|n|n["hosted_by"].is_string()) {
-                                let (Some(id),Some(name))=(node["id"].as_str(),node["name"].as_str()) else {continue;};
+                                let Some(id)=node["id"].as_str() else {continue;};
                                 if revoked.contains(id) || known.contains(id) {continue;}
                                 if desired.len()>=storage::MAX_NODES {break;}
                                 let home=storage::portable_home(parent,id);
-                                desired.entry(home).or_insert_with(||Some((id.into(),name.into())));
+                                desired.entry(home).or_insert_with(||Some(id.into()));
                             }
                         }
                         for (home, token) in &active {
@@ -191,8 +189,8 @@ pub(crate) async fn maintain(parent: &Path, stop: CancellationToken) {
                             tasks.spawn(async move {
                                 // HTTP errors can contain credentials. Keep
                                 // supervisor diagnostics independent of them.
-                                let result=if let Some((node,name))=discovered {
-                                    Box::pin(super::failover::run(&parent,&home,&node,&name,false,token,budget)).await
+                                let result=if let Some(node)=discovered {
+                                    Box::pin(super::failover::run(&parent,&home,&node,false,token,budget)).await
                                 } else {Box::pin(run(&parent,&home,token,budget)).await};
                                 if result.is_err() {
                                     eprintln!("Gent web node stopped; retrying its saved runtime.");
@@ -239,7 +237,7 @@ mod tests {
             (
                 "failover",
                 std::mem::size_of_val(&super::super::failover::run(
-                    path, path, "web", "web", false, stop, budget,
+                    path, path, "web", false, stop, budget,
                 )),
             ),
         ];

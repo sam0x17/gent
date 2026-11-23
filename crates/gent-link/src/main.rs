@@ -419,6 +419,12 @@ enum NodeCommand {
     },
     /// Remove another node from membership and revoke its service access.
     Remove { node: String },
+    /// Rename an enrolled node by its exact ID or unique name.
+    Rename {
+        #[arg(value_name = "NODE_NAME_OR_ID")]
+        node: String,
+        new_name: String,
+    },
     /// List durable removal progress. Confirmation refers to service access, not peer sync.
     Removals {
         #[arg(long)]
@@ -1062,6 +1068,13 @@ async fn execute(cli: Cli) -> Result<()> {
                     command: Some(NodeNameCommand::Set { name }),
                 }),
         }) => configure(&home, &request_id, ConfigurationEdit::RenameNode { name }).await?,
+        Some(Command::Node {
+            command: Some(NodeCommand::Rename { node, new_name }),
+        }) => {
+            let nodes = owner(&home, OwnerOp::Nodes).await?;
+            let id = node::resolve_id(&nodes, &node)?;
+            node::rename(&home, &request_id, id, &new_name).await?
+        }
         Some(Command::Node {
             command: Some(NodeCommand::Admin { command }),
         }) => {

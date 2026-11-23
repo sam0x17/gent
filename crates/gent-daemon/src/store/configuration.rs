@@ -122,6 +122,13 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
             gent_crypto::validate_policy(policy)?;
         }
         ConfigurationEdit::RenameNode { name } => config::label(name)?,
+        ConfigurationEdit::RenameMember { node_id, name } => {
+            ensure!(
+                gent_protocol::configuration_log::valid_id(node_id),
+                "invalid node identity"
+            );
+            config::label(name)?;
+        }
         ConfigurationEdit::Renew => {}
         ConfigurationEdit::GrantRelay {
             grant_id,
@@ -547,13 +554,12 @@ impl StoreSession<'_> {
                 policy.clone(),
                 timestamp,
             ),
-            ConfigurationEdit::RenameNode { name } => self.state.configure(
-                owner,
-                &self.state.state().name,
-                (origin, name),
-                self.state.state().policy.clone(),
-                timestamp,
-            ),
+            ConfigurationEdit::RenameNode { name } => {
+                self.state.rename_node(owner, origin, name, timestamp)
+            }
+            ConfigurationEdit::RenameMember { node_id, name } => {
+                self.state.rename_node(owner, node_id, name, timestamp)
+            }
             ConfigurationEdit::Renew => self.state.renew(owner, timestamp),
             ConfigurationEdit::GrantRelay {
                 grant_id,

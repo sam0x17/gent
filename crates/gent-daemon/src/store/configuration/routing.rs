@@ -137,12 +137,10 @@ impl StoreSession<'_> {
                     params![target, member.signing_key.as_slice()],
                     |r| r.get(0),
                 )?;
-                if matches!(&edit, ConfigurationEdit::SetPermissionRule { .. })
-                    && self.wire_version(target)? < crate::messages::wire::ADMIN_VERSION
+                if !linked
+                    || self.wire_version(target)?
+                        < crate::messages::wire::configuration_version(&edit)
                 {
-                    continue;
-                }
-                if !linked {
                     continue;
                 }
                 let event = scoped_id(
@@ -169,6 +167,13 @@ impl StoreSession<'_> {
             }
             return Ok(());
         }
+        if matches!(edit, ConfigurationEdit::RenameMember { .. })
+            && self.wire_version(writer)? < crate::messages::wire::NODE_RENAME_VERSION
+        {
+            // The durable intent already pins the target. Leave its route absent
+            // until the writer proves it can decode the new edit.
+            return self.request_presence(writer);
+        }
         remember(
             self.db,
             origin,
@@ -185,6 +190,44 @@ impl StoreSession<'_> {
             },
             None,
         )
+    }
+
+    fn dispatch_waiting_renames(&self) -> Result<bool> {
+        if self.state.state().peer.is_some() || self.identity.is_current_owner(&self.state) {
+            return Ok(false);
+        }
+        let origin = self.identity.node.id();
+        let mut query = self.db.prepare(
+            "SELECT e.id,e.writer FROM configuration_pending p
+             JOIN configuration_edits e USING(origin,id)
+             WHERE p.origin=?1 AND e.result IS NULL AND e.writer!=?1
+               AND json_extract(e.edit,'$.op')='rename_member'
+               AND NOT EXISTS(SELECT 1 FROM configuration_routes r
+                   WHERE r.origin=p.origin AND r.id=p.id AND r.writer=e.writer AND r.epoch=?2)
+             ORDER BY e.rowid LIMIT 8",
+        )?;
+        let pending = query
+            .query_map(params![origin, self.state.owner_epoch()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        let writer = self.configuration_writer()?;
+        if self.wire_version(&writer)? < crate::messages::wire::NODE_RENAME_VERSION {
+            self.request_presence(&writer)?;
+            return Ok(false);
+        }
+        let mut dispatched = false;
+        for (id, target) in pending {
+            if target == writer {
+                let edit = pending::load(self.db, origin, &id)?;
+                self.queue_configuration(origin, Uuid::parse_str(&id)?, &writer, edit)?;
+                dispatched = true;
+            }
+        }
+        Ok(dispatched)
     }
 
     fn reroute_configuration(&mut self) -> Result<bool> {
@@ -286,9 +329,11 @@ impl Store {
     pub(crate) fn reconcile_configuration(&mut self) -> Result<()> {
         let tx = rusqlite::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let state = self.identity.state(&tx)?;
-        let changed = self.network_session(&tx, state).reroute_configuration()?;
+        let mut session = self.network_session(&tx, state);
+        let changed = session.reroute_configuration()?;
+        let dispatched = session.dispatch_waiting_renames()?;
         tx.commit()?;
-        if changed {
+        if changed || dispatched {
             self.sync_wakeup.notify_one();
         }
         Ok(())

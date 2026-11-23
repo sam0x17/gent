@@ -35,6 +35,10 @@ pub(super) enum Action {
         name: String,
         role: Role,
     },
+    RenameNode {
+        id: Uuid,
+        name: String,
+    },
     RemoveNode {
         id: Uuid,
     },
@@ -63,7 +67,10 @@ impl Action {
     fn page(&self) -> &'static str {
         match self {
             Self::CheckUpdate => "about",
-            Self::Invite { .. } | Self::RemoveNode { .. } | Self::NodeRole { .. } => "nodes",
+            Self::Invite { .. }
+            | Self::RenameNode { .. }
+            | Self::RemoveNode { .. }
+            | Self::NodeRole { .. } => "nodes",
             Self::Unregister { .. } => "chats",
             Self::SetRule { .. } => "permissions",
             _ => "cluster",
@@ -145,6 +152,11 @@ impl Action {
                 enrollment::add(home, options).await?;
                 return Ok(json!({"notice":format!("Invitation for {name}"),
                     "private_code":std::fs::read_to_string(&file)?}));
+            }
+            Self::RenameNode { id, name } => {
+                let result =
+                    node::rename(home, &Uuid::new_v4().to_string(), &id.to_string(), &name).await?;
+                return change_result(&result);
             }
             Self::RemoveNode { id } => {
                 let result = node::remove(home, id.to_string()).await?;
@@ -276,6 +288,8 @@ pub(super) fn directory_actions(chats: bool) -> Value {
     json!([{"kind":"invite","title":"Add node…","submit":"Create invitation",
         "hint":"Give this one-time code to the new node. It expires after 15 minutes.",
         "fields":[{"key":"name","title":"New node name"},role_field()]},
+        {"kind":"rename_node","title":"Rename node…","row":true,"submit":"Rename",
+        "fields":[{"key":"name","title":"New node name"}]},
         {"kind":"node_role","title":"Change role…","row":true,"submit":"Change role","fields":[role_field()],
         "hint":"Admin nodes can change cluster configuration and permissions."},
         {"kind":"remove_node","title":"Remove node…","row":true,

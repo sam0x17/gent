@@ -18,6 +18,91 @@ func descendants<T: NSView>(_ view: NSView, of type: T.Type) -> [T] {
     view.subviews.compactMap { $0 as? T } + view.subviews.flatMap { descendants($0, of: type) }
 }
 
+func requests(during action: () -> Void) -> [NSDictionary] {
+    let pipe = Pipe()
+    let output = dup(STDOUT_FILENO)
+    require(output >= 0 && dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO) >= 0, "capture supervisor requests")
+    action()
+    require(dup2(output, STDOUT_FILENO) >= 0, "restore fixture output")
+    close(output)
+    pipe.fileHandleForWriting.closeFile()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    require(data.isEmpty || data.last == 10, "newline-delimited requests")
+    return data.split(separator: 10).map { try! JSONSerialization.jsonObject(with: Data($0)) as! NSDictionary }
+}
+
+func checkNodeRename(_ desktop: Desktop) {
+    let nodes = desktop.nodes
+    let ids = (0..<3).map { _ in UUID().uuidString.lowercased() }
+    let action: [String: Any] = ["kind": "rename_node", "title": "Rename node…", "submit": "Rename", "row": true,
+                                 "fields": [["key": "name", "title": "New node name"]]]
+    var rows = [
+        ["name": "Studio", "state": "local", "role": "Owner", "id": ids[0]],
+        ["name": "Remote", "state": "offline", "role": "Admin", "id": ids[1]],
+        ["name": "claude-web", "state": "hosted", "role": "Member", "host": "Studio", "id": ids[2]],
+    ]
+    func receiveRows() { desktop.receive(["page": "nodes", "rows": rows, "actions": [action]]) }
+    desktop.tabs.selectTabViewItem(withIdentifier: "Nodes")
+    receiveRows()
+    require(cell(nodes.table, "name", row: 2) == "claude-web" && cell(nodes.table, "host", row: 2) == "Studio",
+            "hosted member and carrier rendered")
+    func renameDialog() -> NSWindow? {
+        // AppKit can present an alert in a panel instead of attaching it as a sheet.
+        NSApp.windows.first { window in
+            guard window.isVisible, window !== desktop.window, let content = window.contentView else { return false }
+            return descendants(content, of: NSButton.self).contains { $0.title == "Rename" }
+        }
+    }
+    func waitFor(_ description: String, _ condition: () -> Bool) {
+        let deadline = Date(timeIntervalSinceNow: 3)
+        while !condition() && Date() < deadline { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        require(condition(), description)
+    }
+    func edit(_ index: Int, _ name: String, cancel: Bool = false) -> [NSDictionary] {
+        let rename = nodes.actions.view.arrangedSubviews[0] as! NSButton
+        nodes.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        require(rename.isEnabled, "selected node can be renamed")
+        rename.performClick(nil)
+        waitFor("rename dialog is visible") { renameDialog() != nil }
+        guard let dialog = renameDialog(), let content = dialog.contentView,
+              let button = descendants(content, of: NSButton.self).first(where: { $0.title == (cancel ? "Cancel" : "Rename") }),
+              let input = descendants(content, of: NSTextField.self).first(where: { $0.isEditable }) else {
+            require(false, "editable rename dialog")
+            return []
+        }
+        require(input.stringValue == rows[index]["name"], "current name prefilled")
+        require(descendants(content, of: NSTextField.self).contains { $0.stringValue.contains(ids[index]) },
+                "dialog identifies selected member")
+        input.stringValue = name
+        return requests {
+            button.performClick(nil)
+            waitFor("rename dialog dismissed") { !dialog.isVisible && (cancel || !rename.isEnabled) }
+        }
+    }
+    func expectSubmit(_ index: Int, _ name: String) {
+        let sent = edit(index, name)
+        require(sent.count == 1 && sent[0].isEqual(to: ["op": "manage",
+                "action": ["kind": "rename_node", "id": ids[index], "name": name]]),
+                "rename submitted once for selected node UUID")
+    }
+    require(!(nodes.actions.view.arrangedSubviews[0] as! NSButton).isEnabled, "rename requires a selection")
+    require(edit(2, "Cancelled", cancel: true).isEmpty, "cancel sends no request")
+    expectSubmit(2, "Rejected edit")
+    let failure = requests { desktop.receive(["page": "nodes", "operation": true, "error": "Permission denied"]) }
+    require(failure.isEmpty && nodes.actions.notice.stringValue == "Permission denied"
+            && cell(nodes.table, "name", row: 2) == "claude-web", "error shown with original row")
+    for (index, name) in [(2, "Renamed web"), (1, "Renamed remote"), (0, "Renamed owner")] {
+        expectSubmit(index, name)
+        let refresh = requests { desktop.receive(["page": "nodes", "operation": true, "notice": "Configuration change: applied"]) }
+        require(refresh.count == 1 && refresh[0].isEqual(to: ["op": "nodes"]), "refresh directory after rename")
+        rows[index]["name"] = name
+        if index == 0 { rows[2]["host"] = name }
+        receiveRows()
+        require(cell(nodes.table, "name", row: index) == name && cell(nodes.table, "id", row: index) == ids[index],
+                "renamed row retains its ID")
+    }
+}
+
 func checkDashboard(_ desktop: Desktop) {
     desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
     let rows: [[String: Any]] = (1...3).map { i in
@@ -65,17 +150,9 @@ func checkDashboard(_ desktop: Desktop) {
         return
     }
     // Exercise the AppKit target/action and inspect the supervisor's actual wire request.
-    let pipe = Pipe()
-    let output = dup(STDOUT_FILENO)
-    require(output >= 0 && dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO) >= 0, "capture button request")
-    button.performClick(nil)
-    require(dup2(output, STDOUT_FILENO) >= 0, "restore fixture output")
-    close(output)
-    pipe.fileHandleForWriting.closeFile()
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    let request = (try? JSONSerialization.jsonObject(with: data)) as? NSDictionary
-    require(data.last == 10 && request?.isEqual(to: ["op": "dashboard_click", "agent": "agent-2",
-                                                     "revision": 12, "widget": "retry"]) == true,
+    let sent = requests { button.performClick(nil) }
+    require(sent.count == 1 && sent[0].isEqual(to: ["op": "dashboard_click", "agent": "agent-2",
+                                                    "revision": 12, "widget": "retry"]),
             "one newline-delimited click for the displayed chat, revision and widget")
     desktop.window.setContentSize(NSSize(width: 850, height: 605))
 }
@@ -83,6 +160,13 @@ func checkDashboard(_ desktop: Desktop) {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
+if CommandLine.arguments.dropFirst(2).contains("--nodes") {
+    desktop.makeWindow()
+    desktop.window.orderFront(nil)
+    checkNodeRename(desktop)
+    print("PASS: AppKit local, remote and hosted Nodes rename, selected UUID, cancel, error and directory refresh")
+    exit(0)
+}
 app.delegate = desktop
 // The pipe stays open so the UI has the same lifetime as a normal Gent child.
 let lifetime = Pipe()
@@ -111,10 +195,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
     desktop.tabs.selectTabViewItem(withIdentifier: "Chats")
     desktop.receive(["page":"chats","rows":[["name":"Remote chat","node":"Other node","provider":"codex","state":"Registered","id":"c"]]])
     require(desktop.chats.table.numberOfRows == 1, "cluster chat rendered")
-    desktop.tabs.selectTabViewItem(withIdentifier: "Nodes")
-    desktop.receive(["page":"nodes","rows":[["name":"claude-web","state":"connected","role":"Member","host":"Studio","id":"n"]]])
-    require(cell(desktop.nodes.table, "name", row: 0) == "claude-web" && cell(desktop.nodes.table, "host", row: 0) == "Studio",
-            "Nodes shows claude-web and the name of its host")
+    checkNodeRename(desktop)
     desktop.tabs.selectTabViewItem(withIdentifier: "Settings")
     desktop.receive(["page":"settings","values":["updates":true, "discovery":false]])
     desktop.settings.openEditor()
@@ -157,7 +238,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
         require(false, "Quit menu item")
         return
     }
-    FileHandle.standardError.write(Data("PASS: AppKit menu bar, hosted Status and Nodes, Dashboard resizing and button dispatch, directories, editable settings, account confirmation, permissions, about, update check, close, reopen and quit\n".utf8))
+    FileHandle.standardError.write(Data("PASS: AppKit menu bar, hosted Status, local/remote/hosted Nodes rename, cancel and error, Dashboard resizing and button dispatch, directories, editable settings, account confirmation, permissions, about, update check, close, reopen and quit\n".utf8))
     _ = app.sendAction(stop, to: quit.target, from: quit)
 }
 app.run()

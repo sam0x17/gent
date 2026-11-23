@@ -1,11 +1,62 @@
-//! Service reconciliation follows an already committed signed removal. It can
-//! fail or be cancelled at any await without losing the native cleanup intent.
+//! Cluster node selection, signed configuration and service reconciliation.
 use crate::{auth, cluster, owner};
 use anyhow::{Context, Result, ensure};
 use gent_daemon::config::{self, ServiceConfig};
-use gent_protocol::OwnerOp;
+use gent_protocol::{ConfigurationEdit, OwnerOp};
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
+
+pub(crate) fn find_member<'a>(directory: &'a Value, selector: &str) -> Result<Option<&'a Value>> {
+    let nodes = directory
+        .as_array()
+        .context("invalid cluster node directory")?;
+    if let Some(node) = nodes.iter().find(|n| n["id"] == selector) {
+        return Ok(Some(node));
+    }
+    let matches = nodes
+        .iter()
+        .filter(|n| n["name"] == selector)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [node] => Ok(Some(node)),
+        _ => {
+            let ids = matches
+                .iter()
+                .map(|n| n["id"].as_str().context("missing node ID"))
+                .collect::<Result<Vec<_>>>()?;
+            anyhow::bail!(
+                "ambiguous node name; select one of these IDs: {}",
+                ids.join(", ")
+            )
+        }
+    }
+}
+
+pub(crate) fn resolve_id<'a>(directory: &'a Value, selector: &str) -> Result<&'a str> {
+    find_member(directory, selector)?
+        .context("unknown node; run gent nodes to see enrolled nodes")?["id"]
+        .as_str()
+        .context("missing node ID")
+}
+
+/// Submit a rename by signed member ID. An identical retry uses the same request UUID.
+pub(crate) async fn rename(
+    home: &Path,
+    request_id: &str,
+    node_id: &str,
+    new_name: &str,
+) -> Result<Value> {
+    crate::configure(
+        home,
+        request_id,
+        ConfigurationEdit::RenameMember {
+            node_id: node_id.into(),
+            name: new_name.into(),
+        },
+    )
+    .await
+}
 
 /// Give newly requested probes time to return. Cached inventory reads used by
 /// background services never trigger a probe or wait on a remote machine.
@@ -155,5 +206,31 @@ pub async fn maintain(home: &Path) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn resolves_signed_members_by_exact_id_or_unique_name() {
+        let nodes = json!([
+            {"id":"a", "name":"shared"},
+            {"id":"b", "name":"shared"},
+            {"id":"c", "name":"studio", "hosted_by":"b"},
+            {"id":"d", "name":"a"}
+        ]);
+        assert!(
+            resolve_id(&nodes, "shared")
+                .unwrap_err()
+                .to_string()
+                .contains("a, b")
+        );
+        assert!(resolve_id(&nodes, "missing").is_err());
+        assert_eq!(resolve_id(&nodes, "studio").unwrap(), "c");
+        // An ID wins even if another node has that name.
+        assert_eq!(resolve_id(&nodes, "a").unwrap(), "a");
     }
 }

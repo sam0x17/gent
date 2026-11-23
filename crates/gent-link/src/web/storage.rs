@@ -29,6 +29,42 @@ pub(super) fn portable_home(parent: &Path, node: &str) -> PathBuf {
     home(parent, &format!("web-node:{node}"))
 }
 
+fn named_home(parent: &Path, name: &str, slot: usize) -> PathBuf {
+    if slot == 0 {
+        home(parent, name)
+    } else {
+        // The separator cannot occur in a validated node label.
+        home(parent, &format!("{name}\0{slot}"))
+    }
+}
+
+/// A renamed connector keeps its socket path. Reusing its former label needs
+/// another path, and retries must still find the same unfinished enrollment.
+pub(super) fn setup_home(
+    parent: &Path,
+    name: &str,
+    members: &Value,
+) -> Result<(PathBuf, Option<Record>)> {
+    let members = members
+        .as_array()
+        .context("invalid cluster node directory")?;
+    for slot in 0..MAX_NODES {
+        let path = named_home(parent, name, slot);
+        let record = read(parent, &path)?;
+        if let Some(id) = record.as_ref().and_then(|r| r.node.as_deref()) {
+            let member = members
+                .iter()
+                .find(|n| n["id"] == id)
+                .context("saved web node is no longer enrolled; choose a new name")?;
+            if member["name"] != name {
+                continue;
+            }
+        }
+        return Ok((path, record));
+    }
+    anyhow::bail!("this machine has reached its web node limit")
+}
+
 pub(super) fn directory(parent: &Path) -> Result<PathBuf> {
     node_home::inspect(parent)?;
     let path = parent.join("web");
@@ -50,7 +86,7 @@ pub(super) fn read(parent: &Path, home: &Path) -> Result<Option<Record>> {
         record.version == 1
             && record.cluster == cfg.cluster.id
             && record.parent == cfg.node.id
-            && (home == self::home(parent, &record.name)
+            && ((0..MAX_NODES).any(|slot| home == named_home(parent, &record.name, slot))
                 || record
                     .node
                     .as_ref()
@@ -102,6 +138,43 @@ pub(super) fn list(parent: &Path) -> Result<Vec<(PathBuf, Record)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reused_web_label_resumes_its_own_setup_and_preserves_the_renamed_connector() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("parent");
+        let cfg = config::initialize(&parent, "cluster")?;
+        let original = home(&parent, "tablet");
+        let mut child = config::initialize(&original, "tablet")?;
+        child.cluster = cfg.cluster.clone();
+        config::save(&original, &child)?;
+        let mut record = Record {
+            version: 1,
+            cluster: cfg.cluster.id,
+            parent: cfg.node.id.clone(),
+            name: "tablet".into(),
+            node: Some(child.node.id.clone()),
+            revoked: false,
+        };
+        save(&original, &record)?;
+        let members = json!([{"id":child.node.id,"name":"renamed","hosted_by":cfg.node.id}]);
+        assert!(management::resolve(&members, "tablet")?.is_none());
+        assert_eq!(
+            management::resolve(&members, "renamed")?.unwrap()["id"],
+            child.node.id
+        );
+        let (new_home, saved) = setup_home(&parent, "tablet", &members)?;
+        assert!(saved.is_none());
+        assert_ne!(new_home, original);
+        record.node = None;
+        config::private_dir(&new_home)?;
+        save(&new_home, &record)?;
+        let (retry_home, saved) = setup_home(&parent, "tablet", &members)?;
+        assert_eq!(retry_home, new_home);
+        assert!(saved.is_some());
+        assert_eq!(read(&parent, &original)?.unwrap().node, Some(child.node.id));
+        Ok(())
+    }
 
     #[test]
     fn named_nodes_are_pinned_to_the_parent_and_do_not_pollute_pairing_home() {

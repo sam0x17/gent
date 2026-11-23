@@ -1276,6 +1276,19 @@ impl VerifiedState {
         })
     }
 
+    pub fn rename_node(
+        &self,
+        signer: &(impl peer::ConfigurationSigner + ?Sized),
+        node_id: &str,
+        name: &str,
+        now: u64,
+    ) -> Result<SignedState> {
+        self.revise(signer, now, |state| {
+            state.nodes.get_mut(node_id).context("unknown node")?.name = name.into();
+            Ok(())
+        })
+    }
+
     /// `approved_fingerprint` must be independently confirmed by the owner; merely
     /// echoing a fingerprint supplied by the relay does not authenticate enrollment.
     pub fn enroll(

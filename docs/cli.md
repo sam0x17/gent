@@ -86,7 +86,8 @@ The current build guides missing login and cluster enrollment through `gent daem
 | `gent node` | Show details for the current node. |
 | `gent node reset` | Archive local node state for fresh enrollment, keeping the GitHub login. |
 | `gent node name` | Print the current node's name. |
-| `gent node name set my-node` | Rename the current node and publish its updated encrypted metadata to its joined clusters. |
+| `gent node name set my-node` | Rename the current node through signed cluster configuration. |
+| `gent node rename NODE_NAME_OR_ID NEW_NAME` | Rename an enrolled native or hosted node from any node with configuration authority. Use an exact ID or a unique, case-sensitive name from `gent nodes`. |
 | `gent node admin grant NODE_UUID` | On the active owner, authorize an enrolled node to submit configuration edits. |
 | `gent node admin revoke NODE_UUID` | On the active owner, revoke that delegated capability; pending edits are checked at acceptance. |
 | `gent nodes` | List all visible nodes in the active cluster with status and last-seen information. |
@@ -104,7 +105,11 @@ The current build guides missing login and cluster enrollment through `gent daem
 | `gent cluster invitations revoke ID` | Close local admission, then revoke service routing; retry if offline. |
 | `gent cluster leave` | Leave the active cluster after showing the consequences for local access and pending work. |
 
-Names are display labels. Renaming a node must preserve its stable identity, keys, and policy relationships. Reject ambiguous name lookups with a list of authorized matches and their IDs. Human-readable cluster names and node names remain encrypted in routing storage; a hosted web bridge may see only the labels included in its chat's authorized view.
+For example, `gent node rename laptop "Travel Laptop"` publishes the new display name. If several nodes share the old name, the error lists their IDs. A hosted connector has its own directory entry. Renaming it preserves its URL, transport host and chats. Other nodes see the new name as signed configuration synchronizes.
+
+For a repeatable scripted rename, use `gent --request-id UUID node rename NODE_ID NEW_NAME`. A queued response includes the ID to inspect with `gent config request UUID`. When a joined node forwards the rename to a legacy signing owner, it retains the request until the two daemons negotiate wire protocol 10. Older nodes can still receive the resulting signed membership update.
+
+Renaming preserves the node’s identity, keys and permissions. Human-readable cluster and node names remain encrypted in routing storage. A hosted bridge can see the labels in its chat’s authorized view.
 
 Each node belongs to one cluster in `~/.gent`, shared by CLI commands and all chats. A second cluster creation or join is refused. `gent node reset` stops managed services, archives old state, removes its managed host entries, and preserves the GitHub session for fresh enrollment. See [re-enrollment](service-setup.md#re-enroll-an-existing-machine).
 

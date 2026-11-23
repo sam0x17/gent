@@ -68,12 +68,14 @@ class ActionBar(Gtk.Box):
                 inputs[key] = control.get_active_id
             else:
                 control = Gtk.Entry()
+                if row and key in row:
+                    control.set_text(row[key])
                 control.set_visibility(not field.get("secret", False))
                 control.set_width_chars(42)
                 inputs[key] = control.get_text
                 control.connect("changed", lambda *_: submit.set_sensitive(all(read().strip() for read in inputs.values())))
-                submit.set_sensitive(False)
             body.pack_start(control, False, False, 0)
+        submit.set_sensitive(all(read().strip() for read in inputs.values()))
         def response(window, choice):
             if choice == Gtk.ResponseType.OK:
                 values.update({key: read().strip() for key, read in inputs.items()})

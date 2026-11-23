@@ -124,9 +124,13 @@ fn entries(home: &Path, binary: &Path, label: &str) -> Result<Vec<Entry>> {
     };
     let binary = esc(text(binary)?);
     let home = esc(text(home)?);
+    // Updates replace the binary at the same path. Include the build so login
+    // reconciliation reloads a running companion when the new daemon starts.
+    let revision = env!("GENT_COMMIT");
     let contents = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 {marker}
+<!-- Gent build {revision} -->
 <plist version="1.0"><dict>
 <key>Label</key><string>{label}</string>
 <key>ProgramArguments</key><array>

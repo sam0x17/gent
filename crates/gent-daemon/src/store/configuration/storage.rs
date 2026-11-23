@@ -68,6 +68,10 @@ enum Summary {
     RenameNode {
         name: String,
     },
+    RenameMember {
+        node_id: String,
+        name: String,
+    },
     Renew,
     GrantRelay {
         grant_id: String,
@@ -138,6 +142,10 @@ impl From<&ConfigurationEdit> for Summary {
             ConfigurationEdit::Policy { .. } => Self::Policy,
             ConfigurationEdit::Replace { .. } => Self::Replace,
             ConfigurationEdit::RenameNode { name } => Self::RenameNode { name: name.clone() },
+            ConfigurationEdit::RenameMember { node_id, name } => Self::RenameMember {
+                node_id: node_id.clone(),
+                name: name.clone(),
+            },
             ConfigurationEdit::Renew => Self::Renew,
             ConfigurationEdit::GrantRelay { grant_id, .. } => Self::GrantRelay {
                 grant_id: grant_id.clone(),
@@ -336,6 +344,10 @@ pub(super) fn describe(body: &[u8], compact: bool, status: &mut Value) -> Result
         Summary::from(&serde_json::from_slice::<ConfigurationEdit>(body)?)
     };
     match summary {
+        Summary::RenameMember { node_id, name } => {
+            status["node_id"] = node_id.into();
+            status["name"] = name.into();
+        }
         Summary::RenameNode { name }
         | Summary::CreateGroup { name }
         | Summary::DeleteGroup { name } => status["name"] = name.into(),

@@ -77,11 +77,16 @@ async fn restore(
     parent: &Path,
     home: &Path,
     node: &str,
-    name: &str,
     epoch: u64,
     mut bundle: Bundle,
 ) -> Result<()> {
     let cfg = node_home::inspect(parent)?;
+    let members = owner(parent, OwnerOp::Nodes).await?;
+    let name = members
+        .as_array()
+        .and_then(|rows| rows.iter().find(|n| n["id"] == node))
+        .and_then(|n| n["name"].as_str())
+        .context("web node is no longer enrolled")?;
     ensure!(
         bundle.snapshot.cluster == cfg.cluster.id,
         "web checkpoint belongs to another cluster"
@@ -94,6 +99,9 @@ async fn restore(
             "web checkpoint destination belongs to another identity"
         );
     }
+    // Existing records pin a setup directory even after the signed label changes.
+    let setup_name =
+        storage::read(parent, home)?.map_or_else(|| name.to_owned(), |record| record.name);
     let mut child = cfg.clone();
     child.node.id = node.into();
     child.node.name = name.into();
@@ -133,7 +141,7 @@ async fn restore(
             version: 1,
             cluster: cfg.cluster.id,
             parent: cfg.node.id,
-            name: name.into(),
+            name: setup_name,
             node: Some(node.into()),
             revoked: false,
         },
@@ -145,7 +153,6 @@ pub(super) async fn run(
     parent: &Path,
     home: &Path,
     node: &str,
-    name: &str,
     create: bool,
     stop: CancellationToken,
     budget: gent_daemon::hosted::ConnectionBudget,
@@ -198,7 +205,6 @@ pub(super) async fn run(
                 parent,
                 home,
                 node,
-                name,
                 lease.epoch,
                 download(&client, &lease).await?,
             )

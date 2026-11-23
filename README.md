@@ -78,6 +78,7 @@ gent integration install codex
 gent integration install claude-code
 gent node name
 gent node name set my-node
+gent node rename laptop "Travel Laptop"
 gent nodes
 gent ls                         # Known chats across the cluster, grouped by node
 gent cluster

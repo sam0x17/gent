@@ -7,31 +7,15 @@ use gent_protocol::{
     web_failover::Control,
 };
 
-pub(super) async fn resolve(parent: &Path, selector: &str) -> Result<Option<Value>> {
-    let directory = owner(parent, OwnerOp::Nodes).await?;
-    let members = directory
-        .as_array()
-        .context("cluster directory unavailable")?;
-    if let Some(node) = members.iter().find(|n| n["id"] == selector) {
-        ensure!(
-            node["hosted_by"].is_string(),
-            "selected node is not a web connector"
-        );
-        return Ok(Some(node.clone()));
-    }
-    let mut matches = members.iter().filter(|n| n["name"] == selector);
-    let Some(node) = matches.next() else {
+pub(super) fn resolve<'a>(directory: &'a Value, selector: &str) -> Result<Option<&'a Value>> {
+    let Some(node) = crate::node::find_member(directory, selector)? else {
         return Ok(None);
     };
-    ensure!(
-        matches.next().is_none(),
-        "ambiguous node name; use its node ID"
-    );
     ensure!(
         node["hosted_by"].is_string(),
         "name belongs to a native node"
     );
-    Ok(Some(node.clone()))
+    Ok(Some(node))
 }
 
 pub(super) async fn execute(

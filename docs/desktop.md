@@ -22,6 +22,8 @@ On a new machine, run `gent desktop` and open **Cluster**. Sign in to your Gent 
 
 In **Nodes**, choose **Add node…** to name the new machine, choose its role and create a private one-time invitation. Enter the code on the new machine within 15 minutes using the same Gent account. Selecting an existing node lets an administrator change its role or confirm removal from the cluster.
 
+To rename a local, remote or hosted member, select its row and choose **Rename node…**. The dialog shows the selected member’s ID and current name. Enter the new name and choose **Rename**. The node running Gent Desktop needs cluster configuration authority. If the change is queued, choose **Refresh** after it is applied to see the new name.
+
 In **Chats**, select the conversation and choose **Unregister chat…**. The confirmation identifies the chat and its ID. Revocation disables its Gent registration and preserves the conversation in the provider app. A remote host handles the request over its authenticated node link and publishes the updated registration. Remote unregistration requires node protocol 8 on the host and carrier.
 
 **Permissions** shows the signed communication rules. Select **Edit permission…**, choose the source, destination, permission and decision, then apply. Selectors include individual chats, nodes, groups, all chats and chats on the same node. **Inherit** removes the exact override. Other matching denies still apply.
