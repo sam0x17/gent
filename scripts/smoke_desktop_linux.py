@@ -5,10 +5,11 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 import secrets
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -26,7 +27,8 @@ class TrayHost:
       <property name="IsStatusNotifierHostRegistered" type="b" access="read"/>
     </interface></node>"""
 
-    def __init__(self):
+    def __init__(self, desktop_socket):
+        self.desktop_socket = desktop_socket
         self.registrations = Queue()
         iface = Gio.DBusNodeInfo.new_for_xml(self.xml).interfaces[0]
         acquired = threading.Event()
@@ -56,7 +58,15 @@ class TrayHost:
                                   Gio.DBusCallFlags.NONE, 4000, None).unpack()
 
     def menu(self, state):
-        target, item = self.registrations.get(timeout=12)
+        try:
+            target, item = self.registrations.get(timeout=12)
+        except Empty:
+            owner, = self.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                               "GetNameOwner", GLib.Variant("(s)", (self.name,)))
+            raise AssertionError(f"No tray registration for {state!r} within 12s "
+                                 f"(desktop socket present={self.desktop_socket.is_socket()}, "
+                                 f"fixture owns watcher={owner == self.bus.get_unique_name()}, "
+                                 f"watcher thread alive={self.thread.is_alive()})") from None
         menu, = self.call(target, item, "org.freedesktop.DBus.Properties", "Get",
                           GLib.Variant("(ss)", ("org.kde.StatusNotifierItem", "Menu")))
         def ready():
@@ -131,12 +141,20 @@ def enroll_fixture_nodes(binary, home, created):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--setup-only", action="store_true", help="exercise fresh setup and enrollment with the daemon stopped")
     args = parser.parse_args()
+    binary = args.binary.resolve()
+    if not args.setup_only:
+        # Each proof gets its own GTK process, accessibility bus, watcher and node home.
+        with tempfile.TemporaryDirectory(prefix="gent-setup-runtime-") as runtime:
+            env = dict(os.environ, XDG_RUNTIME_DIR=runtime)
+            env.pop("AT_SPI_BUS_ADDRESS", None)
+            subprocess.run(["dbus-run-session", "--", "xvfb-run", "-a", sys.executable,
+                            __file__, "--setup-only", binary], env=env, check=True)
     with tempfile.TemporaryDirectory(prefix="gent-desk-") as folder, ExitStack() as cleanup:
         home = Path(folder) / 'node with % space'
         os.environ.update(HOME=folder, XDG_DATA_HOME=folder+"/data", XDG_CONFIG_HOME=folder+"/config",
                           XDG_CACHE_HOME=folder+"/cache")
-        binary = args.binary.resolve()
         base = [str(binary), "--home", str(home)]
         def cli(*args, **kwargs):
             return subprocess.run(base + list(args), timeout=20, check=True, capture_output=True, **kwargs)
@@ -147,16 +165,19 @@ def main():
         def visible():
             return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Gent Desktop$"],
                                   text=True, capture_output=True).stdout.strip()
-        tray = TrayHost()
-        cleanup.callback(tray.close)
-        setup = launch("desktop")
-        exercise_setup()
-        assert not (home / "config.toml").exists()
-        quit_setup = tray.menu("Quit Gent Desktop")
+        if args.setup_only:
+            tray = TrayHost(home / "auth/desktop/desktop.sock")
+            cleanup.callback(tray.close)
+            setup = launch("desktop")
+            exercise_setup()
+            assert not (home / "config.toml").exists()
+            quit_setup = tray.menu("Quit Gent Desktop")
+            created = json.loads(cli("--json", "cluster", "new", "desktop-test", "--local").stdout)
+            exercise_enrolled_without_daemon(created["node"])
+            quit_setup("Quit Gent Desktop")
+            assert setup.wait(timeout=12) == 0
+            return
         created = json.loads(cli("--json", "cluster", "new", "desktop-test", "--local").stdout)
-        exercise_enrolled_without_daemon(created["node"])
-        quit_setup("Quit Gent Desktop")
-        assert setup.wait(timeout=12) == 0
         # Stdio enrollment requires a configuration relay in the parent's snapshot.
         key = home / "fixture-relay.key"
         key.touch(mode=0o600)
@@ -170,6 +191,8 @@ def main():
         fixture = Client(base + ["mcp", "serve", "--binding", str(home / "fixture.key")])
         cleanup.callback(fixture.close)
         agent = fixture.call("gent_register", {"name": "Fixture conversation", "provider": "generic-mcp"})[0]["agent"]
+        tray = TrayHost(home / "desktop.sock")
+        cleanup.callback(tray.close)
         cli("desktop", "enable")
         def close_desktop():
             if (home / "desktop.sock").exists():
