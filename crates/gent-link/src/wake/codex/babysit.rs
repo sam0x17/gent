@@ -4,6 +4,7 @@ use gent_protocol::notifications::Failure;
 use serde::Deserialize;
 use uuid::Uuid;
 
+mod history;
 mod rollout;
 
 #[derive(Clone, Deserialize, PartialEq)]
@@ -76,28 +77,6 @@ async fn stalled(host: &mut Host, thread: &str) -> Result<Option<Stall>> {
     {
         return Ok(None);
     }
-    let turns = host
-        .rpc(
-            "thread/turns/list",
-            json!({"threadId":thread,"limit":1,"sortDirection":"desc","itemsView":"notLoaded"}),
-        )
-        .await?;
-    let [last] = turns["data"]
-        .as_array()
-        .context("invalid Codex turn page")?
-        .as_slice()
-    else {
-        return Ok(None);
-    };
-    let Some(reason) = terminal_failure(last) else {
-        return Ok(None);
-    };
-    let (Some(started), Some(failed_at)) =
-        (last["startedAt"].as_i64(), last["completedAt"].as_i64())
-    else {
-        return Ok(None);
-    };
-    let turn: Uuid = serde_json::from_value(last["id"].clone())?;
     let info = host
         .rpc("thread/goal/get", json!({"threadId":thread}))
         .await?;
@@ -105,35 +84,35 @@ async fn stalled(host: &mut Host, thread: &str) -> Result<Option<Stall>> {
         return Ok(None);
     };
     if goal.thread_id != thread
-        || turn.is_nil()
-        || failed_at < started
-        || (goal.status != "blocked" && started < goal.created_at)
         || goal.updated_at < goal.created_at
-        || goal.updated_at > failed_at
+        || !matches!(goal.status.as_str(), "active" | "usageLimited" | "blocked")
     {
         return Ok(None);
     }
-    let rollout = match goal.status.as_str() {
-        "active" => None,
-        "usageLimited" if reason == Failure::RateLimit => None,
-        "blocked" if goal.updated_at >= started => {
-            let Some(path) = meta["path"].as_str().map(PathBuf::from) else {
-                return Ok(None);
-            };
-            let queue = host
-                .rpc("thread/queue/list", json!({"threadId":thread}))
-                .await?;
-            if !queue["data"].as_array().is_some_and(Vec::is_empty) {
-                return Ok(None);
-            }
-            let Some(evidence) =
-                rollout::Evidence::read(path, goal.clone(), last.clone(), false).await?
-            else {
-                return Ok(None);
-            };
-            Some(evidence)
-        }
-        _ => return Ok(None),
+    let path = if goal.status == "blocked" {
+        let Some(path) = meta["path"].as_str() else {
+            return Ok(None);
+        };
+        Some(PathBuf::from(path))
+    } else {
+        None
+    };
+    let Some((last, queued, reason)) = history::candidate(host, &goal).await? else {
+        return Ok(None);
+    };
+    let turn = serde_json::from_value(last["id"].clone())?;
+    let failed_at = last["completedAt"]
+        .as_i64()
+        .context("missing completion time")?;
+    let rollout = if let Some(path) = path {
+        let Some(evidence) =
+            rollout::Evidence::read(path, goal.clone(), last, queued, false).await?
+        else {
+            return Ok(None);
+        };
+        Some(evidence)
+    } else {
+        None
     };
     Ok(Some(Stall {
         goal,

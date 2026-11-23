@@ -35,7 +35,7 @@ Four tests that require local account/relay Workers remain explicitly ignored in
 
 ## Goal recovery
 
-With Codex 0.170.0 on `PATH`, run the following from the client checkout. The tests launch isolated app-servers and loopback providers. They exercise quota recovery, continuation of an idle goal, a user interruption, and an explicit user block after a provider failure.
+With Codex 0.170.0 on `PATH`, run the following from the client checkout. The tests launch isolated app-servers and loopback providers. They cover quota recovery, continuation of an idle goal, and a provider failure followed by successful queued turns. They also check that a user interruption, a new foreground turn, or an explicit block takes precedence over recovery.
 
 ```sh
 cargo test --locked -p gent-link installed_codex_ -- --ignored

@@ -110,6 +110,7 @@ struct Read {
     meta: Value,
     goal: Value,
     turn: Value,
+    older_turns: Vec<Value>,
     queue: Vec<Value>,
     append_on_queue_read: Option<Value>,
 }
@@ -117,6 +118,7 @@ impl Read {
     fn new(thread: &str) -> Self {
         let now = gent_daemon::store::now();
         Self {
+            older_turns: Vec::new(),
             queue: Vec::new(),
             append_on_queue_read: None,
             meta: json!({"id":thread,"canAcceptDirectInput":true,"status":{"type":"systemError"}}),
@@ -152,11 +154,19 @@ fn host(thread: &str, before: Read, after: Read, lose_reply: bool) -> Fixture {
                 json!({"thread":r.meta})
             }
             "thread/turns/list" => {
-                assert_eq!(
-                    *params,
-                    json!({"threadId":thread,"limit":1,"sortDirection":"desc","itemsView":"notLoaded"})
-                );
-                json!({"data":[r.turn],"nextCursor":null})
+                let blocked = r.goal["status"] == "blocked";
+                let limit = if blocked { 32 } else { 1 };
+                assert_eq!(params["limit"], limit);
+                assert_eq!(params["itemsView"], "notLoaded");
+                assert_eq!(params["sortDirection"], "desc");
+                let offset = params["cursor"].as_str().map_or(0, |s| s.parse().unwrap());
+                let data: Vec<_> = std::iter::once(&r.turn)
+                    .chain(&r.older_turns)
+                    .skip(offset)
+                    .take(limit)
+                    .collect();
+                let next = offset + data.len();
+                json!({"data":data,"nextCursor":(next <= r.older_turns.len()).then(||next.to_string())})
             }
             "thread/goal/get" => json!({"goal":r.goal}),
             "thread/queue/list" => {
@@ -350,3 +360,5 @@ async fn an_existing_human_stop_or_newer_goal_never_reaches_the_claim_recheck() 
 mod native;
 mod rollout;
 mod scheduler;
+
+mod queued;

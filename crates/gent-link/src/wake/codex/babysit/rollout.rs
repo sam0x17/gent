@@ -1,5 +1,8 @@
 //! The only file opened is the rollout returned by the bound thread's host.
 use super::*;
+use history::Completed;
+
+mod queued;
 use rustix::fs::{Mode, OFlags};
 use std::{collections::HashSet, fs::File, io::BufReader, os::unix::fs::FileExt};
 
@@ -7,6 +10,7 @@ use std::{collections::HashSet, fs::File, io::BufReader, os::unix::fs::FileExt};
 pub(super) struct Evidence {
     path: PathBuf,
     last: Value,
+    queued: Vec<Completed>,
     stamp: Stamp,
 }
 
@@ -32,6 +36,7 @@ impl Evidence {
         path: PathBuf,
         goal: Goal,
         last: Value,
+        queued: Vec<Completed>,
         full: bool,
     ) -> Result<Option<Self>> {
         tokio::task::spawn_blocking(move || {
@@ -59,38 +64,95 @@ impl Evidence {
             if header.r#type != "session_meta" || header.payload.id != *thread {
                 return Ok(None);
             }
-            let mut rows = ReverseLines::new(&file, before.size)?;
+            let mut rows = ReverseLines::new(&file, before.size, !queued.is_empty())?;
             let mut line = Vec::new();
             let mut receipt_turns = HashSet::new();
-            loop {
-                if !rows.previous(&mut line)? {
-                    return Ok(None);
+            let mut admissions = HashSet::new();
+            for expected in queued.iter().map(Some).chain(std::iter::once(None)) {
+                loop {
+                    if !rows.previous(&mut line)? {
+                        return Ok(None);
+                    }
+                    let row: Record = serde_json::from_slice(&line)?;
+                    let matched = match expected {
+                        Some(turn) => row.completes_turn(&turn.id, turn.started, turn.ended, None),
+                        None => row.completes(&last),
+                    };
+                    if matched {
+                        break;
+                    }
+                    if row.r#type != "event_msg" || row.payload.r#type != "item_completed" {
+                        return Ok(None);
+                    }
+                    let Some(id) = serde_json::from_slice::<Record<Receipt>>(&line)
+                        .ok()
+                        .and_then(|r| r.payload.background_turn(thread, &last))
+                    else {
+                        return Ok(None);
+                    };
+                    if expected.is_some_and(|t| Uuid::parse_str(&t.id) == Ok(id)) {
+                        return Ok(None);
+                    }
+                    receipt_turns.insert(id);
                 }
-                let row: Record = serde_json::from_slice(&line)?;
-                if row.completes(&last) {
+                // The two cheap inspections bind the API history and the head
+                // of the stamped file. Replay its checked suffix once per claim.
+                if !full {
                     break;
                 }
-                if row.r#type != "event_msg" || row.payload.r#type != "item_completed" {
+                if let Some(turn) = expected {
+                    receipt_turns.remove(&Uuid::parse_str(&turn.id)?);
+                    if !queued::confirm(
+                        &mut rows,
+                        &mut line,
+                        thread,
+                        turn,
+                        &mut admissions,
+                        Some(goal.updated_at),
+                    )? {
+                        return Ok(None);
+                    }
+                }
+            }
+            if full {
+                // Native goal timestamps have second precision. If the failed
+                // queue admission shares that second, keep its terminal position
+                // for a strict replay through the preceding active setter.
+                let fallback = (!queued.is_empty() && last["startedAt"] == goal.updated_at)
+                    .then(|| rows.clone());
+                if !provider_stop(&mut rows, &mut line, &goal, &last)? {
+                    let Some(mut retry) = fallback else {
+                        return Ok(None);
+                    };
+                    let failed = Completed::read(&last).context("invalid failed turn")?;
+                    if !queued::confirm(
+                        &mut retry,
+                        &mut line,
+                        thread,
+                        &failed,
+                        &mut admissions,
+                        None,
+                    )? {
+                        return Ok(None);
+                    }
+                    // Historical background receipt IDs must still be checked
+                    // against completions preceding the failed admission.
+                    rows = retry.clone();
+                    if !queued::preceding_active_turn(&mut retry, &mut line, &goal, &failed)? {
+                        return Ok(None);
+                    }
+                }
+                if !earlier_turns(&mut rows, &mut line, receipt_turns)? {
                     return Ok(None);
                 }
-                let Some(id) = serde_json::from_slice::<Record<Receipt>>(&line)
-                    .ok()
-                    .and_then(|r| r.payload.background_turn(thread, &last))
-                else {
-                    return Ok(None);
-                };
-                receipt_turns.insert(id);
             }
-            if (full
-                && !(provider_stop(&mut rows, &mut line, &goal, &last)?
-                    && earlier_turns(&mut rows, &mut line, receipt_turns)?))
-                || stamp(std::fs::symlink_metadata(&path)?)? != before
-            {
+            if stamp(std::fs::symlink_metadata(&path)?)? != before {
                 return Ok(None);
             }
             Ok(Some(Self {
                 path,
                 last,
+                queued,
                 stamp: before,
             }))
         })
@@ -98,18 +160,24 @@ impl Evidence {
     }
 
     pub(super) async fn confirms(&self, goal: &Goal) -> Result<bool> {
-        Ok(
-            Self::read(self.path.clone(), goal.clone(), self.last.clone(), true)
-                .await?
-                .as_ref()
-                == Some(self),
+        Ok(Self::read(
+            self.path.clone(),
+            goal.clone(),
+            self.last.clone(),
+            self.queued.clone(),
+            true,
         )
+        .await?
+        .as_ref()
+            == Some(self))
     }
 }
 
 // Read backwards a block at a time.
 // Memory follows the largest individual record, independent of turn length.
+#[derive(Clone)]
 struct ReverseLines<'a> {
+    floor: u64,
     file: &'a File,
     offset: u64,
     block: Vec<u8>,
@@ -117,12 +185,19 @@ struct ReverseLines<'a> {
 }
 
 impl<'a> ReverseLines<'a> {
-    fn new(file: &'a File, size: u64) -> Result<Self> {
+    fn new(file: &'a File, size: u64, retrospective: bool) -> Result<Self> {
         let mut newline = [0];
         file.read_exact_at(&mut newline, size - 1)?;
         ensure!(newline[0] == b'\n', "incomplete Codex rollout record");
         Ok(Self {
             file,
+            // The older direct-failure path may verify a distant background
+            // receipt. Bound additional queue reconstruction to a suffix.
+            floor: if retrospective {
+                size.saturating_sub(64 * 1024 * 1024)
+            } else {
+                0
+            },
             offset: size - 1,
             block: vec![0; 64 * 1024],
             end: 0,
@@ -133,11 +208,14 @@ impl<'a> ReverseLines<'a> {
         line.clear();
         loop {
             if self.end == 0 {
-                if self.offset == 0 {
+                if self.offset == self.floor {
+                    if self.floor != 0 {
+                        return Ok(false);
+                    }
                     line.reverse();
                     return Ok(!line.is_empty());
                 }
-                self.end = self.offset.min(self.block.len() as u64) as usize;
+                self.end = (self.offset - self.floor).min(self.block.len() as u64) as usize;
                 self.offset -= self.end as u64;
                 self.file
                     .read_exact_at(&mut self.block[..self.end], self.offset)?;
@@ -281,6 +359,8 @@ struct Attribution {
 }
 #[derive(Deserialize)]
 struct ItemMeta {
+    turn_id: Option<String>,
+    tool_calls_complete: Option<bool>,
     content_item_kinds: Option<Vec<String>>,
     executed_tool_calls: Option<Vec<Tool>>,
 }
@@ -291,13 +371,25 @@ struct Tool {
 
 impl Record {
     fn completes(&self, last: &Value) -> bool {
+        let (Some(id), Some(started), Some(ended), Some(error)) = (
+            last["id"].as_str(),
+            last["startedAt"].as_i64(),
+            last["completedAt"].as_i64(),
+            last["error"]["message"].as_str(),
+        ) else {
+            return false;
+        };
+        self.completes_turn(id, started, ended, Some(error))
+    }
+
+    fn completes_turn(&self, id: &str, started: i64, ended: i64, error: Option<&str>) -> bool {
         let p = &self.payload;
         self.r#type == "event_msg"
             && p.r#type == "task_complete"
-            && p.turn_id.as_deref() == last["id"].as_str()
-            && p.started_at == last["startedAt"].as_i64()
-            && p.completed_at == last["completedAt"].as_i64()
-            && p.error.as_ref().map(|e| e.message.as_str()) == last["error"]["message"].as_str()
+            && p.turn_id.as_deref() == Some(id)
+            && p.started_at == Some(started)
+            && p.completed_at == Some(ended)
+            && p.error.as_ref().map(|e| e.message.as_str()) == error
     }
 }
 
@@ -344,6 +436,8 @@ fn provider_stop(
                     }
                     return Ok(prior.r#type == "event_msg"
                         && prior.payload.r#type == "thread_goal_updated"
+                        && prior.payload.goal_thread.as_deref() == Some(&goal.thread_id)
+                        && prior.payload.goal_turn.is_none()
                         && prior.payload.goal.is_some_and(|g| same_active(&g, goal)));
                 }
                 return Ok(false);
