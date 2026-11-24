@@ -69,3 +69,67 @@ pub(super) async fn maintain(home: &Path) {
         tokio::time::sleep(Duration::from_secs(delay)).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, routing::get};
+
+    #[tokio::test]
+    async fn rejected_login_invalidates_the_old_lease_before_replacement() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("node");
+        config::initialize(&home, "login-replacement")?;
+        let directory = source::directory(&home)?;
+        managed_file::directory(&directory)?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let service = format!("http://{}", listener.local_addr()?);
+        let api = Router::new()
+            .route(
+                "/v1/auth/session",
+                get(|| async { StatusCode::UNAUTHORIZED }),
+            )
+            .route(
+                "/v1/auth/config",
+                get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, api).await });
+        let path = directory.join("session.json");
+        save(
+            &path,
+            Some(&Saved {
+                version: 1,
+                service,
+                token: candidate()?,
+                phase: Phase::Active,
+                session: Some(ServiceSession {
+                    account_id: uuid::Uuid::new_v4().to_string(),
+                    github_subject: "1".into(),
+                    github_login: "fixture".into(),
+                    created_at: now()? - 60,
+                    expires_at: now()? + 3600,
+                }),
+            }),
+        )?;
+        let previous = Snapshot::read(&path)?;
+        let lease = home.join("account-entitlements.json");
+        config::write_private(&lease, b"old lease")?;
+        let login = Command::Login {
+            headless: true,
+            no_browser: true,
+            service: None,
+        };
+        assert!(execute_at(&directory, login, false).await.is_err());
+        assert!(!lease.exists());
+        assert!(previous.verify().is_err());
+        let saved = read(&path)?.unwrap();
+        assert!(saved.phase == Phase::Pending && saved.session.is_none());
+
+        save(&path, None)?;
+        config::write_private(&lease, b"orphaned lease")?;
+        execute_at(&directory, Command::Logout, false).await?;
+        assert!(!lease.exists());
+        server.abort();
+        Ok(())
+    }
+}

@@ -670,14 +670,15 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
     }
     managed_file::directory(directory)?;
     let _lock = managed_file::lock(&directory.join("session.lock"))?;
+    let home = directory.parent().context("missing account home")?;
     let mut saved = read(&path)?;
     if matches!(command, Command::Logout) {
+        gent_daemon::entitlements::clear(home)?;
         let Some(saved) = &mut saved else {
             return Ok(json!({"status":"signed_out"}));
         };
         saved.phase = Phase::Revoking;
         save(&path, Some(saved))?;
-        gent_daemon::entitlements::clear(directory.parent().context("missing account home")?)?;
         let outcome = response(
             client
                 .request(
@@ -717,11 +718,31 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
             "session revocation is pending; retry gent auth logout first"
         );
         if let Some(session) = service_session(&client, previous).await? {
+            if previous
+                .session
+                .as_ref()
+                .is_some_and(|old| old.account_id != session.account_id)
+            {
+                gent_daemon::entitlements::clear(home)?;
+                previous.phase = Phase::Revoking;
+                save(&path, Some(previous))?;
+                anyhow::bail!(
+                    "account changed for the saved session; sign out before signing in again"
+                );
+            }
             previous.phase = Phase::Active;
             previous.session = Some(session.clone());
             save(&path, Some(previous))?;
             return Ok(json!({"status":"active","service":base.as_str(),"account":session}));
         }
+    }
+    // Invalidate the old lease before waiting on a replacement sign-in. Changing
+    // the session snapshot also fences an in-flight refresh for the old login.
+    gent_daemon::entitlements::clear(home)?;
+    if let Some(previous) = &mut saved {
+        previous.phase = Phase::Pending;
+        previous.session = None;
+        save(&path, Some(previous))?;
     }
     let (status, value) = response(client.get(base.join("v1/auth/config")?)).await?;
     let config: AuthConfig = serde_json::from_value(success(status, value)?)
