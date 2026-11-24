@@ -16,7 +16,7 @@ Closing the window hides it in the tray. **Quit Gent Desktop** exits the compani
 
 ## Dashboard, Chats and Settings
 
-**Dashboard** shows the boards that chats have published. Click a board button to send its action to that chat. See [Chat dashboards and goal recovery](dashboards.md).
+**Dashboard** shows the boards that chats have published. They share the available space, with vertical scrolling when needed. Click a link to open it in your default web browser, or a button to send its action to the publishing chat. See [Chat dashboards and goal recovery](dashboards.md).
 
 **Chats** lists the cluster's known registrations, including chats on offline nodes and retained retired or revoked registrations. Filter by name, node, provider, registration state or ID. Open the tab or choose **Refresh** to read the directory from the local daemon.
 

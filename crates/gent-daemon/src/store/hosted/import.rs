@@ -355,6 +355,7 @@ pub(super) fn dashboards(parent: &Connection, source: &Connection, child: &str) 
         let decode = |raw: &str| -> Result<Board> {
             ensure!(raw.len() <= 32 * 1024, "hosted dashboard exceeds 32 KiB");
             let board: Board = serde_json::from_str(raw)?;
+            crate::messages::wire::check_dashboard_encoding(&board).map_err(anyhow::Error::msg)?;
             board.validate().map_err(anyhow::Error::msg)?;
             Ok(board)
         };

@@ -181,7 +181,20 @@ impl StoreSession<'_> {
                 issued <= self.timestamp && self.timestamp - issued <= RESPONSE_WINDOW
             }) {
                 if let Some(version) = codec {
+                    // A former pre-dashboard receiver may be the only side
+                    // probing after an idle upgrade. Its next probe carries
+                    // the new codec back to the publisher, releasing old boards.
+                    let discovering = self.db.execute(
+                        "DELETE FROM metadata WHERE key='dashboard_discovery:' || ?1 AND value=hex(?2)",
+                        params![peer, key.as_slice()],
+                    )? != 0;
                     self.confirm_wire_version(peer, version)?;
+                    if discovering && version >= crate::messages::wire::DASHBOARD_VERSION {
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO presence_requests VALUES(?1)",
+                            [peer],
+                        )?;
+                    }
                 }
                 self.confirm_activity_support(peer)?;
             }

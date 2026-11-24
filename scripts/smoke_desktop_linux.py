@@ -15,6 +15,7 @@ import threading
 import uuid
 
 from gi.repository import Gio, GLib
+from desktop_fixture_browser import install_fixture_browser
 from desktop_tabs_linux import exercise_enrolled_without_daemon, exercise_setup, exercise_tabs, wait_for
 from mcp_client import Client
 
@@ -145,6 +146,7 @@ def main():
     args = parser.parse_args()
     binary = args.binary.resolve()
     if not args.setup_only:
+        subprocess.run([sys.executable, Path(__file__).with_name("dashboard_gtk.py")], check=True)
         # Each proof gets its own GTK process, accessibility bus, watcher and node home.
         with tempfile.TemporaryDirectory(prefix="gent-setup-runtime-") as runtime:
             env = dict(os.environ, XDG_RUNTIME_DIR=runtime)
@@ -177,6 +179,7 @@ def main():
             quit_setup("Quit Gent Desktop")
             assert setup.wait(timeout=12) == 0
             return
+        browser = install_fixture_browser(Path(folder))
         created = json.loads(cli("--json", "cluster", "new", "desktop-test", "--local").stdout)
         # Stdio enrollment requires a configuration relay in the parent's snapshot.
         key = home / "fixture-relay.key"
@@ -200,7 +203,7 @@ def main():
         cleanup.callback(close_desktop)
         click = tray.menu("Daemon running")
         assert not visible(), "autostart opened the window"
-        app, = (Path(folder)/"data/applications").glob("*.desktop")
+        app, = [p for p in (Path(folder)/"data/applications").glob("*.desktop") if p.name != browser]
         entry, = (Path(folder)/"config/autostart").glob("*.desktop")
         assert "--background" in entry.read_text() and "--background" not in app.read_text()
         click("Open Gent Desktop")

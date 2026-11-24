@@ -80,11 +80,14 @@ fn sent(pair: &mut Pair) -> String {
 fn dashboard_restore_rewinds_only_hosted_boards_and_their_replication_cursors() -> Result<()> {
     let mut pair = fixture();
     let web = pair.child.identity.node.id().to_owned();
-    let define = |title: &str| AgentOp::DashboardDefine {
+    let define = |title: &str| {
+        AgentOp::DashboardDefine {
         expected_revision: 0,
         board: serde_json::from_value(json!({
-        "title":title,"widgets":[{"id":"status","kind":"text","label":"Status","value":"ready"}]}))
-        .unwrap(),
+            "title":title,
+            "widgets":[{"id":"status","kind":"link","label":"Status","value":"https://example.org/status"}]
+        })).unwrap(),
+    }
     };
     call(&mut pair, 0, define("native"))?;
     let initial = snapshot::export(pair.homes[0].path(), &web)?;
@@ -96,6 +99,16 @@ fn dashboard_restore_rewinds_only_hosted_boards_and_their_replication_cursors() 
     let mutation = define("hosted");
     call(&mut pair, 1, mutation.clone())?;
     let published = snapshot::export(pair.homes[0].path(), &web)?;
+    // V9/V10 restore the raw checkpoint cell and validate its ordinary Text
+    // widget. A replacement carrier can export those same fields again.
+    let tables = serde_json::to_value(&published)?;
+    let cell = tables["tables"]["dashboards"]["rows"][0][2]["value"]
+        .as_str()
+        .unwrap();
+    let stored = serde_json::from_str::<Value>(cell)?;
+    assert_eq!(stored["widgets"][0]["kind"], "text");
+    assert_eq!(stored["widgets"][0]["unit"], "↗ web link");
+    assert_eq!(stored["widgets"][0]["value"], "https://example.org/status");
     call(&mut pair, 1, mutation.clone())?;
     assert_eq!(
         snapshot::export(pair.homes[0].path(), &web)?.revision,
@@ -144,10 +157,9 @@ fn dashboard_restore_rewinds_only_hosted_boards_and_their_replication_cursors() 
         )?;
     }
     restore(&mut pair, &published)?;
-    assert_eq!(
-        call(&mut pair, 1, AgentOp::DashboardGet)?["board"]["title"],
-        "hosted"
-    );
+    let restored = call(&mut pair, 1, AgentOp::DashboardGet)?;
+    assert_eq!(restored["board"]["title"], "hosted");
+    assert_eq!(restored["board"]["widgets"][0]["kind"], "link");
     assert_eq!(call(&mut pair, 1, mutation)?["revision"], 1);
     let retained: String =
         pair.parent

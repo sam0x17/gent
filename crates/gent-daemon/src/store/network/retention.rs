@@ -167,6 +167,14 @@ impl StoreSession<'_> {
         {
             ensure!(negotiated >= 4, "directory push requires a version 4 peer");
             negotiated
+        } else if matches!(&event, Event::Dashboard { .. }) {
+            // Dashboard bytes can outlive the capability proof. Both V9 and
+            // V10 readers can consume this record after a receiver rollback.
+            ensure!(
+                negotiated >= messages::wire::DASHBOARD_VERSION,
+                "dashboard requires protocol 9"
+            );
+            messages::wire::DASHBOARD_VERSION
         } else if matches!(&event, Event::Presence { .. }) && negotiated < 4 {
             1
         } else if matches!(&event, Event::Directory { .. }) {

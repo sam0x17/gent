@@ -65,7 +65,7 @@ func checkCluster(_ desktop: Desktop, open: () -> Void) {
     checkMembers(desktop, stopped: stopped)
 }
 
-func resizeCluster(_ desktop: Desktop, width: CGFloat = 510, height: CGFloat) {
+func resizeDesktop(_ desktop: Desktop, width: CGFloat = 510, height: CGFloat) {
     let size = NSSize(width: width, height: height)
     desktop.window.setContentSize(size)
     // A screenless SSH session constrains the window frame. Size its native content view directly there.
@@ -81,7 +81,7 @@ func checkSetup(_ desktop: Desktop, stopped: [String: Any]) {
     desktop.receive(setup)
     require(account.title.stringValue == "Set up this node" && !account.view.isHiddenOrHasHiddenAncestor
             && actionButton(account.actions, "Create cluster…").isEnabled, "setup actions before status arrives")
-    resizeCluster(desktop, height: 400)
+    resizeDesktop(desktop, height: 400)
     let scroll = desktop.tabs.selectedTabViewItem!.view as! NSScrollView
     let clip = scroll.contentView
     for button in descendants(account.actions.view, of: NSButton.self) {
@@ -93,10 +93,10 @@ func checkSetup(_ desktop: Desktop, stopped: [String: Any]) {
             "setup takes precedence over empty daemon health and members")
     let document = scroll.documentView!
     let setupTop = account.title.convert(account.title.bounds, to: document).minY - scroll.documentVisibleRect.minY
-    resizeCluster(desktop, height: 900)
+    resizeDesktop(desktop, height: 900)
     let tallSetupTop = account.title.convert(account.title.bounds, to: document).minY - scroll.documentVisibleRect.minY
     require(setupTop < 100 && abs(setupTop - tallSetupTop) <= 1, "setup stays at the top of a tall window")
-    resizeCluster(desktop, height: 400)
+    resizeDesktop(desktop, height: 400)
     require(requests { desktop.poll() } == [snapshotRead], "periodic status read only")
     let signIn = actionButton(account.actions, "Sign in with GitHub")
     require(requests { signIn.performClick(nil) } == [.json(["op": "manage", "action": ["kind": "sign_in"]])],
@@ -133,7 +133,7 @@ func checkSetup(_ desktop: Desktop, stopped: [String: Any]) {
 }
 
 func checkNodeActionRow(_ desktop: Desktop, width: CGFloat, height: CGFloat) {
-    resizeCluster(desktop, width: width, height: height)
+    resizeDesktop(desktop, width: width, height: height)
     let row = desktop.nodes.actions.view
     let scroll = row.enclosingScrollView!
     let titles = ["Add node…", "Rename node…", "Change role…", "Remove node…"]
@@ -236,13 +236,13 @@ func checkMembers(_ desktop: Desktop, stopped: [String: Any]) {
     let shortDocumentHeight = scroll.documentView!.bounds.height
     let shortVisibleRows = nodes.table.rows(in: nodes.table.visibleRect).length
     require(abs(shortTableHeight - 160) <= 1, "short window preserves the member table minimum")
-    resizeCluster(desktop, height: 900)
+    resizeDesktop(desktop, height: 900)
     let extraHeight = clip.bounds.height - shortDocumentHeight
     require(extraHeight > nodes.table.rowHeight && abs(scroll.documentView!.bounds.height - clip.bounds.height) <= 1
             && abs(memberScroll.bounds.height - shortTableHeight - extraHeight) <= 1
             && nodes.table.rows(in: nodes.table.visibleRect).length > shortVisibleRows,
             "narrow tall window gives spare height to visible member rows")
-    resizeCluster(desktop, height: 400)
+    resizeDesktop(desktop, height: 400)
     require(abs(memberScroll.bounds.height - shortTableHeight) <= 1 && scroll.documentView!.bounds.height > clip.bounds.height,
             "shrinking the window restores outer scrolling")
     receiveRows()
@@ -349,61 +349,137 @@ func editMember(_ desktop: Desktop, at index: Int, member: [String: String], nam
 
 func checkDashboard(_ desktop: Desktop) {
     desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
-    let rows: [[String: Any]] = (1...3).map { i in
-        let button = ["kind": "button", "id": "retry", "label": "Retry", "value": "Retry the fixture job"]
-        return ["agent": "agent-\(i)", "chat": "Chat \(i)", "revision": 10 + i,
-                "board": ["title": "Board \(i)", "widgets": [button]]]
-    }
-    desktop.receive(["page": "dashboard", "rows": rows])
     let view = desktop.dashboard.view
     guard let scroll = descendants(view, of: NSScrollView.self).first else {
-        require(false, "Dashboard scroll view")
-        return
+        fatalError("Missing Dashboard scroll view")
     }
+    var opened: [String] = []
+    desktop.dashboard.openURL = { opened.append($0.absoluteString) }
+    let targets = ["HtTp://localhost:8080/build?run=42#log", "HTTPS://192.168.1.1:8443/status?q=a%20b#result"]
+    let retry = ["kind": "button", "id": "retry", "label": "Retry", "value": "Retry the fixture job"]
 
-    func layout(width: CGFloat, columns: Int) -> CGFloat {
-        desktop.window.setContentSize(NSSize(width: width, height: 605))
-        desktop.window.contentView?.layoutSubtreeIfNeeded()
-        let cards = descendants(view, of: NSBox.self).sorted { $0.title < $1.title }
-        require(cards.map { $0.title } == ["Board 1", "Board 2", "Board 3"], "all Dashboard cards rendered")
-        let clip = scroll.contentView
-        let frames = cards.map { $0.convert($0.bounds, to: clip) }
-        let first = frames[0]
-        let lastInRow = frames[columns - 1]
-        require(abs(first.minY - clip.bounds.minY) <= 1, "first Dashboard row at top of viewport")
-        require(first.width > 0 && first.height > 0 && abs(first.minX - clip.bounds.minX) <= 1
-                && abs(lastInRow.maxX - clip.bounds.maxX) <= 1, "Dashboard row fills viewport at \(width)")
-        require(frames.allSatisfy { abs($0.width - first.width) <= 1 }, "equal widths on partial row")
-        if columns == 2 {
-            require(first.maxX < frames[1].minX && abs(first.midY - frames[1].midY) <= 1,
-                    "two cards side by side")
+    func link(_ target: String, title: String, id: String = "link") -> [String: String] {
+        ["kind": "link", "id": id, "label": title, "value": target]
+    }
+    func row(_ index: Int, widgets: [[String: Any]]) -> [String: Any] {
+        ["agent": "agent-\(index)", "chat": "Chat \(index)", "revision": 10 + index,
+         "board": ["title": "Board \(index)", "widgets": widgets]]
+    }
+    func publish(_ rows: [[String: Any]]) {
+        require(requests { desktop.receive(["page": "dashboard", "rows": rows]) }.isEmpty,
+                "rendering a dashboard sends no supervisor request")
+        desktop.tabs.layoutSubtreeIfNeeded()
+    }
+    func cards() -> [NSBox] { descendants(view, of: NSBox.self).sorted { $0.title < $1.title } }
+    let clip = scroll.contentView
+
+    // Measure native frames through the production tab and its actual scroll viewport.
+    @discardableResult
+    func layout(_ width: CGFloat, _ height: CGFloat, rows: [Int], overflow: Bool = false, equalAreas: Bool = true) -> NSSize {
+        resizeDesktop(desktop, width: width, height: height)
+        let frames = cards().map { $0.convert($0.bounds, to: clip) }
+        require(frames.count == rows.reduce(0, +), "all cards at \(width) × \(height)")
+        var start = 0
+        for count in rows {
+            let line = frames[start..<start + count]
+            let first = line.first!
+            require(abs(first.minX - clip.bounds.minX) <= 1 && abs(line.last!.maxX - clip.bounds.maxX) <= 1,
+                    "each row fills the available width at \(width)")
+            require(line.allSatisfy { abs($0.width - first.width) <= 1 && abs($0.minY - first.minY) <= 1 && abs($0.height - first.height) <= 1 }
+                    && zip(line, line.dropFirst()).allSatisfy { $0.maxX < $1.minX },
+                    "cards share row width at \(width)")
+            require(start == 0 || frames[start - 1].maxY < first.minY, "rows stack vertically")
+            start += count
         }
-        require(abs(first.minX - frames[columns].minX) <= 1 && !first.intersects(frames[columns]),
-                "next Dashboard row wraps at \(width)")
-        return first.width
+        require(frames.allSatisfy { $0.height >= 159 }, "all cards preserve their minimum height")
+        if equalAreas {
+            let area = frames[0].width * frames[0].height
+            require(frames.allSatisfy { abs($0.width * $0.height - area) <= area * 0.03 },
+                    "cards share area within spacing and rounding at \(width) × \(height), rows \(rows)")
+        }
+        let document = scroll.documentView!
+        let bounds = document.convert(document.bounds, to: clip)
+        require(abs(frames[0].minY - bounds.minY) <= 1 && abs(frames.last!.maxY - bounds.maxY) <= 1,
+                "cards fill the document vertically")
+        require(overflow ? document.bounds.height > clip.bounds.height : abs(document.bounds.height - clip.bounds.height) <= 1,
+                "document height at \(width) × \(height), overflow expected: \(overflow)")
+        return frames[0].size
     }
 
-    let wide = layout(width: 810, columns: 2)
-    require(layout(width: 735, columns: 2) < wide - 1, "two-column cards shrink within the breakpoint")
-    let narrow = layout(width: 510, columns: 1)
-    require(layout(width: 550, columns: 1) > narrow + 1, "single-column cards grow within the breakpoint")
+    let rows = (1...6).map { row($0, widgets: [retry, link(targets[($0 - 1) % 2], title: "Build log")]) }
+    publish([rows[0]])
+    let single = layout(850, 605, rows: [1])
+    let smaller = layout(510, 400, rows: [1])
+    require(smaller.width < single.width && smaller.height < single.height, "single board follows both dimensions")
+    publish(Array(rows.prefix(3)))
+    let wide = layout(810, 605, rows: [2, 1])
+    require(layout(735, 605, rows: [2, 1]).width < wide.width, "cards resize within the same breakpoint")
+    layout(810, 440, rows: [2, 1], equalAreas: false)
+    layout(510, 400, rows: [1, 1, 1], overflow: true)
+    layout(550, 720, rows: [1, 1, 1])
+    publish(rows)
+    layout(1000, 605, rows: [3, 3])
+    layout(1240, 605, rows: [4, 2])
+    publish(Array(rows.prefix(3)))
+    layout(850, 605, rows: [2, 1])
+    require(opened.isEmpty, "render, refresh and resize never open links")
 
-    guard let card = descendants(view, of: NSBox.self).first(where: { $0.title == "Board 2" }),
-          let button = descendants(card, of: NSButton.self).first(where: { $0.title == "Retry" }) else {
-        require(false, "published Dashboard button")
-        return
+    for (card, target) in zip(cards(), targets) {
+        guard let link = descendants(card, of: NSButton.self).first(where: { $0.title == "Build log" }) else {
+            fatalError("Missing published link")
+        }
+        require(link.toolTip == target && link.isEnabled && link.accessibilityRole() == .link,
+                "accessible link shows its destination")
+        require(requests { link.performClick(nil) }.isEmpty, "link click sends no chat callback")
     }
-    // Exercise the AppKit target/action and inspect the supervisor's actual wire request.
-    let sent = requests { button.performClick(nil) }
-    require(sent == [.json(["op": "dashboard_click", "agent": "agent-2",
-                                "revision": 12, "widget": "retry"])],
-            "one newline-delimited click for the displayed chat, revision and widget")
-    desktop.window.setContentSize(NSSize(width: 850, height: 605))
+    require(opened == targets, "each click opens its exact HTTP or HTTPS destination once")
+
+    guard let button = descendants(cards()[1], of: NSButton.self).first(where: { $0.title == "Retry" }) else {
+        fatalError("Missing published Dashboard button")
+    }
+    require(requests { button.performClick(nil) } == [.json(["op": "dashboard_click", "agent": "agent-2",
+                                                              "revision": 12, "widget": "retry"])],
+            "ordinary button sends one callback for the displayed chat, revision and widget")
+    let invalid = ["file:///tmp/report", "javascript:alert(1)", "mailto:user@example.org", "/relative", "//host/path",
+                   "https:host", "http:///path", "https://:80", "https://", "https://host/a b", "http://host/\t",
+                   "https://[::1", "https://host:65536", "http://host:18446744073709552030",
+                   "https://host/\u{7f}", "https://host/\u{a0}", "https://host\\path"]
+    publish([row(1, widgets: invalid.enumerated().map { link($0.element, title: "Invalid \($0.offset)", id: "bad-\($0.offset)") })])
+    require(descendants(cards()[0], of: NSButton.self).isEmpty, "invalid links expose no launch action")
+
+    let entries = (1...40).map { "Event \($0)" }
+    let events: [String: Any] = ["kind": "events", "id": "events", "label": "History", "value": entries]
+    publish([row(1, widgets: [events, link(targets[0], title: "Last link")])])
+    layout(510, 400, rows: [1], overflow: true)
+    let card = cards()[0]
+    let field = descendants(card, of: NSTextField.self).first { $0.stringValue == entries.joined(separator: "\n") }!
+    require(field.bounds.height >= CGFloat(entries.count) * (field.font?.pointSize ?? 13), "tall contents stay readable")
+    let last = descendants(card, of: NSButton.self).first { $0.title == "Last link" }!
+    require(!clip.bounds.contains(last.convert(last.bounds, to: clip)), "last link starts below viewport")
+    last.scrollToVisible(last.bounds)
+    require(clip.bounds.contains(last.convert(last.bounds, to: clip)), "last link reachable by vertical scrolling")
+    let message = String(repeating: "A dashboard message with wrapping text. ", count: 49)
+    let paragraph = ["kind": "text", "id": "message", "label": "Message", "value": message]
+    publish([rows[0], rows[1], row(3, widgets: [paragraph])])
+    layout(810, 400, rows: [2, 1], overflow: true, equalAreas: false)
+    let wrapped = descendants(cards()[2], of: NSTextField.self).first { $0.stringValue == message }!
+    let fitting = wrapped.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: wrapped.bounds.width,
+                                                            height: CGFloat.greatestFiniteMagnitude))
+    require(fitting.height > 160 && wrapped.bounds.height >= fitting.height - 1,
+            "wrapped text gets its natural height in a partial row")
+    require(opened == targets, "button, malformed links and scrolling leave opener idle")
+    resizeDesktop(desktop, width: 850, height: 605)
 }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
+if CommandLine.arguments.dropFirst(2).contains("--dashboard") {
+    desktop.makeWindow()
+    checkDashboard(desktop)
+    print("PASS: native Dashboard layout, scrolling, web links and button dispatch")
+    exit(0)
+}
 if CommandLine.arguments.dropFirst(2).contains(where: { ["--cluster", "--nodes"].contains($0) }) {
     desktop.makeWindow()
     checkCluster(desktop) { desktop.show() }
@@ -474,7 +550,7 @@ DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
         require(false, "Quit menu item")
         return
     }
-    FileHandle.standardError.write(Data("PASS: AppKit menu bar, Status tab, setup, daemon controls, node search and actions, Dashboard resizing and button dispatch, directories, editable settings, account confirmation, permissions, about, update check, close, reopen and quit\n".utf8))
+    FileHandle.standardError.write(Data("PASS: AppKit menu bar, Status tab, setup, daemon controls, node search and actions, Dashboard layout, scrolling, web links and button dispatch, directories, editable settings, account confirmation, permissions, about, update check, close, reopen and quit\n".utf8))
     _ = app.sendAction(stop, to: quit.target, from: quit)
 }
 app.run()

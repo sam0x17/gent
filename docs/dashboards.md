@@ -2,7 +2,7 @@
 
 ## Publish a dashboard
 
-Each registered chat can publish one dashboard. Open **Dashboard** in Gent Desktop on any participating node. Nodes exchange dashboard data over Gent wire protocol 9. The tab refreshes from the local daemon while open.
+Each registered chat can publish one dashboard. Open **Dashboard** in Gent Desktop on any participating node. A single board fills the pane. Multiple boards share it and wrap into fewer columns as the window narrows. The page scrolls vertically when the boards need more room. The tab refreshes from the local daemon while open.
 
 For a new board, call `gent_dashboard_define` with an initial revision of zero.
 
@@ -14,6 +14,7 @@ For a new board, call `gent_dashboard_define` with an initial revision of zero.
     "widgets": [
       {"id": "loss", "kind": "graph", "label": "Validation loss", "value": [0.9, 0.71, 0.64]},
       {"id": "epochs", "kind": "progress", "label": "Epochs completed", "max": 20, "value": 4},
+      {"id": "results", "kind": "link", "label": "Open run results", "value": "https://example.org/runs/42"},
       {"id": "inspect", "kind": "button", "label": "Check latest checkpoint", "value": "Report the latest checkpoint and its validation loss."}
     ]
   }
@@ -27,6 +28,10 @@ The call returns the committed revision. To record epoch 5, call `gent_dashboard
 ```
 
 Supply the whole series for a graph and the whole list of strings for an event feed. A board can contain up to 32 widgets and 32 KiB of serialized data. Each graph can show 256 samples and each event feed can show 64 entries. Gauge and progress ranges default to 0 through 100. Use a text widget for a status line or paragraph.
+
+Use a `link` widget for a web page. Give it a label and an absolute HTTP or HTTPS URL. Clicking the label opens the page in the viewer's default browser. To point it at a different run, update the value by widget ID. Older Gent desktops show the destination as text.
+
+If a hosted chat moves to an older carrier whose MCP schema lacks `link`, use `"kind": "text", "unit": "↗ web link"` with the same URL. This is the stored form of a link. It also lets you retry the original definition with the same expected revision after a carrier change.
 
 Clicking a button sends its instruction as a waking message from **Gent Desktop** to the chat that published it. The chat handles the action under its existing permissions. If the board changed since the window displayed it, refresh before clicking again.
 

@@ -391,7 +391,10 @@ async fn web_dashboard_tools_use_the_bound_chat() {
             )
             .await;
     }
-    let board = json!({"title":"Training","widgets":[{"id":"step","kind":"progress","label":"Step","value":10}]});
+    let board = json!({"title":"Training","widgets":[
+        {"id":"step","kind":"progress","label":"Step","value":10},
+        {"id":"run","kind":"link","label":"Run details","value":"https://example.org/runs/1"}
+    ]});
     let define = json!({"expected_revision":0,"board":board});
     assert_eq!(
         server
@@ -417,6 +420,16 @@ async fn web_dashboard_tools_use_the_bound_chat() {
             .await["board"],
         Value::Null
     );
+    let invalid = server
+        .rpc(
+            &client,
+            &f.token,
+            "tools/call",
+            json!({"name":"gent_dashboard_update","_meta":{"test/conversation":"trainer"},
+                "arguments":{"expected_revision":1,"values":{"run":"file:///tmp/results"}}}),
+        )
+        .await;
+    assert_eq!(invalid["result"]["isError"], true);
     assert_eq!(
         server
             .call(
@@ -424,13 +437,19 @@ async fn web_dashboard_tools_use_the_bound_chat() {
                 &f.token,
                 "trainer",
                 "gent_dashboard_update",
-                json!({"expected_revision":1,"values":{"step":50}})
+                json!({"expected_revision":1,"values":{"step":50,"run":"https://example.org/runs/2"}})
             )
             .await["revision"],
         2
     );
     let list = owner(&f.home, OwnerOp::Dashboards { after: None }).await;
     assert_eq!(list["rows"][0]["board"]["widgets"][0]["value"], 50);
+    assert_eq!(
+        list["rows"][0]["board"]["widgets"][1],
+        json!({
+            "id":"run","kind":"link","label":"Run details","value":"https://example.org/runs/2"
+        })
+    );
     server
         .call(
             &client,

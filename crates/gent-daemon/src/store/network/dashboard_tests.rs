@@ -126,6 +126,194 @@ async fn dashboard_lifecycle_replicates_and_routes_button_to_publisher() {
 }
 
 #[tokio::test]
+async fn dashboard_link_survives_legacy_storage_downgrade_and_idle_reopen() -> Result<()> {
+    use crate::messages::wire::{DASHBOARD_VERSION, NODE_RENAME_VERSION};
+    let mut pair = Pair::new().await;
+    directory_push_tests::negotiate(&mut pair);
+    let native = json!({"title":"Run","widgets":[
+        {"id":"guide","kind":"link","label":"Guide","value":"https://example.org/docs?q=1#intro","min":2.0},
+        {"id":"action","kind":"button","label":"Check","value":"Check the run."},
+        {"id":"plain","kind":"text","label":"Plain","value":"https://example.org/"},
+        {"id":"other","kind":"text","label":"Other","value":"https://example.org/","unit":"url"},
+        {"id":"note","kind":"text","label":"Note","value":"Reference pending","unit":"URL"}
+    ]});
+    let mut legacy = native.clone();
+    legacy["widgets"][0]["kind"] = json!("text");
+    legacy["widgets"][0]["unit"] = json!("↗ web link");
+    let define = |value: &Value| -> Result<AgentOp> {
+        Ok(AgentOp::DashboardDefine {
+            expected_revision: 0,
+            board: serde_json::from_value(value.clone())?,
+        })
+    };
+    pair.agent(0, define(&native)?)?;
+    assert_eq!(pair.agent(0, define(&legacy)?)?["revision"], 1);
+    let bytes: Vec<u8> = pair.stores[0].db.query_row(
+        "SELECT e.body FROM network_events e JOIN dashboard_sent s ON e.id=s.event",
+        [],
+        |r| r.get(0),
+    )?;
+    let envelope: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(envelope["version"], DASHBOARD_VERSION);
+    assert_eq!(envelope["event"]["board"], legacy);
+    for version in [DASHBOARD_VERSION, NODE_RENAME_VERSION] {
+        let mut malformed = envelope.clone();
+        malformed["version"] = json!(version);
+        malformed["event"]["board"] = native.clone();
+        assert!(serde_json::from_value::<Record>(malformed).is_err());
+    }
+
+    // This queued snapshot predates the downgrade. Subsequent ordinary
+    // traffic must drain on the very same ordered stream.
+    for store in &pair.stores {
+        store
+            .db
+            .execute("UPDATE wire_peers SET version=?1", [DASHBOARD_VERSION])?;
+    }
+    pair.pump();
+    let publisher = &pair.agents[0];
+    let receiver = &pair.stores[1];
+    let raw: String = receiver.db.query_row(
+        "SELECT body FROM dashboards WHERE agent=?1",
+        [publisher],
+        |r| r.get(0),
+    )?;
+    assert_eq!(serde_json::from_str::<Value>(&raw)?, legacy);
+    // An old receiver normalizes and persists a typed Board. All information
+    // needed after upgrade must survive that write, with no additional rows.
+    let stored: gent_protocol::dashboard::Board = serde_json::from_str(&raw)?;
+    stored.validate().unwrap();
+    receiver.db.execute(
+        "UPDATE dashboards SET body=?2 WHERE agent=?1",
+        params![publisher, serde_json::to_string(&stored)?],
+    )?;
+    pair.send(vec![])?;
+    pair.pump();
+    assert_eq!(pair.agent(1, AgentOp::Inbox)?.as_array().unwrap().len(), 1);
+    pair.reopen(0);
+    pair.reopen(1);
+    let rows = pair.owner(1, OwnerOp::Dashboards { after: None })?;
+    assert_eq!(rows["rows"][0]["board"], native);
+    assert_eq!(rows["rows"][0]["revision"], 1);
+    assert_eq!(pair.agent(0, AgentOp::DashboardGet)?["board"], native);
+
+    let recipient = pair.stores[1].identity.node.id();
+    let sender = &pair.stores[0];
+    for version in [DASHBOARD_VERSION, NODE_RENAME_VERSION] {
+        let tx = sender.db.unchecked_transaction()?;
+        let session = sender.network_session(&tx, sender.identity.state(&tx)?);
+        for _ in 0..3 {
+            session.confirm_wire_version(recipient, version)?;
+        }
+        assert!(!tx.prepare("SELECT 1 FROM network_events")?.exists([])?);
+        assert!(!tx.prepare("SELECT 1 FROM presence_requests")?.exists([])?);
+        // An ordinary legacy heartbeat gets its normal replies and never
+        // schedules a reciprocal dashboard preference probe.
+        session.presence_receive(recipient, Uuid::new_v4(), false)?;
+        assert!(!tx.prepare("SELECT 1 FROM presence_requests")?.exists([])?);
+        tx.rollback()?;
+    }
+    for store in &mut pair.stores {
+        store
+            .db
+            .execute("UPDATE node_presence SET next_probe_at=?1", [now() - 1])?;
+        assert!(!store.presence_tick()?);
+    }
+
+    assert!(
+        pair.agent(
+            0,
+            AgentOp::DashboardUpdate {
+                expected_revision: 1,
+                values: BTreeMap::from([("guide".into(), json!("just text"))]),
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(pair.agent(0, AgentOp::DashboardGet)?["revision"], 1);
+    for (expected_revision, status) in [(1, "https://example.org/status"), (2, "pending")] {
+        pair.agent(
+            0,
+            AgentOp::DashboardUpdate {
+                expected_revision,
+                values: BTreeMap::from([("note".into(), json!(status))]),
+            },
+        )?;
+        let board = pair.agent(0, AgentOp::DashboardGet)?;
+        assert_eq!(board["board"]["widgets"][4]["kind"], "text");
+        assert_eq!(board["board"]["widgets"][4]["unit"], "URL");
+        assert_eq!(board["board"]["widgets"][4]["value"], status);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn idle_pre_dashboard_receiver_discovers_existing_boards_on_upgrade() -> Result<()> {
+    for saved_codec in [true, false] {
+        discover_after_dashboard_upgrade(saved_codec).await?;
+    }
+    Ok(())
+}
+
+async fn discover_after_dashboard_upgrade(saved_codec: bool) -> Result<()> {
+    let mut pair = Pair::new().await;
+    directory_push_tests::negotiate(&mut pair);
+    for store in &pair.stores {
+        store.db.execute("UPDATE wire_peers SET version=8", [])?;
+        store
+            .db
+            .execute("UPDATE node_presence SET next_probe_at=?1", [now() - 1])?;
+    }
+    pair.agent(
+        0,
+        AgentOp::DashboardDefine {
+            expected_revision: 0,
+            board: serde_json::from_value(json!({"title":"Run","widgets":[
+            {"id":"link","kind":"link","label":"Guide","value":"https://example.org/"}]}))?,
+        },
+    )?;
+    assert!(
+        !pair.stores[0]
+            .db
+            .prepare("SELECT 1 FROM dashboard_sent")?
+            .exists([])?
+    );
+    pair.stores[1].db.execute_batch(
+        "DROP TABLE dashboards; DROP TABLE dashboard_sent;
+        DROP TABLE hosted_dashboard_gates;",
+    )?;
+    if !saved_codec {
+        pair.stores[1].db.execute("DELETE FROM wire_peers", [])?;
+    }
+    pair.reopen(1);
+    assert!(pair.stores[1].presence_tick()?);
+    pair.pump();
+    pair.stores[1]
+        .db
+        .execute("UPDATE node_presence SET next_probe_at=?1", [now() - 1])?;
+    pair.stores[1].presence_tick()?;
+    pair.pump();
+    let rows = pair.owner(1, OwnerOp::Dashboards { after: None })?;
+    assert_eq!(rows["rows"][0]["revision"], 1);
+    assert_eq!(rows["rows"][0]["board"]["widgets"][0]["kind"], "link");
+    // Publication itself may request one ordinary reachability check.
+    for store in &mut pair.stores {
+        store
+            .db
+            .execute("UPDATE node_presence SET next_probe_at=?1", [now() - 1])?;
+        store.presence_tick()?;
+    }
+    pair.pump();
+    for store in &mut pair.stores {
+        store
+            .db
+            .execute("UPDATE node_presence SET next_probe_at=?1", [now() - 1])?;
+        assert!(!store.presence_tick()?);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn babysitter_deduplicates_resume_across_restart_and_queues_one_account_event() {
     use gent_protocol::notifications::{Failure, Scope};
     let mut pair = Pair::new().await;

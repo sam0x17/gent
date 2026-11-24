@@ -34,6 +34,32 @@ pub(crate) fn configuration_version(edit: &gent_protocol::ConfigurationEdit) -> 
     }
 }
 
+/// The dashboard payload schema is shared with V9/V10 stores and checkpoints.
+pub(crate) fn check_dashboard_encoding(
+    board: &gent_protocol::dashboard::Board,
+) -> Result<(), &'static str> {
+    if board
+        .widgets
+        .iter()
+        .any(|w| w.kind == gent_protocol::dashboard::Kind::Link)
+    {
+        return Err("encode dashboard links as portable text widgets");
+    }
+    Ok(())
+}
+
+fn check_dashboard_version(event: &Event, version: u8) -> Result<(), &'static str> {
+    if let Event::Dashboard { board, .. } = event {
+        if version < DASHBOARD_VERSION {
+            return Err("dashboard requires protocol 9");
+        }
+        if let Some(board) = board {
+            check_dashboard_encoding(board)?;
+        }
+    }
+    Ok(())
+}
+
 fn check_configuration_version(event: &Event, version: u8) -> Result<(), String> {
     if let Event::ConfigurationRequest { edit, .. } = event {
         let required = configuration_version(edit);
@@ -133,9 +159,7 @@ fn v2(event: &mut Value, encode: bool) -> Result<(), String> {
 impl Serialize for Record {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut event = serde_json::to_value(&self.event).map_err(ser::Error::custom)?;
-        if self.version < DASHBOARD_VERSION && matches!(&self.event, Event::Dashboard { .. }) {
-            return Err(ser::Error::custom("dashboard requires protocol 9"));
-        }
+        check_dashboard_version(&self.event, self.version).map_err(ser::Error::custom)?;
         check_configuration_version(&self.event, self.version).map_err(ser::Error::custom)?;
         if self.version < ADMIN_VERSION && matches!(self.event, Event::UnregisterChat { .. }) {
             return Err(ser::Error::custom(
@@ -187,9 +211,6 @@ impl Serialize for Record {
 impl<'de> Deserialize<'de> for Record {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut envelope = Envelope::deserialize(deserializer)?;
-        if envelope.version < DASHBOARD_VERSION && envelope.event["kind"] == "dashboard" {
-            return Err(de::Error::custom("dashboard requires protocol 9"));
-        }
         if envelope.version < ADMIN_VERSION && envelope.event["kind"] == "unregister_chat" {
             return Err(de::Error::custom(
                 "remote administration requires Gent protocol 8",
@@ -228,6 +249,7 @@ impl<'de> Deserialize<'de> for Record {
             _ => return Err(de::Error::custom("unsupported node record version")),
         }
         let event: Event = serde_json::from_value(envelope.event).map_err(de::Error::custom)?;
+        check_dashboard_version(&event, envelope.version).map_err(de::Error::custom)?;
         check_configuration_version(&event, envelope.version).map_err(de::Error::custom)?;
         Ok(Self {
             version: envelope.version,

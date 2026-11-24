@@ -1,6 +1,7 @@
 """Drive the real tab widgets via AT-SPI in the smoke test's private graphical session."""
 from collections import Counter
 import json
+from pathlib import Path
 import re
 import subprocess
 import time
@@ -167,14 +168,25 @@ def exercise_enrolled_without_daemon(node):
 
 def exercise_dashboard(fixture, agent, cli):
     instruction = "Report the synthetic job status."
+    url = "https://example.test/report"
+    updated_url = "http://localhost:8042/done"
     board = {"title": "Fixture job", "widgets": [
         {"id": "inspect", "kind": "button", "label": "Inspect job", "value": instruction},
+        {"id": "report", "kind": "link", "label": "Job report", "value": url},
         {"id": "status", "kind": "text", "label": "Job status", "value": "Job queued"},
         {"id": "trend", "kind": "graph", "label": "Sample history", "value": [1, 8, 3], "unit": "ms"},
         {"id": "log", "kind": "events", "label": "Recent events", "value": ["Queued", "Started"]},
         {"id": "work", "kind": "progress", "label": "Work completed", "value": 15, "min": 10, "max": 30},
         {"id": "load", "kind": "gauge", "label": "Queue depth", "value": 6, "max": 8, "unit": "jobs"},
     ]}
+
+    def open_report(expected):
+        report = get("Job report")
+        assert report.queryHyperlink().getURI(0) == expected[-1]
+        assert report.queryAction().doAction(0)
+        opened = Path.home() / "opened"
+        wait_for(lambda: opened.exists() and opened.read_text().splitlines() == expected,
+                 "fixture browser opened job report")
 
     def graph_line_in_half(upper):
         plot = get(None, "drawing area")
@@ -199,6 +211,7 @@ def exercise_dashboard(fixture, agent, cli):
     # Dashboard stays selected throughout. Allow two of the GTK timer's 15 s ticks.
     get(board["title"], "label", timeout=35)
     get(agent["name"], "label")
+    open_report([url])
     for name in ("Job queued", "3 ms", "Queued\nStarted", "15", "6 jobs"):
         get(name, "label")
     assert get(None, "progress bar").queryValue().currentValue == 0.25
@@ -215,8 +228,9 @@ def exercise_dashboard(fixture, agent, cli):
     fixture.call("gent_ack", {"message_id": message["id"]})
 
     assert call("update", expected_revision=1, values={"status": "Job done", "trend": [8, 1, 9],
-                "work": 30, "load": 2, "log": ["Finished"]})["revision"] == 2
+                "work": 30, "load": 2, "log": ["Finished"], "report": updated_url})["revision"] == 2
     get("Job done", "label", timeout=35)
+    open_report([url, updated_url])
     for name in ("9 ms", "30", "2 jobs", "Finished"):
         get(name, "label")
     assert get(None, "progress bar").queryValue().currentValue == 1

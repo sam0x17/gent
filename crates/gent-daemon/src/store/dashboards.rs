@@ -2,12 +2,16 @@ use super::*;
 use crate::messages::{Event, wire::DASHBOARD_VERSION};
 use gent_protocol::dashboard::{Board, Kind};
 
+const LINK_UNIT: &str = "↗ web link";
+
 pub(super) fn schema(db: &Connection) -> Result<()> {
     let tx = db.unchecked_transaction()?;
+    let first_dashboard_schema = !tx.table_exists(None, "dashboards")?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS dashboards(agent TEXT PRIMARY KEY REFERENCES agents(id),revision INTEGER NOT NULL CHECK(revision>0),body TEXT,mutation TEXT);
     CREATE TABLE IF NOT EXISTS dashboard_sent(peer TEXT NOT NULL,agent TEXT NOT NULL, revision INTEGER NOT NULL,event TEXT NOT NULL,peer_key BLOB,PRIMARY KEY(peer,agent));
     CREATE TABLE IF NOT EXISTS hosted_dashboard_gates(agent TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,node TEXT NOT NULL,revision INTEGER NOT NULL);
-    CREATE TRIGGER IF NOT EXISTS dashboard_forget_peer AFTER DELETE ON network_links BEGIN DELETE FROM dashboard_sent WHERE peer=OLD.peer; END;
+    CREATE TRIGGER IF NOT EXISTS dashboard_forget_peer AFTER DELETE ON network_links BEGIN DELETE FROM dashboard_sent WHERE peer=OLD.peer;
+        DELETE FROM metadata WHERE key='dashboard_discovery:' || OLD.peer; END;
     CREATE TRIGGER IF NOT EXISTS dashboard_forget_agent AFTER DELETE ON agents BEGIN DELETE FROM dashboard_sent WHERE agent=OLD.id; END;")?;
     if !tx
         .prepare("SELECT 1 FROM pragma_table_info('dashboard_sent') WHERE name='peer_key'")?
@@ -21,8 +25,48 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if first_dashboard_schema {
+        // Established pre-V9 links can be completely idle when this receiver
+        // upgrades. Discover their capabilities once, even with no local board.
+        tx.execute_batch("INSERT OR IGNORE INTO presence_requests SELECT peer FROM network_links;
+            INSERT OR REPLACE INTO metadata SELECT 'dashboard_discovery:' || peer,hex(peer_key) FROM network_links;")?;
+    }
     tx.commit()?;
     Ok(())
+}
+
+// Both the legacy daemon and hosted checkpoint importer reserialize Board.
+// Use fields they retain. The exact unit qualifies otherwise ordinary text.
+fn encode_board(board: &mut Board) -> Result<()> {
+    board.validate().map_err(anyhow::Error::msg)?;
+    let mut encoded_link = false;
+    for widget in &mut board.widgets {
+        if widget.kind == Kind::Link {
+            widget.kind = Kind::Text;
+            widget.unit = Some(LINK_UNIT.into());
+            encoded_link = true;
+        }
+    }
+    if encoded_link {
+        board.validate().map_err(anyhow::Error::msg)?;
+    }
+    Ok(())
+}
+
+fn display_board(mut board: Board) -> Board {
+    for widget in &mut board.widgets {
+        if widget.kind == Kind::Text
+            && widget.unit.as_deref() == Some(LINK_UNIT)
+            && widget
+                .value
+                .as_str()
+                .is_some_and(gent_protocol::dashboard::web_url)
+        {
+            widget.kind = Kind::Link;
+            widget.unit = None;
+        }
+    }
+    board
 }
 
 impl StoreSession<'_> {
@@ -46,9 +90,13 @@ impl StoreSession<'_> {
     }
     pub(super) fn dashboard_get(&self, who: &Agent) -> Result<Value> {
         let (revision, board, _) = self.board(&who.id)?;
-        Ok(json!({"revision":revision,"board":board}))
+        Ok(json!({"revision":revision,"board":board.map(display_board)}))
     }
-    pub(super) fn dashboard_mutate(&self, who: &Agent, op: AgentOp) -> Result<Value> {
+    pub(super) fn dashboard_mutate(&self, who: &Agent, mut op: AgentOp) -> Result<Value> {
+        // A retry through an older daemon sees the same define fingerprint.
+        if let AgentOp::DashboardDefine { board, .. } = &mut op {
+            encode_board(board)?;
+        }
         let (revision, previous, last) = self.board(&who.id)?;
         let fingerprint = hash(&serde_json::to_string(&op)?);
         if last.as_ref() == Some(&fingerprint) {
@@ -64,7 +112,9 @@ impl StoreSession<'_> {
                 expected_revision,
                 values,
             } => {
-                let mut board = previous.context("define a dashboard before updating it")?;
+                let mut board = previous
+                    .map(display_board)
+                    .context("define a dashboard before updating it")?;
                 ensure!(
                     !values.is_empty() && values.len() <= 32,
                     "supply 1–32 widget values"
@@ -77,6 +127,7 @@ impl StoreSession<'_> {
                         .context("unknown widget")?;
                     w.value = value;
                 }
+                encode_board(&mut board)?;
                 (expected_revision, Some(board))
             }
             _ => unreachable!(),
@@ -85,9 +136,6 @@ impl StoreSession<'_> {
             expected == revision,
             "dashboard revision conflict; read gent_dashboard_get"
         );
-        if let Some(board) = &next {
-            board.validate().map_err(anyhow::Error::msg)?;
-        }
         let revision = revision.checked_add(1).context("revision exhausted")?;
         ensure!(
             revision <= MAX_REGISTRATION_GENERATION,
@@ -244,7 +292,7 @@ impl StoreSession<'_> {
                 break;
             }
             let board = serde_json::from_str::<Board>(&row.get::<_, String>(3)?)?;
-            rows.push(json!({"agent":row.get::<_,String>(0)?,"chat":row.get::<_,String>(1)?,"revision":row.get::<_,u64>(2)?,"board":board}));
+            rows.push(json!({"agent":row.get::<_,String>(0)?,"chat":row.get::<_,String>(1)?,"revision":row.get::<_,u64>(2)?,"board":display_board(board)}));
         }
         Ok(json!({"rows":rows,"next":next}))
     }

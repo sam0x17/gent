@@ -118,7 +118,7 @@ fn tools() -> Vec<Tool> {
     let revision = json!({"type":"integer","minimum":0,"description":"Current revision from gent_dashboard_get; zero before the first definition."});
     let widget = json!({"type":"object","additionalProperties":false,"required":["id","kind","label","value"],"properties":{
         "id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,64}$"},"label":{"type":"string","maxLength":128},
-        "kind":{"enum":["text","events","graph","gauge","progress","button"]},"value":{"description":"Text or button instruction, list of event strings, list of graph samples, or numeric reading."},
+        "kind":{"enum":["text","events","graph","gauge","progress","button","link"]},"value":{"description":"Text, a button instruction, an absolute HTTP or HTTPS URL for a link, a list of event strings, graph samples, or a numeric reading."},
         "unit":{"type":"string","maxLength":32},"min":{"type":"number"},"max":{"type":"number"}}});
     let declarations = vec![
         (
@@ -135,7 +135,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_dashboard_define",
-            "Publish or replace this chat's cluster-visible dashboard. Supply up to 32 named widgets. A button's value is the callback instruction sent to this chat when clicked.",
+            "Publish or replace this chat's cluster-visible dashboard. Supply up to 32 named widgets. A link opens its URL in the viewer's default browser when clicked. A button sends its instruction to this chat.",
             json!({"expected_revision":revision,"board":{"type":"object","additionalProperties":false,"required":["title","widgets"],"properties":{"title":{"type":"string","maxLength":128},"widgets":{"type":"array","minItems":1,"maxItems":32,"items":widget}}}}),
             vec!["expected_revision", "board"],
         ),
