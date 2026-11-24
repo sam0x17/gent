@@ -47,6 +47,19 @@ pub(super) fn backfill(dest: &Connection, source: &Connection, node: &str) -> Re
 }
 
 impl StoreSession<'_> {
+    pub(super) fn local_native_message_dates(&self) -> Result<Value> {
+        let mut query = self.db.prepare(
+            "SELECT d.agent,d.timestamp FROM chat_message_dates d
+            JOIN agents a ON a.id=d.agent WHERE a.node_id=?1 AND d.kind='native'",
+        )?;
+        let dates = query
+            .query_map([self.identity.node.id()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
+        Ok(json!(dates))
+    }
+
     pub(super) fn message_dates(&self, id: &str) -> Result<MessageDates> {
         Ok(self.db.query_row(
             "SELECT MAX(timestamp) FILTER(WHERE kind='gent'),

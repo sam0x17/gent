@@ -552,7 +552,11 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     wait_for(lambda: any(r["effect"] == "deny" and r["permission"] == "send" for r in
                          json.loads(cli("--json", "config").stdout)["policy"]["rules"]), "changed signed send rule")
     tab("Chats")
-    get("Gent Desktop", "table cell")
+    table = get("Gent Desktop", "table cell").parent.queryTable()
+    names = [table.getAccessibleAt(i, 0).name for i in range(table.nRows)]
+    # The dashboard callback above sent a Gent message between these two chats.
+    assert names.index("Fixture conversation") < names.index("A quiet chat"), names
+    assert names.index("Gent Desktop") < names.index("A quiet chat"), names
     def fixture_revoked():
         return next(a["revoked"] for a in json.loads(cli("--json", "agents").stdout) if a["id"] == agent["id"])
     def open_unregister():

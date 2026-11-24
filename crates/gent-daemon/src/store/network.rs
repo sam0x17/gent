@@ -621,7 +621,9 @@ impl StoreSession<'_> {
                 self.db.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES(?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
                 self.bind_attachments(&message, &attachments)?;
                 self.save_message_date(&sender.id, "gent", message.created_at)?;
-                self.record_gent_message(&recipient.id, message.created_at)?;
+                // This is the first admitted copy. A message sent to an offline
+                // recipient becomes recent when it actually reaches this inbox.
+                self.record_gent_message(&recipient.id, self.timestamp)?;
                 self.record_relay_message(&message)?;
                 self.web_state_changed(&recipient.node_id)?;
                 Ok(())

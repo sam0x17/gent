@@ -996,6 +996,7 @@ impl StoreSession<'_> {
                 node,
                 provider,
             } => self.resolve_agent(None, &name, node.as_deref(), provider.as_deref()),
+            OwnerOp::NativeMessageDates => self.local_native_message_dates(),
             OwnerOp::ObserveActivity {
                 agent_id,
                 last_activity_at,

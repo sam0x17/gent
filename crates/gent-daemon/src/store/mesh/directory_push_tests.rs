@@ -170,8 +170,14 @@ async fn third_node_learns_send_receive_and_native_dates_without_receiving_a_mes
             .find(|r| r["id"] == id)
             .unwrap()
     };
-    for id in &ids[..2] {
-        assert_eq!(row(id)["last_gent_message_at"], date);
+    let arrival = mesh.stores[1].db.query_row(
+        "SELECT timestamp FROM chat_message_dates WHERE agent=?1 AND kind='gent'",
+        [&ids[1]],
+        |r| r.get::<_, i64>(0),
+    )?;
+    assert!(arrival >= date);
+    for (id, expected) in [(&ids[0], date), (&ids[1], arrival)] {
+        assert_eq!(row(id)["last_gent_message_at"], expected);
         assert_eq!(row(id)["has_gent_messages"], true);
     }
     assert!(row(&ids[2])["last_gent_message_at"].is_null());

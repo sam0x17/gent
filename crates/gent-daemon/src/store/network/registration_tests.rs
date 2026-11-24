@@ -658,8 +658,26 @@ async fn message_dates_backfill_only_admitted_recipients_and_outlive_history() -
     pair.reopen(0);
     assert_eq!(dates(&pair, 0, &pair.agents[0])?, Some(date));
     assert_eq!(dates(&pair, 0, &pair.agents[1])?, None);
+    let bytes: Vec<u8> = pair.stores[0].db.query_row(
+        "SELECT body FROM network_events WHERE subject=?1",
+        [sent["message_id"].as_str().unwrap()],
+        |r| r.get(0),
+    )?;
+    // Simulate transit time, then replay the same encrypted record a second
+    // time. Only its first admission can advance the recipient's date.
+    for elapsed in [10, 20] {
+        let store = &pair.stores[1];
+        let tx = store.db.unchecked_transaction()?;
+        let mut session = store.network_session(&tx, store.identity.state(&tx)?);
+        session.timestamp = date + elapsed;
+        session.import_event(
+            pair.stores[0].identity.node.id(),
+            serde_json::from_slice::<Record>(&bytes)?.event,
+        )?;
+        tx.commit()?;
+        assert_eq!(dates(&pair, 1, &pair.agents[1])?, Some(date + 10));
+    }
     pair.pump();
-    assert_eq!(dates(&pair, 1, &pair.agents[1])?, Some(date));
     // Upgrading on the receiver finds the accepted but still unread inbox message.
     pair.stores[1]
         .db

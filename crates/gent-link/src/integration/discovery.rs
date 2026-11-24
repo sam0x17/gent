@@ -217,7 +217,6 @@ async fn register(
         native: chat.id.clone(),
         name,
         last_activity_at: None,
-        last_native_message_at: None,
         endpoint: inventory.socket.clone(),
         recovery,
     })
@@ -250,6 +249,11 @@ async fn refresh(home: &Path) -> Result<()> {
         super::recovery::initialize_discovery(home, &cfg)?;
     }
     let (saved, mut catalog) = storage::read(home, &cfg)?;
+    // Keep the discovery catalog readable by older installations. The daemon
+    // already owns the durable message dates, including after a chat restore.
+    let native_dates: BTreeMap<String, i64> = serde_json::from_value(
+        crate::owner(home, gent_protocol::OwnerOp::NativeMessageDates).await?,
+    )?;
     for host in [Host::Codex, Host::ClaudeCode] {
         let result = tokio::time::timeout(Duration::from_secs(45), async {
             match host {
@@ -288,7 +292,7 @@ async fn refresh(home: &Path) -> Result<()> {
                         break;
                     }
                     if let Some(entry) = catalog.entries.get_mut(&key) {
-                        match observe_activity(home, entry, chat).await {
+                        match observe_activity(home, entry, chat, &native_dates).await {
                             Ok(()) => indexed += 1,
                             Err(e) => {
                                 failures += 1;
@@ -304,7 +308,9 @@ async fn refresh(home: &Path) -> Result<()> {
                     added += 1;
                     match register(home, &cfg, host, &inventory, chat).await {
                         Ok(mut entry) => {
-                            if let Err(e) = observe_activity(home, &mut entry, chat).await {
+                            if let Err(e) =
+                                observe_activity(home, &mut entry, chat, &native_dates).await
+                            {
                                 failures += 1;
                                 error = Some(e.to_string());
                             }
@@ -363,13 +369,18 @@ fn record_failure(previous: &mut Value, error: &str) {
     }
 }
 
-async fn observe_activity(home: &Path, entry: &mut Entry, chat: &hosts::Chat) -> Result<()> {
+async fn observe_activity(
+    home: &Path,
+    entry: &mut Entry,
+    chat: &hosts::Chat,
+    dates: &BTreeMap<String, i64>,
+) -> Result<()> {
     let activity = chat
         .last_activity_at
         .filter(|v| Some(*v) > entry.last_activity_at);
     let native = chat
         .last_native_message_at
-        .filter(|v| Some(*v) > entry.last_native_message_at);
+        .filter(|v| Some(*v) > dates.get(&entry.agent).copied());
     if let Some(timestamp) = activity.or(native) {
         crate::owner(
             home,
@@ -381,7 +392,6 @@ async fn observe_activity(home: &Path, entry: &mut Entry, chat: &hosts::Chat) ->
         )
         .await?;
         entry.last_activity_at = entry.last_activity_at.max(activity);
-        entry.last_native_message_at = entry.last_native_message_at.max(native);
     }
     Ok(())
 }

@@ -746,6 +746,7 @@ pub enum OwnerOp {
     Nodes,
     RefreshNodes,
     Agents,
+    NativeMessageDates,
     ObserveActivity {
         agent_id: String,
         last_activity_at: i64,

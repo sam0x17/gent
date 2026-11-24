@@ -194,6 +194,9 @@ def main():
         fixture = Client(base + ["mcp", "serve", "--binding", str(home / "fixture.key")])
         cleanup.callback(fixture.close)
         agent = fixture.call("gent_register", {"name": "Fixture conversation", "provider": "generic-mcp"})[0]["agent"]
+        quiet = Client(base + ["mcp", "serve", "--binding", str(home / "quiet.key")])
+        cleanup.callback(quiet.close)
+        quiet.call("gent_register", {"name": "A quiet chat", "provider": "generic-mcp"})
         tray = TrayHost(home / "desktop.sock")
         cleanup.callback(tray.close)
         cli("desktop", "enable")
