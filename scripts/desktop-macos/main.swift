@@ -355,6 +355,93 @@ func fixtureRaster(_ format: NSBitmapImageRep.FileType, width: Int, height: Int)
     return bitmap.representation(using: format, properties: [:])!
 }
 
+// Use AppKit's native backing for the first capture. A bitmap with two pixels per
+// point also exercises the 2× drawing path on a screenless SSH host.
+func chartCapture(_ view: NSImageView, at2x: Bool) -> NSBitmapImageRep {
+    let bitmap: NSBitmapImageRep
+    if at2x {
+        let size = view.bounds.size
+        bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(ceil(size.width * 2)),
+                                  pixelsHigh: Int(ceil(size.height * 2)), bitsPerSample: 8,
+                                  samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                  colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        bitmap.size = size
+        NSGraphicsContext.saveGraphicsState()
+        let context = NSGraphicsContext(bitmapImageRep: bitmap)!
+        NSGraphicsContext.current = context
+        view.cell!.draw(withFrame: view.bounds, in: view)
+        NSGraphicsContext.restoreGraphicsState()
+    } else {
+        bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+    }
+    return bitmap
+}
+
+func rasterizedAtSourceSize(_ vector: NSImage) -> NSImage {
+    let size = vector.size
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                                  bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                  colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)!
+    vector.draw(in: NSRect(origin: .zero, size: size))
+    NSGraphicsContext.restoreGraphicsState()
+    let image = NSImage(size: size)
+    image.addRepresentation(bitmap)
+    return image
+}
+
+func checkChartPixels(_ bitmap: NSBitmapImageRep, kind: String, expectSharp: Bool) {
+    let width = Double(bitmap.pixelsWide)
+    func pixel(_ x: Int, _ y: Int) -> NSColor {
+        bitmap.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!
+    }
+    func midline(_ x: Double) -> NSColor { pixel(Int(x / 60 * width), bitmap.pixelsHigh / 2) }
+    let mark = midline(6)
+    require(mark.blueComponent > 0.9 && mark.redComponent < 0.3, "native SVG draws the " + kind + " mark")
+    if expectSharp {
+        let xs = stride(from: bitmap.pixelsWide / 3, to: bitmap.pixelsWide * 9 / 10, by: 4)
+        let ys = stride(from: 0, to: bitmap.pixelsHigh, by: 4)
+        let hasText = xs.contains { x in
+            ys.contains { y in
+                let color = pixel(x, y)
+                return color.alphaComponent > 0.95 && color.redComponent < 0.3
+            }
+        }
+        require(hasText, "native SVG draws chart text for " + kind)
+    }
+
+    // The screen color profile affects even fully covered red pixels. Sample both
+    // endpoints of the contrast scale from broad, solid fills in this same capture.
+    let red = midline(16.5)
+    let paper = midline(19)
+    let contrast = paper.greenComponent - red.greenComponent
+    require(red.alphaComponent > 0.98 && red.redComponent - red.greenComponent > 0.45
+            && paper.greenComponent > 0.9 && contrast > 0.5, "red and white SVG reference fills")
+    func matches(_ color: NSColor, _ reference: NSColor) -> Bool {
+        max(abs(color.redComponent - reference.redComponent),
+            abs(color.greenComponent - reference.greenComponent),
+            abs(color.blueComponent - reference.blueComponent)) <= contrast * 0.05 && color.alphaComponent > 0.98
+    }
+    let left = 12.25 / 60 * width
+    let right = 12.75 / 60 * width
+    let scan = (Int(floor(left)) - 3)...(Int(ceil(right)) + 3)
+    let core = scan.filter { matches(pixel($0, bitmap.pixelsHigh / 2), red) }
+    var sharp = false
+    if let first = core.first, let last = core.last {
+        // Allow antialiasing on each edge; require a solid contiguous interior
+        // of the projected width and white paper immediately outside both edges.
+        sharp = core.count == last - first + 1 && core.count >= max(1, Int(floor(right - left)) - 2)
+            && abs(Double(first) - left) <= 2 && abs(Double(last + 1) - right) <= 2
+            && matches(pixel(scan.lowerBound, bitmap.pixelsHigh / 2), paper)
+            && matches(pixel(scan.upperBound, bitmap.pixelsHigh / 2), paper)
+    }
+    require(sharp == expectSharp,
+            "\(kind) stripe in \(bitmap.pixelsWide)×\(bitmap.pixelsHigh) capture, expected sharp=\(expectSharp), " +
+            "edges=\(left)...\(right), solid pixels=\(core), reference=\(red), center=\(midline(12.5))")
+}
+
 func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
     let chartKinds = ["graph", "bar", "pie", "radar", "scatter"]
     let categories = [["label": "A", "value": 1], ["label": "B", "value": 2], ["label": "C", "value": 3]]
@@ -372,6 +459,7 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
         let svg = """
         <svg xmlns="http://www.w3.org/2000/svg" width="60" height="\(height)" viewBox="0 0 60 \(height)">
         <rect width="60" height="\(height)" fill="white"/><rect x="12.25" width=".5" height="\(height)" fill="red"/>
+        <rect x="15" width="3" height="\(height)" fill="red"/>
         <g transform="translate(0 \(i))">\(marks[i])</g>
         <text x="20" y="12" font-size="7">\(kind)</text></svg>
         """
@@ -446,26 +534,19 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
             require(abs(size.width - contentWidth) <= 1 && abs(size.height - size.width * CGFloat(16 + i * 2) / 60) <= 1,
                     "full-width proportional SVG at \(width) for " + kind)
             chart.scrollToVisible(chart.bounds)
-            let bitmap = chart.bitmapImageRepForCachingDisplay(in: chart.bounds)!
-            chart.cacheDisplay(in: chart.bounds, to: bitmap)
-            func pixel(_ x: Double) -> NSColor {
-                bitmap.colorAt(x: Int(x / 60 * Double(bitmap.pixelsWide)), y: bitmap.pixelsHigh / 2)!.usingColorSpace(.sRGB)!
+            for at2x in [false, true] {
+                checkChartPixels(chartCapture(chart, at2x: at2x), kind: kind, expectSharp: true)
             }
-            let mark = pixel(6)
-            require(mark.blueComponent > 0.9 && mark.redComponent < 0.3, "native SVG draws the " + kind + " mark")
-            let xs = stride(from: bitmap.pixelsWide / 3, to: bitmap.pixelsWide * 9 / 10, by: 4)
-            let ys = stride(from: 0, to: bitmap.pixelsHigh, by: 4)
-            let hasText = xs.contains { x in
-                ys.contains { y in
-                    let color = bitmap.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!
-                    return color.alphaComponent > 0.95 && color.redComponent < 0.3
+            if kind == "graph" {
+                // The same mark and reference patch survive an upscale from
+                // 60×16 pixels. The half-unit stripe must fail the sharpness check.
+                let vector = chart.image!
+                chart.image = rasterizedAtSourceSize(vector)
+                for at2x in [false, true] {
+                    checkChartPixels(chartCapture(chart, at2x: at2x), kind: kind, expectSharp: false)
                 }
+                chart.image = vector
             }
-            require(hasText, "native SVG draws chart text for " + kind)
-            let stripe = pixel(12.5)
-            let paper = pixel(13.5)
-            require(stripe.redComponent > 0.9 && stripe.greenComponent < 0.25 && paper.greenComponent > 0.9,
-                    "native SVG preserves fine detail after resizing " + kind)
         }
         let landscape = image("Wide PNG").bounds
         let portrait = image("Tall JPEG").bounds
