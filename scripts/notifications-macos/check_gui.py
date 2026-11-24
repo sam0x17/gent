@@ -37,7 +37,7 @@ def build_tray():
 
 
 STAGES = {"no_gui", "lookup", "registration_unavailable", "settings_requested", "settings_received",
-          "permission_requested", "permission_error", "permission_granted", "permission_not_granted",
+          "permission_requested", "permission_pending", "permission_error", "permission_granted", "permission_not_granted",
           "already_delivered", "submission_requested", "submission_error", "submitted"}
 DOMAINS = {"UNErrorDomain", "NSPOSIXErrorDomain", "NSCocoaErrorDomain", "NSOSStatusErrorDomain",
            "RBSRequestErrorDomain", "RBSServiceErrorDomain", "NSMachErrorDomain",
@@ -197,6 +197,10 @@ def main():
 def check_notice(connection):
     notice_id = str(uuid.uuid4())
     accepted, stage = deliver(connection, notice_id)
+    deadline = time.monotonic() + 135
+    while not accepted and stage == "permission_pending" and time.monotonic() < deadline:
+        time.sleep(1)
+        accepted, stage = deliver(connection, notice_id)
     if not accepted and stage == "permission_granted":
         accepted, stage = deliver(connection, notice_id)
     if not accepted:

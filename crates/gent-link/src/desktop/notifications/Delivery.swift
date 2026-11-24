@@ -33,21 +33,12 @@ struct Banner: Decodable {
     let title: String
     let body: String
 
-    func submit(to center: NotificationCenterClient, trace: @escaping Trace = { _, _, _ in },
+    func submit(using permission: NotificationPermission, trace: @escaping Trace = { _, _, _ in },
                 accepted: @escaping @Sendable (Bool) -> Void) {
-        trace("settings_requested", nil, nil)
-        center.authorization { status in
-            trace("settings_received", status, nil)
+        permission.check(trace: trace) { status in
             switch status {
-            case .notDetermined:
-                // Permission can take arbitrarily long. Re-read the signed-in account
-                // and pending event on the next attempt before actually submitting.
-                trace("permission_requested", status, nil)
-                center.requestAuthorization(options: [.alert]) { granted, error in
-                    trace(error != nil ? "permission_error" : granted ? "permission_granted" : "permission_not_granted", status, error)
-                    accepted(false)
-                }
             case .authorized, .provisional:
+                let center = permission.center
                 let identifier = id.uuidString.lowercased()
                 center.wasDelivered(identifier) { delivered in
                     // Retry after an interrupted acknowledgment or cursor write.
@@ -68,6 +59,42 @@ struct Banner: Decodable {
                 }
             default:
                 accepted(false)
+            }
+        }
+    }
+}
+
+// Both the GUI launch and an arriving event can observe an undecided setting.
+final class NotificationPermission {
+    let center: NotificationCenterClient
+    private let lock = NSLock()
+    private var requesting = false
+
+    init(_ center: NotificationCenterClient) { self.center = center }
+
+    func check(trace: @escaping Banner.Trace = { _, _, _ in },
+               completion: @escaping @Sendable (UNAuthorizationStatus) -> Void = { _ in }) {
+        trace("settings_requested", nil, nil)
+        center.authorization { status in
+            trace("settings_received", status, nil)
+            guard status == .notDetermined else { completion(status); return }
+            let start = self.lock.withLock {
+                if self.requesting { return false }
+                self.requesting = true
+                return true
+            }
+            guard start else {
+                trace("permission_pending", status, nil)
+                completion(status)
+                return
+            }
+            trace("permission_requested", status, nil)
+            self.center.requestAuthorization(options: [.alert]) { granted, error in
+                self.lock.withLock { self.requesting = false }
+                trace(error != nil ? "permission_error" : granted ? "permission_granted" : "permission_not_granted", status, error)
+                // An open dialog may outlive the account session. The watcher
+                // re-reads the account and event before submitting a banner.
+                completion(.notDetermined)
             }
         }
     }
@@ -99,6 +126,8 @@ extension Desktop {
                                    sendPage("notification_result", ["attempt": attempt.uuidString.lowercased(),
                                                                     "accepted": accepted])
                                }) {
+        let permission = center.map(NotificationPermission.init)
+        prepareNotifications = { permission?.check() }
         deliverNotification = { fields in
             guard let bytes = try? JSONSerialization.data(withJSONObject: fields),
                   let banner = try? JSONDecoder().decode(Banner.self, from: bytes) else { return }
@@ -113,12 +142,12 @@ extension Desktop {
                     sendPage("notification_diagnostic", data)
                 }
             }
-            guard let center = center else {
+            guard let permission = permission else {
                 trace("registration_unavailable", nil, nil)
                 DispatchQueue.main.async { reply(banner.attempt, false) }
                 return
             }
-            banner.submit(to: center, trace: trace) { accepted in
+            banner.submit(using: permission, trace: trace) { accepted in
                 DispatchQueue.main.async { reply(banner.attempt, accepted) }
             }
         }

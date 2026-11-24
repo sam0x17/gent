@@ -5,7 +5,8 @@ import ImageIO
 import UserNotifications
 
 final class Center: NotificationCenterClient {
-    let status: UNAuthorizationStatus
+    var status: UNAuthorizationStatus
+    var permissionRequests = 0
     var permission: (@Sendable (Bool, Error?) -> Void)?
     var added: (@Sendable (Error?) -> Void)?
     var deliveredID: String?
@@ -20,6 +21,7 @@ final class Center: NotificationCenterClient {
     func requestAuthorization(options: UNAuthorizationOptions,
                               completionHandler: @escaping @Sendable (Bool, Error?) -> Void) {
         precondition(options == [.alert])
+        permissionRequests += 1
         permission = completionHandler
     }
 
@@ -48,7 +50,7 @@ for (granted, failure) in [(false, nil), (true, nil), (false, error as Error?)] 
     let center = Center(.notDetermined)
     let ack = Acknowledgment()
     let trace = Stages()
-    banner.submit(to: center, trace: { stage, _, _ in trace.received.append(stage) }) { ack.record($0) }
+    banner.submit(using: NotificationPermission(center), trace: { stage, _, _ in trace.received.append(stage) }) { ack.record($0) }
     precondition(trace.received == ["settings_requested", "settings_received", "permission_requested"])
     precondition(ack.received.isEmpty && center.request == nil)
     center.permission!(granted, failure)
@@ -60,7 +62,7 @@ for status: UNAuthorizationStatus in [.denied, .authorized, .provisional] {
     for failure in [nil, error as Error?] {
         let center = Center(status)
         let ack = Acknowledgment()
-        banner.submit(to: center) { ack.record($0) }
+        banner.submit(using: NotificationPermission(center)) { ack.record($0) }
         precondition(center.permission == nil)
         if status == .denied {
             precondition(ack.received == [false] && center.request == nil)
@@ -77,13 +79,38 @@ for status: UNAuthorizationStatus in [.denied, .authorized, .provisional] {
 let retry = Center(.authorized)
 retry.deliveredID = id.uuidString.lowercased()
 let duplicate = Acknowledgment()
-banner.submit(to: retry) { duplicate.record($0) }
+banner.submit(using: NotificationPermission(retry)) { duplicate.record($0) }
 precondition(duplicate.received == [true] && retry.request == nil)
 print("macOS notification authorization and acknowledgment fixture passed")
 
 // Exercise the tray's real message dispatch and asynchronous acceptance without
 // giving this test access to the user's notification center or account inbox.
 let desktop = Desktop(iconPath: CommandLine.arguments[2], openAtLaunch: false)
+for status: UNAuthorizationStatus in [.notDetermined, .denied, .authorized, .provisional] {
+    let center = Center(status)
+    desktop.useNotificationCenter(center)
+    desktop.prepareNotifications?()
+    precondition(center.permissionRequests == (status == .notDetermined ? 1 : 0))
+    precondition(center.request == nil)
+}
+let firstLaunch = Center(.notDetermined)
+var launchReplies: [Bool] = []
+desktop.useNotificationCenter(firstLaunch) { _, accepted in launchReplies.append(accepted) }
+desktop.prepareNotifications?()
+precondition(firstLaunch.permissionRequests == 1 && firstLaunch.request == nil && launchReplies.isEmpty)
+let arriving = ["notification": ["id": id.uuidString, "attempt": banner.attempt.uuidString,
+                                 "title": banner.title, "body": banner.body]]
+desktop.receive(arriving)
+RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+precondition(firstLaunch.permissionRequests == 1 && launchReplies == [false] && firstLaunch.request == nil)
+firstLaunch.status = .authorized
+firstLaunch.permission!(true, nil)
+RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+precondition(launchReplies == [false] && firstLaunch.request == nil)
+desktop.prepareNotifications?()
+desktop.receive(arriving)
+precondition(firstLaunch.permissionRequests == 1 && firstLaunch.request?.identifier == id.uuidString.lowercased())
+print("First GUI launch asks before any notice, respects existing choices, and shares an outstanding prompt")
 let trayCenter = Center(.authorized)
 var replies: [(UUID, Bool)] = []
 desktop.useNotificationCenter(trayCenter) { replies.append(($0, $1)) }

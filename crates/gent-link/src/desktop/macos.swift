@@ -16,6 +16,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     lazy var about = ManagementTab(page: "about", icon: icon)
     let icon: NSImage?
     let trayIcon: NSImage?
+    var prepareNotifications: (() -> Void)?
     var deliverNotification: (([String: Any]) -> Void)?
     let openAtLaunch: Bool
     var statusItem: NSStatusItem!
@@ -81,6 +82,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         NSApp.mainMenu = main
         makeWindow()
         if openAtLaunch { show() } else { request("refresh") }
+        prepareNotifications?()
 
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             self?.poll()

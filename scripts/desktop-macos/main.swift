@@ -1029,6 +1029,8 @@ if CommandLine.arguments.dropFirst(2).contains(where: { ["--cluster", "--nodes"]
     print("PASS: native Status tab, setup, node search, guarded actions, rename dialogs and refresh requests")
     exit(0)
 }
+var permissionChecks = 0
+desktop.prepareNotifications = { permissionChecks += 1 }
 let dashboardOnly = CommandLine.arguments.dropFirst(2).contains("--dashboard")
 let lifetime = Pipe()
 if dashboardOnly {
@@ -1051,6 +1053,7 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     require(desktop.statusItem?.isVisible == true && desktop.statusItem?.button?.image != nil,
             "visible menu-bar item and image in a logged-in Aqua session")
     require(!desktop.window.isVisible, "starts in tray")
+    require(permissionChecks == 1, "tray launch checks notification permission before any notice")
     let menu = desktop.statusItem.menu!
     guard let open = menu.item(withTitle: "Open Gent Desktop"), let action = open.action else {
         require(false, "Open menu item")
