@@ -238,19 +238,28 @@ class DashboardCard(Gtk.Frame):
     def palette(self):
         context = self.get_style_context()
         state = context.get_state()
-        surface = context.get_property("background-color", state)
+        background = context.get_property("background-color", state)
+        # The viewport paints the themed canvas beneath translucent card surfaces.
+        found, canvas = context.lookup_color("theme_bg_color")
+        canvas = canvas if found else background
 
-        def rgb(color):
-            return [round(255 * (v * color.alpha + bg * (1 - color.alpha)))
-                    for v, bg in zip((color.red, color.green, color.blue),
-                                     (surface.red, surface.green, surface.blue))]
+        def over(color, base):
+            return [v * color.alpha + bg * (1 - color.alpha)
+                    for v, bg in zip((color.red, color.green, color.blue), base)]
+
+        surface = over(background, (canvas.red, canvas.green, canvas.blue))
+
+        def channels(components):
+            return [round(255 * v) for v in components]
 
         def foreground(widget):
             style = widget.get_style_context()
-            return rgb(style.get_color(style.get_state()))
+            return channels(over(style.get_color(style.get_state()), surface))
 
-        return {"surface": rgb(surface), "text": foreground(self.title),
-                "secondary": foreground(self.publisher), "accent": rgb(context.get_property("outline-color", state))}
+        # Both native bar fills share the card's focus outline accent.
+        accent = context.get_property("outline-color", state)
+        return {"surface": channels(surface), "text": foreground(self.title),
+                "secondary": foreground(self.publisher), "accent": channels(over(accent, surface))}
 
 
 class DashboardPane(Gtk.Box):
@@ -262,6 +271,7 @@ class DashboardPane(Gtk.Box):
         screen = self.get_screen()
         Gtk.StyleContext.add_provider_for_screen(screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.connect("destroy", lambda *_: Gtk.StyleContext.remove_provider_for_screen(screen, provider))
+        # The first request needs the same style nodes before a publisher has supplied a card.
         self.empty_card = DashboardCard("", "")
         self.rows = None
         self.last_palette = None

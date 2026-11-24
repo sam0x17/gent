@@ -505,7 +505,10 @@ fn cartesian_width_tracks_tick_strings_and_keeps_edge_labels_visible() {
         assert!(left <= 40.0 && right >= 248.0);
         assert!(svg.contains(&format!(r#"<circle cx="{left:.2}""#)));
         assert!(svg.contains(&format!(r#"<circle cx="{right:.2}""#)));
-        assert!(svg.contains(">2</text>"), "keep the middle tick when it fits");
+        assert!(
+            svg.contains(">2</text>"),
+            "keep the middle tick when it fits"
+        );
     }
     let (long, _) = rendered(
         "scatter",

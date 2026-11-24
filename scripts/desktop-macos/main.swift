@@ -30,11 +30,24 @@ enum Request: Equatable {
 let accountRead = Request.json(["op": "cluster"])
 let snapshotRead = Request.command("refresh")
 
-func requests(during action: () -> Void) -> [Request] {
+@discardableResult
+func waitInMainRunLoop(until ready: () -> Bool) -> Bool {
+    let deadline = ProcessInfo.processInfo.systemUptime + 3
+    while !ready() && ProcessInfo.processInfo.systemUptime < deadline {
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+    }
+    return ready()
+}
+
+func requests(waitForOutput: Bool = false, during action: () -> Void) -> [Request] {
     let pipe = Pipe()
     let output = dup(STDOUT_FILENO)
     require(output >= 0 && dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO) >= 0, "capture supervisor requests")
     action()
+    if waitForOutput {
+        var reader = pollfd(fd: pipe.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+        waitInMainRunLoop { poll(&reader, 1, 0) == 1 }
+    }
     require(dup2(output, STDOUT_FILENO) >= 0, "restore fixture output")
     close(output)
     pipe.fileHandleForWriting.closeFile()
@@ -592,25 +605,48 @@ func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
     let oldAppearance = window.appearance
     let oldAccent = dashboard.accentColor
     let wasVisible = window.isVisible
+    let initialAppearance = window.effectiveAppearance.name.rawValue
     defer {
+        window.orderOut(nil)
         dashboard.accentColor = oldAccent
         window.appearance = oldAppearance
-        if !wasVisible { window.orderOut(nil) }
+        if wasVisible { window.orderFront(nil) }
     }
-    func settle() {
+    func state(_ stage: String) -> String {
+        let mode = CommandLine.arguments.contains("--dashboard") ? "--dashboard" : "full"
+        return "\(stage) [\(mode), initial=\(initialAppearance), window=\(window.effectiveAppearance.name.rawValue), " +
+            "dashboard=\(dashboard.view.effectiveAppearance.name.rawValue), tab=\(desktop.tabs.selectedTabViewItem?.label ?? "none"), " +
+            "grid=\(scroll.documentView?.effectiveAppearance.name.rawValue ?? "none"), visible=\(window.isVisible), " +
+            "attached=\(dashboard.view.window === window), hidden=\(dashboard.view.isHiddenOrHasHiddenAncestor)]"
+    }
+    func settle(_ stage: String, _ expected: NSAppearance.Name) {
         desktop.tabs.layoutSubtreeIfNeeded()
-        // AppKit invalidates effective appearances during its display pass.
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.04))
+        window.displayIfNeeded()
+        let selected = window.isVisible && desktop.tabs.selectedTabViewItem?.label == "Dashboard"
+        let modes: [NSAppearance.Name] = [.aqua, .darkAqua]
+        require(waitInMainRunLoop {
+            window.effectiveAppearance.bestMatch(from: modes) == expected &&
+                (!selected || (dashboard.view.window === window && dashboard.view.effectiveAppearance.bestMatch(from: modes) == expected))
+        }, state(stage) + " did not adopt " + expected.rawValue)
+        var drained = false
+        DispatchQueue.main.async { drained = true }
+        require(waitInMainRunLoop { drained }, state(stage) + " could not drain the main dispatch queue")
     }
-    func readPalette(_ sent: [Request]) -> [String: [Int]] {
+    func readPalette(_ stage: String, _ expected: NSAppearance.Name, during action: () -> Void) -> [String: [Int]] {
+        let sent = requests(waitForOutput: true) { action(); settle(stage, expected) }
         guard sent.count == 1, case .json(let message) = sent[0], message.count == 2,
               message["op"] as? String == "dashboard", let palette = message["palette"] as? [String: [Int]] else {
-            fatalError("Expected exactly one dashboard read with a palette, received \(sent)")
+            require(false, state(stage) + " expected one dashboard palette read for \(expected.rawValue), received \(sent)")
+            return [:]
         }
         require(Set(palette.keys) == ["surface", "text", "secondary", "accent"] && palette.values.allSatisfy {
             $0.count == 3 && $0.allSatisfy { (0...255).contains($0) }
-        }, "four local sRGB palette triples")
+        }, state(stage) + " expected four local sRGB palette triples")
         return palette
+    }
+    func expectNoRead(_ stage: String, _ expected: NSAppearance.Name, during action: () -> Void) {
+        let sent = requests { action(); settle(stage, expected) }
+        require(sent.isEmpty, state(stage) + " expected no reads, received \(sent)")
     }
     func publish(_ palette: [String: [Int]]) {
         func rgb(_ role: String) -> String { "rgb(" + palette[role]!.map(String.init).joined(separator: ",") + ")" }
@@ -691,19 +727,24 @@ func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
         require(style.paragraphSpacing > 0 && style.paragraphSpacing <= 4, "compact selectable event entries")
     }
 
-    window.appearance = NSAppearance(named: .aqua)
-    window.orderFront(nil)
-    resizeDesktop(desktop, width: 766, height: 604)
-    settle()
-    let light = readPalette(requests { dashboard.load() })
+    // Establish Aqua off the Dashboard so launch appearance and pending color notifications
+    // cannot turn the baseline into a second read. Selection issues the normal first request.
+    _ = requests { desktop.tabs.selectTabViewItem(withIdentifier: "Chats") }
+    expectNoRead("establish Aqua on Chats", .aqua) {
+        window.appearance = NSAppearance(named: .aqua)!
+        window.orderFront(nil)
+        resizeDesktop(desktop, width: 766, height: 604)
+    }
+    let light = readPalette("select Dashboard in Aqua", .aqua) {
+        desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
+    }
     publish(light)
     inspect(light, accent: .controlAccentColor)
     scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
     let position = scroll.documentVisibleRect.origin
-    let dark = readPalette(requests {
-        window.appearance = NSAppearance(named: .darkAqua)
-        settle()
-    })
+    let dark = readPalette("visible Aqua to Dark Aqua", .darkAqua) {
+        window.appearance = NSAppearance(named: .darkAqua)!
+    }
     require(dark["surface"] != light["surface"] && dark["text"] != light["text"], "effective appearance changes palette")
     publish(dark)
     inspect(dark, accent: .controlAccentColor)
@@ -714,19 +755,26 @@ func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
     let alternate = dark["accent"] == [255, 0, 255]
         ? NSColor(srgbRed: 0, green: 1, blue: 0, alpha: 1) : NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1)
     dashboard.accentColor = { alternate }
-    let recolored = readPalette(requests { notifyColors(); notifyColors(); settle() })
+    let recolored = readPalette("accent change in Dark Aqua", .darkAqua) { notifyColors(); notifyColors() }
     require(recolored["accent"] != dark["accent"] && recolored["surface"] == dark["surface"], "accent-only change")
     publish(recolored)
     inspect(recolored, accent: alternate)
-    require(requests { notifyColors(); settle() }.isEmpty, "identical palette sends no additional read")
+    expectNoRead("unchanged accent in Dark Aqua", .darkAqua) { notifyColors() }
     _ = requests { desktop.tabs.selectTabViewItem(withIdentifier: "Chats") }
-    require(requests { window.appearance = NSAppearance(named: .aqua); notifyColors(); settle() }.isEmpty,
-            "appearance change on another tab sends no dashboard read")
-    _ = readPalette(requests { desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard"); settle() })
+    expectNoRead("Dark Aqua to Aqua on Chats", .aqua) {
+        window.appearance = NSAppearance(named: .aqua)!
+        notifyColors()
+    }
+    let reselected = readPalette("reselect Dashboard in Aqua", .aqua) {
+        desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
+    }
+    require(reselected["surface"] == light["surface"] && reselected["accent"] == recolored["accent"],
+            state("reselect Dashboard in Aqua") + " did not send the current surface and accent")
     window.orderOut(nil)
-    require(requests { window.appearance = NSAppearance(named: .darkAqua); notifyColors(); settle() }.isEmpty,
-            "hidden dashboard window sends no appearance reads")
-    if wasVisible { window.orderFront(nil) }
+    expectNoRead("hidden Aqua to Dark Aqua", .darkAqua) {
+        window.appearance = NSAppearance(named: .darkAqua)!
+        notifyColors()
+    }
 }
 
 func checkDashboard(_ desktop: Desktop) {
@@ -859,23 +907,31 @@ func checkDashboard(_ desktop: Desktop) {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
-if CommandLine.arguments.dropFirst(2).contains("--dashboard") {
-    desktop.makeWindow()
-    checkDashboard(desktop)
-    print("PASS: native Dashboard layout, scrolling, web links, button dispatch, SVG charts, metrics, inline images, unchanged replies and appearance palettes")
-    exit(0)
-}
 if CommandLine.arguments.dropFirst(2).contains(where: { ["--cluster", "--nodes"].contains($0) }) {
     desktop.makeWindow()
     checkCluster(desktop) { desktop.show() }
     print("PASS: native Status tab, setup, node search, guarded actions, rename dialogs and refresh requests")
     exit(0)
 }
-app.delegate = desktop
-// The pipe stays open so the UI has the same lifetime as a normal Gent child.
+let dashboardOnly = CommandLine.arguments.dropFirst(2).contains("--dashboard")
 let lifetime = Pipe()
-dup2(lifetime.fileHandleForReading.fileDescriptor, STDIN_FILENO)
-DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+if dashboardOnly {
+    // A screenless SSH session can construct the native window without a tray.
+    desktop.makeWindow()
+} else {
+    app.delegate = desktop
+    // The pipe stays open so the UI has the same lifetime as a normal Gent child.
+    dup2(lifetime.fileHandleForReading.fileDescriptor, STDIN_FILENO)
+}
+// Run from an AppKit run-loop timer. A nested run loop inside DispatchQueue.main
+// cannot service the dashboard's coalesced refresh on that same serial queue.
+Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
+    if dashboardOnly {
+        desktop.window.orderFront(nil)
+        checkDashboard(desktop)
+        print("PASS: native Dashboard layout, scrolling, web links, button dispatch, SVG charts, metrics, inline images, unchanged replies and appearance palettes")
+        exit(0)
+    }
     require(desktop.statusItem?.isVisible == true && desktop.statusItem?.button?.image != nil,
             "visible menu-bar item and image in a logged-in Aqua session")
     require(!desktop.window.isVisible, "starts in tray")

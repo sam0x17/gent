@@ -245,6 +245,17 @@ def exercise(root):
         frame, = widgets(pane, Gtk.Frame)
         card = rendered(frame)
         assert rgb(card, card.get_width() - 5, 40) == tuple(palette["surface"])
+        for label, key in [(frame.title, "text"), (frame.publisher, "secondary")]:
+            x, y = label.translate_coordinates(frame, 0, 0)
+            assert x >= 14 and y >= 14
+            content = card.new_subpixbuf(x, y, label.get_allocated_width(), label.get_allocated_height())
+            pixels = content.get_pixels()
+            stride, channels = content.get_rowstride(), content.get_n_channels()
+            assert any(max(abs(a - b) for a, b in zip(pixels[k:k+3], palette[key])) <= 5
+                       for y in range(content.get_height())
+                       for k in range(y * stride, y * stride + content.get_width() * channels, channels))
+        style = frame.title.get_style_context()
+        assert style.get_property("font-size", style.get_state()) >= 17
         for cls in (Gtk.ProgressBar, Gtk.LevelBar):
             bar, = widgets(frame, cls)
             pixels = rendered(bar)
@@ -323,7 +334,7 @@ def exercise(root):
     pane.receive({"unchanged": True})
     assert pane.notice.get_text() == "No chats have published a dashboard."
     window.destroy()
-    print("PASS dashboard allocations, scroll retention, SVG pixels and accessibility, metric typography, PNG/JPEG pixels, invalid images, links and actions")
+    print("PASS dashboard allocations, light/dark/custom accent refresh, scroll retention, compact readings, SVG and image pixels, accessibility, links and actions")
 
 
 if __name__ == "__main__":
