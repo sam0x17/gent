@@ -150,9 +150,20 @@ fn frontend(_home: &Path) -> Result<Command> {
 
 fn install_icon(home: &Path) -> Result<std::path::PathBuf> {
     let icon = home.join("desktop-icon.png");
-    let image = include_bytes!("../../../assets/branding/inkling-512.png");
-    if fs::read(&icon).ok().as_deref() != Some(image) {
-        config::write_private(&icon, image)?;
+    let tray = home.join("inkling-tray-128.png");
+    for (path, image) in [
+        (
+            &icon,
+            include_bytes!("../../../assets/branding/inkling-512.png").as_slice(),
+        ),
+        (
+            &tray,
+            include_bytes!("../../../assets/branding/inkling-tray-128.png").as_slice(),
+        ),
+    ] {
+        if fs::read(path).ok().as_deref() != Some(image) {
+            config::write_private(path, image)?;
+        }
     }
     Ok(icon)
 }

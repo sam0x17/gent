@@ -13,6 +13,7 @@ except (ImportError, ValueError):
     sys.exit("Gent Desktop needs Python 3 with PyGObject and GTK 3 (python3-gi and gir1.2-gtk-3.0 on Debian/Ubuntu).")
 
 ICON, MODE = sys.argv[1:]
+TRAY_ICON = os.path.join(os.path.dirname(ICON), "inkling-tray-128.png")
 if not Gtk.init_check()[0]:
     sys.exit("Gent Desktop could not connect to the graphical display.")
 GLib.set_application_name("Gent Desktop")
@@ -188,12 +189,12 @@ class Desktop:
                 continue
             import hashlib
             tag = hashlib.sha256(os.fsencode(ICON)).hexdigest()[:16]
-            self.tray = api.Indicator.new("gent-" + tag, ICON, api.IndicatorCategory.APPLICATION_STATUS)
+            self.tray = api.Indicator.new("gent-" + tag, TRAY_ICON, api.IndicatorCategory.APPLICATION_STATUS)
             self.tray.set_status(api.IndicatorStatus.ACTIVE)
             self.tray.set_title("Gent Desktop")
             self.tray.set_menu(menu)
             return
-        self.tray = Gtk.StatusIcon.new_from_file(ICON)
+        self.tray = Gtk.StatusIcon.new_from_file(TRAY_ICON)
         self.tray.set_title("Gent Desktop")
         self.tray.set_tooltip_text("Gent Desktop")
         self.tray.connect("activate", lambda *_: self.show())

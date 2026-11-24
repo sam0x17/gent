@@ -19,7 +19,8 @@ import resvg_py
 HERE = Path(__file__).resolve().parent
 SIZES = (16, 32, 48, 64, 128, 192, 256, 512)
 FAVICON_SIZES = (16, 32, 48)
-PNG_SETS = {"inkling": SIZES, "classic": SIZES, "favicon": SIZES, "inkling-favicon": FAVICON_SIZES}
+PNG_SETS = {"inkling": SIZES, "classic": SIZES, "favicon": SIZES, "inkling-favicon": FAVICON_SIZES,
+            "inkling-tray": (128,)}
 ICO_SETS = ("favicon", "inkling-favicon", "classic")
 COMPARISONS = (
     ("inkling", "Inkling / original"),
@@ -32,14 +33,15 @@ NS = "http://www.w3.org/2000/svg"
 ET.register_namespace("", NS)
 
 
-def outlined(svg: str) -> str:
-    """Add a 12-unit outside rim, behind the entire original drawing."""
+def outlined(svg: str, *, tray: bool = False) -> str:
+    """Place a 12-unit outside rim behind the original ink."""
     root = ET.fromstring(svg)
-    # Preserve at least one fully transparent edge pixel even at 16px.
-    root.set("viewBox", "-24 -24 560 560")
+    # The tray uses a tighter square around the ink and outlines only the hat.
+    root.set("viewBox", "6 0 500 500" if tray else "-24 -24 560 560")
+    outlined_shapes = ("hat",) if tray else ("body", "hat")
     halo = ET.Element(f"{{{NS}}}g", {"aria-hidden": "true"})
     for shape in root:
-        if shape.get("id") not in ("body", "hat"):
+        if shape.get("id") not in outlined_shapes:
             continue
         rim = deepcopy(shape)
         rim.attrib.pop("id")
@@ -81,6 +83,7 @@ def build() -> tuple[dict[str, bytes], dict[str, str]]:
     masters = {name: (HERE / f"{name}.svg").read_text() for name in ("inkling", "classic", "inkling-favicon")}
     drawings = dict(masters)
     drawings.update({f"{name}-dark": outlined(masters[name]) for name in ("inkling", "classic")})
+    drawings["inkling-tray"] = outlined(masters["inkling"], tray=True)
     drawings["favicon"] = drawings["classic-dark"]
     artifacts = {
         f"{name}.svg": svg.encode()

@@ -15,6 +15,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     let permissions = ManagementTab(page: "permissions")
     lazy var about = ManagementTab(page: "about", icon: icon)
     let icon: NSImage?
+    let trayIcon: NSImage?
     let openAtLaunch: Bool
     var statusItem: NSStatusItem!
     let trayState = NSMenuItem(title: "Checking daemon…", action: nil, keyEquivalent: "")
@@ -40,12 +41,14 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
 
     init(iconPath: String, openAtLaunch: Bool) {
         self.icon = NSImage(contentsOfFile: iconPath)
+        self.trayIcon = NSImage(contentsOf: URL(fileURLWithPath: iconPath)
+            .deletingLastPathComponent().appendingPathComponent("inkling-tray-128.png"))
         self.openAtLaunch = openAtLaunch
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let image = icon?.copy() as? NSImage {
+        if let image = trayIcon {
             image.size = NSSize(width: 20, height: 20)
             statusItem.button?.image = image
         } else {
