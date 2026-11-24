@@ -34,27 +34,13 @@ pub(crate) fn configuration_version(edit: &gent_protocol::ConfigurationEdit) -> 
     }
 }
 
-/// The dashboard payload schema is shared with V9/V10 stores and checkpoints.
-pub(crate) fn check_dashboard_encoding(
-    board: &gent_protocol::dashboard::Board,
-) -> Result<(), &'static str> {
-    if board
-        .widgets
-        .iter()
-        .any(|w| w.kind == gent_protocol::dashboard::Kind::Link)
-    {
-        return Err("encode dashboard links as portable text widgets");
-    }
-    Ok(())
-}
-
 fn check_dashboard_version(event: &Event, version: u8) -> Result<(), &'static str> {
     if let Event::Dashboard { board, .. } = event {
         if version < DASHBOARD_VERSION {
             return Err("dashboard requires protocol 9");
         }
         if let Some(board) = board {
-            check_dashboard_encoding(board)?;
+            super::dashboard::check_encoding(board)?;
         }
     }
     Ok(())

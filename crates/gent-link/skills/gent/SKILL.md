@@ -69,7 +69,7 @@ To rename this chat's Gent label when requested, read `gent_identity` and pass i
 
 ## Dashboards and automatic goal recovery
 
-When publishing status in Gent Desktop, call `gent_dashboard_get` for this conversation's revision. Use `gent_dashboard_define` for the layout, `gent_dashboard_update` to replace changed widget values, and `gent_dashboard_delete` to remove the board. A `link` widget's label opens its HTTP or HTTPS URL in the viewer's default browser when clicked. Dashboard buttons deliver their callback text to this conversation under the usual messaging permissions. Use `gent_babysit` to read or set this chat's automatic recovery preference when the user requests it.
+When publishing status in Gent Desktop, call `gent_dashboard_get` for this conversation's revision. Use `gent_dashboard_define` for the layout, `gent_dashboard_update` to replace changed widget values, and `gent_dashboard_delete` to remove the board. Use a `metric` for a labeled number, `graph` for a smooth sample series, or `scatter` for explicit [x,y] pairs. Set `unit` for the values and `x_unit` for a scatter's horizontal axis. Bar, pie and radar charts take lists of {label,value} categories. An `image` takes an inline PNG or JPEG data URI within the 32 KiB board limit. A `link` opens its HTTP or HTTPS URL in the viewer's default browser when clicked. Dashboard buttons deliver their callback text to this conversation under the usual messaging permissions. Use `gent_babysit` to read or set this chat's automatic recovery preference when the user requests it.
 
 ## Interrupted host work
 

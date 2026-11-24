@@ -355,7 +355,7 @@ pub(super) fn dashboards(parent: &Connection, source: &Connection, child: &str) 
         let decode = |raw: &str| -> Result<Board> {
             ensure!(raw.len() <= 32 * 1024, "hosted dashboard exceeds 32 KiB");
             let board: Board = serde_json::from_str(raw)?;
-            crate::messages::wire::check_dashboard_encoding(&board).map_err(anyhow::Error::msg)?;
+            crate::messages::dashboard::check_encoding(&board).map_err(anyhow::Error::msg)?;
             board.validate().map_err(anyhow::Error::msg)?;
             Ok(board)
         };
@@ -384,6 +384,9 @@ pub(super) fn dashboards(parent: &Connection, source: &Connection, child: &str) 
                 );
             }
         }
+        // Re-serialize through the portable schema: even an omitted optional
+        // field spelled as an explicit null must not reach an old carrier.
+        let body = board.as_ref().map(serde_json::to_string).transpose()?;
         parent.execute("INSERT INTO dashboards(agent,revision,body,mutation) VALUES(?1,?2,?3,?4)
             ON CONFLICT(agent) DO UPDATE SET revision=excluded.revision,body=excluded.body,mutation=excluded.mutation",
             params![id,revision,body,mutation])?;

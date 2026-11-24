@@ -118,8 +118,16 @@ fn tools() -> Vec<Tool> {
     let revision = json!({"type":"integer","minimum":0,"description":"Current revision from gent_dashboard_get; zero before the first definition."});
     let widget = json!({"type":"object","additionalProperties":false,"required":["id","kind","label","value"],"properties":{
         "id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,64}$"},"label":{"type":"string","maxLength":128},
-        "kind":{"enum":["text","events","graph","gauge","progress","button","link"]},"value":{"description":"Text, a button instruction, an absolute HTTP or HTTPS URL for a link, a list of event strings, graph samples, or a numeric reading."},
-        "unit":{"type":"string","maxLength":32},"min":{"type":"number"},"max":{"type":"number"}}});
+        "kind":{"enum":["text","metric","events","graph","bar","pie","radar","scatter","image","gauge","progress","button","link"]},
+        "value":{"description":concat!(
+            "metric, progress, gauge: a number. graph: up to 256 numeric samples, drawn as a smooth line. ",
+            "scatter: up to 256 [x,y] numeric pairs. bar, pie, radar: up to 16 {label,value} categories; ",
+            "pie needs a positive total and radar needs at least three categories. Both use nonnegative values. ",
+            "image: a base64 PNG or JPEG data URI that fits the 32 KiB board. ",
+            "text: a string. events: a list of strings. link: an absolute HTTP(S) URL. button: a callback instruction.")},
+        "unit":{"type":"string","maxLength":32,"description":"Unit for a numeric value or chart's value axis."},
+        "x_unit":{"type":"string","maxLength":32,"description":"Unit for a scatter plot's horizontal axis."},
+        "min":{"type":"number"},"max":{"type":"number"}}});
     let declarations = vec![
         (
             "gent_babysit",
@@ -141,7 +149,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_dashboard_update",
-            "Replace selected widget values by ID. Use up to 256 numbers per graph or 64 strings per event list. Gauge and progress bounds default to 0–100.",
+            "Replace selected widget values by ID. Supply a complete series for a chart, a full list for events, or a new PNG/JPEG data URI for an image. Use gent_dashboard_define to change the labels, units or kinds.",
             json!({"expected_revision":revision,"values":{"type":"object","minProperties":1,"maxProperties":32}}),
             vec!["expected_revision", "values"],
         ),

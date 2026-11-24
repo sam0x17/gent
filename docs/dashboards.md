@@ -29,6 +29,37 @@ The call returns the committed revision. To record epoch 5, call `gent_dashboard
 
 Supply the whole series for a graph and the whole list of strings for an event feed. A board can contain up to 32 widgets and 32 KiB of serialized data. Each graph can show 256 samples and each event feed can show 64 entries. Gauge and progress ranges default to 0 through 100. Use a text widget for a status line or paragraph.
 
+### Metrics, charts and images
+
+A `metric` displays the field name in bold followed by the number and its optional unit, for example **GPU temperature:** 64 °C.
+
+```json
+{"id":"temperature","kind":"metric","label":"GPU temperature","unit":"°C","value":64}
+```
+
+| Kind | Example value | How it reads |
+| --- | --- | --- |
+| `graph` | `[18, 24, 21, 30]` | Gent numbers samples from 1, labels the value axis with the unit, and draws a smooth spline through the samples. |
+| `scatter` | `[[0.5, 18], [1.5, 19], [5, 30]]` | Each pair supplies its own x and y coordinates. Set `x_unit` for the horizontal axis and `unit` for the vertical axis. |
+| `bar` | `[{"label":"Read","value":42},{"label":"Write","value":-7}]` | Compare values across categories, including values below zero. |
+| `pie` | `[{"label":"GPU","value":8},{"label":"CPU","value":2}]` | Show shares of a positive total. Values can be counts or other nonnegative quantities. |
+| `radar` | `[{"label":"GPU","value":80},{"label":"CPU","value":36},{"label":"RAM","value":60}]` | Compare at least three nonnegative values on a common scale, with one spoke per category. |
+
+Scatter plots accept up to 256 points. Bar, pie and radar charts accept up to 16 categories. Use the same unit for all values in a series. For example, a scatter with `"x_unit":"s","unit":"MiB"` plots memory usage against elapsed seconds.
+
+For an `image`, put a PNG or JPEG data URI in `value` and describe the picture in `label`. To build the value from a PNG thumbnail in Python, encode its bytes in base64.
+
+```python
+import base64
+from pathlib import Path
+
+value = "data:image/png;base64," + base64.b64encode(Path("preview.png").read_bytes()).decode("ascii")
+```
+
+The preview travels with the dashboard and counts toward the 32 KiB board limit, including base64 overhead. Use a still image up to 2,048 pixels per side and 1,048,576 pixels in total. For a larger original, place a `link` widget alongside the preview.
+
+### Links and buttons
+
 Use a `link` widget for a web page. Give it a label and an absolute HTTP or HTTPS URL. Clicking the label opens the page in the viewer's default browser. To point it at a different run, update the value by widget ID. Older Gent desktops show the destination as text.
 
 If a hosted chat moves to an older carrier whose MCP schema lacks `link`, use `"kind": "text", "unit": "↗ web link"` with the same URL. This is the stored form of a link. It also lets you retry the original definition with the same expected revision after a carrier change.

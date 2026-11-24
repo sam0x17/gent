@@ -18,6 +18,7 @@ use tokio::{
 };
 
 mod admin;
+mod charts;
 mod login;
 mod model;
 #[cfg(target_os = "macos")]

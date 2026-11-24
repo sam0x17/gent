@@ -82,7 +82,7 @@ rm "$fixture/GentDesktopSmoke" && rmdir "$fixture"
 
 To run the Status page proof on the Mac Studio over SSH, append `--cluster` after the icon path. It exercises setup, daemon controls, member filtering, and native action dialogs, including selection by UUID across a refresh.
 
-Append `--dashboard` after the icon path to exercise the Dashboard tab alone. The fixture measures card sizes as the window resizes, scrolls to a link below a long event list, and captures the URL passed to the browser opener. The Linux desktop smoke test uses a private default browser handler to record clicks before and after a chat updates a link.
+Append `--dashboard` after the icon path to exercise the Dashboard tab alone. The fixture measures card sizes as the window resizes, checks native chart and image scaling, scrolls to a link below a long event list, and captures the URL passed to the browser opener. The Linux desktop smoke test uses a private default browser handler to record clicks before and after a chat updates a link.
 
 ## Automatic update acceptance
 

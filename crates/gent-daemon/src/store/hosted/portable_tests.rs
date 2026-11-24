@@ -80,14 +80,13 @@ fn sent(pair: &mut Pair) -> String {
 fn dashboard_restore_rewinds_only_hosted_boards_and_their_replication_cursors() -> Result<()> {
     let mut pair = fixture();
     let web = pair.child.identity.node.id().to_owned();
-    let define = |title: &str| {
-        AgentOp::DashboardDefine {
+    let define = |title: &str| AgentOp::DashboardDefine {
         expected_revision: 0,
-        board: serde_json::from_value(json!({
-            "title":title,
-            "widgets":[{"id":"status","kind":"link","label":"Status","value":"https://example.org/status"}]
-        })).unwrap(),
-    }
+        board: serde_json::from_value(json!({"title":title, "widgets":[
+            {"id":"status","kind":"link","label":"Status","value":"https://example.org/status"},
+            {"id":"data","kind":"scatter","label":"Data","value":[[1,2]],"unit":"kg","x_unit":"s"}
+        ]}))
+        .unwrap(),
     };
     call(&mut pair, 0, define("native"))?;
     let initial = snapshot::export(pair.homes[0].path(), &web)?;
@@ -106,6 +105,8 @@ fn dashboard_restore_rewinds_only_hosted_boards_and_their_replication_cursors() 
         .as_str()
         .unwrap();
     let stored = serde_json::from_str::<Value>(cell)?;
+    assert_eq!(stored["widgets"][1]["kind"], "events");
+    assert!(stored["widgets"][1].get("x_unit").is_none());
     assert_eq!(stored["widgets"][0]["kind"], "text");
     assert_eq!(stored["widgets"][0]["unit"], "↗ web link");
     assert_eq!(stored["widgets"][0]["value"], "https://example.org/status");
@@ -160,6 +161,12 @@ fn dashboard_restore_rewinds_only_hosted_boards_and_their_replication_cursors() 
     let restored = call(&mut pair, 1, AgentOp::DashboardGet)?;
     assert_eq!(restored["board"]["title"], "hosted");
     assert_eq!(restored["board"]["widgets"][0]["kind"], "link");
+    assert_eq!(
+        restored["board"]["widgets"][1],
+        json!({
+            "id":"data","kind":"scatter","label":"Data","value":[[1,2]],"unit":"kg","x_unit":"s"
+        })
+    );
     assert_eq!(call(&mut pair, 1, mutation)?["revision"], 1);
     let retained: String =
         pair.parent

@@ -248,6 +248,106 @@ async fn dashboard_link_survives_legacy_storage_downgrade_and_idle_reopen() -> R
 }
 
 #[tokio::test]
+async fn advanced_dashboard_survives_legacy_replication_edits_retries_and_deletion() -> Result<()> {
+    let mut pair = Pair::new().await;
+    directory_push_tests::negotiate(&mut pair);
+    let categories: Vec<_> = (0..16)
+        .map(|i| json!({"label": format!("{}{i}", "界".repeat(41)), "value":i}))
+        .collect();
+    let mut native = json!({"title":"Mixed","widgets":[
+        {"id":"m","kind":"metric","label":"Total","value":-12.5,"unit":"kg","min":-20.0},
+        {"id":"b","kind":"bar","label":"Sales","value":categories},
+        {"id":"p","kind":"pie","label":"Shares","value":categories},
+        {"id":"r","kind":"radar","label":"Bands","value":categories},
+        {"id":"s","kind":"scatter","label":"Position","value":[[-1,2.5],[4,0]],"x_unit":"s","unit":"m","max":20.0},
+        {"id":"i","kind":"image","label":"Result","value":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGP4z/AfK2IYWhIA0ad/gXfwoGMAAAAASUVORK5CYII="},
+        {"id":"g","kind":"graph","label":"Trend","value":[0,1]},
+        {"id":"l","kind":"link","label":"Guide","value":"https://example.org/"},
+        {"id":"old","kind":"events","label":"Notes","unit":"Gent widget v1","value":["work in progress"]},
+        {"id":"invalid","kind":"events","label":"Notes","unit":"Gent widget v1","value":["{\"kind\":\"scatter\"}","[1,2]"]}
+    ]});
+    let define = |board| -> Result<AgentOp> {
+        Ok(AgentOp::DashboardDefine {
+            expected_revision: 0,
+            board: serde_json::from_value(board)?,
+        })
+    };
+    pair.agent(0, define(native.clone())?)?;
+    let bytes: Vec<u8> = pair.stores[0].db.query_row(
+        "SELECT body FROM network_events e JOIN dashboard_sent s ON s.event=e.id",
+        [],
+        |r| r.get(0),
+    )?;
+    let wire: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(wire["version"], 9);
+    let legacy = &wire["event"]["board"];
+    for widget in &legacy["widgets"].as_array().unwrap()[..6] {
+        assert_eq!(widget["kind"], "events");
+        assert_eq!(widget["unit"], "Gent widget v1");
+        assert!(widget.get("x_unit").is_none());
+        assert!(
+            widget["value"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s.as_str().unwrap().len() <= 2048)
+        );
+    }
+    assert!(legacy["widgets"][1]["value"].as_array().unwrap().len() >= 3);
+    assert_eq!(pair.agent(0, define(legacy.clone())?)?["revision"], 1);
+    let mut malformed = wire.clone();
+    malformed["event"]["board"] = native.clone();
+    assert!(serde_json::from_value::<Record>(malformed).is_err());
+    pair.pump();
+    pair.reopen(1);
+    let list = |pair: &mut Pair| pair.owner(1, OwnerOp::Dashboards { after: None });
+    assert_eq!(list(&mut pair)?["rows"][0]["board"], native);
+    // A V9/V10 rewrite stores precisely the board which entered its stream.
+    let body: String = pair.stores[1].db.query_row(
+        "SELECT body FROM dashboards WHERE agent=?1",
+        [&pair.agents[0]],
+        |r| r.get(0),
+    )?;
+    assert_eq!(serde_json::from_str::<Value>(&body)?, *legacy);
+
+    let update = |expected_revision, data| AgentOp::DashboardUpdate {
+        expected_revision,
+        values: BTreeMap::from([("s".into(), data)]),
+    };
+    assert!(pair.agent(0, update(1, json!([1, 2]))).is_err());
+    let points = json!([[1, 3], [2, -4]]);
+    for _ in 0..2 {
+        assert_eq!(pair.agent(0, update(1, points.clone()))?["revision"], 2);
+    }
+    let portable_points = json!([legacy["widgets"][4]["value"][0], "[[1,3],[2,-4]]"]);
+    assert_eq!(pair.agent(0, update(1, portable_points))?["revision"], 2);
+    let changed_unit = json!([
+        "{\"kind\":\"scatter\",\"unit\":\"other\",\"x_unit\":\"s\"}",
+        "[[1,3]]"
+    ]);
+    assert!(pair.agent(0, update(2, changed_unit)).is_err());
+    native["widgets"][4]["value"] = points;
+    pair.pump();
+    assert_eq!(list(&mut pair)?["rows"][0]["board"], native);
+    let portable_empty = json!([legacy["widgets"][4]["value"][0], "[]"]);
+    assert_eq!(pair.agent(0, update(2, portable_empty))?["revision"], 3);
+    pair.reopen(0);
+    assert_eq!(pair.agent(0, update(2, json!([])))?["revision"], 3);
+    native["widgets"][4]["value"] = json!([]);
+    pair.pump();
+    assert_eq!(list(&mut pair)?["rows"][0]["board"], native);
+    pair.agent(
+        0,
+        AgentOp::DashboardDelete {
+            expected_revision: 3,
+        },
+    )?;
+    pair.pump();
+    assert_eq!(list(&mut pair)?["rows"], json!([]));
+    Ok(())
+}
+
+#[tokio::test]
 async fn idle_pre_dashboard_receiver_discovers_existing_boards_on_upgrade() -> Result<()> {
     for saved_codec in [true, false] {
         discover_after_dashboard_upgrade(saved_codec).await?;

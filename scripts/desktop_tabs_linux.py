@@ -1,5 +1,4 @@
 """Drive the real tab widgets via AT-SPI in the smoke test's private graphical session."""
-from collections import Counter
 import json
 from pathlib import Path
 import re
@@ -11,7 +10,9 @@ import pyatspi
 
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkX11", "3.0")
-from gi.repository import Gdk, GdkX11
+from gi.repository import Gdk, GdkPixbuf, GdkX11
+
+from desktop_dashboard_samples import chart_widgets, image_uri
 
 
 def wait_for(check, description, timeout=12):
@@ -166,6 +167,23 @@ def exercise_enrolled_without_daemon(node):
     assert not find("Create cluster…") and not find("Join with invitation…")
 
 
+def dashboard_pixels(item):
+    x, y, width, height = item.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+    assert width > 8 and height > 8
+    # AT-SPI reports new allocations before the next X11 paint. Wait for two
+    # identical frames at these coordinates before checking the visible pixels.
+    previous = None
+
+    def painted():
+        nonlocal previous
+        snap = Gdk.pixbuf_get_from_window(Gdk.get_default_root_window(), x, y, width, height)
+        pixels = snap.get_pixels()
+        if previous == pixels:
+            return snap
+        previous = pixels
+    return wait_for(painted, "settled GTK pixels for " + item.name)
+
+
 def exercise_dashboard(fixture, agent, cli):
     instruction = "Report the synthetic job status."
     url = "https://example.test/report"
@@ -174,10 +192,12 @@ def exercise_dashboard(fixture, agent, cli):
         {"id": "inspect", "kind": "button", "label": "Inspect job", "value": instruction},
         {"id": "report", "kind": "link", "label": "Job report", "value": url},
         {"id": "status", "kind": "text", "label": "Job status", "value": "Job queued"},
-        {"id": "trend", "kind": "graph", "label": "Sample history", "value": [1, 8, 3], "unit": "ms"},
+        {"id": "rate", "kind": "metric", "label": "Throughput:", "value": 12.5, "unit": "jobs/s"},
         {"id": "log", "kind": "events", "label": "Recent events", "value": ["Queued", "Started"]},
         {"id": "work", "kind": "progress", "label": "Work completed", "value": 15, "min": 10, "max": 30},
         {"id": "load", "kind": "gauge", "label": "Queue depth", "value": 6, "max": 8, "unit": "jobs"},
+        *chart_widgets(),
+        {"id": "preview", "kind": "image", "label": "Job preview", "value": image_uri("PNG")},
     ]}
 
     def open_report(expected):
@@ -188,18 +208,94 @@ def exercise_dashboard(fixture, agent, cli):
         wait_for(lambda: opened.exists() and opened.read_text().splitlines() == expected,
                  "fixture browser opened job report")
 
-    def graph_line_in_half(upper):
-        plot = get(None, "drawing area")
-        x, y, width, height = plot.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
-        # At 40% of the plot width the first series rises and the updated series dips.
-        # Sample one vertical strip of the Xvfb framebuffer, independent of theme colors.
-        assert width > 8 and height > 8
-        strip = Gdk.pixbuf_get_from_window(Gdk.get_default_root_window(), x + width*2//5, y + 2, 1, height - 4)
-        pixels, stride, channels = strip.get_pixels(), strip.get_rowstride(), strip.get_n_channels()
-        colors = [pixels[r*stride:r*stride + channels] for r in range(strip.get_height())]
-        background = Counter(colors).most_common(1)[0][0]
-        ink = [r for r, color in enumerate(colors) if color != background]
-        return bool(ink) and all((r < len(colors)/2) == upper for r in ink)
+    def reveal(name, role):
+        def match(obj):
+            return obj.name == name and obj.getRole() == role
+        item = wait_for(lambda: pyatspi.findDescendant(pyatspi.Registry.getDesktop(0), match), name)
+        # GTK 3 returns sentinel coordinates for clipped widgets. Move the real
+        # scrollbar until the widget intersects the viewport, then align its top.
+        pane = item.parent
+        while pane.getRoleName() != "scroll pane":
+            pane = pane.parent
+        view = pane.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+        bar, = [c.queryValue() for c in pane if c.getRoleName() == "scroll bar"
+                and c.getState().contains(pyatspi.STATE_VERTICAL)]
+        limit = int(bar.maximumValue)
+        offsets = [bar.currentValue, *range(0, limit, max(1, view.height // 2)), limit]
+
+        def extents():
+            return item.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+
+        def fully_visible():
+            r = extents()
+            return view.y <= r.y and r.y + r.height <= view.y + view.height
+
+        for offset in offsets:
+            bar.currentValue = offset
+            r = extents()
+            if fully_visible():
+                return item
+            if r.y < view.y + view.height and r.y + r.height > view.y:
+                bar.currentValue = min(limit, max(0, offset + r.y - view.y))
+                wait_for(fully_visible, "whole widget visible: " + name)
+                return item
+        raise AssertionError("could not reveal " + name)
+
+    def chart_pixels(updated):
+        shapes = {}
+        for widget in chart_widgets():
+            name, kind = widget["label"], widget["kind"]
+            item = reveal(name, pyatspi.ROLE_IMAGE)
+            detail = "ms" if kind in ("graph", "scatter") else kind
+            assert name in item.description and detail in item.description, item.description
+
+            def series():
+                snap = dashboard_pixels(item)
+                scaled = snap.scale_simple(160, 100, GdkPixbuf.InterpType.BILINEAR)
+                pixels, stride, channels = scaled.get_pixels(), scaled.get_rowstride(), scaled.get_n_channels()
+                colored = set()
+                warm = 0
+                pale_blue = 0
+                for y in range(10, 86):
+                    for x in range(6, 154):
+                        k = y * stride + x * channels
+                        r, g, b = pixels[k:k + 3]
+                        warm += r > b + 45
+                        pale_blue += 205 < r < 235 and b > r + 10
+                        if max(r, g, b) - min(r, g, b) > 45:
+                            colored.add((x, y))
+                # Both cartesian fixtures reverse their middle sample on update.
+                if kind in ("graph", "scatter") and not any(
+                    85 <= x <= 96 and ((y >= 50) if updated else (y < 40)) for x, y in colored
+                ):
+                    return None
+                if kind == "bar" and not all(
+                    any(sum((x, y) in colored for x in range(18, 140)) >= 9 for y in band)
+                    for band in (range(26, 35), range(49, 58), range(72, 81))
+                ):
+                    return None
+                if (kind == "pie" and warm < 100) or (kind == "radar" and pale_blue < 50):
+                    return None
+                if kind == "scatter" and any(57 < x < 82 for x, y in colored):
+                    return None
+                return colored if len(colored) >= 12 else None
+            shapes[kind] = wait_for(series, "painted " + kind + " series")
+
+        preview = reveal("Job preview", pyatspi.ROLE_IMAGE)
+        assert ("JPEG" if updated else "PNG") in preview.description
+
+        def preview_painted():
+            snap = dashboard_pixels(preview)
+            width, height = snap.get_width(), snap.get_height()
+            offset = height // 2 * snap.get_rowstride()
+            p = snap.get_pixels()
+            left = offset + (width // 2 - 60) * snap.get_n_channels()
+            right = offset + (width // 2 + 60) * snap.get_n_channels()
+            if updated:
+                left, right = right, left
+            return p[left] > 180 > p[left + 2] and p[right + 2] > 170 > p[right]
+        wait_for(preview_painted, "two-color inline preview")
+        return shapes
 
     def call(tool, **args):
         return fixture.call("gent_dashboard_" + tool, args)[0]
@@ -212,11 +308,13 @@ def exercise_dashboard(fixture, agent, cli):
     get(board["title"], "label", timeout=35)
     get(agent["name"], "label")
     open_report([url])
-    for name in ("Job queued", "3 ms", "Queued\nStarted", "15", "6 jobs"):
+    for name in ("Job queued", "Throughput: 12.5 jobs/s", "Queued\nStarted", "15", "6 jobs"):
         get(name, "label")
     assert get(None, "progress bar").queryValue().currentValue == 0.25
     assert get(None, "level bar").queryValue().currentValue == 0.75
-    wait_for(lambda: graph_line_in_half(upper=True), "initial graph pixels")
+    initial = chart_pixels(updated=False)
+    reveal("3 ms", pyatspi.ROLE_LABEL)
+    reveal("Inspect job", pyatspi.ROLE_PUSH_BUTTON)
 
     assert fixture.call("gent_inbox")[0] == []
     click("Inspect job")
@@ -228,14 +326,20 @@ def exercise_dashboard(fixture, agent, cli):
     fixture.call("gent_ack", {"message_id": message["id"]})
 
     assert call("update", expected_revision=1, values={"status": "Job done", "trend": [8, 1, 9],
-                "work": 30, "load": 2, "log": ["Finished"], "report": updated_url})["revision"] == 2
+                "work": 30, "load": 2, "log": ["Finished"], "report": updated_url, "rate": 18,
+                "preview": image_uri("JPEG", reverse=True), "runs": [[1, 8], [2, 1], [3, 9]],
+                **{key: [{"label": label, "value": n} for label, n in [("Build", 9), ("Test", 1), ("Ship", 5)]]
+                   for key in ("counts", "share", "profile")}})["revision"] == 2
     get("Job done", "label", timeout=35)
     open_report([url, updated_url])
-    for name in ("9 ms", "30", "2 jobs", "Finished"):
+    for name in ("Throughput: 18 jobs/s", "30", "2 jobs", "Finished"):
         get(name, "label")
     assert get(None, "progress bar").queryValue().currentValue == 1
     assert get(None, "level bar").queryValue().currentValue == 0.25
-    wait_for(lambda: graph_line_in_half(upper=False), "updated graph pixels")
+    changed = chart_pixels(updated=True)
+    for kind in initial:
+        assert len(initial[kind] ^ changed[kind]) > 12, kind
+    reveal("9 ms", pyatspi.ROLE_LABEL)
 
     assert call("delete", expected_revision=2)["revision"] == 3
     get(empty, "label", timeout=35)
@@ -330,7 +434,14 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     tab("Chats")
     get("Fixture conversation", "table cell")
     tab("Dashboard")
-    exercise_dashboard(fixture, agent, cli)
+    xid = subprocess.check_output(["xdotool", "getactivewindow"], text=True).strip()
+    geometry = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), int(xid)).get_geometry()
+    try:
+        # Fit each SVG (including its axes and legend) into the Xvfb viewport for pixel sampling.
+        subprocess.run(["xdotool", "windowsize", "--sync", xid, "485", "690"], check=True)
+        exercise_dashboard(fixture, agent, cli)
+    finally:
+        subprocess.run(["xdotool", "windowsize", xid, str(geometry.width), str(geometry.height)], check=True)
     tab("Settings")
     toggle = get("Automatically update Gent", "check box")
     assert toggle.getState().contains(pyatspi.STATE_CHECKED)

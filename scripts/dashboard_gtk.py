@@ -6,6 +6,9 @@ import tempfile
 import time
 from unittest.mock import patch
 
+import cairo
+
+from desktop_dashboard_samples import chart_widgets, image_uri
 from desktop_fixture_browser import install_fixture_browser
 
 
@@ -123,6 +126,98 @@ def exercise(root):
     value, = [w for w in widgets(pane, Gtk.Label) if w.get_text() == long_text["value"]]
     assert value.get_allocated_height() >= value.get_layout().get_pixel_size()[1] > 260
 
+    # An unchanged snapshot clears the transient notice while retaining the
+    # decoded content, focusable widgets and the user's place in a long board.
+    v.set_value(85)
+    pane.receive({"error": "Daemon temporarily unavailable"})
+    wait(lambda: pane.notice.get_visible())
+    pane.receive({"unchanged": True})
+    wait(lambda: not pane.notice.get_visible())
+    assert v.get_value() == 85 and value in widgets(pane, Gtk.Label)
+
+    def rendered(widget):
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, widget.get_allocated_width(), widget.get_allocated_height())
+        widget.draw(cairo.Context(surface))
+        return ui["Gdk"].pixbuf_get_from_surface(surface, 0, 0, surface.get_width(), surface.get_height())
+
+    def rgb(pixbuf, x, y):
+        offset = y * pixbuf.get_rowstride() + x * pixbuf.get_n_channels()
+        return tuple(pixbuf.get_pixels()[offset:offset + 3])
+
+    from gi.repository import Atk, Pango
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40" viewBox="0 0 100 40">'
+           '<rect width="100" height="40" fill="white"/><rect x="50" width=".4" height="40" fill="red"/></svg>')
+    charts = [dict(w, chart_svg=svg, chart_description=w["kind"] + " details") for w in chart_widgets()]
+    metric = {"id": "rate", "kind": "metric", "label": "Δ <rate>:  ", "value": 12.5, "unit": "jobs & runs"}
+    pane.receive({"rows": [row(0, charts + [metric])]})
+    for width in (800, 260):
+        layout(width, 280, [1], overflow=True)
+        plots = widgets(pane, Gtk.DrawingArea)
+        assert len(plots) == len(charts)
+        for plot, w in zip(plots, charts):
+            a = plot.get_accessible()
+            assert a.get_role() == Atk.Role.IMAGE and a.get_name() == w["label"]
+            assert a.get_description() == w["chart_description"]
+            pixels = rendered(plot)
+            pw, ph = pixels.get_width(), pixels.get_height()
+            assert pw >= width - 50 and abs(ph - .4 * pw) < 1
+            assert rgb(pixels, pw // 4, ph // 2) == (255, 255, 255)
+            if width == 800:
+                # A subpixel-wide SVG stripe resolves to solid red when enlarged.
+                assert rgb(pixels, pw // 2 + 1, ph // 2) == (255, 0, 0)
+    fields = [w for w in widgets(pane, Gtk.Label) if w.get_text() == "Δ <rate>: 12.5 jobs & runs"]
+    field, = fields
+    attrs = field.get_layout().get_attributes().get_attributes()
+    weight, = [a for a in attrs if a.klass.type == Pango.AttrType.WEIGHT]
+    assert weight.as_int().value == Pango.Weight.BOLD
+    assert (weight.start_index, weight.end_index) == (0, len("Δ <rate>:".encode()))
+    assert "3 ms" in [w.get_text() for w in widgets(pane, Gtk.Label)]
+
+    v.set_value(85)
+    pane.receive({"error": "Transient dashboard error"})
+    pane.receive({"page": "dashboard", "unchanged": True})
+    assert widgets(pane, Gtk.DrawingArea) == plots and v.get_value() == 85 and not pane.notice.get_visible()
+
+    with patch.object(ui["gi"], "require_version", side_effect=ValueError("Rsvg not installed")):
+        pane.receive({"rows": [row(0, [charts[0], dict(metric, label="Δ <rate>")])]})
+    labels = [w.get_text() for w in widgets(pane, Gtk.Label)]
+    assert not widgets(pane, Gtk.DrawingArea)
+    assert "graph details" in labels and "3 ms" in labels and "Δ <rate>: 12.5 jobs & runs" in labels
+
+    pane.receive({"rows": [row(0, [dict(charts[0], chart_svg="<broken>")])]})
+    assert "graph details" in [w.get_text() for w in widgets(pane, Gtk.Label)]
+
+    for fmt in ("PNG", "JPEG"):
+        item = {"id": "sample", "kind": "image", "label": "Fixture preview", "value": image_uri(fmt)}
+        pane.receive({"rows": [row(0, [item])]})
+        layout(260, 300, [1])
+        preview, = widgets(pane, Gtk.DrawingArea)
+        assert preview.get_accessible().get_name() == item["label"]
+        assert fmt in preview.get_accessible().get_description()
+        pixels = rendered(preview)
+        pw, ph = pixels.get_width(), pixels.get_height()
+        assert pw < 320 and abs(ph - pw / 4) < 1
+        red = rgb(pixels, pw // 4, ph // 2)
+        blue = rgb(pixels, 3 * pw // 4, ph // 2)
+        assert red[0] > 180 > red[2] and blue[2] > 170 > blue[0]
+
+    pane.receive({"rows": [row(0, [dict(item, value=image_uri("PNG", (80, 960)))])]})
+    layout(260, 200, [1], overflow=True)
+    portrait, = widgets(pane, Gtk.DrawingArea)
+    pixels = rendered(portrait)
+    assert pixels.get_height() == 360
+    mid = pixels.get_width() // 2
+    assert rgb(pixels, mid - 10, 180)[0] > 180 and rgb(pixels, mid + 10, 180)[2] > 170
+    assert rgb(pixels, mid + 18, 180) != rgb(pixels, mid + 10, 180)
+
+    for bad in ("https://example.invalid/preview.png", "file:///tmp/preview.png",
+                "data:image/svg+xml;base64,PHN2Zy8+", "data:image/png;base64,!!!",
+                "data:image/png;base64,aW52YWxpZA==", image_uri("JPEG").replace("jpeg;", "png;"),
+                image_uri("PNG", (2049, 1)), image_uri("PNG", (1025, 1025))):
+        pane.receive({"rows": [row(0, [dict(item, value=bad)])]})
+        assert not widgets(pane, Gtk.DrawingArea)
+        assert "Image unavailable" in [w.get_text() for w in widgets(pane, Gtk.Label)]
+
     urls = ["http://localhost:8123/job?q=one%20two#chart", "HTTPS://192.168.1.2:444/report",
             "http://[::1]/status"]
     link_fields = [{"id": str(i), "kind": "link", "label": f"Report {i}", "value": url}
@@ -148,8 +243,11 @@ def exercise(root):
     assert requests == [("dashboard_click", {"agent": "agent-0", "revision": 1, "widget": "inspect"})]
     pane.receive({"rows": []})
     assert not widgets(pane, Gtk.Frame) and pane.notice.get_visible()
+    pane.receive({"error": "Disconnected"})
+    pane.receive({"unchanged": True})
+    assert pane.notice.get_text() == "No chats have published a dashboard."
     window.destroy()
-    print("PASS dashboard allocations, scrolling, link tooltips, default URI handlers and action routing")
+    print("PASS dashboard allocations, scroll retention, SVG pixels and accessibility, metric typography, PNG/JPEG pixels, invalid images, links and actions")
 
 
 if __name__ == "__main__":

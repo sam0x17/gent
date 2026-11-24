@@ -393,7 +393,15 @@ async fn web_dashboard_tools_use_the_bound_chat() {
     }
     let board = json!({"title":"Training","widgets":[
         {"id":"step","kind":"progress","label":"Step","value":10},
-        {"id":"run","kind":"link","label":"Run details","value":"https://example.org/runs/1"}
+        {"id":"run","kind":"link","label":"Run details","value":"https://example.org/runs/1"},
+        {"id":"temp","kind":"metric","label":"GPU temperature","unit":"°C","value":48},
+        {"id":"cost","kind":"scatter","label":"Cost per run","unit":"USD","x_unit":"s","value":[[6,2],[9,1]]},
+        {"id":"jobs","kind":"bar","label":"Jobs","value":[{"label":"CPU","value":7}]},
+        {"id":"share","kind":"pie","label":"Worker share","value":[{"label":"GPU","value":4},{"label":"CPU","value":2}]},
+        {"id":"load","kind":"radar","label":"Utilization","unit":"%",
+            "value":[{"label":"CPU","value":20},{"label":"GPU","value":45},{"label":"Memory","value":51}]},
+        {"id":"preview","kind":"image","label":"Preview","value":concat!("data:image/png;base64,",
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNQSwkHAAGVAOICf7lpAAAAAElFTkSuQmCC")}
     ]});
     let define = json!({"expected_revision":0,"board":board});
     assert_eq!(
@@ -437,19 +445,24 @@ async fn web_dashboard_tools_use_the_bound_chat() {
                 &f.token,
                 "trainer",
                 "gent_dashboard_update",
-                json!({"expected_revision":1,"values":{"step":50,"run":"https://example.org/runs/2"}})
+                json!({"expected_revision":1,"values":{"step":50,"run":"https://example.org/runs/2",
+                    "temp":49,"cost":[[10,3]],"jobs":[{"label":"GPU","value":9}]}})
             )
             .await["revision"],
         2
     );
     let list = owner(&f.home, OwnerOp::Dashboards { after: None }).await;
-    assert_eq!(list["rows"][0]["board"]["widgets"][0]["value"], 50);
-    assert_eq!(
-        list["rows"][0]["board"]["widgets"][1],
-        json!({
-            "id":"run","kind":"link","label":"Run details","value":"https://example.org/runs/2"
-        })
-    );
+    let mut expected = board;
+    for (index, value) in [
+        (0, json!(50)),
+        (1, json!("https://example.org/runs/2")),
+        (2, json!(49)),
+        (3, json!([[10, 3]])),
+        (4, json!([{"label":"GPU","value":9}])),
+    ] {
+        expected["widgets"][index]["value"] = value;
+    }
+    assert_eq!(list["rows"][0]["board"], expected);
     server
         .call(
             &client,

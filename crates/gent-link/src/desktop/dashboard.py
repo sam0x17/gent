@@ -1,6 +1,9 @@
+import base64
+import math
+import re
 import unicodedata
 
-from gi.repository import Pango
+from gi.repository import Atk, Pango
 
 
 def dashboard_web_url(value):
@@ -20,6 +23,105 @@ def dashboard_label(text, style=None):
     widget.set_line_wrap(True)
     widget.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
     return widget
+
+
+class DashboardGraphic(Gtk.DrawingArea):
+    def __init__(self, width, height, title, description, upscale):
+        super().__init__()
+        self.width, self.height = width, height
+        self.upscale = upscale
+        accessible = self.get_accessible()
+        accessible.set_role(Atk.Role.IMAGE)
+        accessible.set_name(title)
+        accessible.set_description(description)
+
+    def do_get_request_mode(self):
+        return Gtk.SizeRequestMode.HEIGHT_FOR_WIDTH
+
+    def do_get_preferred_width(self):
+        return 1, min(260, self.width)
+
+    def do_get_preferred_height_for_width(self, width):
+        if not self.upscale:
+            width = min(width, self.width)
+        height = max(1, math.ceil(width * self.height / self.width))
+        if not self.upscale:
+            height = min(360, height)
+        return height, height
+
+    def do_get_preferred_height(self):
+        return self.do_get_preferred_height_for_width(self.do_get_preferred_width()[1])
+
+
+def dashboard_chart(widget):
+    description = widget.get("chart_description", "")
+    svg = widget.get("chart_svg")
+    if not svg:
+        return dashboard_label(description or "Chart unavailable")
+    try:
+        gi.require_version("Rsvg", "2.0")
+        from gi.repository import Rsvg
+        # The supervisor generates this field. Published widget values are data only.
+        handle = Rsvg.Handle.new_from_data(svg.encode("utf-8"))
+        sized, width, height = handle.get_intrinsic_size_in_pixels()
+        if not sized or width <= 0 or height <= 0:
+            raise ValueError("missing chart dimensions")
+    except (GLib.Error, ImportError, ValueError, AttributeError):
+        return dashboard_label(description or "Chart unavailable")
+
+    def draw(view, cr):
+        rect = Rsvg.Rectangle()
+        rect.width, rect.height = view.get_allocated_width(), view.get_allocated_height()
+        handle.render_document(cr, rect)
+        return False
+
+    view = DashboardGraphic(int(width), int(height), widget["label"], description, upscale=True)
+    view.connect("draw", draw)
+    return view
+
+
+def dashboard_image(title, value):
+    if not isinstance(value, str) or len(value) > 32 * 1024:
+        return dashboard_label("Image unavailable")
+    header, _, encoded = value.partition(",")
+    image_format = {"data:image/png;base64": "png", "data:image/jpeg;base64": "jpeg"}.get(header)
+    if not image_format:
+        return dashboard_label("Image unavailable")
+
+    def limit_size(loader, width, height):
+        if not (0 < width <= 2048 and 0 < height <= 2048 and width * height <= 1_048_576):
+            # GdkPixbuf uses (0, 0) in its own metadata probe to stop before decoding pixels.
+            loader.set_size(0, 0)
+
+    try:
+        data = base64.b64decode(encoded, validate=True)
+        end = b"\x00\x00\x00\x00IEND\xaeB\x60\x82" if image_format == "png" else b"\xff\xd9"
+        if not data.endswith(end):
+            return dashboard_label("Image unavailable")
+        loader = GdkPixbuf.PixbufLoader.new_with_type(image_format)
+        loader.connect("size-prepared", limit_size)
+        try:
+            loader.write(data)
+        finally:
+            loader.close()
+        pixbuf = loader.get_pixbuf()
+        if pixbuf is None:
+            return dashboard_label("Image unavailable")
+    except (GLib.Error, ValueError):
+        return dashboard_label("Image unavailable")
+    width, height = pixbuf.get_width(), pixbuf.get_height()
+
+    def draw(view, cr):
+        scale = min(1, view.get_allocated_width() / width, view.get_allocated_height() / height)
+        cr.translate((view.get_allocated_width() - width * scale) / 2, 0)
+        cr.scale(scale, scale)
+        Gdk.cairo_set_source_pixbuf(cr, pixbuf, 0, 0)
+        cr.paint()
+        return False
+
+    view = DashboardGraphic(width, height, title, f"{image_format.upper()} image, {width} × {height} pixels", upscale=False)
+    view.connect("draw", draw)
+    return view
 
 
 class DashboardGrid(Gtk.Fixed):
@@ -96,11 +198,14 @@ class DashboardPane(Gtk.Box):
         page_request("dashboard")
 
     def receive(self, reply):
+        if reply.get("unchanged"):
+            self.show_dashboard_notice(self.rows)
+            return
         if "rows" not in reply:
             self.notice.set_text(reply.get("error") or reply.get("notice", ""))
             return
         rows = reply["rows"]
-        self.notice.set_text("" if rows else "No chats have published a dashboard.")
+        self.show_dashboard_notice(rows)
         if self.rows != rows:
             self.rows = rows
             for card in self.grid.get_children():
@@ -108,6 +213,9 @@ class DashboardPane(Gtk.Box):
             for row in rows:
                 self.grid.put(self.card(row), 0, 0)
             self.grid.show_all()
+
+    def show_dashboard_notice(self, rows):
+        self.notice.set_text("" if rows else "No chats have published a dashboard.")
 
     def card(self, row):
         board = row["board"]
@@ -135,14 +243,24 @@ class DashboardPane(Gtk.Box):
                     "dashboard_click", agent=r["agent"], revision=r["revision"], widget=k))
                 box.pack_start(button, False, False, 0)
                 continue
+            unit = " " + w["unit"] if w.get("unit") else ""
+            if kind == "metric":
+                metric = dashboard_label("")
+                title = GLib.markup_escape_text(re.sub(r"[:\s]+\Z", "", w["label"]))
+                number = GLib.markup_escape_text(str(v) + unit)
+                metric.set_markup(f"<b>{title}:</b> {number}")
+                metric.set_selectable(True)
+                box.pack_start(metric, False, False, 0)
+                continue
             caption = dashboard_label(w["label"], "section")
             box.pack_start(caption, False, False, 0)
-            if kind == "graph":
-                plot = Gtk.DrawingArea()
-                plot.set_size_request(120, 48)
-                plot.connect("draw", self.plot, v)
-                caption.set_tooltip_text(str(v))
-                box.pack_start(plot, False, False, 0)
+            if kind == "image":
+                box.pack_start(dashboard_image(w["label"], v), False, False, 0)
+                continue
+            if kind in ("graph", "bar", "pie", "radar", "scatter"):
+                box.pack_start(dashboard_chart(w), False, False, 0)
+                if kind != "graph":
+                    continue
                 shown = str(v[-1]) if v else "—"
             elif kind in ("progress", "gauge"):
                 low, high = w.get("min", 0), w.get("max", 100)
@@ -152,25 +270,8 @@ class DashboardPane(Gtk.Box):
                 shown = str(v)
             else:
                 shown = "\n".join(v) if kind == "events" else v
-            value = dashboard_label(shown + (" " + w["unit"] if w.get("unit") else ""))
+            value = dashboard_label(shown + unit)
             value.set_max_width_chars(38)
             value.set_selectable(True)
             box.pack_start(value, False, False, 0)
         return frame
-
-    @staticmethod
-    def plot(view, cr, points):
-        if not points:
-            return False
-        width, height = view.get_allocated_width()-4, view.get_allocated_height()-4
-        low, high = min(points), max(points)
-        cr.set_source_rgb(0.15, 0.55, 0.76)
-        cr.set_line_width(2)
-        for i, value in enumerate(points):
-            x = 2 + width * i / max(1, len(points)-1)
-            y = 2 + height * ((high-value)/(high-low) if high != low else .5)
-            if i == 0:
-                cr.move_to(x, y)
-            cr.line_to(x + .1, y)
-        cr.stroke()
-        return False

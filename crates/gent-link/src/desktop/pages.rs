@@ -129,9 +129,29 @@ fn chats(value: Value) -> Result<Value> {
 pub(super) struct Pages {
     // A private, in-memory edit session. The snapshot detects concurrent CLI or daemon writes.
     draft: Option<(Snapshot, uuid::Uuid)>,
+    // The same frontend keeps its last rendered dashboard until its pipe closes.
+    dashboard_rows: Option<Vec<Value>>,
 }
 
 impl Pages {
+    fn dashboard(&mut self, mut rows: Vec<Value>) -> Result<Value> {
+        rows.sort_by_cached_key(|r| r["chat"].as_str().unwrap_or_default().to_lowercase());
+        if self.dashboard_rows.as_ref() == Some(&rows) {
+            return Ok(json!({"unchanged":true}));
+        }
+        let mut display = rows.clone();
+        for row in &mut display {
+            for widget in row["board"]["widgets"]
+                .as_array_mut()
+                .context("invalid dashboard widgets")?
+            {
+                super::charts::decorate(widget);
+            }
+        }
+        self.dashboard_rows = Some(rows);
+        Ok(json!({"rows":display}))
+    }
+
     pub(super) async fn respond(&mut self, home: &Path, line: &str) -> Value {
         let Ok(request) = serde_json::from_str::<Request>(line) else {
             return json!({"page":"settings","error":"Invalid desktop request"});
@@ -180,8 +200,7 @@ impl Pages {
                     );
                     after = Some(cursor.to_owned());
                 }
-                rows.sort_by_cached_key(|r| r["chat"].as_str().unwrap_or_default().to_lowercase());
-                Ok(json!({"rows":rows}))
+                self.dashboard(rows)
             }
             Request::DashboardClick {
                 agent,
@@ -263,6 +282,24 @@ impl Pages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_refresh_only_sends_charts_when_the_snapshot_changes() {
+        let mut pages = Pages::default();
+        let mut rows = vec![json!({"agent":"chat","chat":"Trainer","revision":1,
+            "board":{"title":"Training","widgets":[{"id":"loss","kind":"graph",
+                "label":"Loss","unit":"%","value":[4,2,3]}]}})];
+        let first = pages.dashboard(rows.clone()).unwrap();
+        assert!(first["rows"][0]["board"]["widgets"][0]["chart_svg"].is_string());
+        assert_eq!(
+            pages.dashboard(rows.clone()).unwrap(),
+            json!({"unchanged":true})
+        );
+        rows[0]["chat"] = json!("Renamed");
+        assert_eq!(pages.dashboard(rows).unwrap()["rows"][0]["chat"], "Renamed");
+        assert_eq!(pages.dashboard(vec![]).unwrap(), json!({"rows":[]}));
+        assert_eq!(pages.dashboard(vec![]).unwrap(), json!({"unchanged":true}));
+    }
 
     #[tokio::test]
     async fn editor_saves_rejects_conflicts_and_retains_invalid_drafts() {

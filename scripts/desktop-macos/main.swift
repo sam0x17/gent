@@ -347,6 +347,162 @@ func editMember(_ desktop: Desktop, at index: Int, member: [String: String], nam
     }
 }
 
+func fixtureRaster(_ format: NSBitmapImageRep.FileType, width: Int, height: Int) -> Data {
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                                  bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false,
+                                  colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    memset(bitmap.bitmapData!, 128, bitmap.bytesPerRow * height)
+    return bitmap.representation(using: format, properties: [:])!
+}
+
+func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
+    let chartKinds = ["graph", "bar", "pie", "radar", "scatter"]
+    let categories = [["label": "A", "value": 1], ["label": "B", "value": 2], ["label": "C", "value": 3]]
+    let values: [Any] = [[0.5, 1.5], categories, categories, categories, [[1, 2], [2, 3]]]
+    let marks = [
+        #"<path d="M1 8 C4 5 8 11 11 8" fill="none" stroke="blue" stroke-width="2"/>"#,
+        #"<rect x="4" y="2" width="4" height="8" fill="blue"/>"#,
+        #"<path d="M3 4 A7 7 0 0 1 10 11 L3 11 Z" fill="blue"/>"#,
+        #"<polygon points="2,10 6,3 10,10" fill="blue"/>"#,
+        #"<circle cx="6" cy="8" r="2" fill="blue"/>"#,
+    ]
+    var widgets: [[String: Any]] = chartKinds.enumerated().map { i, kind in
+        // The half-unit stripe must remain solid red when AppKit enlarges the vector.
+        let height = 16 + i * 2
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="60" height="\(height)" viewBox="0 0 60 \(height)">
+        <rect width="60" height="\(height)" fill="white"/><rect x="12.25" width=".5" height="\(height)" fill="red"/>
+        <g transform="translate(0 \(i))">\(marks[i])</g>
+        <text x="20" y="12" font-size="7">\(kind)</text></svg>
+        """
+        return ["kind": kind, "label": kind, "id": kind, "unit": "ms", "value": values[i],
+                "chart_svg": svg, "chart_description": "Summary of " + kind]
+    }
+    widgets.append(["kind": "metric", "id": "duration", "label": "Latency", "value": 21.5, "unit": "ms"])
+    widgets.append(["kind": "metric", "id": "count", "label": "Count:  ", "value": 0])
+    let png = fixtureRaster(.png, width: 1024, height: 256)
+    let jpeg = fixtureRaster(.jpeg, width: 90, height: 600)
+    let pngPrefix = "data:image/png;base64,"
+    let jpegPrefix = "data:image/jpeg;base64,"
+    // A legal 24 KiB JPEG comment takes this small picture over the encoded byte limit.
+    let paddedJPEG = jpeg.prefix(2) + Data([0xff, 0xfe, 0x60, 0x02]) + Data(count: 24 * 1024) + jpeg.dropFirst(2)
+    let sources = [
+        ("Wide PNG", pngPrefix + png.base64EncodedString()), ("Tall JPEG", jpegPrefix + jpeg.base64EncodedString()),
+        ("Remote", "https://example.invalid/image.png"), ("Broken", pngPrefix + "!!"),
+        ("PNG declared as JPEG", jpegPrefix + png.base64EncodedString()),
+        ("JPEG declared as PNG", pngPrefix + jpeg.base64EncodedString()),
+        ("Inline SVG", "data:image/svg+xml;base64," + Data("<svg/>".utf8).base64EncodedString()),
+        ("Truncated PNG", pngPrefix + png.dropLast(12).base64EncodedString()),
+        ("Truncated JPEG", jpegPrefix + jpeg.dropLast(2).base64EncodedString()),
+        ("Oversized", jpegPrefix + paddedJPEG.base64EncodedString()),
+        ("Too wide", pngPrefix + fixtureRaster(.png, width: 2049, height: 1).base64EncodedString()),
+        ("Too many pixels", pngPrefix + fixtureRaster(.png, width: 1025, height: 1024).base64EncodedString()),
+    ]
+    for (i, source) in sources.enumerated() {
+        widgets.append(["kind": "image", "id": "image-\(i)", "label": source.0, "value": source.1])
+    }
+    widgets.append(["kind": "bar", "id": "missing", "label": "Missing chart", "value": categories,
+                    "chart_description": "Bar summary without a drawing"])
+    let view = desktop.dashboard.view
+    let board: [String: Any] = ["agent": "charts", "chat": "Chart fixture", "revision": 1,
+                                "board": ["title": "Telemetry", "widgets": widgets]]
+    func reply(_ fields: [String: Any]) {
+        require(requests { desktop.receive(fields.merging(["page": "dashboard"]) { _, new in new }) }.isEmpty,
+                "media and unchanged replies generate no supervisor requests")
+        desktop.tabs.layoutSubtreeIfNeeded()
+    }
+    reply(["rows": [board]])
+    let card = descendants(view, of: NSBox.self).first!
+    let images = descendants(card, of: NSImageView.self)
+    require(images.count == chartKinds.count + 2, "only charts and valid inline rasters produce images")
+    func image(_ label: String) -> NSImageView {
+        guard let image = images.first(where: { $0.accessibilityLabel() == label }) else {
+            fatalError("Missing accessible image " + label)
+        }
+        require(image.isAccessibilityElement() && image.accessibilityRole() == .image && image.toolTip == label,
+                "accessible image description for " + label)
+        return image
+    }
+    let fields = descendants(card, of: NSTextField.self)
+    require(fields.contains { $0.stringValue == "1.5 ms" } && fields.contains { $0.stringValue == "Bar summary without a drawing" },
+            "latest graph value and fallback chart description")
+    for (label, number) in [("Latency:", "21.5 ms"), ("Count:", "0")] {
+        let metric = fields.first { $0.stringValue == label + " " + number }!.attributedStringValue
+        for i in 0..<metric.length {
+            let font = metric.attribute(.font, at: i, effectiveRange: nil) as! NSFont
+            require(font.fontDescriptor.symbolicTraits.contains(.bold) == (i < label.utf16.count),
+                    "metric label and single colon bold, value and unit regular")
+        }
+    }
+    require(fields.filter { $0.stringValue == "Image unavailable" }.count == sources.count - 2,
+            "invalid, remote and oversized images show placeholders")
+
+    for width: CGFloat in [850, 510] {
+        resizeDesktop(desktop, width: width, height: 605)
+        let contentWidth = card.contentView!.bounds.width
+        for (i, kind) in chartKinds.enumerated() {
+            let chart = image("Summary of " + kind)
+            let size = chart.bounds.size
+            require(abs(size.width - contentWidth) <= 1 && abs(size.height - size.width * CGFloat(16 + i * 2) / 60) <= 1,
+                    "full-width proportional SVG at \(width) for " + kind)
+            chart.scrollToVisible(chart.bounds)
+            let bitmap = chart.bitmapImageRepForCachingDisplay(in: chart.bounds)!
+            chart.cacheDisplay(in: chart.bounds, to: bitmap)
+            func pixel(_ x: Double) -> NSColor {
+                bitmap.colorAt(x: Int(x / 60 * Double(bitmap.pixelsWide)), y: bitmap.pixelsHigh / 2)!.usingColorSpace(.sRGB)!
+            }
+            let mark = pixel(6)
+            require(mark.blueComponent > 0.9 && mark.redComponent < 0.3, "native SVG draws the " + kind + " mark")
+            let xs = stride(from: bitmap.pixelsWide / 3, to: bitmap.pixelsWide * 9 / 10, by: 4)
+            let ys = stride(from: 0, to: bitmap.pixelsHigh, by: 4)
+            let hasText = xs.contains { x in
+                ys.contains { y in
+                    let color = bitmap.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!
+                    return color.alphaComponent > 0.95 && color.redComponent < 0.3
+                }
+            }
+            require(hasText, "native SVG draws chart text for " + kind)
+            let stripe = pixel(12.5)
+            let paper = pixel(13.5)
+            require(stripe.redComponent > 0.9 && stripe.greenComponent < 0.25 && paper.greenComponent > 0.9,
+                    "native SVG preserves fine detail after resizing " + kind)
+        }
+        let landscape = image("Wide PNG").bounds
+        let portrait = image("Tall JPEG").bounds
+        require(abs(landscape.width - contentWidth) <= 1 && abs(landscape.width - 4 * landscape.height) <= 2
+                && portrait.height > 0 && portrait.height <= 360 && abs(portrait.width - portrait.height * 0.15) <= 1,
+                "PNG and JPEG fit at their aspect ratios")
+    }
+
+    let clip = scroll.contentView
+    require(scroll.documentView!.bounds.height > clip.bounds.height, "media board scrolls")
+    let last = fields.first { $0.stringValue == "Bar summary without a drawing" }!
+    last.scrollToVisible(last.bounds)
+    require(clip.bounds.contains(last.convert(last.bounds, to: clip)), "last widget below charts and rasters is reachable")
+    clip.scroll(to: NSPoint(x: 0, y: 200))
+    reply(["error": "Transient dashboard error"])
+    let notice = descendants(view, of: NSTextField.self).first { $0.stringValue == "Transient dashboard error" }!
+    require(!notice.isHiddenOrHasHiddenAncestor, "dashboard shows transient errors")
+    let position = scroll.documentVisibleRect.origin
+    reply(["unchanged": true])
+    require(notice.isHiddenOrHasHiddenAncestor && position.y > 0 && position == scroll.documentVisibleRect.origin
+            && descendants(view, of: NSBox.self).first === card && descendants(card, of: NSImageView.self).first === images.first,
+            "unchanged populated reply clears error and preserves cards, media and scroll position")
+    var replacement = board
+    replacement["board"] = ["title": "Telemetry", "widgets": [
+        ["kind": "metric", "id": "duration", "label": "Latency:", "value": 42, "unit": "ms"]
+    ]]
+    reply(["rows": [replacement]])
+    require(descendants(view, of: NSImageView.self).isEmpty
+            && descendants(view, of: NSTextField.self).contains { $0.stringValue == "Latency: 42 ms" },
+            "a differing full snapshot replaces stale media and values")
+    reply(["rows": []])
+    reply(["notice": "Waiting for refresh"])
+    reply(["unchanged": true])
+    require(!notice.isHiddenOrHasHiddenAncestor && notice.stringValue == "No chats have published a dashboard.",
+            "unchanged empty reply restores empty state")
+}
+
 func checkDashboard(_ desktop: Desktop) {
     desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
     let view = desktop.dashboard.view
@@ -467,7 +623,8 @@ func checkDashboard(_ desktop: Desktop) {
                                                             height: CGFloat.greatestFiniteMagnitude))
     require(fitting.height > 160 && wrapped.bounds.height >= fitting.height - 1,
             "wrapped text gets its natural height in a partial row")
-    require(opened == targets, "button, malformed links and scrolling leave opener idle")
+    checkDashboardMedia(desktop, scroll: scroll)
+    require(opened == targets, "button, malformed links, media and scrolling leave opener idle")
     resizeDesktop(desktop, width: 850, height: 605)
 }
 
@@ -477,7 +634,7 @@ let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
 if CommandLine.arguments.dropFirst(2).contains("--dashboard") {
     desktop.makeWindow()
     checkDashboard(desktop)
-    print("PASS: native Dashboard layout, scrolling, web links and button dispatch")
+    print("PASS: native Dashboard layout, scrolling, web links, button dispatch, SVG charts, metrics, inline images and unchanged replies")
     exit(0)
 }
 if CommandLine.arguments.dropFirst(2).contains(where: { ["--cluster", "--nodes"].contains($0) }) {

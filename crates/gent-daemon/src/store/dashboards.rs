@@ -1,8 +1,10 @@
 use super::*;
-use crate::messages::{Event, wire::DASHBOARD_VERSION};
+use crate::messages::{
+    Event,
+    dashboard::{display_board, encode_board, update_board},
+    wire::DASHBOARD_VERSION,
+};
 use gent_protocol::dashboard::{Board, Kind};
-
-const LINK_UNIT: &str = "↗ web link";
 
 pub(super) fn schema(db: &Connection) -> Result<()> {
     let tx = db.unchecked_transaction()?;
@@ -35,40 +37,6 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-// Both the legacy daemon and hosted checkpoint importer reserialize Board.
-// Use fields they retain. The exact unit qualifies otherwise ordinary text.
-fn encode_board(board: &mut Board) -> Result<()> {
-    board.validate().map_err(anyhow::Error::msg)?;
-    let mut encoded_link = false;
-    for widget in &mut board.widgets {
-        if widget.kind == Kind::Link {
-            widget.kind = Kind::Text;
-            widget.unit = Some(LINK_UNIT.into());
-            encoded_link = true;
-        }
-    }
-    if encoded_link {
-        board.validate().map_err(anyhow::Error::msg)?;
-    }
-    Ok(())
-}
-
-fn display_board(mut board: Board) -> Board {
-    for widget in &mut board.widgets {
-        if widget.kind == Kind::Text
-            && widget.unit.as_deref() == Some(LINK_UNIT)
-            && widget
-                .value
-                .as_str()
-                .is_some_and(gent_protocol::dashboard::web_url)
-        {
-            widget.kind = Kind::Link;
-            widget.unit = None;
-        }
-    }
-    board
-}
-
 impl StoreSession<'_> {
     fn board(&self, id: &str) -> Result<(u64, Option<Board>, Option<String>)> {
         let row = self
@@ -98,7 +66,7 @@ impl StoreSession<'_> {
             encode_board(board)?;
         }
         let (revision, previous, last) = self.board(&who.id)?;
-        let fingerprint = hash(&serde_json::to_string(&op)?);
+        let mut fingerprint = hash(&serde_json::to_string(&op)?);
         if last.as_ref() == Some(&fingerprint) {
             return Ok(json!({"revision":revision}));
         }
@@ -110,24 +78,19 @@ impl StoreSession<'_> {
             AgentOp::DashboardDelete { expected_revision } => (expected_revision, None),
             AgentOp::DashboardUpdate {
                 expected_revision,
-                values,
+                mut values,
             } => {
-                let mut board = previous
-                    .map(display_board)
-                    .context("define a dashboard before updating it")?;
-                ensure!(
-                    !values.is_empty() && values.len() <= 32,
-                    "supply 1–32 widget values"
-                );
-                for (key, value) in values {
-                    let w = board
-                        .widgets
-                        .iter_mut()
-                        .find(|w| w.id == key)
-                        .context("unknown widget")?;
-                    w.value = value;
+                let board = update_board(
+                    previous.context("define a dashboard before updating it")?,
+                    &mut values,
+                )?;
+                fingerprint = hash(&serde_json::to_string(&AgentOp::DashboardUpdate {
+                    expected_revision,
+                    values,
+                })?);
+                if last.as_ref() == Some(&fingerprint) {
+                    return Ok(json!({"revision":revision}));
                 }
-                encode_board(&mut board)?;
                 (expected_revision, Some(board))
             }
             _ => unreachable!(),

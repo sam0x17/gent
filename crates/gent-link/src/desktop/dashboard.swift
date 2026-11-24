@@ -1,20 +1,41 @@
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 
-private final class Plot: NSView {
-    var samples: [Double] = []
-    override func draw(_ rect: NSRect) {
-        guard let lo = samples.min(), let hi = samples.max() else { return }
-        let line = NSBezierPath()
-        for (i, v) in samples.enumerated() {
-            let x = 2 + (bounds.width - 4) * CGFloat(i) / CGFloat(max(1, samples.count - 1))
-            let y = 2 + (bounds.height - 4) * CGFloat(hi == lo ? 0.5 : (v - lo) / (hi - lo))
-            if i == 0 { line.move(to: NSPoint(x: x, y: y)) }
-            line.line(to: NSPoint(x: x + 0.1, y: y))
-        }
-        NSColor.controlAccentColor.setStroke()
-        line.lineWidth = 2
-        line.stroke()
+// Inspect the compressed image's type and pixel dimensions before decoding its first frame.
+private func dashboardRaster(_ value: Any?) -> NSImage? {
+    guard let uri = value as? String, uri.utf8.count <= 32 * 1024,
+          let comma = uri.firstIndex(of: ",") else { return nil }
+    let payload = uri[uri.index(after: comma)...]
+    guard let bytes = Data(base64Encoded: String(payload)) else { return nil }
+    // ImageIO can recover a partial image after a truncated stream. Require its terminator.
+    let type: UTType
+    switch uri[..<comma] {
+    case "data:image/png;base64":
+        guard bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]),
+              bytes.suffix(12).elementsEqual([0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]) else { return nil }
+        type = .png
+    case "data:image/jpeg;base64":
+        guard bytes.starts(with: [0xff, 0xd8]), bytes.suffix(2).elementsEqual([0xff, 0xd9]) else { return nil }
+        type = .jpeg
+    default: return nil
     }
+    guard let source = CGImageSourceCreateWithData(bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+          CGImageSourceGetType(source) as String? == type.identifier,
+          CGImageSourceGetStatus(source) == .statusComplete, CGImageSourceGetCount(source) == 1,
+          let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+          let width = properties[kCGImagePropertyPixelWidth] as? Int, (1...2048).contains(width),
+          let height = properties[kCGImagePropertyPixelHeight] as? Int, (1...2048).contains(height),
+          width * height <= 1_048_576 else { return nil }
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: max(width, height),
+        kCGImageSourceShouldCacheImmediately: true,
+    ]
+    guard let pixels = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+          CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { return nil }
+    return NSImage(cgImage: pixels, size: NSSize(width: pixels.width, height: pixels.height))
 }
 
 private final class DashboardButton: NSButton {
@@ -67,6 +88,7 @@ final class DashboardTab: NSObject {
     private let notice = NSTextField(wrappingLabelWithString: "")
     var openURL: (URL) -> Void = { url in _ = NSWorkspace.shared.open(url) }
     private var rows: [[String: Any]] = []
+    private var cards: [NSBox] = []
     private var columns = 0
     private var viewportColumns: Int { max(1, min(4, Int(scroll.contentSize.width / 280))) }
 
@@ -103,18 +125,21 @@ final class DashboardTab: NSObject {
     func load() { sendPage("dashboard") }
 
     func receive(_ reply: [String: Any]) {
-        guard let next = reply["rows"] as? [[String: Any]] else {
+        if let next = reply["rows"] as? [[String: Any]] {
+            if !NSArray(array: rows).isEqual(to: next) {
+                rows = next
+                cards = next.compactMap(makeCard)
+                arrangeCards()
+            }
+        } else if reply["unchanged"] as? Bool != true {
             showNotice((reply["error"] ?? reply["notice"]) as? String ?? "")
             return
         }
-        showNotice(next.isEmpty ? "No chats have published a dashboard." : "")
-        if columns == 0 || !NSArray(array: rows).isEqual(to: next) {
-            rows = next
-            render()
-        }
+        showNotice(rows.isEmpty ? "No chats have published a dashboard." : "")
     }
 
     private func showNotice(_ message: String) {
+        guard notice.stringValue != message else { return }
         notice.stringValue = message
         notice.isHidden = message.isEmpty
     }
@@ -124,16 +149,15 @@ final class DashboardTab: NSObject {
     }
 
     @objc private func resized() {
-        if viewportColumns != columns { render() }
+        if viewportColumns != columns { arrangeCards() }
     }
 
-    private func render() {
+    private func arrangeCards() {
         columns = viewportColumns
         for line in grid.arrangedSubviews {
             grid.removeArrangedSubview(line)
             line.removeFromSuperview()
         }
-        let cards = rows.compactMap(makeCard)
         for start in stride(from: 0, to: cards.count, by: columns) {
             let rowCards = cards[start..<min(start + columns, cards.count)]
             let line = NSStackView()
@@ -162,11 +186,36 @@ final class DashboardTab: NSObject {
         content.orientation = .vertical
         content.alignment = .leading
 
-        func addText(_ value: String) {
+        @discardableResult
+        func addText(_ value: String) -> NSTextField {
             let field = NSTextField(wrappingLabelWithString: value)
             field.isSelectable = true
             content.addArrangedSubview(field)
             field.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor).isActive = true
+            return field
+        }
+
+        func addImage(_ image: NSImage, description: String, chart: Bool) {
+            let view = NSImageView()
+            view.image = image
+            view.imageScaling = .scaleProportionallyUpOrDown
+            view.setAccessibilityElement(true)
+            view.setAccessibilityRole(.image)
+            view.setAccessibilityLabel(description)
+            view.toolTip = description
+            view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+            content.addArrangedSubview(view)
+            let width = view.widthAnchor.constraint(equalTo: content.widthAnchor)
+            if !chart {
+                // Keep small images at native size and fit portraits on a laptop screen.
+                width.priority = NSLayoutConstraint.Priority(495)
+                view.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor).isActive = true
+                view.widthAnchor.constraint(lessThanOrEqualToConstant: image.size.width).isActive = true
+                view.heightAnchor.constraint(lessThanOrEqualToConstant: 360).isActive = true
+            }
+            width.isActive = true
+            view.heightAnchor.constraint(equalTo: view.widthAnchor, multiplier: image.size.height / image.size.width).isActive = true
         }
 
         addText(row["chat"] as? String ?? "")
@@ -194,16 +243,42 @@ final class DashboardTab: NSObject {
                 content.addArrangedSubview(button)
                 continue
             }
-            addText(title)
             let unit = (item["unit"] as? String).map { " " + $0 } ?? ""
-            if kind == "graph" {
-                let plot = Plot()
-                plot.samples = value as? [Double] ?? []
-                content.addArrangedSubview(plot)
-                plot.heightAnchor.constraint(equalToConstant: 48).isActive = true
-                plot.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
-                addText(plot.samples.last.map { String($0) + unit } ?? "—")
-            } else if kind == "progress" || kind == "gauge" {
+            if kind == "metric" {
+                let number = (value as? NSNumber)?.stringValue ?? "—"
+                var label = title[...]
+                while let last = label.last, last.isWhitespace || last == ":" { label = label.dropLast() }
+                let text = NSMutableAttributedString(string: label + ":", attributes: [
+                    .font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+                ])
+                text.append(NSAttributedString(string: " " + number + unit, attributes: [
+                    .font: NSFont.systemFont(ofSize: NSFont.systemFontSize)
+                ]))
+                addText("").attributedStringValue = text
+                continue
+            }
+            addText(title)
+            switch kind {
+            case "graph", "bar", "pie", "radar", "scatter":
+                let description = item["chart_description"] as? String ?? title
+                // Only the supervisor supplies chart_svg. AppKit keeps its SVG representation scalable.
+                if let svg = item["chart_svg"] as? String, let chart = NSImage(data: Data(svg.utf8)),
+                   chart.size.width > 0, chart.size.height > 0 {
+                    chart.cacheMode = .never
+                    addImage(chart, description: description, chart: true)
+                } else {
+                    addText(item["chart_description"] as? String ?? "Chart unavailable")
+                }
+                if kind == "graph" {
+                    addText((value as? [Double])?.last.map { String($0) + unit } ?? "—")
+                }
+            case "image":
+                if let image = dashboardRaster(value) {
+                    addImage(image, description: title, chart: false)
+                } else {
+                    addText("Image unavailable")
+                }
+            case "progress", "gauge":
                 let bar = NSLevelIndicator()
                 bar.levelIndicatorStyle = .continuousCapacity
                 bar.minValue = item["min"] as? Double ?? 0
@@ -212,7 +287,7 @@ final class DashboardTab: NSObject {
                 content.addArrangedSubview(bar)
                 bar.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
                 addText(String(bar.doubleValue) + unit)
-            } else {
+            default:
                 addText((value as? [String])?.joined(separator: "\n") ?? value as? String ?? "")
             }
         }
