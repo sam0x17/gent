@@ -108,6 +108,7 @@ pub(in crate::integration) async fn discovery(
             let id = row.session_id?;
             Some(crate::integration::discovery::hosts::Chat {
                 last_activity_at: None,
+                last_native_message_at: None,
                 id,
                 name: row.name,
                 working_dir: Some(row.cwd),

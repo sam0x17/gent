@@ -5,6 +5,7 @@ pub(in crate::integration) struct Chat {
     pub id: String,
     pub name: Option<String>,
     pub last_activity_at: Option<i64>,
+    pub last_native_message_at: Option<i64>,
     pub working_dir: Option<PathBuf>,
     pub recoverable: bool,
 }
@@ -58,7 +59,7 @@ pub(super) async fn codex(home: &Path, previous: Option<&Value>) -> Result<Inven
     let result = host.rpc_with_timeout("thread/list",
         json!({"limit":32,"cursor":cursor.cursor,"archived":cursor.archived,"modelProviders":[],"sortKey":"updated_at"}),
         Duration::from_secs(30)).await?;
-    let (mut chats, next) = codex_page(&result)?;
+    let (mut chats, next) = codex_page(&result, &directory)?;
     let page = advance(cursor, next)?;
     for chat in &mut chats {
         chat.recoverable = can_recover;
@@ -98,7 +99,7 @@ fn advance(current: Cursor, next: Option<String>) -> Result<Page> {
     })
 }
 
-fn codex_page(value: &Value) -> Result<(Vec<Chat>, Option<String>)> {
+fn codex_page(value: &Value, directory: &Path) -> Result<(Vec<Chat>, Option<String>)> {
     let rows = value["data"]
         .as_array()
         .context("invalid Codex inventory")?;
@@ -115,6 +116,9 @@ fn codex_page(value: &Value) -> Result<(Vec<Chat>, Option<String>)> {
             id: id.into(),
             name: super::super::naming::title(&row["name"]),
             last_activity_at: super::activity::timestamp(row["updatedAt"].as_i64()),
+            last_native_message_at: row["path"]
+                .as_str()
+                .and_then(|p| super::activity::codex(directory, Path::new(p), id)),
             working_dir: None,
             recoverable: true,
         });
@@ -178,15 +182,25 @@ mod tests {
         let two = uuid::Uuid::new_v4().to_string();
         let (rows, next) = codex_page(
             &json!({"data":[{"id":one,"name":"cit"},{"id":two,"name":"cit"}],"nextCursor":"page2"}),
+            Path::new("/codex"),
         )
         .unwrap();
         assert_eq!(rows.len(), 2);
         assert_ne!(rows[0].id, rows[1].id);
         assert_eq!(next.as_deref(), Some("page2"));
-        let (rows, _) =
-            codex_page(&json!({"data":[{"id":one,"preview":"private prompt"}]})).unwrap();
+        let (rows, _) = codex_page(
+            &json!({"data":[{"id":one,"preview":"private prompt"}]}),
+            Path::new("/codex"),
+        )
+        .unwrap();
         assert!(rows[0].name.is_none());
-        assert!(codex_page(&json!({"data":[{"id":one},{"id":one}]})).is_err());
-        assert!(codex_page(&json!({"data":[],"nextCursor":""})).is_err());
+        assert!(
+            codex_page(
+                &json!({"data":[{"id":one},{"id":one}]}),
+                Path::new("/codex")
+            )
+            .is_err()
+        );
+        assert!(codex_page(&json!({"data":[],"nextCursor":""}), Path::new("/codex")).is_err());
     }
 }

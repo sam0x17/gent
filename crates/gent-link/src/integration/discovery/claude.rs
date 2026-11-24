@@ -61,6 +61,7 @@ pub(super) fn history(directory: &Path, chats: &mut Vec<hosts::Chat>) -> Result<
             if !known.insert(id.into()) {
                 if let Some(chat) = chats.iter_mut().find(|chat| chat.id == id) {
                     chat.last_activity_at = last_activity_at;
+                    chat.last_native_message_at = last_activity_at;
                 }
                 continue;
             }
@@ -68,6 +69,7 @@ pub(super) fn history(directory: &Path, chats: &mut Vec<hosts::Chat>) -> Result<
                 id: id.into(),
                 name,
                 last_activity_at,
+                last_native_message_at: last_activity_at,
                 working_dir: None,
                 recoverable: false,
             });

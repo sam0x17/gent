@@ -97,7 +97,9 @@ pub enum Event {
     },
     ConversationActivity {
         agent: Registration,
-        timestamp: i64,
+        timestamp: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_dates: Option<gent_protocol::directory::MessageDates>,
     },
     Message {
         sender: Box<Registration>,

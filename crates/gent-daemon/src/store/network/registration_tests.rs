@@ -13,6 +13,7 @@ async fn conversation_activity_syncs_resolves_and_survives_polling_restart_and_r
             index,
             OwnerOp::ObserveActivity {
                 agent_id: id,
+                last_native_message_at: None,
                 last_activity_at: now - age,
             },
         )
@@ -45,6 +46,7 @@ async fn conversation_activity_syncs_resolves_and_survives_polling_restart_and_r
             0,
             OwnerOp::ObserveActivity {
                 agent_id: remote.clone(),
+                last_native_message_at: None,
                 last_activity_at: now
             }
         )
@@ -55,6 +57,7 @@ async fn conversation_activity_syncs_resolves_and_survives_polling_restart_and_r
         1,
         OwnerOp::ObserveActivity {
             agent_id: remote.clone(),
+            last_native_message_at: None,
             last_activity_at: now - 300,
         },
     )
@@ -626,4 +629,53 @@ async fn remote_permission_edit_replaces_one_selector_rule_and_inherit_removes_i
             );
         }
     }
+}
+
+#[tokio::test]
+async fn message_dates_backfill_only_admitted_recipients_and_outlive_history() -> Result<()> {
+    let mut pair = Pair::new().await;
+    let sent = pair.send(vec![])?;
+    let date: i64 = pair.stores[0].db.query_row(
+        "SELECT json_extract(payload,'$.created_at') FROM messages WHERE id=?1",
+        [sent["message_id"].as_str().unwrap()],
+        |r| r.get(0),
+    )?;
+    let dates = |pair: &Pair, node, agent: &str| -> Result<Option<i64>> {
+        let store: &Store = &pair.stores[node];
+        Ok(store
+            .db
+            .query_row(
+                "SELECT timestamp FROM chat_message_dates WHERE agent=?1 AND kind='gent'",
+                [agent],
+                |r| r.get(0),
+            )
+            .optional()?)
+    };
+    // An old sender upgrading with a pending outbound message.
+    pair.stores[0]
+        .db
+        .execute_batch("DROP TABLE chat_message_dates; DROP TRIGGER message_dates_forget_peer")?;
+    pair.reopen(0);
+    assert_eq!(dates(&pair, 0, &pair.agents[0])?, Some(date));
+    assert_eq!(dates(&pair, 0, &pair.agents[1])?, None);
+    pair.pump();
+    assert_eq!(dates(&pair, 1, &pair.agents[1])?, Some(date));
+    // Upgrading on the receiver finds the accepted but still unread inbox message.
+    pair.stores[1]
+        .db
+        .execute_batch("DROP TABLE chat_message_dates; DROP TRIGGER message_dates_forget_peer")?;
+    pair.reopen(1);
+    assert_eq!(dates(&pair, 1, &pair.agents[1])?, Some(date));
+    for i in 0..2 {
+        pair.retire_history(i);
+        pair.reopen(i);
+        assert_eq!(
+            pair.stores[i]
+                .db
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))?,
+            0
+        );
+        assert_eq!(dates(&pair, i, &pair.agents[i])?, Some(date));
+    }
+    Ok(())
 }

@@ -2,6 +2,17 @@
 use crate::Agent;
 use serde::{Deserialize, Serialize};
 
+/// Most recent messages with known dates, independent of directory presence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageDates {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_gent_messages: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_gent_message_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_native_message_at: Option<i64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entry {
     #[serde(flatten)]
@@ -12,6 +23,8 @@ pub struct Entry {
     pub last_activity_at: Option<i64>,
     #[serde(default)]
     pub retired: bool,
+    #[serde(flatten)]
+    pub message_dates: MessageDates,
 }
 
 #[derive(Serialize)]
@@ -89,6 +102,7 @@ mod tests {
             node_name: Some(id.into()),
             last_activity_at: activity,
             retired: false,
+            message_dates: MessageDates::default(),
         }
     }
     #[test]

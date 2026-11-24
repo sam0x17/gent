@@ -129,6 +129,11 @@ pub(super) fn import(
             copy(parent_tx, &snapshot, table, child_id)
                 .with_context(|| format!("hosted migration table {table}"))?;
         }
+        if snapshot.table_exists(None, "chat_message_dates")? {
+            copy(parent_tx, &snapshot, "chat_message_dates", child_id)?;
+        } else {
+            crate::store::message_dates::backfill(parent_tx, &snapshot, child_id)?;
+        }
         if snapshot.table_exists(None, "dashboards")? {
             dashboards(parent_tx, &snapshot, child_id)?;
         }
@@ -430,14 +435,22 @@ pub(super) fn copy(
         .collect::<Vec<_>>()
         .join(",");
     let fields = names.join(",");
-    let mut query = source.prepare(&format!("SELECT {fields} FROM {table}"))?;
+    let mut query = source.prepare(&format!(
+        "SELECT {fields} FROM {table} {}",
+        if table == "chat_message_dates" {
+            "WHERE agent IN (SELECT id FROM agents WHERE node_id=?1)"
+        } else {
+            ""
+        }
+    ))?;
     let mut find = parent.prepare(&format!("SELECT {fields} FROM {table} WHERE {keys}"))?;
     let mut insert = parent.prepare(&format!(
         "INSERT INTO {table}({fields}) VALUES({})",
         values.join(",")
     ))?;
     let mut update = parent.prepare(&format!("UPDATE {table} SET {assignments} WHERE {keys}"))?;
-    for incoming in query.query_map([], row)? {
+    let scope = (table == "chat_message_dates").then_some(child);
+    for incoming in query.query_map(params_from_iter(scope), row)? {
         let mut incoming = incoming?;
         // Numbered placeholders reserve slots through the highest key position.
         let key_count = columns.iter().rposition(|(_, key)| *key).unwrap() + 1;
@@ -454,6 +467,7 @@ pub(super) fn copy(
                     | ("exchanges", "count")
                     | ("request_clock", "floor" | "legacy_until")
                     | ("agent_activity", "last_activity_at")
+                    | ("chat_message_dates", "timestamp")
                     | ("file_chunks", "uploaded")
                     | ("file_objects", "complete" | "incomplete_until")
                     | ("relay_attachments", "detached")

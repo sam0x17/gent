@@ -27,7 +27,7 @@ pub(super) fn backfill_names(db: &Connection, state: &VerifiedState) -> Result<(
 }
 
 impl StoreSession<'_> {
-    pub(super) fn directory_entry(&self, agent: Agent) -> Result<Entry> {
+    fn directory_entry(&self, agent: Agent, owner_view: bool) -> Result<Entry> {
         let node_name = self
             .state
             .state()
@@ -47,6 +47,11 @@ impl StoreSession<'_> {
         };
         Ok(Entry {
             last_activity_at: self.activity(&agent.id)?,
+            message_dates: if owner_view {
+                self.message_dates(&agent.id)?
+            } else {
+                Default::default()
+            },
             retired: agent.revoked || !self.state.state().nodes.contains_key(&agent.node_id),
             agent,
             node_name,
@@ -78,7 +83,7 @@ impl StoreSession<'_> {
                 |r| r.get(0),
             )?;
             if !cleared {
-                entries.push(self.directory_entry(agent)?);
+                entries.push(self.directory_entry(agent, who.is_none())?);
             }
         }
         entries.sort_by(|a, b| {
@@ -140,13 +145,26 @@ impl StoreSession<'_> {
         Ok(self.db.execute("INSERT INTO agent_activity VALUES(?1,?2) ON CONFLICT(agent) DO UPDATE SET last_activity_at=excluded.last_activity_at WHERE excluded.last_activity_at>agent_activity.last_activity_at",params![id,timestamp])? > 0)
     }
 
-    pub(super) fn observe_activity(&self, id: &str, timestamp: i64) -> Result<Value> {
+    pub(super) fn observe_activity(
+        &self,
+        id: &str,
+        timestamp: i64,
+        native: Option<i64>,
+    ) -> Result<Value> {
         let agent = self.get_agent(id)?;
         ensure!(
             self.local_node(&agent.node_id) && !agent.revoked,
             "activity requires an active local chat"
         );
-        if self.save_activity(id, timestamp)? {
+        let mut changed = self.save_activity(id, timestamp)?;
+        if let Some(date) = native {
+            ensure!(
+                date > 0 && date <= self.timestamp.saturating_add(60),
+                "invalid native message date"
+            );
+            changed |= self.save_message_date(id, "native", date)?;
+        }
+        if changed {
             self.announce_activity(id)?;
         }
         Ok(json!({"last_activity_at":self.activity(id)?}))

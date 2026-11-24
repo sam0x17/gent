@@ -749,6 +749,8 @@ pub enum OwnerOp {
     ObserveActivity {
         agent_id: String,
         last_activity_at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_native_message_at: Option<i64>,
     },
     ClearRetiredAgents {
         dry_run: bool,

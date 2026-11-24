@@ -119,6 +119,10 @@ Older daemons continue ordinary messaging; activity sync starts after both
 endpoints support it. Only the hosting node can publish a chat's activity.
 The record contains an identity and timestamp, without transcript content.
 
+The desktop Chats pane uses separate dates for Gent and native messages. Each host keeps the latest Gent message date after history cleanup and shares it with protocol 11 peers. A remote recipient counts once its host accepts the message. On upgrade, Gent indexes retained messages. A surviving work or wake journal can also establish participation when the original date is gone. Conversations whose Gent history was completely erased before upgrade can enter the first group on their next send or receipt.
+
+Native message dates come from user and assistant records in the bounded tails of Claude session files and the Codex rollouts identified by native discovery. Gent shares the date alone. When no message date is available, the Chats pane keeps the conversation in the list.
+
 Name resolution uses exact case-insensitive names and optional node/provider
 qualifiers. Full chat IDs take precedence over names. When multiple visible
 active matches all have activity and one is strictly newest, it becomes the

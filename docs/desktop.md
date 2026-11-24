@@ -18,7 +18,7 @@ Closing the window hides it in the tray. **Quit Gent Desktop** exits the compani
 
 **Dashboard** shows the boards that chats have published. They share the available space, with vertical scrolling when needed. Charts follow your desktop’s colors. As a card widens, the plot expands while labels and lines keep their size. Click a link to open it in your default web browser, or a button to send its action to the publishing chat. See [Chat dashboards and goal recovery](dashboards.md).
 
-**Chats** lists the cluster's known registrations, including chats on offline nodes and retained retired or revoked registrations. Filter by name, node, provider, registration state or ID. Open the tab or choose **Refresh** to read the directory from the local daemon.
+**Chats** lists the cluster's known registrations, including chats on offline nodes and retained retired or revoked registrations. Chats that have sent or received a Gent message appear first, newest Gent message first. Other chats follow by their latest known user or assistant message. Within each group, undated chats come last. Ties sort by name and then chat ID. Filter by name, node, provider, registration state or ID. Open the tab or choose **Refresh** to read the directory from the local daemon.
 
 In **Chats**, select the conversation and choose **Unregister chat…**. The confirmation identifies the chat and its ID. Revocation disables its Gent registration and preserves the conversation in the provider app. A remote host handles the request over its authenticated node link and publishes the updated registration. Remote unregistration requires node protocol 8 on the host and carrier.
 

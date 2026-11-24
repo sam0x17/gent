@@ -217,6 +217,7 @@ async fn register(
         native: chat.id.clone(),
         name,
         last_activity_at: None,
+        last_native_message_at: None,
         endpoint: inventory.socket.clone(),
         recovery,
     })
@@ -287,7 +288,7 @@ async fn refresh(home: &Path) -> Result<()> {
                         break;
                     }
                     if let Some(entry) = catalog.entries.get_mut(&key) {
-                        match observe_activity(home, entry, chat.last_activity_at).await {
+                        match observe_activity(home, entry, chat).await {
                             Ok(()) => indexed += 1,
                             Err(e) => {
                                 failures += 1;
@@ -303,9 +304,7 @@ async fn refresh(home: &Path) -> Result<()> {
                     added += 1;
                     match register(home, &cfg, host, &inventory, chat).await {
                         Ok(mut entry) => {
-                            if let Err(e) =
-                                observe_activity(home, &mut entry, chat.last_activity_at).await
-                            {
+                            if let Err(e) = observe_activity(home, &mut entry, chat).await {
                                 failures += 1;
                                 error = Some(e.to_string());
                             }
@@ -364,19 +363,25 @@ fn record_failure(previous: &mut Value, error: &str) {
     }
 }
 
-async fn observe_activity(home: &Path, entry: &mut Entry, timestamp: Option<i64>) -> Result<()> {
-    if let Some(timestamp) =
-        timestamp.filter(|value| entry.last_activity_at.is_none_or(|old| *value > old))
-    {
+async fn observe_activity(home: &Path, entry: &mut Entry, chat: &hosts::Chat) -> Result<()> {
+    let activity = chat
+        .last_activity_at
+        .filter(|v| Some(*v) > entry.last_activity_at);
+    let native = chat
+        .last_native_message_at
+        .filter(|v| Some(*v) > entry.last_native_message_at);
+    if let Some(timestamp) = activity.or(native) {
         crate::owner(
             home,
             gent_protocol::OwnerOp::ObserveActivity {
                 agent_id: entry.agent.clone(),
                 last_activity_at: timestamp,
+                last_native_message_at: native,
             },
         )
         .await?;
-        entry.last_activity_at = Some(timestamp);
+        entry.last_activity_at = entry.last_activity_at.max(activity);
+        entry.last_native_message_at = entry.last_native_message_at.max(native);
     }
     Ok(())
 }

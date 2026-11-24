@@ -142,7 +142,19 @@ async fn set(home: &Path, key: Preference, enabled: bool) -> Result<()> {
 
 fn chats(value: Value) -> Result<Value> {
     let mut entries: Vec<Entry> = serde_json::from_value(value)?;
-    entries.sort_by_cached_key(|e| (e.agent.name.to_lowercase(), e.agent.id.clone()));
+    entries.sort_by_cached_key(|entry| {
+        let dates = entry.message_dates;
+        (
+            !dates.has_gent_messages,
+            std::cmp::Reverse(if dates.has_gent_messages {
+                dates.last_gent_message_at
+            } else {
+                dates.last_native_message_at
+            }),
+            entry.agent.name.to_lowercase(),
+            entry.agent.id.clone(),
+        )
+    });
     let rows: Vec<_> = entries
         .into_iter()
         .map(|entry| {
@@ -475,6 +487,34 @@ mod tests {
         assert_eq!(saved["saved"], true);
         assert_eq!(config::load(&home).unwrap().cluster.name, "edited");
         assert_eq!(saved["values"]["updates"], false);
+    }
+
+    #[test]
+    fn chat_order_uses_the_date_for_each_group_and_keeps_unknowns_last() {
+        let row = |id, name, gent: Option<i64>, native: Option<i64>| {
+            json!({"id":id,"name":name,"node_id":"node","provider":"test","revoked":false,
+                "last_seen":9999,"last_activity_at":9999,
+                "has_gent_messages":gent.is_some(),"last_gent_message_at":gent,"last_native_message_at":native})
+        };
+        let mut undated_gent = row("5", "Old Gent", None, Some(900));
+        undated_gent["has_gent_messages"] = true.into();
+        let rows = chats(json!([
+            undated_gent,
+            row("9", "Unknown", None, None),
+            row("4", "A", None, Some(400)),
+            row("3", "Z", Some(30), Some(999)),
+            row("2", "beta", Some(35), None),
+            row("8", "Recent", None, Some(800)),
+            row("1", "Beta", Some(35), Some(100)),
+        ]))
+        .unwrap();
+        let ids: Vec<_> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["1", "2", "3", "5", "8", "4", "9"]);
     }
 
     #[test]

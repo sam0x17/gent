@@ -189,7 +189,14 @@ impl StoreSession<'_> {
                         params![peer, key.as_slice()],
                     )? != 0;
                     self.confirm_wire_version(peer, version)?;
-                    if discovering && version >= crate::messages::wire::DASHBOARD_VERSION {
+                    let dates_discovery = self.db.execute(
+                        "DELETE FROM metadata WHERE key='message_dates_discovery:' || ?1 AND value=hex(?2)",
+                        params![peer, key.as_slice()],
+                    )? != 0;
+                    if (discovering && version >= crate::messages::wire::DASHBOARD_VERSION)
+                        || (dates_discovery
+                            && version >= crate::messages::wire::MESSAGE_DATES_VERSION)
+                    {
                         self.db.execute(
                             "INSERT OR IGNORE INTO presence_requests VALUES(?1)",
                             [peer],

@@ -15,6 +15,8 @@ pub(super) struct Entry {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_native_message_at: Option<i64>,
     pub endpoint: Option<PathBuf>,
     pub recovery: Option<config::RecoveryAgent>,
 }

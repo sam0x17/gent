@@ -32,6 +32,7 @@ const TABLES: &[(&str, &str)] = &[
     ("message_file_proofs", "message IN wm"),
     ("network_rejections", "message IN wm"),
     ("agent_activity", "agent IN wp"),
+    ("chat_message_dates", "agent IN wa"),
     ("recovered_sources", "target IN wa"),
     (
         "recovered_messages",
@@ -168,10 +169,21 @@ fn export_scoped(home: &Path, node: &str, epoch: Option<u64>) -> Result<Snapshot
         !uploading,
         "web file upload is pending; checkpoint will retry"
     );
+    // V10 and older carriers reject unknown checkpoint tables. Keep their
+    // checkpoint readable during rollout; new carriers can index its messages.
+    let portable_dates: bool = tx.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM network_links l LEFT JOIN wire_peers w
+        ON w.peer=l.peer AND w.peer_key=l.peer_key WHERE COALESCE(w.version,0)<?1)",
+        [crate::messages::wire::MESSAGE_DATES_VERSION],
+        |r| r.get(0),
+    )?;
     let mut tables = BTreeMap::new();
     for &(table, predicate) in TABLES {
+        if table == "chat_message_dates" && !portable_dates {
+            continue;
+        }
         let names = columns(&tx, table)?;
-        if table == "dashboards" && names.is_empty() {
+        if matches!(table, "dashboards" | "chat_message_dates") && names.is_empty() {
             continue;
         }
         let mut rows = tx
@@ -182,7 +194,7 @@ fn export_scoped(home: &Path, node: &str, epoch: Option<u64>) -> Result<Snapshot
                     .collect::<rusqlite::Result<Vec<_>>>()
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        if table == "dashboards" && rows.is_empty() {
+        if matches!(table, "dashboards" | "chat_message_dates") && rows.is_empty() {
             continue;
         }
         for row in &mut rows {
@@ -283,7 +295,9 @@ pub(in crate::store) fn restore(
             |r| r.get(0),
         )?;
         source.execute_batch(&ddl)?;
-        if table == "dashboards" && !snapshot.tables.contains_key(table) {
+        if matches!(table, "dashboards" | "chat_message_dates")
+            && !snapshot.tables.contains_key(table)
+        {
             continue;
         }
         let incoming = snapshot
@@ -363,6 +377,9 @@ pub(in crate::store) fn restore(
         } else {
             import::copy(parent, &source, table, node)?;
         }
+    }
+    if !snapshot.tables.contains_key("chat_message_dates") {
+        crate::store::message_dates::backfill(parent, &source, node)?;
     }
     for (id, final_message) in finals {
         parent.execute(

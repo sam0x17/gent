@@ -454,9 +454,11 @@ impl StoreSession<'_> {
                 ),
             },
             Event::Registration { agent } => self.import_registration(peer, &agent),
-            Event::ConversationActivity { agent, timestamp } => {
-                self.import_activity(peer, &agent, timestamp)
-            }
+            Event::ConversationActivity {
+                agent,
+                timestamp,
+                message_dates,
+            } => self.import_activity(peer, &agent, timestamp, message_dates),
             Event::Receipt {
                 message_id,
                 delivered,
@@ -491,6 +493,9 @@ impl StoreSession<'_> {
                         [message_id],
                     )?
                 };
+                if delivered {
+                    self.save_message_date(&message.recipient, "gent", message.created_at)?;
+                }
                 if changed == 1 {
                     self.web_state_changed(&sender_node)?;
                 }
@@ -615,6 +620,8 @@ impl StoreSession<'_> {
                 history::message_capacity(self.db, payload.len())?;
                 self.db.execute("INSERT INTO messages(id,sender,recipient,request_id,fingerprint,payload) VALUES(?1,?2,?3,?4,?5,?6)",params![message.id,message.sender,message.recipient,request_id,fingerprint,payload])?;
                 self.bind_attachments(&message, &attachments)?;
+                self.save_message_date(&sender.id, "gent", message.created_at)?;
+                self.record_gent_message(&recipient.id, message.created_at)?;
                 self.record_relay_message(&message)?;
                 self.web_state_changed(&recipient.node_id)?;
                 Ok(())

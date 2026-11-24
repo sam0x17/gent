@@ -63,6 +63,7 @@ async fn opt_in_registration_preserves_native_bindings_duplicates_and_pending_de
     };
     let one = hosts::Chat {
         last_activity_at: None,
+        last_native_message_at: None,
         id: uuid::Uuid::new_v4().to_string(),
         name: Some("cit".into()),
         working_dir: None,
@@ -70,6 +71,7 @@ async fn opt_in_registration_preserves_native_bindings_duplicates_and_pending_de
     };
     let two = hosts::Chat {
         last_activity_at: None,
+        last_native_message_at: None,
         id: uuid::Uuid::new_v4().to_string(),
         name: Some("cit".into()),
         working_dir: None,

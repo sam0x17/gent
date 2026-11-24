@@ -12,7 +12,8 @@ pub const HELPERS_VERSION: u8 = 7;
 pub const ADMIN_VERSION: u8 = 8;
 pub const DASHBOARD_VERSION: u8 = 9;
 pub const NODE_RENAME_VERSION: u8 = 10;
-pub const CURRENT: u8 = NODE_RENAME_VERSION;
+pub const MESSAGE_DATES_VERSION: u8 = 11;
+pub const CURRENT: u8 = MESSAGE_DATES_VERSION;
 pub const NEGOTIATED: &[u8] = &[
     2,
     3,
@@ -23,6 +24,7 @@ pub const NEGOTIATED: &[u8] = &[
     ADMIN_VERSION,
     DASHBOARD_VERSION,
     NODE_RENAME_VERSION,
+    MESSAGE_DATES_VERSION,
 ];
 
 /// Older peers cannot decode new configuration edits on their ordered streams.
@@ -32,6 +34,20 @@ pub(crate) fn configuration_version(edit: &gent_protocol::ConfigurationEdit) -> 
         gent_protocol::ConfigurationEdit::RenameMember { .. } => NODE_RENAME_VERSION,
         _ => 1,
     }
+}
+
+fn check_activity_version(event: &Event, version: u8) -> Result<(), &'static str> {
+    if let Event::ConversationActivity {
+        timestamp,
+        message_dates,
+        ..
+    } = event
+        && version < MESSAGE_DATES_VERSION
+        && (message_dates.is_some() || timestamp.is_none())
+    {
+        return Err("message dates require protocol 11");
+    }
+    Ok(())
 }
 
 fn check_dashboard_version(event: &Event, version: u8) -> Result<(), &'static str> {
@@ -145,6 +161,7 @@ fn v2(event: &mut Value, encode: bool) -> Result<(), String> {
 impl Serialize for Record {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut event = serde_json::to_value(&self.event).map_err(ser::Error::custom)?;
+        check_activity_version(&self.event, self.version).map_err(ser::Error::custom)?;
         check_dashboard_version(&self.event, self.version).map_err(ser::Error::custom)?;
         check_configuration_version(&self.event, self.version).map_err(ser::Error::custom)?;
         if self.version < ADMIN_VERSION && matches!(self.event, Event::UnregisterChat { .. }) {
@@ -235,6 +252,7 @@ impl<'de> Deserialize<'de> for Record {
             _ => return Err(de::Error::custom("unsupported node record version")),
         }
         let event: Event = serde_json::from_value(envelope.event).map_err(de::Error::custom)?;
+        check_activity_version(&event, envelope.version).map_err(de::Error::custom)?;
         check_dashboard_version(&event, envelope.version).map_err(de::Error::custom)?;
         check_configuration_version(&event, envelope.version).map_err(de::Error::custom)?;
         Ok(Self {
@@ -254,6 +272,27 @@ impl<'de> Deserialize<'de> for Record {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn message_dates_require_a_compatible_peer_and_legacy_activity_still_round_trips() {
+        let mut value = json!({"version":MESSAGE_DATES_VERSION,"authority":{"revision":1,"state_hash":vec![0;32]},
+            "event":{"kind":"conversation_activity","chat":{"chat_id":"c","node_id":"n","nonce":null,"legacy":null,
+            "generation":1,"name":"reader","provider":"test","revoked":false},"timestamp":null,
+            "message_dates":{"has_gent_messages":true,"last_gent_message_at":123}}});
+        let mut record: Record = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&record).unwrap(), value);
+        value["version"] = json!(NODE_RENAME_VERSION);
+        record.version = NODE_RENAME_VERSION;
+        assert!(serde_json::to_value(&record).is_err());
+        assert!(serde_json::from_value::<Record>(value.clone()).is_err());
+        value["event"]
+            .as_object_mut()
+            .unwrap()
+            .remove("message_dates");
+        value["event"]["timestamp"] = 123.into();
+        let legacy: Record = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap(), value);
+    }
 
     #[test]
     fn targeted_rename_requires_a_compatible_writer_on_the_ordered_stream() {

@@ -22,6 +22,7 @@ mod administration;
 mod agents;
 mod babysitter;
 mod configuration;
+mod message_dates;
 mod notifications;
 mod wire;
 pub(crate) use configuration::pending::schema as pending_configuration_schema;
@@ -204,6 +205,7 @@ impl Store {
         let identity = Identity::load_or_create(home, &config, &tx, now() as u64)?;
         peer_configuration::check_state(&tx, &identity.state(&tx)?)?;
         directory::backfill_names(&tx, &identity.state(&tx)?)?;
+        message_dates::migrate(&tx, identity.node.id())?;
         configuration::pending::recover(&tx, identity.node.id())?;
         if let Some(record) = replacement {
             record.verify_node(&identity.node)?;
@@ -997,7 +999,8 @@ impl StoreSession<'_> {
             OwnerOp::ObserveActivity {
                 agent_id,
                 last_activity_at,
-            } => self.observe_activity(&agent_id, last_activity_at),
+                last_native_message_at,
+            } => self.observe_activity(&agent_id, last_activity_at, last_native_message_at),
             OwnerOp::ClearRetiredAgents { dry_run } => self.clear_retired_agents(dry_run),
             OwnerOp::Agent { agent_id } => self.agent_details(&agent_id),
             OwnerOp::RenameAgent {
@@ -1679,6 +1682,10 @@ impl StoreSession<'_> {
         self.web_state_changed(&recipient.node_id)?;
         self.gate_web_message(&message)?;
         self.save_activity(&sender.id, message.created_at)?;
+        self.record_gent_message(&sender.id, message.created_at)?;
+        if !remote {
+            self.record_gent_message(&recipient.id, message.created_at)?;
+        }
         if remote {
             self.record_web_demand(&recipient.node_id, &message.id)?;
             self.queue_message(
