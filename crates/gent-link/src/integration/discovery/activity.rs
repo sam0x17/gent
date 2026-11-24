@@ -79,7 +79,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let dir = root.path().join("sessions");
-        std::fs::create_dir(&dir).unwrap();
+        gent_daemon::config::private_dir(&dir).unwrap();
         let path = dir.join(format!("rollout-test-{id}.jsonl"));
         let rows = [
             ("2025-01-02T03:04:05Z", "response_item", "message", "user"),

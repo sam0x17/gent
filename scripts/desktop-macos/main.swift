@@ -1063,8 +1063,23 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     }
     checkDashboard(desktop)
     desktop.tabs.selectTabViewItem(withIdentifier: "Chats")
-    desktop.receive(["page":"chats","rows":[["name":"Remote chat","node":"Other node","provider":"codex","state":"Registered","id":"c"]]])
-    require(desktop.chats.table.numberOfRows == 1, "cluster chat rendered")
+    let chats = desktop.chats
+    let ranked = [("z", "Zulu"), ("m", "Mike"), ("a", "Alpha")].map { id, name in
+        ["id": id, "name": name, "node": id == "m" ? "Other" : "West",
+         "provider": "codex", "state": "Registered"]
+    }
+    desktop.receive(["page": "chats", "rows": ranked])
+    require((0..<3).map { cell(chats.table, "id", row: $0) } == ["z", "m", "a"],
+            "Chats preserves the supervisor's nonalphabetical message order")
+    chats.table.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+    chats.search.stringValue = "West"
+    chats.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+    require(chats.table.numberOfRows == 2 && cell(chats.table, "id", row: 0) == "z" &&
+            cell(chats.table, "id", row: 1) == "a" && chats.table.selectedRow == 1,
+            "filtered Chats keeps the original order and selection")
+    desktop.receive(["page": "chats", "rows": Array(ranked.reversed())])
+    require(cell(chats.table, "id", row: 0) == "a" && chats.table.selectedRow == 0,
+            "selected chat follows its ID after recent-message order changes")
     desktop.tabs.selectTabViewItem(withIdentifier: "Settings")
     desktop.receive(["page":"settings","values":["updates":true, "discovery":false]])
     desktop.settings.openEditor()

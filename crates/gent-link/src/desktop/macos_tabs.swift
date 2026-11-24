@@ -153,7 +153,7 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     func controlTextDidChange(_ notification: Notification) { filter() }
 
     private func filter() {
-        let selectedID = page == "nodes" ? actions.selection()?["id"] as? String : nil
+        let selectedID = actions.selection()?["id"] as? String
         let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         filtered = query.isEmpty ? rows : rows.filter { row in
             columns.contains { (row[$0.0] as? String)?.localizedCaseInsensitiveContains(query) == true }
