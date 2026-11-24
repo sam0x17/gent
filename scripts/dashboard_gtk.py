@@ -191,11 +191,12 @@ def exercise(root):
     wait(lambda: requests[-1][1]["chart_widths"] == [768, 360])
     for plot, count in zip(widgets(pane, Gtk.DrawingArea), (2, 2, 1)):
         assert abs(requests[-1][1]["chart_widths"][count - 1] - plot.get_allocated_width()) <= 4
-    cached = []
-    for i, width in enumerate((360, 360, 768)):
+    def resized_chart(widget, width):
         graphic = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="96" '
                    f'viewBox="0 0 {width} 96"><circle cx="20" cy="20" r="6"/></svg>')
-        cached.append(row(i, [dict(charts[0], chart_svg=graphic)]))
+        return dict(widget, chart_svg=graphic)
+
+    cached = [row(i, [resized_chart(charts[0], width)]) for i, width in enumerate((360, 360, 768))]
     before = list(requests)
     pane.receive({"error": "Daemon temporarily unavailable"})
     pane.receive({"layout_only": True, "rows": cached})
@@ -237,6 +238,15 @@ def exercise(root):
     pane.receive({"error": "Transient dashboard error"})
     pane.receive({"page": "dashboard", "unchanged": True})
     assert widgets(pane, Gtk.DrawingArea) == plots and v.get_value() == 85 and not pane.notice.get_visible()
+
+    layout(600, 280, [1], overflow=True)
+    wait(lambda: requests[-1][1]["chart_widths"] == [568, 264])
+    assert requests[-1][0] == "dashboard_layout" and v.get_value() == 85
+    resized = [resized_chart(w, 568) for w in charts]
+    before = list(requests)
+    pane.receive({"layout_only": True, "rows": [row(0, resized + [metric])]})
+    settle()
+    assert requests == before and v.get_value() == 85
 
     with patch.object(ui["gi"], "require_version", side_effect=ValueError("Rsvg not installed")):
         pane.receive({"rows": [row(0, [charts[0], dict(metric, label="Δ <rate>")])]})
@@ -405,7 +415,7 @@ def exercise(root):
     pane.receive({"unchanged": True})
     assert pane.notice.get_text() == "No chats have published a dashboard."
     window.destroy()
-    print("PASS dashboard allocations, light/dark/custom accent refresh, scroll retention, compact readings, SVG and image pixels, accessibility, links and actions")
+    print("PASS dashboard allocations, logical chart widths, cached resize and theme redraw, scroll and notices, compact readings, SVG and image pixels, accessibility, links and actions")
 
 
 if __name__ == "__main__":
