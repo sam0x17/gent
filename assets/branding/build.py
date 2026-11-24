@@ -33,15 +33,13 @@ NS = "http://www.w3.org/2000/svg"
 ET.register_namespace("", NS)
 
 
-def outlined(svg: str, *, tray: bool = False) -> str:
+def outlined(svg: str) -> str:
     """Place a 12-unit outside rim behind the original ink."""
     root = ET.fromstring(svg)
-    # The tray uses a tighter square around the ink and outlines only the hat.
-    root.set("viewBox", "6 0 500 500" if tray else "-24 -24 560 560")
-    outlined_shapes = ("hat",) if tray else ("body", "hat")
+    root.set("viewBox", "-24 -24 560 560")
     halo = ET.Element(f"{{{NS}}}g", {"aria-hidden": "true"})
     for shape in root:
-        if shape.get("id") not in outlined_shapes:
+        if shape.get("id") not in ("body", "hat"):
             continue
         rim = deepcopy(shape)
         rim.attrib.pop("id")
@@ -83,7 +81,9 @@ def build() -> tuple[dict[str, bytes], dict[str, str]]:
     masters = {name: (HERE / f"{name}.svg").read_text() for name in ("inkling", "classic", "inkling-favicon")}
     drawings = dict(masters)
     drawings.update({f"{name}-dark": outlined(masters[name]) for name in ("inkling", "classic")})
-    drawings["inkling-tray"] = outlined(masters["inkling"], tray=True)
+    tray = ET.fromstring(masters["inkling"])
+    tray.set("viewBox", "6 0 500 500")
+    drawings["inkling-tray"] = ET.tostring(tray, encoding="unicode") + "\n"
     drawings["favicon"] = drawings["classic-dark"]
     artifacts = {
         f"{name}.svg": svg.encode()
