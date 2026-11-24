@@ -697,3 +697,44 @@ async fn message_dates_backfill_only_admitted_recipients_and_outlive_history() -
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn upgrading_only_the_reader_fetches_message_dates_from_an_idle_publisher() -> Result<()> {
+    use crate::messages::wire::NODE_RENAME_VERSION;
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let date = now() - 3600;
+    // Publisher has a retained date and no new activity. Both peers last
+    // negotiated V10 and have drained their ordered queues.
+    pair.stores[0].db.execute(
+        "INSERT INTO chat_message_dates VALUES(?1,'gent',?2)",
+        params![pair.agents[0], date],
+    )?;
+    for store in &pair.stores {
+        store
+            .db
+            .execute("UPDATE wire_peers SET version=?1", [NODE_RENAME_VERSION])?;
+        store.db.execute("DELETE FROM presence_requests", [])?;
+    }
+    pair.stores[1]
+        .db
+        .execute_batch("DROP TABLE chat_message_dates; DROP TRIGGER message_dates_forget_peer")?;
+    pair.reopen(1);
+    for _ in 0..2 {
+        pair.stores[1]
+            .db
+            .execute("UPDATE node_presence SET next_probe_at=?1", [now() - 1])?;
+        pair.stores[1].presence_tick()?;
+        pair.pump();
+    }
+    let rows = owner(&mut pair, 1, OwnerOp::Agents)?;
+    assert_eq!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == pair.agents[0])
+            .unwrap()["last_gent_message_at"],
+        date
+    );
+    Ok(())
+}

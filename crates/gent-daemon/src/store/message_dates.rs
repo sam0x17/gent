@@ -15,8 +15,10 @@ pub(super) fn migrate(db: &Connection, node: &str) -> Result<()> {
         timestamp INTEGER NOT NULL CHECK(timestamp >= 0), PRIMARY KEY(agent,kind));",
     )?;
     backfill(db, db, node)?;
-    db.execute_batch("INSERT OR IGNORE INTO presence_requests SELECT peer FROM network_links;
-        INSERT OR REPLACE INTO metadata SELECT 'message_dates_discovery:' || peer,hex(peer_key) FROM network_links;
+    db.execute_batch("INSERT OR IGNORE INTO presence_requests SELECT l.peer FROM network_links l
+            JOIN node_presence p ON p.peer=l.peer AND p.peer_key=l.peer_key;
+        INSERT OR REPLACE INTO metadata SELECT 'message_dates_discovery:' || l.peer,hex(l.peer_key) FROM network_links l
+            JOIN node_presence p ON p.peer=l.peer AND p.peer_key=l.peer_key;
         CREATE TRIGGER message_dates_forget_peer AFTER DELETE ON network_links BEGIN
             DELETE FROM metadata WHERE key='message_dates_discovery:' || OLD.peer; END;")?;
     Ok(())
@@ -90,8 +92,10 @@ impl StoreSession<'_> {
             // Coalesce sends and arrivals until each peer's next eligible
             // activity replay. A slow third node must never block a message.
             self.db.execute(
-                "INSERT OR IGNORE INTO presence_requests SELECT peer FROM network_links",
-                [],
+                "INSERT OR IGNORE INTO presence_requests SELECT l.peer FROM network_links l
+                LEFT JOIN wire_peers w ON w.peer=l.peer AND w.peer_key=l.peer_key
+                WHERE w.version IS NULL OR w.version>=?1",
+                [crate::messages::wire::MESSAGE_DATES_VERSION],
             )?;
         }
         Ok(())

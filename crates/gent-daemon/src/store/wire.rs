@@ -61,6 +61,10 @@ impl StoreSession<'_> {
             return Ok(());
         }
         let member = self.state.state().nodes.get(peer).context("unknown peer")?;
+        let learned_message_dates = version >= crate::messages::wire::MESSAGE_DATES_VERSION
+            && self
+                .last_wire_version(peer, &member.signing_key)?
+                .is_none_or(|previous| previous < crate::messages::wire::MESSAGE_DATES_VERSION);
         let confirmed = self.db.execute(
             "INSERT INTO wire_peers(peer,peer_key,version,confirmed_at)
              SELECT peer,peer_key,?3,?4 FROM network_links WHERE peer=?1 AND peer_key=?2
@@ -73,6 +77,11 @@ impl StoreSession<'_> {
             && network::active_peer(&self.state, peer, &member.signing_key, self.timestamp).is_ok()
         {
             self.dashboard_sync(peer, &member.signing_key)?;
+            // An idle publisher may learn of a reader's upgrade only from the
+            // reader's incoming record. Send its retained dates on that proof.
+            if learned_message_dates {
+                self.confirm_activity_support(peer)?;
+            }
         }
         Ok(())
     }
