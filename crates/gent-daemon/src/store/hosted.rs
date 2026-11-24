@@ -345,6 +345,7 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn check_hosted(&self, node: &str, gateway: &str) -> Result<()> {
+        require_pro(self.home, &self.config, "Hosted node access")?;
         self.state.authorize_node(
             self.identity.node.id(),
             &self.identity.node.public_key(),

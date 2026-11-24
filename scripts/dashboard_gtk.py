@@ -409,6 +409,9 @@ def exercise(root):
     assert requests == []
     buttons[-1].clicked()
     assert requests == [("dashboard_click", {"agent": "agent-0", "revision": 1, "widget": "inspect"})]
+    pane.receive({"rows": [], "pro_required": True})
+    assert not pane.grid.get_children() and not widgets(pane, Gtk.Button)
+    assert "Gent Pro" in pane.notice.get_text() and "https://gent.link/pricing" in pane.notice.get_label()
     pane.receive({"rows": []})
     assert not widgets(pane, Gtk.Frame) and pane.notice.get_visible()
     pane.receive({"error": "Disconnected"})

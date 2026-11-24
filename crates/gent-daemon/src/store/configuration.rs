@@ -303,6 +303,7 @@ impl StoreSession<'_> {
             pending::retain(self.db, &origin, id, &edit)?;
             return self.configuration_status(id);
         }
+        self.require_edit_plan(&edit)?;
         validate(&edit)?;
         if let Some((administrator, request_id)) = administration::edit_identity(&edit) {
             ensure!(
@@ -383,6 +384,15 @@ impl StoreSession<'_> {
         }
         self.configuration_status(id)
     }
+    fn require_edit_plan(&self, edit: &ConfigurationEdit) -> Result<()> {
+        match edit {
+            ConfigurationEdit::EnrollNode { .. } | ConfigurationEdit::HostNode { .. } => {
+                require_pro(self.home, &self.config, "Adding or hosting another node")
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn revision_for_edit(&self, origin: &str, edit: &ConfigurationEdit) -> Result<SignedState> {
         let owner = &*self.identity.signing_owner(self.db)?;
         self.revision_for_edit_with(origin, edit, owner)
@@ -405,6 +415,7 @@ impl StoreSession<'_> {
                 "configuration-management grant is absent or revoked"
             );
         }
+        self.require_edit_plan(edit)?;
         let timestamp = self.timestamp as u64;
         match edit {
             ConfigurationEdit::EnrollNode {
@@ -412,7 +423,6 @@ impl StoreSession<'_> {
                 can_configure,
                 invitation,
             } => {
-                require_pro(self.home, &self.config, "Adding another node")?;
                 let request = gent_crypto::SignedEnrollment::decode(&STANDARD.decode(request)?)?;
                 if let Some(id) = invitation {
                     invitations::validate_queued_enrollment(
@@ -447,7 +457,6 @@ impl StoreSession<'_> {
                 .state
                 .delegate_configuration(owner, node_id, *allow, timestamp),
             ConfigurationEdit::HostNode { node_id, parent } => {
-                require_pro(self.home, &self.config, "Hosting another node")?;
                 // Epoch-zero owner state has no signed owner/node binding.
                 // Its runtime writer must reject hosting itself before signing.
                 ensure!(

@@ -1487,3 +1487,46 @@ async fn stream_budgets_preserve_retries_and_do_not_create_extra_groups() {
         );
     }
 }
+
+#[test]
+fn downgrade_blocks_existing_new_node_invitation_and_direct_enrollment() -> Result<()> {
+    let mut f = Fixture::new();
+    let first = NodeIdentity::generate()?;
+    let existing = f.issue(true, None);
+    let mut client = handshake(&mut f.store, &existing, &first, "existing")?;
+    let request = enroll_request(&mut f.store, &mut client, &first, "existing");
+    send(&mut f.store, &mut client, &request)?;
+    let unused = f.issue(true, None);
+    let second = NodeIdentity::generate()?;
+    let mut new_client = handshake(&mut f.store, &unused, &second, "new")?;
+    let request = enroll_request(&mut f.store, &mut new_client, &second, "new");
+    let before = f.store.identity.state(&f.store.db)?;
+    std::fs::remove_file(f.home.path().join("test-entitlement"))?;
+    assert!(f.store.invitation_live(unused.offer()).is_err());
+    assert!(send(&mut f.store, &mut new_client, &request).is_err());
+    let direct = |node: &NodeIdentity, name: &str| -> Result<PairingOp> {
+        let signed =
+            node.request_enrollment(before.anchor(), before.checkpoint(), name, now() as u64)?;
+        Ok(PairingOp::Enroll {
+            request: STANDARD.encode(signed.encode()?),
+        })
+    };
+    assert!(
+        f.store
+            .pair_authorized(direct(&second, "new")?, true, now() as u64)
+            .unwrap_err()
+            .to_string()
+            .contains("Gent Pro")
+    );
+    f.store
+        .pair_authorized(direct(&first, "existing")?, true, now() as u64)?;
+    assert_eq!(
+        f.store.identity.state(&f.store.db)?.checkpoint(),
+        before.checkpoint()
+    );
+    let continuation = f.issue(true, Some(first.id()));
+    handshake(&mut f.store, &continuation, &first, "existing")?;
+    f.store
+        .revoke_invitation(&f.credential, &unused.offer().offer.id)?;
+    Ok(())
+}

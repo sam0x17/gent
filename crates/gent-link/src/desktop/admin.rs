@@ -285,7 +285,7 @@ pub(super) fn directory_actions(chats: bool) -> Value {
         "confirm":"Unregister this conversation? Its Gent binding will lose access. The conversation stays in its host app."}]);
     }
     json!([{"kind":"invite","title":"Add node…","submit":"Create invitation",
-        "hint":"Give this one-time code to the new node. It expires after 15 minutes.",
+        "hint":"Adding a new node requires Gent Pro. Give the one-time code to that node within 15 minutes.",
         "fields":[{"key":"name","title":"New node name"},role_field()]},
         {"kind":"rename_node","title":"Rename node…","row":true,"submit":"Rename",
         "fields":[{"key":"name","title":"New node name"}]},

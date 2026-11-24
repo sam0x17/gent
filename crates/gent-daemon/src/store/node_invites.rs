@@ -134,7 +134,15 @@ impl StoreSession<'_> {
         configure: bool,
         activate: bool,
     ) -> Result<Value> {
-        require_pro(self.home, &self.config, "Inviting another node")?;
+        if !self
+            .state
+            .state()
+            .nodes
+            .values()
+            .any(|member| member.name == name)
+        {
+            require_pro(self.home, &self.config, "Inviting another node")?;
+        }
         let spec = Spec {
             id: Uuid::parse_str(id).context("invalid node invitation request ID")?,
             origin: self.identity.node.id().into(),

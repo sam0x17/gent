@@ -180,6 +180,7 @@ where
     let Some(pending) = prepared.peer(store.clone(), group).await? else {
         return Ok(None);
     };
+    local(store.clone(), |s| s.require_node_delivery()).await?;
     pending.exchange(store, group, exchange).await.map(Some)
 }
 

@@ -4,7 +4,8 @@ use super::*;
 fn hosting_uses_existing_configuration_authority_and_persists_exact_retries() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("node");
-    config::initialize(&home, "hosting").unwrap();
+    let cfg = config::initialize(&home, "hosting").unwrap();
+    crate::entitlements::grant_test(&home, &cfg);
     let mut store = Store::open(&home).unwrap();
     let credential = config::read_private(&home.join("owner.key")).unwrap();
     let child = gent_crypto::NodeIdentity::generate().unwrap();

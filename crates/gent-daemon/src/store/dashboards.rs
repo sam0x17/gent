@@ -39,7 +39,7 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
 
 impl StoreSession<'_> {
     fn board(&self, id: &str) -> Result<(u64, Option<Board>, Option<String>)> {
-        require_pro(self.home, &self.config, "Dashboards")?;
+        require_pro(self.home, &self.config, "Dashboard access")?;
         let row = self
             .db
             .query_row(
@@ -62,11 +62,11 @@ impl StoreSession<'_> {
         Ok(json!({"revision":revision,"board":board.map(display_board)}))
     }
     pub(super) fn dashboard_mutate(&self, who: &Agent, mut op: AgentOp) -> Result<Value> {
+        let (revision, previous, last) = self.board(&who.id)?;
         // A retry through an older daemon sees the same define fingerprint.
         if let AgentOp::DashboardDefine { board, .. } = &mut op {
             encode_board(board)?;
         }
-        let (revision, previous, last) = self.board(&who.id)?;
         let mut fingerprint = hash(&serde_json::to_string(&op)?);
         if last.as_ref() == Some(&fingerprint) {
             return Ok(json!({"revision":revision}));
@@ -236,7 +236,7 @@ impl StoreSession<'_> {
         Ok(())
     }
     pub(super) fn dashboards(&self, after: Option<&str>) -> Result<Value> {
-        require_pro(self.home, &self.config, "Dashboards")?;
+        require_pro(self.home, &self.config, "Dashboard access")?;
         let members = self.state.state().nodes.keys().collect::<Vec<_>>();
         let mut query = self.db.prepare(
             "SELECT a.id,a.name,d.revision,d.body FROM dashboards d

@@ -409,6 +409,19 @@ impl Store {
         self.identity.require_administrator(&self.db)?;
         let state = self.identity.state(&self.db)?;
         record.offer.verify_current(&state, timestamp)?;
+        // Continue an exact enrolled identity, including a lost Finish reply.
+        // A draft or claim for a new identity still needs a current paid lease.
+        if record.offer.offer.purpose.continuation().is_none()
+            && !record.claim.as_ref().is_some_and(|node| {
+                state
+                    .state()
+                    .nodes
+                    .get(&node.id)
+                    .is_some_and(|m| m.signing_key == node.key)
+            })
+        {
+            require_pro(&self.home, &self.config, "Inviting another node")?;
+        }
         ensure!(
             record.offer.offer.issuer_id == self.identity.node.id()
                 && record.offer.offer.issuer_key == self.identity.node.public_key()
@@ -496,7 +509,6 @@ impl Store {
         name: Option<(&str, &str)>,
         wall: u64,
     ) -> Result<Zeroizing<Vec<u8>>> {
-        require_pro(&self.home, &self.config, "Inviting another node")?;
         let _lock = config::state_lock(&self.home, "invitation.lock")?;
         let timestamp = observe(&self.db, wall)?;
         let service = self.invitation_service()?;
@@ -581,6 +593,9 @@ impl Store {
                 }
             }
         };
+        if purpose.continuation().is_none() {
+            require_pro(&self.home, &self.config, "Inviting another node")?;
+        }
         let (replaces, can_configure) = match (&purpose, replace_node) {
             (Purpose::NewNode, Some(id)) => {
                 ensure!(

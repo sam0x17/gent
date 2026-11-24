@@ -597,3 +597,56 @@ fn directory_publishes_only_committed_generations_and_restore_removes_orphans() 
         old["agent"]["name"]
     );
 }
+
+#[test]
+fn downgrade_blocks_hosting_and_takeover_but_allows_lease_release() -> Result<()> {
+    let mut pair = fixture();
+    let node = pair.child.identity.node.id().to_owned();
+    let home = pair.homes[1].path().to_owned();
+    std::fs::remove_file(pair.homes[0].path().join("test-entitlement"))?;
+    // The pre-downgrade carrier still has a valid local grant and gateway credential.
+    assert!(
+        call(&mut pair, 1, AgentOp::Inbox)
+            .unwrap_err()
+            .to_string()
+            .contains("Gent Pro")
+    );
+    call(&mut pair, 0, AgentOp::Inbox)?;
+    for action in [
+        OwnerOp::PrepareHostedNode {
+            node_id: node.clone(),
+            home,
+        },
+        OwnerOp::WebLease {
+            node_id: node.clone(),
+            seconds: 20,
+        },
+        OwnerOp::WebGrant {
+            node_id: node.clone(),
+            epoch: 1,
+            expires_at: now() as u64 + 20,
+        },
+    ] {
+        assert!(
+            try_owner(&mut pair, action)
+                .unwrap_err()
+                .to_string()
+                .contains("Gent Pro")
+        );
+    }
+    assert!(
+        snapshot::export(pair.homes[0].path(), &node)
+            .err()
+            .expect("checkpoint export must require Pro")
+            .to_string()
+            .contains("Gent Pro")
+    );
+    try_owner(
+        &mut pair,
+        OwnerOp::WebLease {
+            node_id: node,
+            seconds: 0,
+        },
+    )?;
+    Ok(())
+}

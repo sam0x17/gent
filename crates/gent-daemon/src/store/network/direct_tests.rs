@@ -128,6 +128,15 @@ async fn bootstrap_can_stop_only_after_a_verified_receipt_for_the_current_link()
 async fn direct_delivers_with_signed_receipts_and_disabled_path_preserves_cloud_retry() {
     let mut pair = Pair::new().await;
     super::directory_push_tests::negotiate(&mut pair);
+    let account = Uuid::new_v4().to_string();
+    for (store, home) in pair.stores.iter_mut().zip(&pair.homes) {
+        store.config.cluster.local_only = false;
+        store.config.service = Some(config::ServiceConfig {
+            account_id: account.clone(),
+            origin: "https://accounts.example".into(),
+        });
+        config::save(home.path(), &store.config).unwrap();
+    }
     let health: Vec<_> = pair.stores.iter().map(|s| s.sync_health.clone()).collect();
     let keys = pair.keys.clone();
     let ids = pair.agents.clone();
@@ -223,6 +232,17 @@ async fn direct_delivers_with_signed_receipts_and_disabled_path_preserves_cloud_
     };
     {
         let mut receiver = stores[1].lock().unwrap();
+        // The first direct exchange established QUIC and pinned this endpoint.
+        // Try its authenticated batch again on the same reader after downgrade.
+        std::fs::remove_file(pair.homes[1].path().join("test-entitlement")).unwrap();
+        assert!(
+            receiver
+                .direct_receive(endpoint, &stream.group, vec![packet.clone()])
+                .is_err()
+        );
+        assert!(receiver.data_streams().unwrap().is_empty());
+        assert!(receiver.data_receive(&packet).is_err());
+        crate::entitlements::grant_test(pair.homes[1].path(), &receiver.config);
         let stranger = iroh::SecretKey::generate().public();
         assert!(
             receiver
@@ -242,6 +262,22 @@ async fn direct_delivers_with_signed_receipts_and_disabled_path_preserves_cloud_
                 .sequence(),
             next
         );
+    }
+    std::fs::remove_file(pair.homes[0].path().join("test-entitlement")).unwrap();
+    assert!(
+        a.transfer(
+            stores[0].clone(),
+            &stream,
+            &health[0],
+            &mut Prepared::new(wakeup.clone())
+        )
+        .await
+        .is_none()
+    );
+    {
+        let sender = stores[0].lock().unwrap();
+        assert!(sender.data_outgoing(&stream.group, next).is_err());
+        crate::entitlements::grant_test(pair.homes[0].path(), &sender.config);
     }
     assert_eq!(
         stores[0]

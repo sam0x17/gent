@@ -218,6 +218,9 @@ impl StoreSession<'_> {
     }
 
     pub(in crate::store) fn web_lease(&self, node: &str, seconds: u64) -> Result<Value> {
+        if seconds > 0 {
+            require_pro(self.home, &self.config, "Hosting another node")?;
+        }
         super::check_epoch(self.db, node, None)?;
         ensure!(seconds <= 25, "invalid local web lease");
         self.save_web_deadline(node, self.timestamp + seconds as i64)
@@ -233,6 +236,9 @@ impl StoreSession<'_> {
             (1..(1u64 << 53)).contains(&epoch),
             "invalid web carrier epoch"
         );
+        if expires_at > 0 {
+            require_pro(self.home, &self.config, "Hosting another node")?;
+        }
         let deadline = i64::try_from(expires_at)?;
         let current = super::grant_now().max(self.timestamp);
         ensure!(

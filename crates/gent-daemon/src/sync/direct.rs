@@ -86,7 +86,7 @@ impl Direct {
     ) -> Result<Option<Arc<Self>>> {
         let (settings, node, wakeup) = local(store.clone(), |s| {
             Ok((
-                s.direct_settings()?,
+                s.configured_transport()?,
                 s.local_node_id().to_owned(),
                 s.sync_wakeup.clone(),
             ))
@@ -239,21 +239,22 @@ impl Direct {
         health: &health::Health,
         deadline: Instant,
     ) -> Option<session::Confirmed> {
-        if let Some(pin) = &link.pin {
-            let pin = pin.clone();
-            let g = group.to_vec();
-            let direct = selected_ip(&link.conn);
-            tokio::time::timeout_at(
-                deadline,
-                local(store.clone(), move |s| {
-                    let peer = s.session_peer(&g, true)?;
-                    authorize_session_path(s, &pin, &peer, direct)
-                }),
-            )
-            .await
-            .ok()?
-            .ok()?;
-        }
+        let pin = link.pin.clone();
+        let g = group.to_vec();
+        let direct = selected_ip(&link.conn);
+        tokio::time::timeout_at(
+            deadline,
+            local(store.clone(), move |s| {
+                let peer = s.session_peer(&g, true)?;
+                if let Some(pin) = pin {
+                    authorize_session_path(s, &pin, &peer, direct)?;
+                }
+                Ok(())
+            }),
+        )
+        .await
+        .ok()?
+        .ok()?;
         let lane = link.reserve()?;
         let before = path::Frames::read(&link.conn);
         let operation = async {

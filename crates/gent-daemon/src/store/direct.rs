@@ -194,8 +194,19 @@ impl Store {
             .endpoint_binding(endpoint, fresh)?
             .context("unrecognized direct endpoint")
     }
-    pub(crate) fn direct_settings(&self) -> Result<config::Transport> {
+    // Bind the configured listener even on Free. Existing sockets check the
+    // current lease on every payload, and can resume after an upgrade.
+    pub(crate) fn configured_transport(&self) -> Result<config::Transport> {
         config::load(&self.home)?.transport()
+    }
+    pub(crate) fn direct_settings(&self) -> Result<config::Transport> {
+        let cfg = config::load(&self.home)?;
+        let mut transport = cfg.transport()?;
+        if !crate::entitlements::paid(&self.home, &cfg) {
+            transport.direct = config::Direct::Off;
+            transport.helper = config::Direct::Off;
+        }
+        Ok(transport)
     }
     #[cfg(test)]
     pub(crate) fn advertise_direct(&mut self, endpoint: EndpointAddr) -> Result<()> {

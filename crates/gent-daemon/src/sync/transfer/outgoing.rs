@@ -187,6 +187,10 @@ pub(super) async fn run(
         health.idle(group);
         return Ok(None);
     }
+    // A peer attempt may have prepared this batch before a downgrade.
+    if !configuration {
+        local(store.clone(), |s| s.require_node_delivery()).await?;
+    }
     let count = relay
         .put_batch(group, first, &batch, (!configuration).then_some(health))
         .await?;

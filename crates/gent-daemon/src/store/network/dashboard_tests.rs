@@ -455,6 +455,12 @@ async fn babysitter_deduplicates_resume_across_restart_and_queues_one_account_ev
     let out = pair.owner(0, pending("a")).unwrap();
     assert_eq!(out.as_array().unwrap().len(), 1);
     assert_eq!(out[0]["event"]["chat"], pair.agents[0]);
+    std::fs::remove_file(pair.homes[0].path().join("test-entitlement")).unwrap();
+    assert_eq!(pair.owner(0, pending("a")).unwrap(), out);
+    // A host can acknowledge an already accepted resume after the lease ends.
+    pair.agent(0, finish).unwrap();
+    assert_eq!(pair.owner(0, pending("a")).unwrap(), out);
+    crate::entitlements::grant_test(pair.homes[0].path(), &pair.stores[0].config);
     let second = claim(Uuid::new_v4());
     assert!(pair.agent(0, second.clone()).unwrap()["claim"].is_null());
     let wait: i64 = pair.stores[0]
@@ -604,19 +610,63 @@ async fn losing_pro_blocks_boards_and_claims_without_blocking_messages_or_erasin
         )
         .is_err()
     );
-    pair.send(vec![]).unwrap();
-    pair.pump();
+    // A locally delivered message does not need a cross-node data stream.
+    let local_key = config::secret();
+    let local = pair.stores[0]
+        .execute(Request::Agent {
+            credential: local_key.clone(),
+            action: AgentOp::Register {
+                name: "Local reader".into(),
+                provider: "test".into(),
+            },
+        })
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut policy = Policy::default();
+    for permission in [Permission::Enumerate, Permission::Send, Permission::Receive] {
+        policy.rules.push(Rule {
+            actor: Selector::All,
+            peer: Selector::All,
+            permission,
+            effect: Effect::Allow,
+        });
+    }
+    pair.owner(0, OwnerOp::SetPolicy { policy }).unwrap();
+    let sent = pair
+        .agent(
+            0,
+            AgentOp::Send {
+                recipient: local,
+                request_id: Uuid::now_v7().to_string(),
+                text: "Still local".into(),
+                files: vec![],
+                file_ids: vec![],
+            },
+        )
+        .unwrap();
+    let inbox = pair.stores[0]
+        .execute(Request::Agent {
+            credential: local_key,
+            action: AgentOp::Inbox,
+        })
+        .unwrap();
+    assert_eq!(inbox[0]["id"], sent["message_id"]);
+
+    let remote = pair.send(vec![]).unwrap();
+    let group = pair.group();
+    assert!(pair.stores[0].data_prepare(&group).is_err());
     assert_eq!(
         pair.owner(1, OwnerOp::Dashboards { after: None }).unwrap()["rows"],
         json!([])
     );
-    assert_eq!(
+    assert!(
         pair.agent(1, AgentOp::Inbox)
             .unwrap()
             .as_array()
             .unwrap()
-            .len(),
-        1
+            .is_empty()
     );
 
     crate::entitlements::grant_test(pair.homes[0].path(), &pair.stores[0].config);
@@ -625,17 +675,18 @@ async fn losing_pro_blocks_boards_and_claims_without_blocking_messages_or_erasin
         pair.agent(0, AgentOp::Babysit { enabled: None }).unwrap()["enabled"],
         true
     );
-    // The other endpoint may lose its lease while an authorized publisher is still online.
+
+    // A lapsed receiver leaves the ordered queue available for its next lease.
     std::fs::remove_file(pair.homes[1].path().join("test-entitlement")).unwrap();
-    directory_push_tests::negotiate(&mut pair);
+    assert!(pair.stores[1].data_next(&group).is_err());
+    crate::entitlements::grant_test(pair.homes[1].path(), &pair.stores[1].config);
     pair.pump();
-    let imported: bool = pair.stores[1]
-        .db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM dashboards WHERE agent=?1)",
-            [&publisher],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(!imported);
+    assert_eq!(
+        pair.owner(1, OwnerOp::Dashboards { after: None }).unwrap()["rows"][0]["agent"],
+        publisher
+    );
+    assert_eq!(
+        pair.agent(1, AgentOp::Inbox).unwrap()[0]["id"],
+        remote["message_id"]
+    );
 }

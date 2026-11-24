@@ -330,6 +330,7 @@ fn connected_home(
     )
     .unwrap();
     config::save(home.path(), &cfg).unwrap();
+    crate::entitlements::grant_test(home.path(), &cfg);
     let store = Store::open(home.path()).unwrap();
     (home, store)
 }
@@ -574,5 +575,50 @@ fn released_binary_refuses_the_migration_identity_fence() {
     assert_eq!(
         f.store.identity.state(&f.store.db).unwrap().checkpoint(),
         &before
+    );
+}
+
+#[test]
+fn loss_of_pro_invalidates_cached_hosting_proposal_and_allows_removal() {
+    let mut f = Fixture::new();
+    f.activate();
+    let id = uuid::Uuid::new_v4().to_string();
+    let host = ConfigurationEdit::HostNode {
+        node_id: f.peer.id().into(),
+        parent: f.store.config.node.id.clone(),
+    };
+    let submit = |id: &str| Request::Owner {
+        credential: f.credential.clone(),
+        action: OwnerOp::Configure {
+            request_id: id.into(),
+            edit: host.clone(),
+        },
+    };
+    f.store.execute(submit(&id)).unwrap();
+    f.store.prepare_configuration_proposal(&id).unwrap();
+    std::fs::remove_file(f.home.path().join("test-entitlement")).unwrap();
+    assert!(
+        f.store
+            .execute(submit(&uuid::Uuid::new_v4().to_string()))
+            .unwrap_err()
+            .to_string()
+            .contains("Gent Pro")
+    );
+    assert!(f.store.prepare_configuration_proposal(&id).is_err());
+    let member = f.peer.id().to_owned();
+    configure(
+        &mut f.store,
+        ConfigurationEdit::RemoveNode {
+            node_id: member.clone(),
+        },
+    );
+    assert!(
+        f.store
+            .identity
+            .state(&f.store.db)
+            .unwrap()
+            .state()
+            .retired_nodes
+            .contains(&member)
     );
 }

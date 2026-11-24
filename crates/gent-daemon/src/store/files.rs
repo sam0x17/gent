@@ -332,6 +332,9 @@ impl StoreSession<'_> {
             upload || self.local_node(&recipient.node_id),
             FILE_UNAVAILABLE
         );
+        if !crate::entitlements::paid(self.home, &self.config) {
+            return Ok(None);
+        }
         let objects = self.objects()?;
         let status = objects.status(id)?;
         if !upload && status.complete {

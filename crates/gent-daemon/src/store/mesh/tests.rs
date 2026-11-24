@@ -66,7 +66,9 @@ impl Mesh {
             )
             .await
             .unwrap();
-            stores.push(Store::open(home.path()).unwrap());
+            let store = Store::open(home.path()).unwrap();
+            crate::entitlements::grant_test(home.path(), &store.config);
+            stores.push(store);
         }
         let mut mesh = Self { homes, stores };
         for _ in 0..10 {

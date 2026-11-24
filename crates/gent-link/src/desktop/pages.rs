@@ -233,20 +233,34 @@ impl Pages {
             Request::Chats => "chats",
             _ => "settings",
         };
-        if page == "dashboard"
-            && !crate::node_home::inspect(home)
-                .is_ok_and(|cfg| gent_daemon::entitlements::paid(home, &cfg))
-        {
-            self.dashboard_snapshot = None;
-            return json!({"page":page,"pro_required":true,"rows":[]});
+        let dashboard_locked = || {
+            page == "dashboard"
+                && !crate::node_home::inspect(home)
+                    .is_ok_and(|cfg| gent_daemon::entitlements::paid(home, &cfg))
+        };
+        if dashboard_locked() {
+            return self.lock_dashboard();
         }
-        match self.handle(home, request).await {
+        let waits_for_daemon = matches!(
+            request,
+            Request::Dashboard(_) | Request::DashboardClick { .. }
+        );
+        let result = self.handle(home, request).await;
+        if waits_for_daemon && dashboard_locked() {
+            return self.lock_dashboard();
+        }
+        match result {
             Ok(mut response) => {
                 response["page"] = json!(page);
                 response
             }
             Err(error) => json!({"page":page,"error":error.to_string()}),
         }
+    }
+
+    fn lock_dashboard(&mut self) -> Value {
+        self.dashboard_snapshot = None;
+        json!({"page":"dashboard","pro_required":true,"rows":[]})
     }
 
     async fn handle(&mut self, home: &Path, request: Request) -> Result<Value> {
@@ -410,10 +424,13 @@ mod tests {
 
     #[tokio::test]
     async fn dashboard_resize_renders_each_row_at_its_width_from_cached_data() {
-        let home = tempfile::tempdir().unwrap(); // No daemon in this home.
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("node");
+        let cfg = config::initialize(&home, "cached-resize").unwrap();
+        gent_daemon::entitlements::grant_test(&home, &cfg);
         let mut pages = Pages::default();
         let resize = r#"{"op":"dashboard_layout","chart_widths":[704,332]}"#;
-        assert_eq!(pages.respond(home.path(), resize).await["unchanged"], true);
+        assert_eq!(pages.respond(&home, resize).await["unchanged"], true);
         let boards = ["C", "A", "B"].map(|chat| {
             json!({
                 "chat":chat, "board":{"widgets":[{"kind":"graph","label":"Loss","value":[3,2]}]}
@@ -422,7 +439,7 @@ mod tests {
         pages
             .dashboard(boards.to_vec(), DashboardLayout::default())
             .unwrap();
-        let reply = pages.respond(home.path(), resize).await;
+        let reply = pages.respond(&home, resize).await;
         assert_eq!(reply["layout_only"], true);
         for (i, (chat, width)) in [("A", 332), ("B", 332), ("C", 704)].into_iter().enumerate() {
             let row = &reply["rows"][i];
@@ -432,9 +449,33 @@ mod tests {
         }
         for invalid in ["[]", "[0]", "[65535]", "[240,240,240,240,240]"] {
             let request = format!(r#"{{"op":"dashboard_layout","chart_widths":{invalid}}}"#);
-            assert!(pages.respond(home.path(), &request).await["error"].is_string());
+            assert!(pages.respond(&home, &request).await["error"].is_string());
         }
-        assert_eq!(pages.respond(home.path(), resize).await["unchanged"], true);
+        assert_eq!(pages.respond(&home, resize).await["unchanged"], true);
+    }
+
+    #[tokio::test]
+    async fn free_desktop_clears_cached_boards_and_refuses_old_clicks() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("node");
+        config::initialize(&home, "free").unwrap();
+        let mut pages = Pages::default();
+        for op in [
+            r#"{"op":"dashboard_layout"}"#,
+            r#"{"op":"dashboard_click","agent":"old","revision":1,"widget":"run"}"#,
+            r#"{"op":"dashboard"}"#,
+        ] {
+            pages.dashboard_snapshot =
+                Some((DashboardLayout::default(), vec![json!({"chat":"former"})]));
+            assert_eq!(
+                pages.respond(&home, op).await,
+                json!({"page":"dashboard","pro_required":true,"rows":[]})
+            );
+            assert!(pages.dashboard_snapshot.is_none());
+        }
+        assert!(!settings(&home).unwrap()["paid"].as_bool().unwrap());
+        assert!(set(&home, Preference::Babysitter, false).await.is_err());
+        assert!(!home.join("babysitter-disabled").exists());
     }
 
     #[tokio::test]
