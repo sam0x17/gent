@@ -496,6 +496,7 @@ impl Store {
         name: Option<(&str, &str)>,
         wall: u64,
     ) -> Result<Zeroizing<Vec<u8>>> {
+        require_pro(&self.home, &self.config, "Inviting another node")?;
         let _lock = config::state_lock(&self.home, "invitation.lock")?;
         let timestamp = observe(&self.db, wall)?;
         let service = self.invitation_service()?;

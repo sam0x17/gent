@@ -65,6 +65,8 @@ Gent requests one native system notification after an automatic update has been 
 
 Gent Desktop uses its Inkling icon for update and goal-resumed notifications. On macOS, allow notifications from **Gent** when prompted. To change that choice later, open **Notifications** in System Settings and select **Gent**. On Linux, Gent passes its icon and desktop entry to `notify-send`. Banners require a graphical session and follow the desktop’s notification and Focus settings.
 
+Automatic activation and successful Babysitter resumes from Codex or Claude Code enqueue account events. The daemon publishes them, and each signed-in desktop reads the inbox using its own cursor. On macOS the running menu-bar app submits the notice to Notification Center, including when its window is closed. Quitting the app pauses delivery. The device advances its cursor for a supported event only after the app confirms native acceptance. If permission was just granted, the next read rechecks the account before delivery.
+
 ## Terminal output
 
 Ordinary commands show readable status, tables and labeled results. Interactive operations use a pulsing block of dots on stderr while waiting. Animation is disabled for redirected output, `TERM=dumb`, `--json`, `--verbose`, foreground servers, MCP and host hooks. `NO_COLOR` disables color.

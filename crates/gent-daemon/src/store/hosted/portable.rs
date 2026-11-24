@@ -162,6 +162,7 @@ impl StoreSession<'_> {
         Ok(())
     }
     pub(in crate::store) fn web_admission(&self, node: &str, body_hash: [u8; 32]) -> Result<Value> {
+        require_pro(self.home, &self.config, "Hosted node admission")?;
         self.state.require_fresh(self.timestamp as u64)?;
         ensure!(
             self.identity.can_administer(&self.state),

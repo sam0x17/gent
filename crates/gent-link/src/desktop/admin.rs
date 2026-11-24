@@ -239,7 +239,7 @@ fn change_result(result: &Value) -> Result<Value> {
 
 pub(super) fn about() -> Value {
     let build = build_info::current();
-    json!({"title":"Gent","detail":format!("Version {} · {}{}\nCopyright © 2026 Gent contributors",
+    json!({"title":"Gent","detail":format!("Version {} · {}{}\nCopyright © 2026 PrivacyTools LLC",
         build.version,build.commit.chars().take(12).collect::<String>(),if build.dirty {" (development)"} else {""}),
         "actions":[{"kind":"check_update","title":"Check for updates"}]})
 }

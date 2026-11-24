@@ -537,3 +537,105 @@ async fn babysitter_recovers_fifteen_failures_in_one_goal_across_a_day() {
         .unwrap();
     assert_eq!(events.as_array().unwrap().len(), 15);
 }
+
+#[tokio::test]
+async fn losing_pro_blocks_boards_and_claims_without_blocking_messages_or_erasing_state() {
+    use gent_protocol::notifications::Failure;
+
+    let mut pair = Pair::new().await;
+    directory_push_tests::negotiate(&mut pair);
+    let board = serde_json::from_value(json!({"title":"Retained","widgets":[
+        {"id":"go","kind":"button","label":"Go","value":"Launch"}
+    ]}))
+    .unwrap();
+    pair.agent(
+        0,
+        AgentOp::DashboardDefine {
+            expected_revision: 0,
+            board,
+        },
+    )
+    .unwrap();
+    let claim = AgentOp::BabysitterClaim {
+        goal: "a".repeat(64),
+        turn: Uuid::new_v4(),
+        failed_at: now(),
+        reason: Failure::Capacity,
+    };
+    let attempt =
+        serde_json::from_value(pair.agent(0, claim.clone()).unwrap()["claim"].clone()).unwrap();
+    let publisher = pair.agents[0].clone();
+    std::fs::remove_file(pair.homes[0].path().join("test-entitlement")).unwrap();
+
+    assert!(pair.agent(0, AgentOp::DashboardGet).is_err());
+    assert!(
+        pair.agent(
+            0,
+            AgentOp::DashboardDelete {
+                expected_revision: 1
+            }
+        )
+        .is_err()
+    );
+    assert!(pair.owner(0, OwnerOp::Dashboards { after: None }).is_err());
+    assert!(
+        pair.owner(
+            0,
+            OwnerOp::DashboardClick {
+                agent: publisher.clone(),
+                revision: 1,
+                widget: "go".into(),
+                request_id: Uuid::now_v7().to_string(),
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(
+        pair.agent(0, AgentOp::BabysitterCheck { attempt }).unwrap()["eligible"],
+        false
+    );
+    assert!(pair.agent(0, claim).unwrap()["claim"].is_null());
+    assert!(
+        pair.agent(
+            0,
+            AgentOp::Babysit {
+                enabled: Some(false)
+            }
+        )
+        .is_err()
+    );
+    pair.send(vec![]).unwrap();
+    pair.pump();
+    assert_eq!(
+        pair.owner(1, OwnerOp::Dashboards { after: None }).unwrap()["rows"],
+        json!([])
+    );
+    assert_eq!(
+        pair.agent(1, AgentOp::Inbox)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    crate::entitlements::grant_test(pair.homes[0].path(), &pair.stores[0].config);
+    assert_eq!(pair.agent(0, AgentOp::DashboardGet).unwrap()["revision"], 1);
+    assert_eq!(
+        pair.agent(0, AgentOp::Babysit { enabled: None }).unwrap()["enabled"],
+        true
+    );
+    // The other endpoint may lose its lease while an authorized publisher is still online.
+    std::fs::remove_file(pair.homes[1].path().join("test-entitlement")).unwrap();
+    directory_push_tests::negotiate(&mut pair);
+    pair.pump();
+    let imported: bool = pair.stores[1]
+        .db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM dashboards WHERE agent=?1)",
+            [&publisher],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!imported);
+}

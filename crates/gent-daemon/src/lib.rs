@@ -4,6 +4,7 @@ pub mod config;
 pub mod configuration_log;
 mod connection;
 pub mod encrypted;
+pub mod entitlements;
 pub mod file_objects;
 pub mod file_transport;
 pub mod hosted;

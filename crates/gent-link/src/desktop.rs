@@ -22,7 +22,9 @@ mod charts;
 mod login;
 mod model;
 #[cfg(target_os = "macos")]
-pub(crate) mod notification_app;
+mod notification_app;
+#[cfg(target_os = "macos")]
+pub(crate) mod notification_delivery;
 mod pages;
 #[cfg(target_os = "linux")]
 pub(crate) use login::label as desktop_entry_id;
@@ -130,17 +132,9 @@ fn frontend(_home: &Path) -> Result<Command> {
 
 #[cfg(target_os = "macos")]
 fn frontend(home: &Path) -> Result<Command> {
-    use std::{io::Write, os::unix::fs::PermissionsExt};
-    let path = home.join("Gent Desktop");
-    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/GentDesktop"));
-    if fs::read(&path).ok().as_deref() != Some(bytes) {
-        let mut tmp = tempfile::NamedTempFile::new_in(home)?;
-        tmp.write_all(bytes)?;
-        tmp.as_file()
-            .set_permissions(fs::Permissions::from_mode(0o700))?;
-        tmp.persist(&path)?;
-    }
-    Ok(Command::new(path))
+    Ok(Command::new(
+        notification_app::install(home)?.join("Contents/MacOS/GentDesktop"),
+    ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -246,12 +240,21 @@ async fn supervise(
     let mut input = child.stdin.take().unwrap();
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut pages = pages::Pages::default();
-    let watch = crate::auth::notifications::desktop_loop(home, &icon);
+    #[cfg(target_os = "macos")]
+    let (destination, mut deliveries) = notification_delivery::channel();
+    #[cfg(not(target_os = "macos"))]
+    let destination = icon;
+    let watch = crate::auth::notifications::desktop_loop(home, &destination);
     tokio::pin!(watch);
     let mut jobs = tokio::task::JoinSet::new();
     let mut activation = [0; 16];
     loop {
+        #[cfg(target_os = "macos")]
+        let next_banner = deliveries.next();
+        #[cfg(not(target_os = "macos"))]
+        let next_banner = std::future::pending();
         let message = tokio::select! {
+            banner = next_banner => banner,
             _=&mut watch=>anyhow::bail!("account notification watch stopped"),
             Some(result) = jobs.join_next() => result?,
             size = socket.recv(&mut activation) => match &activation[..size?] {
@@ -261,6 +264,8 @@ async fn supervise(
             },
             line = events.next_line() => {
                 let Some(line) = line? else { break };
+                #[cfg(target_os = "macos")]
+                if deliveries.receive(&line) { continue; }
                 if line.starts_with('{') {
                     if let Ok(admin::Request::Manage { action }) = serde_json::from_str(&line) {
                         if jobs.is_empty() {

@@ -412,6 +412,7 @@ impl StoreSession<'_> {
                 can_configure,
                 invitation,
             } => {
+                require_pro(self.home, &self.config, "Adding another node")?;
                 let request = gent_crypto::SignedEnrollment::decode(&STANDARD.decode(request)?)?;
                 if let Some(id) = invitation {
                     invitations::validate_queued_enrollment(
@@ -446,6 +447,7 @@ impl StoreSession<'_> {
                 .state
                 .delegate_configuration(owner, node_id, *allow, timestamp),
             ConfigurationEdit::HostNode { node_id, parent } => {
+                require_pro(self.home, &self.config, "Hosting another node")?;
                 // Epoch-zero owner state has no signed owner/node binding.
                 // Its runtime writer must reject hosting itself before signing.
                 ensure!(

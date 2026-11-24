@@ -354,7 +354,10 @@ class DashboardPane(Gtk.Box):
             self.notice.set_text(reply.get("error") or reply.get("notice", ""))
             return
         rows = reply["rows"]
-        if not reply.get("layout_only"):
+        if reply.get("pro_required"):
+            self.notice.set_markup('Dashboards require an active Gent Pro plan for this cluster. '
+                                 '<a href="https://gent.link/pricing">View plans</a>')
+        elif not reply.get("layout_only"):
             self.show_dashboard_notice(rows)
         if self.rows != rows:
             self.rows = rows

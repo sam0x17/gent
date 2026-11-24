@@ -91,6 +91,7 @@ impl Pair {
         )
         .unwrap();
         config::save(homes[0].path(), &cfg).unwrap();
+        crate::entitlements::grant_test(homes[0].path(), &cfg);
         let mut owner = Store::open(homes[0].path()).unwrap();
         let keys: [String; 2] = std::array::from_fn(|_| config::secret());
         if before_join {
@@ -118,6 +119,7 @@ impl Pair {
         .await
         .unwrap();
         let joined = Store::open(homes[1].path()).unwrap();
+        crate::entitlements::grant_test(homes[1].path(), &joined.config);
         let mut stores = [owner, joined];
         let agents = std::array::from_fn(|i| {
             stores[i]

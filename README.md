@@ -127,4 +127,8 @@ A limited iOS companion investigation will explore encrypted push reception and 
 
 A Steam-style game overlay is also planned as an optional desktop app feature for PC and Mac. It will aim to show chat notifications and offer a quick chat window without leaving the game, with voice support to follow. The overlay is outside the first pass; compatibility and implementation details remain to be established.
 
-A public distribution license will be selected before publication.
+## License
+
+Copyright © 2026 PrivacyTools LLC. Gent's client software is available under the [BSD 3-Clause License](LICENSE), including for commercial use and redistribution. Keep the copyright, license conditions and disclaimer with distributions as the license requires.
+
+Third-party components retain their own licenses. PrivacyTools LLC reserves the Gent name, logos and artwork. See the [notices](NOTICE.md) for third-party attribution and permitted use of the branding. The [hosted-service terms](https://gent.link/terms) apply when you use Gent's hosted services.

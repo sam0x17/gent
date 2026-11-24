@@ -36,7 +36,7 @@ For a separate install prefix, add `--root /absolute/install/prefix` to `cargo i
 
 ## Private source archives
 
-A prepared source archive contains one committed version of this repository, including `Cargo.lock`, the embedded Gent skill, tests and documentation. It has no Git metadata or private service implementation. Verify its independently supplied manifest/digest before extracting it, enter its `gent-VERSION` directory, and run the same `cargo install --locked --path crates/gent-link` command. Preparation does not publish crates or select a public license.
+A prepared source archive contains one committed version of this repository, including `Cargo.lock`, the embedded Gent skill, tests and documentation. It has no Git metadata or private service implementation. Verify its independently supplied manifest/digest before extracting it, enter its `gent-VERSION` directory, and run the same `cargo install --locked --path crates/gent-link` command. The archive includes the [client license](../LICENSE) and [notices](../NOTICE.md).
 
 Keep the commit and archive manifest with the installed version. A successful source-install proof establishes that this archive supplies the binary and its embedded resources; it does not establish that the hosted service is deployed, that GUI/mobile connectors work, or that the build ran on a pristine operating system.
 

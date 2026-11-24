@@ -1,6 +1,10 @@
 //! Account inbox publisher and passive desktop watch. Only the pinned login
 //! origin sees its bearer. Local device cursors are independent per account.
 use super::*;
+#[cfg(target_os = "macos")]
+use crate::desktop::notification_delivery::Destination;
+#[cfg(not(target_os = "macos"))]
+type Destination = Path;
 use futures_util::StreamExt;
 use gent_protocol::{
     OwnerOp,
@@ -44,7 +48,7 @@ async fn directory_name(home: &Path, op: OwnerOp, id: uuid::Uuid) -> String {
         .unwrap_or(id)
 }
 
-async fn display(home: &Path, icon: &Path, notice: &Notice) -> Result<()> {
+async fn display(home: &Path, destination: &Destination, notice: &Notice) -> Result<()> {
     let (title, message) = match &notice.event {
         Event::GoalResumed { chat, reason, .. } => {
             let name = directory_name(home, OwnerOp::Agents, *chat).await;
@@ -66,7 +70,7 @@ async fn display(home: &Path, icon: &Path, notice: &Notice) -> Result<()> {
     };
     #[cfg(target_os = "macos")]
     {
-        crate::desktop::notification_app::display(icon, notice.id, title, &message).await
+        destination.display(notice.id, title, message).await
     }
     #[cfg(not(target_os = "macos"))]
     let mut command = {
@@ -77,7 +81,9 @@ async fn display(home: &Path, icon: &Path, notice: &Notice) -> Result<()> {
             "--hint=string:desktop-entry:{}",
             crate::desktop::desktop_entry_id(home)
         ));
-        c.arg("--icon").arg(icon).args(["--", title, &message]);
+        c.arg("--icon")
+            .arg(destination)
+            .args(["--", title, &message]);
         c
     };
     #[cfg(not(target_os = "macos"))]
@@ -181,7 +187,7 @@ fn supported(value: &Value) -> Result<Option<Notice>> {
         _ => Ok(None),
     }
 }
-async fn collect(home: &Path, login: &Saved, icon: &Path) -> Result<()> {
+async fn collect(home: &Path, login: &Saved, destination: &Destination) -> Result<()> {
     let path = cursor_path(home, login)?;
     let url = origin(&login.service)?.join("v1/notifications")?;
     let client = client()?;
@@ -214,7 +220,7 @@ async fn collect(home: &Path, login: &Saved, icon: &Path) -> Result<()> {
             let seq = row["sequence"].as_u64().context("invalid inbox sequence")?;
             ensure!(seq > after, "invalid inbox order");
             if let Some(notice) = supported(&row["notice"])? {
-                display(home, icon, &notice).await?;
+                display(home, destination, &notice).await?;
             }
             let state = Snapshot::read(&path)?;
             state.private()?;
@@ -227,7 +233,7 @@ async fn collect(home: &Path, login: &Saved, icon: &Path) -> Result<()> {
     }
 }
 
-async fn watch(home: &Path, login: &Saved, icon: &Path) -> Result<()> {
+async fn watch(home: &Path, login: &Saved, destination: &Destination) -> Result<()> {
     let mut url = origin(&login.service)?.join("v1/notifications/watch")?;
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
         .map_err(|_| anyhow::anyhow!("invalid watch URL"))?;
@@ -243,12 +249,12 @@ async fn watch(home: &Path, login: &Saved, icon: &Path) -> Result<()> {
         connect_async_with_config(request, Some(config), true),
     )
     .await??;
-    collect(home, login, icon).await?;
+    collect(home, login, destination).await?;
     let mut auth_tick = tokio::time::interval(Duration::from_secs(15));
     loop {
         tokio::select! {
             frame=socket.next()=>match frame.context("watch closed")??{
-                Message::Text(text) if text=="changed"=>collect(home,login,icon).await?,
+                Message::Text(text) if text=="changed"=>collect(home,login,destination).await?,
                 Message::Ping(_) | Message::Pong(_)=>{},
                 _=>anyhow::bail!("account watch ended"),
             },
@@ -256,12 +262,12 @@ async fn watch(home: &Path, login: &Saved, icon: &Path) -> Result<()> {
         }
     }
 }
-pub(crate) async fn desktop_loop(home: &Path, icon: &Path) {
+pub(crate) async fn desktop_loop(home: &Path, destination: &Destination) {
     let mut backoff = 1;
     loop {
         if let Ok(Some(login)) = active(home) {
             let since = std::time::Instant::now();
-            let result = watch(home, &login, icon).await;
+            let result = watch(home, &login, destination).await;
             backoff = if result.is_ok() || since.elapsed().as_secs() > 60 {
                 1
             } else {

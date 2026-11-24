@@ -107,10 +107,54 @@ pub struct TransportSession {
     pub expires_at: u64,
 }
 
+/// Current capabilities of this node in its cluster owner's account.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Entitlements {
+    pub account_id: String,
+    pub cluster_id: String,
+    pub node_id: String,
+    pub plan: AccountPlan,
+    pub valid_until: u64,
+}
+
+pub const ENTITLEMENT_LEASE_SECONDS: u64 = 900;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountPlan {
+    Free,
+    Pro,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransportCheck {
     pub token_hash: String,
+}
+
+/// Ed25519 public key of the hosted account authority.
+pub const ENTITLEMENT_PUBLIC_KEY: &[u8; 32] = include_bytes!("entitlement-key.bin");
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedEntitlements {
+    pub lease: Entitlements,
+    pub signature: String,
+}
+
+impl Entitlements {
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let plan = match self.plan {
+            AccountPlan::Free => "free",
+            AccountPlan::Pro => "pro",
+        };
+        format!(
+            "gent.account.entitlement.v1\0{}\0{}\0{}\0{}\0{}",
+            self.account_id, self.cluster_id, self.node_id, plan, self.valid_until
+        )
+        .into_bytes()
+    }
 }
 
 #[cfg(test)]

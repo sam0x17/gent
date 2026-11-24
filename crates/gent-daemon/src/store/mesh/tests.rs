@@ -50,6 +50,7 @@ impl Mesh {
         )
         .unwrap();
         config::save(homes[0].path(), &cfg).unwrap();
+        crate::entitlements::grant_test(homes[0].path(), &cfg);
         let mut stores = vec![Store::open(homes[0].path()).unwrap()];
         for home in &homes[1..] {
             let credential = config::read_private(&homes[0].path().join("owner.key")).unwrap();

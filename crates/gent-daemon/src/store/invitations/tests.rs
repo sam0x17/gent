@@ -96,6 +96,7 @@ impl Fixture {
         )
         .unwrap();
         config::save(home.path(), &cfg).unwrap();
+        crate::entitlements::grant_test(home.path(), &cfg);
         let store = Store::open(home.path()).unwrap();
         let credential = config::read_private(&home.path().join("owner.key")).unwrap();
         Self {

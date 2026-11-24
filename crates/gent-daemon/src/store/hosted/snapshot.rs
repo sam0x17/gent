@@ -146,6 +146,7 @@ pub fn export_for_epoch(home: &Path, node: &str, epoch: u64) -> Result<Snapshot>
 
 fn export_scoped(home: &Path, node: &str, epoch: Option<u64>) -> Result<Snapshot> {
     let cfg = config::load_for_runtime(home)?;
+    super::require_pro(home, &cfg, "Hosted node checkpoints")?;
     let mut db = encrypted::open_database(home, "state.sqlite3")?;
     db.execute_batch("PRAGMA query_only=ON;")?;
     let tx = db.transaction()?;

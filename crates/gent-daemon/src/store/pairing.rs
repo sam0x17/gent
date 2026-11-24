@@ -99,6 +99,9 @@ impl Store {
                 ensure!(request.len() <= 8192, "enrollment request too large");
                 let request = SignedEnrollment::decode(&STANDARD.decode(request)?)?;
                 let state = self.identity.state(&self.db)?;
+                if !state.state().nodes.contains_key(&request.request.node_id) {
+                    require_pro(&self.home, &self.config, "Adding another node")?;
+                }
                 if state.state().peer.is_some() {
                     return self.queue_peer_enrollment(&request, can_configure, invitation);
                 }

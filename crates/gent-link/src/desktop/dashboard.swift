@@ -186,6 +186,8 @@ final class DashboardTab: NSObject {
     private let grid = DashboardGrid()
     private let scroll = NSScrollView()
     private let notice = NSTextField(wrappingLabelWithString: "")
+    private lazy var pricing = NSButton(title: "View Gent plans", target: self, action: #selector(openPricing))
+    @objc private func openPricing() { openURL(URL(string: "https://gent.link/pricing")!) }
     var openURL: (URL) -> Void = { url in _ = NSWorkspace.shared.open(url) }
     var accentColor: () -> NSColor = { .controlAccentColor }
     private var lastPalette: [String: [Int]]?
@@ -236,6 +238,8 @@ final class DashboardTab: NSObject {
         ])
         view.addArrangedSubview(scroll)
         view.addArrangedSubview(notice)
+        pricing.isHidden = true
+        view.addArrangedSubview(pricing)
         scroll.widthAnchor.constraint(equalTo: view.widthAnchor, constant: -24).isActive = true
         scroll.contentView.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(resized), name: NSView.frameDidChangeNotification, object: scroll.contentView)
@@ -293,7 +297,11 @@ final class DashboardTab: NSObject {
             showNotice((reply["error"] ?? reply["notice"]) as? String ?? "")
             return
         }
-        if reply["layout_only"] as? Bool != true {
+        let locked = reply["pro_required"] as? Bool == true
+        pricing.isHidden = !locked
+        if locked {
+            showNotice("Dashboards require an active Gent Pro plan for this cluster.")
+        } else if reply["layout_only"] as? Bool != true {
             showNotice(rows.isEmpty ? "No chats have published a dashboard." : "")
         }
     }

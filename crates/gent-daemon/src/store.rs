@@ -65,6 +65,13 @@ pub fn now() -> i64 {
 fn hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
+fn require_pro(home: &Path, cfg: &Config, feature: &str) -> Result<()> {
+    ensure!(
+        crate::entitlements::paid(home, cfg),
+        "{feature} requires an active Gent Pro plan for this cluster. See https://gent.link/pricing"
+    );
+    Ok(())
+}
 const UNAVAILABLE: &str = "recipient or message unavailable";
 
 pub struct Store {

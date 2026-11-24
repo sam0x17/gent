@@ -33,6 +33,7 @@ impl Pair {
             })
             .into();
         config::save(homes[0].path(), &cfg).unwrap();
+        crate::entitlements::grant_test(homes[0].path(), &cfg);
         let mut parent = Store::open(homes[0].path()).unwrap();
         let state = parent.identity.state(&parent.db).unwrap();
         let node = NodeIdentity::generate().unwrap();
@@ -52,6 +53,7 @@ impl Pair {
         tx.commit().unwrap();
         runtime::install_joined(homes[1].path(), &node, &state).unwrap();
         let mut child = Store::open(homes[1].path()).unwrap();
+        crate::entitlements::grant_test(homes[1].path(), &child.config);
         let keys = std::array::from_fn(|_| config::secret());
         let agents = std::array::from_fn(|i| {
             let store = if i == 0 { &mut parent } else { &mut child };

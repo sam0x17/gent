@@ -1,4 +1,5 @@
 //! Native account login. Service credentials never grant cluster key authority.
+mod entitlements;
 pub(crate) mod notifications;
 mod pairing;
 pub mod renewal;
@@ -31,6 +32,12 @@ const DEFAULT_SERVICE: &str = "https://api.gent.link";
 #[derive(Subcommand)]
 pub enum Command {
     Status,
+    /// Open the billing page for the signed-in Gent account.
+    Billing {
+        /// Print a private five-minute sign-in link for another browser.
+        #[arg(long)]
+        no_browser: bool,
+    },
     /// Renew an active session near expiry; never signs in or revives a revoked session.
     Renew,
     /// Sign in with GitHub. SSH sessions use the device-code flow by default.
@@ -174,6 +181,9 @@ async fn response_limit(
     Ok((status, value))
 }
 fn success(status: StatusCode, value: Value) -> Result<Value> {
+    if status == StatusCode::FORBIDDEN && value["error"] == "free_cluster_node_limit" {
+        bail!("Free includes one node per cluster. Manage your plan with gent auth billing.");
+    }
     ensure!(
         status.is_success(),
         "authentication request failed (HTTP {})",
@@ -524,7 +534,55 @@ pub(crate) async fn desktop_login(home: &Path) -> Result<Value> {
     .await
 }
 
+async fn billing(home: &Path, no_browser: bool) -> Result<Value> {
+    let service = Service::open(home).await?;
+    ensure!(
+        service.origin()? == origin(DEFAULT_SERVICE)?,
+        "hosted billing requires a gent.link account"
+    );
+    let (status, value) = response(
+        service
+            .request(Method::POST, "v1/billing/browser/grant")?
+            .bearer_auth(&service.saved.token),
+    )
+    .await?;
+    let value = success(status, value)?;
+    let grant = value["grant"]
+        .as_str()
+        .filter(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+        .context("invalid account handoff")?;
+    let url = format!("https://gent.link/account#{grant}");
+    if no_browser {
+        return Ok(json!({"status":"billing_link","url":url,"expires_at":value["expires_at"]}));
+    }
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let status = tokio::process::Command::new(opener)
+        .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .context("could not open billing; run gent auth billing --no-browser")?;
+    ensure!(
+        status.success(),
+        "could not open billing; run gent auth billing --no-browser"
+    );
+    Ok(json!({"status":"billing_opened"}))
+}
+
 pub async fn execute(home: &Path, command: Command) -> Result<Value> {
+    if let Command::Billing { no_browser } = command {
+        return billing(home, no_browser).await;
+    }
     if matches!(command, Command::Renew) {
         return renewal::renew(home, None).await;
     }
@@ -619,6 +677,7 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
         };
         saved.phase = Phase::Revoking;
         save(&path, Some(saved))?;
+        gent_daemon::entitlements::clear(directory.parent().context("missing account home")?)?;
         let outcome = response(
             client
                 .request(
@@ -997,6 +1056,11 @@ pub fn print(value: &Value) {
         return;
     }
     match value["status"].as_str() {
+        Some("billing_opened") => println!("Opened Gent account billing."),
+        Some("billing_link") => println!(
+            "Private sign-in link (expires in five minutes)\n{}",
+            value["url"].as_str().unwrap_or_default()
+        ),
         Some("active") => println!(
             "Signed in as @{} ({})",
             value["account"]["github_login"]

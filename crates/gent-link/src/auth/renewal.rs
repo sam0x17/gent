@@ -24,7 +24,7 @@ fn validate(previous: &ServiceSession, current: &ServiceSession, timestamp: u64)
     Ok(())
 }
 
-fn check_pin(saved: &Saved, pin: Option<&ServiceConfig>) -> Result<()> {
+pub(super) fn check_pin(saved: &Saved, pin: Option<&ServiceConfig>) -> Result<()> {
     ensure!(
         saved.phase == Phase::Active,
         "finish gent auth login or gent auth logout before renewing"
@@ -138,6 +138,7 @@ pub async fn run_daemon(
         }
         let stopped = tokio::select! {
             _ = super::notifications::publish_loop(&home) => "account notifications",
+            _ = super::entitlements::maintain(&home) => "account entitlements",
             _ = maintain(&home) => "account renewal",
             _ = crate::node::maintain(&home) => "node removals",
             _ = crate::integration::recovery::maintain(&home) => "host recovery",

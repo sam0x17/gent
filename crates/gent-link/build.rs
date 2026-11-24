@@ -38,12 +38,18 @@ fn build_desktop() {
     };
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let target = format!("{arch}-apple-macos11.0");
-    swiftc(
+    build_app(
+        &out,
         &target,
-        &[source, tabs, management, dashboard, main],
-        &out.join("GentDesktop"),
+        &[
+            source,
+            tabs,
+            management,
+            dashboard,
+            "src/desktop/notifications/Delivery.swift",
+            main,
+        ],
     );
-    build_notification_app(&out, &target);
 }
 
 fn swiftc(target: &str, sources: &[&str], output: &Path) {
@@ -66,8 +72,11 @@ fn swiftc(target: &str, sources: &[&str], output: &Path) {
     assert!(ok.success(), "could not compile {}", output.display());
 }
 
-fn build_notification_app(out: &Path, target: &str) {
+fn build_app(out: &Path, target: &str, sources: &[&str]) {
     let app = out.join("Gent.app");
+    if app.exists() {
+        fs::remove_dir_all(&app).unwrap();
+    }
     let contents = app.join("Contents");
     let bin = contents.join("MacOS");
     let resources = contents.join("Resources");
@@ -76,14 +85,7 @@ fn build_notification_app(out: &Path, target: &str) {
     let src = "src/desktop/notifications";
     println!("cargo:rerun-if-changed={src}");
     fs::copy(format!("{src}/Info.plist"), contents.join("Info.plist")).unwrap();
-    swiftc(
-        target,
-        &[
-            &format!("{src}/Delivery.swift"),
-            &format!("{src}/main.swift"),
-        ],
-        &bin.join("GentNotifications"),
-    );
+    swiftc(target, sources, &bin.join("GentDesktop"));
 
     let iconset = out.join("Inkling.iconset");
     fs::create_dir_all(&iconset).unwrap();
@@ -115,7 +117,7 @@ fn build_notification_app(out: &Path, target: &str) {
         .arg(&app)
         .status()
         .unwrap();
-    assert!(ok.success(), "could not sign the notification sender");
+    assert!(ok.success(), "could not sign Gent Desktop");
 }
 
 fn main() {

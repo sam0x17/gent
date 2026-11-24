@@ -16,6 +16,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     lazy var about = ManagementTab(page: "about", icon: icon)
     let icon: NSImage?
     let trayIcon: NSImage?
+    var deliverNotification: (([String: Any]) -> Void)?
     let openAtLaunch: Bool
     var statusItem: NSStatusItem!
     let trayState = NSMenuItem(title: "Checking daemon…", action: nil, keyEquivalent: "")
@@ -239,6 +240,10 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     }
 
     func receive(_ m: [String: Any]) {
+        if let banner = m["notification"] as? [String: Any] {
+            deliverNotification?(banner)
+            return
+        }
         switch m["page"] as? String {
         case "cluster":
             account.receive(m)

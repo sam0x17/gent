@@ -84,6 +84,10 @@ To run the Status page proof on the Mac Studio over SSH, append `--cluster` afte
 
 Append `--dashboard` after the icon path to exercise the Dashboard tab alone. The fixture measures card sizes as the window resizes, checks native chart and image scaling, scrolls to a link below a long event list, and captures the URL passed to the browser opener. The Linux desktop smoke test uses a private default browser handler to record clicks before and after a chat updates a link.
 
+### macOS notification attribution
+
+In a logged-in Mac terminal, run `python3 scripts/notifications-macos/check_gui.py` from the client checkout. It builds the candidate and runs its signed tray executable with fixture pipes. The only notice is local to Notification Center. Allow Gent if macOS prompts. Check the sender above **Gent local sender check**, the Inkling icon, and the app selected by the notification’s settings action. Leave that entry in Notification Center during the replay and check that only one copy is listed. Record the sender separately from the notification title. Focus and the configured alert style can suppress a banner even after native acceptance.
+
 ## Automatic update acceptance
 
 Run `python3 scripts/prove_updates.py --cache /absolute/path/to/disposable-cache`

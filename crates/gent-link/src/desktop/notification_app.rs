@@ -1,16 +1,12 @@
-//! Launch the signed sender as a macOS application. Launch Services' exit status
-//! only describes the launch; the sender acknowledges the notice on its own stdout.
-use anyhow::{Context, Result, ensure};
+//! Install the signed tray application at the existing Gent.app URL so upgrades
+//! keep the sender identity used by Notification Center.
+use anyhow::{Result, ensure};
 use rustix::fs::{CWD, RenameFlags, renameat_with};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
 };
-use tokio::process::Command;
-use uuid::Uuid;
 
 macro_rules! bundled {
     ($file:literal) => {
@@ -23,12 +19,12 @@ macro_rules! bundled {
 
 const FILES: &[(&str, &[u8])] = &[
     bundled!("Info.plist"),
-    bundled!("MacOS/GentNotifications"),
+    bundled!("MacOS/GentDesktop"),
     bundled!("Resources/Inkling.icns"),
     bundled!("_CodeSignature/CodeResources"),
 ];
 
-fn install(runtime: &Path) -> Result<PathBuf> {
+pub(super) fn install(runtime: &Path) -> Result<PathBuf> {
     let root = runtime.join("desktop-notifications");
     gent_daemon::config::private_dir(&root)?;
     let _lock = crate::managed_file::lock(&root.join("install.lock"))?;
@@ -44,7 +40,7 @@ fn install(runtime: &Path) -> Result<PathBuf> {
             "unexpected application at {}",
             app.display()
         );
-        let executable = contents.join("MacOS/GentNotifications");
+        let executable = contents.join("MacOS/GentDesktop");
         let runnable = fs::metadata(executable).is_ok_and(|m| m.permissions().mode() & 0o100 != 0);
         if runnable
             && FILES.iter().all(|(path, bytes)| {
@@ -62,7 +58,7 @@ fn install(runtime: &Path) -> Result<PathBuf> {
         fs::write(path, bytes)?;
     }
     fs::set_permissions(
-        contents.join("MacOS/GentNotifications"),
+        contents.join("MacOS/GentDesktop"),
         fs::Permissions::from_mode(0o700),
     )?;
     // Never expose a mix of an old signature and new resources to Launch Services.
@@ -72,57 +68,6 @@ fn install(runtime: &Path) -> Result<PathBuf> {
         fs::rename(stage.path(), &app)?;
     }
     Ok(app)
-}
-
-// Unit tests exercise the real cursor path without registering an app with the
-// user's Launch Services database or submitting a notification to their session.
-#[cfg(test)]
-tokio::task_local! { pub(crate) static FIXTURE_OPEN: PathBuf; }
-
-pub(crate) async fn display(icon: &Path, id: Uuid, title: &str, body: &str) -> Result<()> {
-    // This is the active desktop runtime, including auth/desktop during first-run.
-    let runtime = icon.parent().context("missing desktop runtime")?;
-    let app = install(runtime)?;
-    #[cfg(not(test))]
-    let open = Path::new("/usr/bin/open");
-    #[cfg(test)]
-    let open = &FIXTURE_OPEN
-        .try_with(Clone::clone)
-        .context("missing isolated Launch Services fixture")?;
-    submit(open, &app, id, title, body).await
-}
-
-async fn submit(open: &Path, app: &Path, id: Uuid, title: &str, body: &str) -> Result<()> {
-    // Private, per-attempt files keep chat names off the command line and prevent
-    // a stale acknowledgment from satisfying another attempt.
-    let request = tempfile::NamedTempFile::new()?;
-    let ack = tempfile::NamedTempFile::new()?;
-    serde_json::to_writer(
-        request.as_file(),
-        &serde_json::json!({ "id": id, "title": title, "body": body }),
-    )?;
-    let status = tokio::time::timeout(
-        Duration::from_secs(135),
-        Command::new(open)
-            .args(["-n", "-g", "-W", "--stdin"])
-            .arg(request.path())
-            .arg("--stdout")
-            .arg(ack.path())
-            .arg("-a")
-            .arg(app)
-            .args(["--args", "--deliver"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status(),
-    )
-    .await??;
-    ensure!(
-        status.success() && fs::read(ack.path())? == id.to_string().as_bytes(),
-        "macOS did not acknowledge the desktop notification"
-    );
-    Ok(())
 }
 
 #[cfg(test)]

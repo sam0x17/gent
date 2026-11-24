@@ -14,6 +14,7 @@ impl Fixture {
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         config::initialize(home.path(), "creator").unwrap();
         let store = Store::open(home.path()).unwrap();
+        crate::entitlements::grant_test(home.path(), &store.config);
         let credential = config::read_private(&home.path().join("owner.key")).unwrap();
         let peer = gent_crypto::NodeIdentity::generate().unwrap();
         let tx = store.db.unchecked_transaction().unwrap();

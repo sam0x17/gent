@@ -1,7 +1,7 @@
 use super::*;
-use crate::desktop::notification_app::FIXTURE_OPEN;
+use crate::desktop::notification_delivery::channel;
 use axum::{Json, Router, http::HeaderMap, routing::get};
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::fs;
 
 #[tokio::test]
 async fn macos_notification_cursor_requires_native_acceptance() {
@@ -21,11 +21,8 @@ async fn macos_notification_cursor_requires_native_acceptance() {
             expires_at: now().unwrap() + 3600,
         }),
     };
-    save(
-        &source::directory(&home).unwrap().join("session.json"),
-        Some(&login),
-    )
-    .unwrap();
+    let session = source::directory(&home).unwrap().join("session.json");
+    save(&session, Some(&login)).unwrap();
     let notice = Notice {
         id: uuid::Uuid::new_v4(),
         created_at: now().unwrap() as i64,
@@ -34,6 +31,7 @@ async fn macos_notification_cursor_requires_native_acceptance() {
             commit: "a".repeat(40),
         },
     };
+    let notice_id = notice.id;
     let api = Router::new().route(
         "/v1/notifications",
         get(move |headers: HeaderMap| {
@@ -48,25 +46,53 @@ async fn macos_notification_cursor_requires_native_acceptance() {
     let server = tokio::spawn(async move { axum::serve(listener, api).await.unwrap() });
     let cursor = cursor_path(&home, &login).unwrap();
     Snapshot::read(&cursor).unwrap().write("41").unwrap();
-    let open = temp.path().join("open");
-    let icon = home.join("desktop-icon.png");
-    FIXTURE_OPEN
-        .scope(open.clone(), async {
-            fs::write(&open, "#!/bin/sh\nexit 0\n").unwrap();
-            fs::set_permissions(&open, fs::Permissions::from_mode(0o700)).unwrap();
-            assert!(collect(&home, &login, &icon).await.is_err());
-            assert_eq!(fs::read_to_string(&cursor).unwrap(), "41");
+    let (gui, mut deliveries) = channel();
+    let (_, disconnected) = tokio::join!(
+        async {
+            let message = deliveries.next().await;
+            assert_eq!(message["notification"]["id"], notice_id.to_string());
+            drop(deliveries); // App quit between submission and acknowledgment.
+        },
+        collect(&home, &login, &gui)
+    );
+    assert!(disconnected.is_err());
+    assert_eq!(fs::read_to_string(&cursor).unwrap(), "41");
 
-            fs::write(
-                &open,
-                "#!/bin/sh\n/usr/bin/plutil -extract id raw -n \"$5\" > \"$7\"\n",
-            )
-            .unwrap();
-            collect(&home, &login, &icon).await.unwrap();
-            assert_eq!(fs::read_to_string(&cursor).unwrap(), "42");
-            fs::remove_file(&open).unwrap();
-            collect(&home, &login, &icon).await.unwrap();
-        })
-        .await;
+    let (gui, mut deliveries) = channel();
+    let mut previous = uuid::Uuid::nil().to_string();
+    for accepted in [false, true] {
+        let (_, collected) = tokio::join!(
+            async {
+                let message = deliveries.next().await;
+                let banner = &message["notification"];
+                assert_eq!(banner["id"], notice_id.to_string());
+                assert_eq!(banner["title"], "Gent updated");
+                let attempt = banner["attempt"].as_str().unwrap();
+                assert_ne!(attempt, previous);
+                assert!(!deliveries.receive("refresh"));
+                let reply = |attempt: &str, accepted| {
+                    json!({"op":"notification_result","attempt":attempt,"accepted":accepted})
+                        .to_string()
+                };
+                assert!(deliveries.receive(&reply(&previous, !accepted)));
+                assert!(deliveries.receive(&reply(attempt, accepted)));
+                previous = attempt.to_owned();
+            },
+            collect(&home, &login, &gui)
+        );
+        assert_eq!(collected.is_ok(), accepted);
+        assert_eq!(
+            fs::read_to_string(&cursor).unwrap(),
+            if accepted { "42" } else { "41" }
+        );
+        if !accepted {
+            save(&session, None).unwrap();
+            collect(&home, &login, &gui).await.unwrap();
+            assert_eq!(fs::read_to_string(&cursor).unwrap(), "41");
+            save(&session, Some(&login)).unwrap();
+        }
+    }
+    drop(deliveries);
+    collect(&home, &login, &gui).await.unwrap(); // Reconnect at 42 requires no GUI delivery.
     server.abort();
 }

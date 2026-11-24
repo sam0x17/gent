@@ -39,6 +39,7 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
 
 impl StoreSession<'_> {
     fn board(&self, id: &str) -> Result<(u64, Option<Board>, Option<String>)> {
+        require_pro(self.home, &self.config, "Dashboards")?;
         let row = self
             .db
             .query_row(
@@ -171,6 +172,9 @@ impl StoreSession<'_> {
         Ok(())
     }
     pub(super) fn dashboard_sync(&self, peer: &str, key: &[u8]) -> Result<()> {
+        if !crate::entitlements::paid(self.home, &self.config) {
+            return Ok(());
+        }
         // Include hosted conversations whose current signed carrier is this node.
         let local: Vec<_> = self
             .state
@@ -232,6 +236,7 @@ impl StoreSession<'_> {
         Ok(())
     }
     pub(super) fn dashboards(&self, after: Option<&str>) -> Result<Value> {
+        require_pro(self.home, &self.config, "Dashboards")?;
         let members = self.state.state().nodes.keys().collect::<Vec<_>>();
         let mut query = self.db.prepare(
             "SELECT a.id,a.name,d.revision,d.body FROM dashboards d

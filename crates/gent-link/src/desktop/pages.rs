@@ -91,6 +91,7 @@ fn settings(home: &Path) -> Result<Value> {
     let cfg = crate::node_home::inspect(home)?;
     let transport = cfg.transport()?;
     Ok(json!({
+        "paid": gent_daemon::entitlements::paid(home, &cfg),
         "babysitter": !home.join("babysitter-disabled").try_exists()?,
         "login": login::autostarts(home)?,
         "updates": cfg.updates()?.enabled,
@@ -114,6 +115,11 @@ async fn set(home: &Path, key: Preference, enabled: bool) -> Result<()> {
             Ok(())
         }
         Preference::Babysitter => {
+            let cfg = crate::node_home::inspect(home)?;
+            ensure!(
+                gent_daemon::entitlements::paid(home, &cfg),
+                "Babysitter requires Gent Pro. See https://gent.link/pricing"
+            );
             let marker = Snapshot::read(&home.join("babysitter-disabled"))?;
             if enabled {
                 marker.remove()
@@ -227,6 +233,13 @@ impl Pages {
             Request::Chats => "chats",
             _ => "settings",
         };
+        if page == "dashboard"
+            && !crate::node_home::inspect(home)
+                .is_ok_and(|cfg| gent_daemon::entitlements::paid(home, &cfg))
+        {
+            self.dashboard_snapshot = None;
+            return json!({"page":page,"pro_required":true,"rows":[]});
+        }
         match self.handle(home, request).await {
             Ok(mut response) => {
                 response["page"] = json!(page);

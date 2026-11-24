@@ -119,6 +119,11 @@ class SettingsPane(Gtk.Box):
             button.connect("toggled", self.toggle, key)
             form.pack_start(button, False, False, 0)
             self.checks[key] = button
+            if key == "babysitter":
+                self.pricing = Gtk.LinkButton.new_with_label("https://gent.link/pricing", "Babysitter requires Gent Pro · View plans")
+                self.pricing.set_halign(Gtk.Align.START)
+                self.pricing.set_no_show_all(True)
+                form.pack_start(self.pricing, False, False, 0)
         form.pack_start(label("Network changes take effect when the daemon restarts.", "quiet"), False, False, 0)
         edit = Gtk.Button(label="Edit full configuration…")
         edit.set_halign(Gtk.Align.START)
@@ -185,8 +190,10 @@ class SettingsPane(Gtk.Box):
         self.updating = True
         self.values = reply.get("values", self.values)
         for key, button in self.checks.items():
-            button.set_active(bool(self.values.get(key)))
-            button.set_sensitive(key in self.values)
+            available = key in self.values and (key != "babysitter" or self.values.get("paid") is True)
+            button.set_active(bool(available and self.values[key]))
+            button.set_sensitive(available)
+        self.pricing.set_visible(self.values.get("paid") is False)
         self.updating = False
         self.stack.set_sensitive(True)
         if "document" in reply:

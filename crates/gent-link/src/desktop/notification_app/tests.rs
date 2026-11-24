@@ -2,13 +2,25 @@ use super::*;
 use std::os::unix::fs::MetadataExt;
 
 #[test]
-fn existing_desktop_gains_intact_signed_sender() {
+fn existing_sender_is_replaced_by_the_signed_tray_app() {
     let node = tempfile::tempdir().unwrap();
     for runtime in [node.path().join("auth/desktop"), node.path().to_owned()] {
         fs::create_dir_all(&runtime).unwrap();
         let legacy = runtime.join("Gent Desktop");
         fs::write(&legacy, b"existing tray").unwrap();
-        let root = install(&runtime).unwrap();
+        let root = runtime.join("desktop-notifications/Gent.app");
+        gent_daemon::config::private_dir(root.parent().unwrap()).unwrap();
+        let old_bin = root.join("Contents/MacOS/GentNotifications");
+        fs::create_dir_all(old_bin.parent().unwrap()).unwrap();
+        fs::write(&old_bin, b"old notification sender").unwrap();
+        fs::write(
+            root.join("Contents/Info.plist"),
+            "<key>CFBundleIdentifier</key><string>link.gent.notifications</string>",
+        )
+        .unwrap();
+        assert_eq!(install(&runtime).unwrap(), root);
+        assert!(!old_bin.exists());
+        assert!(root.join("Contents/MacOS/GentDesktop").is_file());
         let inode = || fs::metadata(&root).unwrap().ino();
         let first = inode();
         assert_eq!(install(&runtime).unwrap(), root);
@@ -32,45 +44,6 @@ fn existing_desktop_gains_intact_signed_sender() {
     }
 }
 
-#[tokio::test]
-async fn launch_needs_matching_native_acknowledgment() {
-    let scratch = tempfile::tempdir().unwrap();
-    let launcher = scratch.path().join("open");
-    let app = scratch.path().join("profile with spaces/Gent.app");
-    let id = Uuid::new_v4();
-    for (reply, code, accepted) in [
-        ("", 0, false),
-        ("some other notice", 0, false),
-        (&id.to_string(), 1, false),
-        (&id.to_string(), 0, true),
-    ] {
-        let script = format!(
-            r#"#!/bin/sh
-set -eu
-test "$1 $2 $3 $4" = "-n -g -W --stdin"
-test "$6" = "--stdout" && test "$8" = "-a"
-test "$9" = "${{0%/*}}/profile with spaces/Gent.app" && test "${{10}} ${{11}}" = "--args --deliver"
-test "$(/usr/bin/plutil -extract id raw "$5")" = "{id}"
-test "$(/usr/bin/plutil -extract title raw "$5")" = "Goal resumed"
-test "$(/usr/bin/plutil -extract body raw "$5")" = 'A "quoted" chat resumed.'
-printf '%s' '{reply}' > "$7"
-exit {code}
-"#
-        );
-        fs::write(&launcher, script).unwrap();
-        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
-        let result = submit(
-            &launcher,
-            &app,
-            id,
-            "Goal resumed",
-            "A \"quoted\" chat resumed.",
-        )
-        .await;
-        assert_eq!(result.is_ok(), accepted, "{result:?}");
-    }
-}
-
 #[test]
 fn native_notification_center_fixture() {
     let temp = tempfile::tempdir().unwrap();
@@ -85,6 +58,10 @@ fn native_notification_center_fixture() {
             "-swift-version",
             "5",
             "-warnings-as-errors",
+            "src/desktop/macos.swift",
+            "src/desktop/macos_tabs.swift",
+            "src/desktop/management.swift",
+            "src/desktop/dashboard.swift",
             "src/desktop/notifications/Delivery.swift",
             "../../scripts/notifications-macos/main.swift",
             "-o",

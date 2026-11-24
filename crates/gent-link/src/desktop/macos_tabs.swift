@@ -193,6 +193,8 @@ final class SettingsTab: NSObject {
     private var checks: [String: NSButton] = [:]
     private var controls: [NSButton] = []
     private var loaded: [String: Bool] = [:]
+    private lazy var pricing = NSButton(title: "Babysitter requires Gent Pro · View plans", target: self, action: #selector(openPricing))
+    @objc private func openPricing() { NSWorkspace.shared.open(URL(string: "https://gent.link/pricing")!) }
     private var busy = false
 
     override init() {
@@ -212,6 +214,10 @@ final class SettingsTab: NSObject {
             button.isEnabled = false
             checks[key] = button
             fields.append(button)
+            if key == "babysitter" {
+                pricing.isHidden = true
+                fields.append(pricing)
+            }
         }
         let hint = NSTextField(labelWithString: "Network changes take effect when the daemon restarts.")
         hint.textColor = .secondaryLabelColor
@@ -260,9 +266,11 @@ final class SettingsTab: NSObject {
     private func enableControls() {
         for button in controls { button.isEnabled = !busy }
         for (key, button) in checks {
-            button.state = loaded[key] == true ? .on : .off
-            button.isEnabled = !busy && loaded[key] != nil
+            let available = loaded[key] != nil && (key != "babysitter" || loaded["paid"] == true)
+            button.state = available && loaded[key] == true ? .on : .off
+            button.isEnabled = !busy && available
         }
+        pricing.isHidden = loaded["paid"] != false
         text.isEditable = !busy
     }
 

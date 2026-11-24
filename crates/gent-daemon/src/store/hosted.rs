@@ -60,6 +60,7 @@ impl Store {
         checkpoint: &Path,
         epoch: Option<u64>,
     ) -> Result<Value> {
+        require_pro(&self.home, &self.config, "Hosting another node")?;
         let home = std::fs::canonicalize(home)?;
         ensure!(home != self.home, "invalid web home");
         config::private_dir(&home)?;
@@ -241,6 +242,7 @@ impl Store {
     }
 
     pub(super) fn prepare_hosted_node(&mut self, node: &str, home: &Path) -> Result<Value> {
+        require_pro(&self.home, &self.config, "Hosting another node")?;
         let home = std::fs::canonicalize(home)?;
         ensure!(home != self.home, "a node cannot host itself");
         config::private_dir(&home)?;

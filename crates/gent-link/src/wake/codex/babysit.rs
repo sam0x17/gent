@@ -158,8 +158,8 @@ pub(super) async fn inspect(
     {
         return Ok(());
     }
-    if agent(home, credential, AgentOp::BabysitterCheck { attempt }).await?["eligible"] != true
-        || stalled(&mut host, thread).await?.as_ref() != Some(&stall)
+    if stalled(&mut host, thread).await?.as_ref() != Some(&stall)
+        || agent(home, credential, AgentOp::BabysitterCheck { attempt }).await?["eligible"] != true
     {
         return Ok(());
     }

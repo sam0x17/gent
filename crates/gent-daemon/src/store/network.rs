@@ -422,6 +422,10 @@ impl StoreSession<'_> {
                 revision,
                 board,
             } => {
+                // Consume this frame so ordinary messages on the same ordered stream can advance.
+                if !crate::entitlements::paid(self.home, &self.config) {
+                    return Ok(());
+                }
                 self.import_registration(peer, &agent)?;
                 self.dashboard_receive(&agent.id, revision, board)
             }
@@ -838,16 +842,21 @@ impl Store {
         let Some(queue::ReadyEvent {
             id,
             subject,
-            cancelled,
+            mut cancelled,
         }) = queue::ready_event(self, &peer)?
         else {
             return Ok(());
         };
-        let (body, offset, control, compress): (Vec<u8>, usize, bool, bool) = self.db.query_row(
-            "SELECT body,offset,traffic<>'data',compress FROM network_events WHERE id=?1",
+        let (body, offset, control, compress, dashboard): (Vec<u8>, usize, bool, bool, bool) = self.db.query_row(
+            "SELECT body,offset,traffic<>'data',compress,
+                CASE WHEN announcement THEN json_extract(CAST(body AS TEXT),'$.event.kind')='dashboard' ELSE 0 END
+             FROM network_events WHERE id=?1",
             [&id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
+        if dashboard && !crate::entitlements::paid(&self.home, &self.config) {
+            cancelled = true;
+        }
         let id = Uuid::parse_str(&id)?;
         if cancelled {
             let tx = self.db.unchecked_transaction()?;
@@ -887,6 +896,9 @@ impl Store {
             |db, state| {
                 self.data_peer(db, group, true)?;
                 check_cursor(db, group, (id, offset, cancelled))?;
+                if dashboard && !cancelled {
+                    require_pro(&self.home, &self.config, "Dashboard replication")?;
+                }
                 if !cancelled && let Some(subject) = &subject {
                     let session = self.network_session(db, state.clone());
                     ensure!(
@@ -903,6 +915,12 @@ impl Store {
         let confirmed: Option<u64> = if cancelled || end == body.len() {
             if !cancelled && control {
                 configuration::pending::capture_record(&tx, self.identity.node.id(), &body)?;
+            }
+            if cancelled && dashboard {
+                tx.execute(
+                    "DELETE FROM dashboard_sent WHERE event=?1",
+                    [id.to_string()],
+                )?;
             }
             retention::finish(&tx, id)?;
             tx.query_row(

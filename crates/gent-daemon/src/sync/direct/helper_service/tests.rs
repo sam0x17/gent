@@ -302,6 +302,7 @@ async fn revoked_member_loses_existing_relay_session_while_host_stays_registered
         });
         config::write_private(&home.path().join("relay.key"), config::secret().as_bytes())?;
         config::save(home.path(), &cfg)?;
+        crate::entitlements::grant_test(home.path(), &cfg);
         let mut setup = Store::open(home.path())?;
         crate::pairing::join(
             joined.path(),
