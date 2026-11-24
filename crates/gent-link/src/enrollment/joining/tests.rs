@@ -14,6 +14,7 @@ fn invitations(root: &Path) -> (Invitation, Invitation) {
         credential_file: "relay.key".into(),
     });
     config::save(&owner, &cfg).unwrap();
+    gent_daemon::entitlements::grant_test(&owner, &cfg);
     let credential = config::read_private(&owner.join("owner.key")).unwrap();
     let mut store = Store::open(&owner).unwrap();
     let mut issue = || {

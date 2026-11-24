@@ -19,7 +19,8 @@ pub(crate) fn current() -> Build {
         dirty: env!("GENT_DIRTY") != "false",
         target: env!("GENT_TARGET").into(),
         update_protocol: 1,
-        test_build: cfg!(any(feature = "test-updates", feature = "test-web-bridge")),
+        test_build: cfg!(any(feature = "test-updates", feature = "test-web-bridge"))
+            || gent_daemon::entitlements::FIXTURE_AUTHORITY,
     }
 }
 

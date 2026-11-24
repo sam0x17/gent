@@ -20,6 +20,7 @@ impl Node {
         let root = tempfile::tempdir()?;
         let home = root.path().join("node");
         let mut cfg = config::initialize(&home, "babysitter-test")?;
+        gent_daemon::entitlements::grant_test(&home, &cfg);
         cfg.extra
             .insert("transport".into(), toml::toml! { direct = "off" }.into());
         config::save(&home, &cfg)?;

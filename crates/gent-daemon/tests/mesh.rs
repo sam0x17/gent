@@ -15,6 +15,7 @@ use gent_protocol::{
 use rusqlite::Connection;
 use serde_json::Value;
 use std::{
+    collections::BTreeSet,
     fs,
     os::unix::fs::PermissionsExt,
     sync::{Arc, Mutex},
@@ -65,6 +66,7 @@ struct Node {
 impl Node {
     fn new(home: tempfile::TempDir) -> Self {
         let owner = config::read_private(&home.path().join("owner.key")).unwrap();
+        gent_daemon::entitlements::grant_test(home.path(), &config::load(home.path()).unwrap());
         let mut store = Store::open(home.path()).unwrap();
         let key = config::secret();
         let agent = ok(store.handle(Request::Agent {
@@ -373,26 +375,37 @@ async fn mesh_jobs_retry_storage_failures_and_restart_without_duplicate_streams(
 async fn a_new_node_drains_directory_backlog_and_reports_transport_progress() {
     let relay = relay::RelayServer::start().await;
     let mut nodes = cluster(&relay).await;
+    let mut expected: BTreeSet<_> = nodes.iter().map(|node| node.agent.clone()).collect();
     for i in 0..40 {
-        ok(nodes[0].store.lock().unwrap().handle(Request::Agent {
+        let registration = ok(nodes[0].store.lock().unwrap().handle(Request::Agent {
             credential: config::secret(),
             action: AgentOp::Register {
                 name: format!("history-{i}"),
                 provider: "test".into(),
             },
         }));
+        assert!(expected.insert(registration["agent"]["id"].as_str().unwrap().to_owned()));
     }
     for node in &mut nodes {
         node.start();
     }
-    wait(|| {
-        nodes
+    let agents = |node: &Node| -> BTreeSet<String> {
+        node.owner(OwnerOp::Agents)
+            .as_array()
+            .unwrap()
             .iter()
-            .all(|node| node.owner(OwnerOp::Agents).as_array().unwrap().len() == 43)
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    wait(|| nodes.iter().all(|node| agents(node) == expected)).await;
+    // A directory push can deliver multiple registrations in one packet.
+    wait(|| {
+        nodes[1].owner(OwnerOp::Status)["sync"]["packets_received"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
     })
     .await;
     let status = nodes[1].owner(OwnerOp::Status);
-    assert!(status["sync"]["packets_received"].as_u64().unwrap() >= 40);
     assert!(status["sync"]["last_progress_at"].as_i64().is_some());
     assert!(
         status["sync"]["scope"]
@@ -401,8 +414,5 @@ async fn a_new_node_drains_directory_backlog_and_reports_transport_progress() {
             .contains("not a complete cluster directory")
     );
     nodes[1].restart();
-    assert_eq!(
-        nodes[1].owner(OwnerOp::Agents).as_array().unwrap().len(),
-        43
-    );
+    assert_eq!(agents(&nodes[1]), expected);
 }

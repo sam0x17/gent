@@ -1544,6 +1544,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "gent-crypto",
+ "gent-daemon",
  "gent-protocol",
  "getrandom 0.4.3",
  "http",

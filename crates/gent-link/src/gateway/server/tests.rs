@@ -377,6 +377,7 @@ async fn http_boundary_rejects_wrong_authority_origin_auth_proxy_and_oversized_p
 #[tokio::test]
 async fn web_dashboard_tools_use_the_bound_chat() {
     let f = Fixture::new();
+    gent_daemon::entitlements::grant_test(&f.home, &config::load(&f.home).unwrap());
     let daemon = Daemon::start(&f.home).await;
     let server = f.start().await;
     let client = client();

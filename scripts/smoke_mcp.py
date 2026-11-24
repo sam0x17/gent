@@ -29,7 +29,10 @@ def main():
         def cli(*args):
             return subprocess.run(base + ["--json", *args], capture_output=True, text=True, check=True).stdout
 
-        cli("cluster", "new", "proof", "--local")
+        assert json.loads(cli("version"))["test_build"] is False
+        node = json.loads(cli("cluster", "new", "proof", "--local"))["node"]
+        # A normal build must ignore the disposable GTK/daemon fixture's marker.
+        (home / "test-entitlement").write_text(node["id"])
         daemon = None
         clients = []
 
@@ -57,6 +60,10 @@ def main():
             daemon = start_daemon()
             a, b, outsider = connect("a.key"), connect("b.key"), connect("outsider.key")
             aid = a.call("gent_register", {"name": "a", "provider": "agents"})[0]["agent"]["id"]
+            assert a.call("gent_babysit")[0]["enabled"] is False
+            for name, arguments in [("gent_dashboard_get", {}), ("gent_babysit", {"enabled": True})]:
+                denial = a.call(name, arguments, error=True)
+                assert "Gent Pro" in denial["result"]["content"][0]["text"], denial
             bid = b.call("gent_register", {"name": "b", "provider": "arbitrary-b"})[0]["agent"]["id"]
             hid = outsider.call("gent_register", {"name": "hidden", "provider": "hidden-provider"})[0]["agent"]["id"]
             assert {agent["id"] for agent in a.call("gent_agents")[0]} == {aid, bid, hid}

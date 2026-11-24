@@ -181,6 +181,7 @@ def main():
             return
         browser = install_fixture_browser(Path(folder))
         created = json.loads(cli("--json", "cluster", "new", "desktop-test", "--local").stdout)
+        (home / "test-entitlement").write_text(created["node"]["id"])
         # Stdio enrollment requires a configuration relay in the parent's snapshot.
         key = home / "fixture-relay.key"
         key.touch(mode=0o600)

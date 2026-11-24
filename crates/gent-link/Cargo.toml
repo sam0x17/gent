@@ -13,6 +13,8 @@ path = "src/main.rs"
 [features]
 # Local auth proof only; rejects overrides unless both origins are loopback.
 test-auth-provider = []
+# Disposable desktop smoke binary; never publish a test build.
+test-entitlements = ["gent-daemon/test-entitlements"]
 # Disposable hosted connector proofs with a loopback relay and bridge.
 test-web-bridge = []
 # Disposable updater proofs only. Never bless or deploy this feature.
@@ -65,6 +67,7 @@ reqwest.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
+gent-daemon = { path = "../gent-daemon", features = ["test-entitlements"] }
 rcgen = "0.14"
 
 [lints]

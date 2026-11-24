@@ -5,6 +5,7 @@ fn build(commit: char) -> Build {
     Build {
         commit: commit.to_string().repeat(40),
         dirty: false,
+        test_build: cfg!(feature = "test-updates"),
         ..build_info::current()
     }
 }
@@ -314,6 +315,9 @@ fn update_lock_and_binary_validation_reject_competing_writers_and_unsafe_paths()
     assert!(install::hash(&f.installation.binary).is_ok());
     let mut candidate = build('a');
     assert!(eligible(&candidate));
+    candidate.test_build = !candidate.test_build;
+    assert!(!eligible(&candidate));
+    candidate.test_build = !candidate.test_build;
     candidate.dirty = true;
     assert!(!eligible(&candidate));
     candidate.dirty = false;

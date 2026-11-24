@@ -22,6 +22,7 @@ fn fixture() -> (tempfile::TempDir, Store, String) {
         credential_file: "relay.key".into(),
     });
     config::save(&home, &cfg).unwrap();
+    gent_daemon::entitlements::grant_test(&home, &cfg);
     let owner = config::read_private(&home.join("owner.key")).unwrap();
     (root, Store::open(&home).unwrap(), owner)
 }

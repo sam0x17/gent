@@ -13,6 +13,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub const FIXTURE_AUTHORITY: bool = cfg!(feature = "test-entitlements");
+
 const FILE: &str = "account-entitlements.json";
 
 fn check(signed: &SignedEntitlements, cfg: &Config, now: u64, public_key: &[u8; 32]) -> Result<()> {
@@ -53,8 +55,13 @@ pub fn clear(home: &Path) -> Result<()> {
 }
 
 pub fn paid(home: &Path, cfg: &Config) -> bool {
-    #[cfg(test)]
-    if fs::read_to_string(home.join("test-entitlement")).is_ok_and(|id| id == cfg.node.id) {
+    #[cfg(any(test, feature = "test-entitlements"))]
+    if cfg
+        .service
+        .as_ref()
+        .is_none_or(|s| s.origin.trim_end_matches('/') != "https://api.gent.link")
+        && fs::read_to_string(home.join("test-entitlement")).is_ok_and(|id| id == cfg.node.id)
+    {
         return true;
     }
     let read = || -> Result<bool> {
@@ -71,7 +78,7 @@ pub fn paid(home: &Path, cfg: &Config) -> bool {
     read().unwrap_or(false)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-entitlements"))]
 pub fn grant_test(home: &Path, cfg: &Config) {
     config::write_private(&home.join("test-entitlement"), cfg.node.id.as_bytes()).unwrap();
 }

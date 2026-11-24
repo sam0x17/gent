@@ -171,6 +171,7 @@ impl Pair {
         });
         config::write_private(&homes[0].path().join("relay.key"), token.as_bytes()).unwrap();
         config::save(homes[0].path(), &cfg).unwrap();
+        gent_daemon::entitlements::grant_test(homes[0].path(), &cfg);
         let source = Arc::new(Mutex::new(Store::open(homes[0].path()).unwrap()));
         let owner = config::read_private(&homes[0].path().join("owner.key")).unwrap();
         let mut peer = OwnerPeer {
@@ -190,6 +191,10 @@ impl Pair {
         )
         .await
         .unwrap();
+        gent_daemon::entitlements::grant_test(
+            homes[1].path(),
+            &config::load(homes[1].path()).unwrap(),
+        );
         let target = Arc::new(Mutex::new(Store::open(homes[1].path()).unwrap()));
         let stores = [source, target];
         let keys = std::array::from_fn(|_| config::secret());
