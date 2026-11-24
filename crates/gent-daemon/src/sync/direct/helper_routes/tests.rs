@@ -153,6 +153,7 @@ async fn tcp_only_registration_uses_live_tls_and_wakes_on_helper_loss() -> Resul
     let home = tempfile::tempdir()?;
     std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700))?;
     let cfg = config::initialize(home.path(), "helper-client-tests")?;
+    crate::entitlements::grant_test(home.path(), &cfg);
     let mut store = Store::open(home.path())?;
     let key = SecretKey::generate();
     store.advertise_direct(EndpointAddr::new(key.public()))?;
