@@ -1,4 +1,5 @@
 import base64
+from collections import Counter
 import math
 import re
 import unicodedata
@@ -217,6 +218,9 @@ DASHBOARD_CSS = b"""
     outline-color: @theme_selected_bg_color;
 }
 .gent-dashboard-card > border { border: none; }
+.gent-dashboard-hide { min-width: 24px; min-height: 24px; padding: 0; }
+.gent-dashboard-restore { min-height: 0; padding: 1px 2px; font-size: 0.9em; }
+.gent-dashboard-restore > label { text-decoration-line: underline; }
 .gent-dashboard-title { font-size: 18px; font-weight: bold; }
 .gent-dashboard-publisher { color: mix(@theme_text_color, @theme_base_color, .30); }
 .gent-dashboard-heading { font-weight: bold; }
@@ -237,7 +241,7 @@ DASHBOARD_CSS = b"""
 
 
 class DashboardCard(Gtk.Frame):
-    def __init__(self, title, publisher):
+    def __init__(self, title, publisher, agent=None):
         super().__init__(shadow_type=Gtk.ShadowType.NONE)
         self.get_style_context().add_class("gent-dashboard-card")
         self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, border_width=15)
@@ -247,7 +251,16 @@ class DashboardCard(Gtk.Frame):
         self.publisher = dashboard_label(publisher, "gent-dashboard-publisher")
         header.add(self.title)
         header.add(self.publisher)
-        self.body.add(header)
+        heading = Gtk.Box(spacing=6)
+        heading.pack_start(header, True, True, 0)
+        if agent is not None:
+            hide = Gtk.Button(label="×", tooltip_text="Hide dashboard", relief=Gtk.ReliefStyle.NONE)
+            hide.set_valign(Gtk.Align.START)
+            hide.get_style_context().add_class("gent-dashboard-hide")
+            hide.get_accessible().set_name("Hide dashboard")
+            hide.connect("clicked", lambda _: page_request("dashboard_hide", agent=agent))
+            heading.pack_end(hide, False, False, 0)
+        self.body.add(heading)
         self.get_accessible().set_name(title)
 
     def horizontal_inset(self):
@@ -295,11 +308,19 @@ class DashboardPane(Gtk.Box):
         # The first request needs the same style nodes before a publisher has supplied a card.
         self.empty_card = DashboardCard("", "")
         self.rows = None
+        self.hidden = []
         self.grid_width = None
         self.last_layout = None
         self.refresh_source = 0
         self.load_requested = False
         self.notice = notice_label()
+        self.showing_feedback = False
+        self.restore = Gtk.MenuButton(label="Restore hidden dashboards", halign=Gtk.Align.END,
+                                      relief=Gtk.ReliefStyle.NONE)
+        self.restore.set_state_flags(Gtk.StateFlags.LINK, False)
+        self.restore.get_style_context().add_class("gent-dashboard-restore")
+        self.restore.set_no_show_all(True)
+        self.pack_start(self.restore, False, False, 0)
         self.grid = DashboardGrid()
         self.grid.connect("size-allocate", self.grid_allocated)
         scroll = Gtk.ScrolledWindow()
@@ -345,20 +366,47 @@ class DashboardPane(Gtk.Box):
                 page_request(op, **layout)
         return False
 
+    def set_hidden(self, hidden):
+        if self.hidden == hidden:
+            return
+        self.hidden = hidden
+        old_menu = self.restore.get_popup()
+        if old_menu is not None:
+            old_menu.destroy()
+        if hidden:
+            menu = Gtk.Menu()
+            names = [f"{item['title']} — {item['chat']}" for item in hidden]
+            counts = Counter(names)
+            for item, name in zip(hidden, names):
+                agent = item["agent"]
+                if counts[name] > 1:
+                    name = f"{name} ({agent})"
+                choice = Gtk.MenuItem(label=name)
+                choice.connect("activate", lambda _, agent=agent: page_request("dashboard_restore", agent=agent))
+                menu.append(choice)
+            menu.show_all()
+            self.restore.set_popup(menu)
+        self.restore.set_visible(bool(hidden))
+
     def receive(self, reply):
-        if reply.get("unchanged"):
-            if not reply.get("layout_only"):
-                self.show_dashboard_notice(self.rows)
-            return
-        if "rows" not in reply:
-            self.notice.set_text(reply.get("error") or reply.get("notice", ""))
-            return
-        rows = reply["rows"]
+        rows = reply.get("rows", self.rows)
         if reply.get("pro_required"):
+            rows = []
+            self.set_hidden([])
+            self.showing_feedback = False
             self.notice.set_markup('Dashboards require an active Gent Pro plan for this cluster. '
                                  '<a href="https://gent.link/pricing">View plans</a>')
-        elif not reply.get("layout_only"):
-            self.show_dashboard_notice(rows)
+        else:
+            if "hidden" in reply:
+                self.set_hidden(reply["hidden"])
+            feedback = reply.get("error") or reply.get("notice")
+            if feedback:
+                self.showing_feedback = True
+                self.notice.set_text(feedback)
+            elif not (reply.get("layout_only") and self.showing_feedback):
+                self.showing_feedback = False
+                empty = "All dashboards are hidden." if self.hidden else "No chats have published a dashboard."
+                self.notice.set_text("" if rows else empty)
         if self.rows != rows:
             self.rows = rows
             for card in self.grid.get_children():
@@ -373,12 +421,9 @@ class DashboardPane(Gtk.Box):
                     widget.connect("style-updated", self.queue_refresh)
                 self.queue_refresh()
 
-    def show_dashboard_notice(self, rows):
-        self.notice.set_text("" if rows else "No chats have published a dashboard.")
-
     def card(self, row):
         board = row["board"]
-        frame = DashboardCard(board["title"], row["chat"])
+        frame = DashboardCard(board["title"], row["chat"], row["agent"])
         for w in board["widgets"]:
             v, kind = w["value"], w["kind"]
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)

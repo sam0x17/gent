@@ -13,6 +13,80 @@ from desktop_dashboard_samples import chart_widgets, image_uri
 from desktop_fixture_browser import install_fixture_browser
 
 
+def exercise_visibility(pane, Gtk, widgets, requests, boards):
+    from gi.repository import Pango
+
+    restore, = widgets(pane, Gtk.MenuButton)
+    assert restore.get_label() == "Restore hidden dashboards"
+    rows = [dict(row, chat="Fixture chat", board=dict(row["board"], title="Same title")) for row in boards[:2]]
+    hidden = [{"agent": row["agent"], "chat": row["chat"], "title": row["board"]["title"]} for row in rows]
+    pane.receive({"rows": rows, "hidden": []})
+    assert not restore.get_visible()
+    cards = pane.grid.get_children()
+    for card, row in zip(cards, rows, strict=True):
+        hide, = widgets(card, Gtk.Button)
+        assert hide.get_label() == "×" and hide.get_can_focus()
+        assert hide.get_accessible().get_name() == hide.get_tooltip_text() == "Hide dashboard"
+        assert max(hide.get_preferred_width()[1], hide.get_preferred_height()[1]) <= 32
+        hide.clicked()
+        assert requests.pop() == ("dashboard_hide", {"agent": row["agent"]})
+    pane.receive({"error": "Hide failed"})
+    assert pane.grid.get_children() == cards and not restore.get_visible()
+
+    pane.receive({"rows": rows[:1], "hidden": hidden[1:]})
+    remaining, = pane.grid.get_children()
+    assert restore.get_visible() and not pane.notice.get_visible()
+    assert restore.get_relief() == Gtk.ReliefStyle.NONE and restore.get_can_focus()
+    assert restore.get_state_flags() & Gtk.StateFlags.LINK
+    caption = restore.get_child()
+    link = Gtk.LinkButton.new_with_label("https://example.test", "Fixture link")
+    reference = link.get_child()
+    assert caption.get_style_context().get_color(caption.get_state_flags()).equal(
+        reference.get_style_context().get_color(reference.get_state_flags()))
+    assert restore.get_preferred_height()[1] <= caption.get_preferred_height()[1] + 6
+    attrs = caption.get_layout().get_attributes().get_attributes()
+    assert any(a.klass.type == Pango.AttrType.UNDERLINE and a.as_int().value for a in attrs)
+    menu = restore.get_popup()
+    choice, = menu.get_children()
+    assert choice.get_label() == "Same title — Fixture chat"
+    pane.receive({"unchanged": True})
+    pane.receive({"layout_only": True, "rows": rows[:1]})
+    assert pane.grid.get_children() == [remaining] and restore.get_popup() == menu
+
+    pane.receive({"rows": [], "hidden": hidden})
+    assert not pane.grid.get_children() and pane.notice.get_text() == "All dashboards are hidden."
+    choices = restore.get_popup().get_children()
+    for choice, row in zip(choices, rows, strict=True):
+        assert choice.get_label() == f"Same title — Fixture chat ({row['agent']})"
+        choice.activate()
+        assert requests.pop() == ("dashboard_restore", {"agent": row["agent"]})
+    pane.receive({"error": "Restore failed"})
+    pane.receive({"layout_only": True, "unchanged": True})
+    assert pane.notice.get_text() == "Restore failed" and restore.get_popup().get_children() == choices
+    pane.receive({"unchanged": True, "hidden": hidden[1:]})
+    choice, = restore.get_popup().get_children()
+    assert choice.get_label() == "Same title — Fixture chat" and pane.notice.get_text() == "All dashboards are hidden."
+    pane.receive({"layout_only": True, "rows": [], "hidden": []})
+    assert not restore.get_visible() and pane.notice.get_text() == "No chats have published a dashboard."
+    pane.receive({"layout_only": True, "unchanged": True, "hidden": hidden})
+    assert restore.get_visible() and pane.notice.get_text() == "All dashboards are hidden."
+    pane.receive({"rows": rows[1:], "hidden": hidden[:1]})
+    choice, = restore.get_popup().get_children()
+    choice.activate()
+    assert requests.pop() == ("dashboard_restore", {"agent": rows[0]["agent"]})
+    pane.receive({"rows": rows, "hidden": []})
+    assert not restore.get_visible() and len(pane.grid.get_children()) == 2
+
+    pane.receive({"rows": rows[:1], "hidden": hidden[1:]})
+    restore.clicked()
+    menu = restore.get_popup()
+    assert menu.get_visible()
+    pane.receive({"rows": [], "pro_required": True})
+    assert not pane.grid.get_children() and not restore.get_visible()
+    assert not menu.get_visible() and restore.get_popup() is None
+    assert "Gent Pro" in pane.notice.get_text() and "https://gent.link/pricing" in pane.notice.get_label()
+
+
 def exercise(root):
     # GTK_THEME forces a variant even when GtkSettings changes. This subprocess
     # exercises live changes; the daemon smoke inherits the caller's chosen theme.
@@ -399,26 +473,25 @@ def exercise(root):
     action = {"id": "inspect", "kind": "button", "label": "Inspect", "value": "Report status"}
     pane.receive({"rows": [row(0, link_fields + invalid_fields + [action])]})
     links = widgets(pane, Gtk.LinkButton)
-    buttons = widgets(pane, Gtk.Button)
-    assert len(buttons) == len(links) + 1 and len(links) == len(urls)
+    buttons = widgets(pane.grid, Gtk.Button)
+    assert len(buttons) == len(links) + 2 and len(links) == len(urls)
     for i, (link, url) in enumerate(zip(links, urls)):
         assert link.get_label() == f"Report {i}" and link.get_tooltip_text() == link.get_uri() == url
         link.clicked()
         opened = root / "opened"
         wait(lambda: opened.exists() and opened.read_text().splitlines() == urls[:i + 1])
     assert requests == []
-    buttons[-1].clicked()
+    inspect, = [b for b in buttons if b.get_label() == "Inspect"]
+    inspect.clicked()
     assert requests == [("dashboard_click", {"agent": "agent-0", "revision": 1, "widget": "inspect"})]
-    pane.receive({"rows": [], "pro_required": True})
-    assert not pane.grid.get_children() and not widgets(pane, Gtk.Button)
-    assert "Gent Pro" in pane.notice.get_text() and "https://gent.link/pricing" in pane.notice.get_label()
+    exercise_visibility(pane, Gtk, widgets, requests, boards)
     pane.receive({"rows": []})
     assert not widgets(pane, Gtk.Frame) and pane.notice.get_visible()
     pane.receive({"error": "Disconnected"})
     pane.receive({"unchanged": True})
     assert pane.notice.get_text() == "No chats have published a dashboard."
     window.destroy()
-    print("PASS dashboard allocations, logical chart widths, cached resize and theme redraw, scroll and notices, compact readings, SVG and image pixels, accessibility, links and actions")
+    print("PASS dashboard allocations, logical chart widths, cached resize and theme redraw, scroll and notices, compact readings, SVG and image pixels, accessibility, links, actions, hide and selective restore")
 
 
 if __name__ == "__main__":

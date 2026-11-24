@@ -71,11 +71,23 @@ async fn dashboard_lifecycle_replicates_and_routes_button_to_publisher() {
         assert_eq!(pair.agent(1, define.clone()).unwrap()["revision"], 1);
     }
     pair.pump();
-    assert_eq!(
-        pair.owner(0, OwnerOp::Dashboards { after: None }).unwrap()["rows"][0]["board"]["title"],
-        "Training"
-    );
-    let id = pair.agents[1].clone();
+    let published = pair.owner(0, OwnerOp::Dashboards { after: None }).unwrap();
+    let card = &published["rows"][0];
+    assert_eq!(card["board"]["title"], "Training");
+    let id = card["agent"].as_str().unwrap().to_owned();
+    // A new conversation takes the same display name after the card was published.
+    let successor_key = config::secret();
+    let successor = pair.stores[1]
+        .execute(Request::Agent {
+            credential: successor_key.clone(),
+            action: AgentOp::Register {
+                name: card["chat"].as_str().unwrap().to_owned(),
+                provider: "test".into(),
+            },
+        })
+        .unwrap();
+    assert_ne!(successor["agent"]["id"], id);
+    pair.pump();
     let click = OwnerOp::DashboardClick {
         agent: id.clone(),
         revision: 1,
@@ -88,15 +100,28 @@ async fn dashboard_lifecycle_replicates_and_routes_button_to_publisher() {
         sent["message_id"]
     );
     pair.pump();
-    let message: String = pair.stores[1]
-        .db
-        .query_row(
-            "SELECT payload FROM messages WHERE id=?1",
-            [sent["message_id"].as_str().unwrap()],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(message.contains("Report the latest checkpoint."));
+    let inbox = pair.agent(1, AgentOp::Inbox).unwrap();
+    assert_eq!(inbox[0]["id"], sent["message_id"]);
+    assert!(
+        inbox[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Report the latest checkpoint.")
+    );
+    for (action, expected) in [
+        (AgentOp::Inbox, json!([])),
+        (AgentOp::DashboardGet, json!({"revision":0,"board":null})),
+    ] {
+        assert_eq!(
+            pair.stores[1]
+                .execute(Request::Agent {
+                    credential: successor_key.clone(),
+                    action
+                })
+                .unwrap(),
+            expected
+        );
+    }
     let update = |v| AgentOp::DashboardUpdate {
         expected_revision: 1,
         values: BTreeMap::from([("trend".into(), v)]),

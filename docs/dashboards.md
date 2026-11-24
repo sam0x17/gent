@@ -64,7 +64,7 @@ Use a `link` widget for a web page. Give it a label and an absolute HTTP or HTTP
 
 If a hosted chat moves to an older carrier whose MCP schema lacks `link`, use `"kind": "text", "unit": "↗ web link"` with the same URL. This is the stored form of a link. It also lets you retry the original definition with the same expected revision after a carrier change.
 
-Clicking a button sends its instruction as a waking message from **Gent Desktop** to the chat that published it. The chat handles the action under its existing permissions. If the board changed since the window displayed it, refresh before clicking again.
+Clicking a button sends its instruction as a waking message from **Gent Desktop** to the chat that published it. The recipient is the publisher’s Gent chat ID. If a replacement chat registers under the same name with a new ID, it can publish its own board. Buttons on the earlier board keep addressing the original ID. The chat handles the action under its existing permissions. If the board changed since the window displayed it, refresh before clicking again.
 
 To change the layout, define the complete board again. To remove it, call `gent_dashboard_delete` with its current revision. On a revision conflict, call `gent_dashboard_get` for the latest board and revision, including after deletion. An identical retry of the most recent successful change returns the saved revision.
 

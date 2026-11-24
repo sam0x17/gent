@@ -351,6 +351,20 @@ def exercise_dashboard(fixture, agent, cli, xid):
     # Dashboard stays selected throughout. Allow two of the GTK timer's 15 s ticks.
     get(board["title"], "label", timeout=35)
     get(agent["name"], "label")
+    restore = "Restore hidden dashboards"
+    assert not find(restore)
+    click("Hide dashboard")
+    get("All dashboards are hidden.", "label")
+    assert not find(board["title"], "label") and not find("Inspect job")
+    assert call("get") == {"revision": 1, "board": board}
+    tab("Chats")
+    tab("Dashboard")
+    assert get(restore).queryComponent().grabFocus()
+    subprocess.run(["xdotool", "key", "space"], check=True)
+    get(f"{board['title']} — {agent['name']}", "menu item")
+    subprocess.run(["xdotool", "key", "Home", "Return"], check=True)
+    get(board["title"], "label")
+    assert not find(restore)
     open_report([url])
     for name in ("Job queued", "Throughput: 72%", "Queued\nStarted", "15 ms", "6 jobs"):
         get(name, "label")

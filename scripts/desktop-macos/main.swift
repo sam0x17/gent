@@ -874,6 +874,84 @@ func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
     }
 }
 
+func checkDashboardVisibility(_ desktop: Desktop) {
+    let view = desktop.dashboard.view
+    let review = ["agent": "reviewer", "title": "Build", "chat": "Review"]
+    let first = ["agent": "runner-1", "title": "Build", "chat": "Runner"]
+    let second = ["agent": "runner-2", "title": "Build", "chat": "Runner"]
+    func row(_ board: [String: String]) -> [String: Any] {
+        ["agent": board["agent"]!, "chat": board["chat"]!, "revision": 8, "board": ["title": board["title"]!]]
+    }
+    func reply(_ fields: [String: Any]) {
+        require(requests { desktop.receive(fields.merging(["page": "dashboard"]) { _, new in new }) }.isEmpty,
+                "applying dashboard visibility sends no requests")
+        desktop.tabs.layoutSubtreeIfNeeded()
+    }
+    func cards() -> [NSBox] { descendants(view, of: NSBox.self) }
+    func restoreLink() -> NSButton? {
+        descendants(view, of: NSButton.self).first { $0.title == "Restore hidden dashboards" && !$0.isHiddenOrHasHiddenAncestor }
+    }
+    func shows(_ message: String) -> Bool {
+        descendants(view, of: NSTextField.self).contains { $0.stringValue == message && !$0.isHiddenOrHasHiddenAncestor }
+    }
+    reply(["rows": [row(review)], "hidden": []])
+    // Negotiate the current viewport before performClick services queued resize work.
+    _ = requests { desktop.dashboard.load() }
+    require(cards().count == 1 && restoreLink() == nil, "no restore link when every dashboard is visible")
+    let card = cards()[0]
+    guard let title = descendants(card, of: NSTextField.self).first(where: { $0.stringValue == "Build" }),
+          let hide = descendants(card, of: NSButton.self).first(where: { $0.title == "×" }) else {
+        fatalError("Missing dashboard header controls")
+    }
+    require(hide.toolTip == "Hide dashboard" && hide.accessibilityLabel() == "Hide dashboard" && hide.isEnabled
+            && title.superview === hide.superview && title.frame.maxX <= hide.frame.minX
+            && (16...28).contains(hide.bounds.width) && (16...28).contains(hide.bounds.height),
+            "compact labeled hide action sits beside the card title")
+    let hideRequests = requests { hide.performClick(nil) }
+    require(hideRequests == [.json(["op": "dashboard_hide", "agent": "reviewer"])],
+            "hide sends only the displayed agent, received \(hideRequests)")
+    require(cards().first === card, "the displayed card waits for supervisor data after hide")
+    reply(["rows": [], "hidden": [review]])
+    require(cards().isEmpty && shows("All dashboards are hidden."), "hiding the last card shows the all-hidden state")
+    guard let restore = restoreLink() else { fatalError("Missing restore link with all dashboards hidden") }
+    require(restore.controlSize == .small && restore.accessibilityRole() == .link && restore.action != nil && restore.isEnabled
+            && restore.menu?.items.map({ $0.title }) == ["Build — Review"], "even one hidden board is a named choice")
+
+    reply(["layout_only": true, "rows": [], "hidden": []])
+    require(restoreLink() == nil && shows("No chats have published a dashboard."), "cached data updates the empty state")
+    reply(["unchanged": true, "hidden": [review, first, second]])
+    guard let menu = restore.menu else { fatalError("Missing hidden dashboard choices") }
+    let labels = menu.items.map { $0.title }
+    require(Set(labels) == ["Build — Review", "Build — Runner (runner-1)", "Build — Runner (runner-2)"]
+            && labels.count == 3, "restore choices distinguish identical titles and chat names")
+    let intermediate: [[String: Any]] = [
+        ["notice": "Action sent"], ["unchanged": true, "layout_only": true], ["error": "Refresh failed"],
+        ["rows": [], "layout_only": true], ["rows": []], ["unchanged": true],
+    ]
+    for fields in intermediate {
+        reply(fields)
+        require(restoreLink()?.menu?.items.map({ $0.title }) == labels, "omitting hidden preserves restore choices")
+    }
+    require(shows("All dashboards are hidden."), "ordinary refresh restores the all-hidden notice")
+    let selection = menu.indexOfItem(withTitle: "Build — Runner (runner-2)")
+    let restoreRequests = requests { menu.performActionForItem(at: selection) }
+    require(restoreRequests == [.json(["op": "dashboard_restore", "agent": "runner-2"])],
+            "restore sends only the selected duplicate's agent, received \(restoreRequests)")
+    require(cards().isEmpty, "restoring a card waits for supervisor data")
+    reply(["rows": [row(second)], "hidden": [review, first]])
+    require(cards().count == 1 && shows("Runner") && !shows("All dashboards are hidden.")
+            && restoreLink()?.menu?.items.map({ $0.title }) == ["Build — Review", "Build — Runner"],
+            "restored card returns and the menu lists the remaining publishers")
+    reply(["unchanged": true, "hidden": []])
+    require(cards().count == 1 && restoreLink() == nil, "an explicit empty hidden list removes the link")
+    reply(["rows": [row(second)], "hidden": [first]])
+    reply(["pro_required": true])
+    require(cards().isEmpty && restoreLink() == nil && restore.menu == nil
+            && shows("Dashboards require an active Gent Pro plan for this cluster."), "lock clears cards and restore choices")
+    reply(["rows": []])
+    require(restoreLink() == nil && shows("No chats have published a dashboard."), "unlock starts with an empty hidden list")
+}
+
 func checkDashboard(_ desktop: Desktop) {
     let initial = requests { DashboardTab().load() }
     guard case .json(let initialPage)? = initial.first else { fatalError("Missing initial dashboard read") }
@@ -992,7 +1070,7 @@ func checkDashboard(_ desktop: Desktop) {
                    "https://[::1", "https://host:65536", "http://host:18446744073709552030",
                    "https://host/\u{7f}", "https://host/\u{a0}", "https://host\\path"]
     publish([row(1, widgets: invalid.enumerated().map { link($0.element, title: "Invalid \($0.offset)", id: "bad-\($0.offset)") })])
-    require(descendants(cards()[0], of: NSButton.self).isEmpty, "invalid links expose no launch action")
+    require(descendants(cards()[0], of: NSButton.self).map { $0.title } == ["×"], "invalid links expose no launch action")
 
     let entries = (1...40).map { "Event \($0)" }
     let events: [String: Any] = ["kind": "events", "id": "events", "label": "History", "value": entries]
@@ -1015,6 +1093,7 @@ func checkDashboard(_ desktop: Desktop) {
     require(fitting.height > 160 && wrapped.bounds.height >= fitting.height - 1,
             "wrapped text gets its natural height in a partial row")
     checkDashboardMedia(desktop, scroll: scroll)
+    checkDashboardVisibility(desktop)
     checkDashboardAppearance(desktop, scroll: scroll)
     require(opened == targets, "button, malformed links, media and scrolling leave opener idle")
     resizeDesktop(desktop, width: 850, height: 605)
@@ -1047,7 +1126,7 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     if dashboardOnly {
         desktop.window.orderFront(nil)
         checkDashboard(desktop)
-        print("PASS: native Dashboard layout, scrolling, web links, button dispatch, SVG charts, metrics, inline images, negotiated widths, appearance palettes and cached redraws")
+        print("PASS: native Dashboard layout, scrolling, hide and restore, web links, button dispatch, SVG charts, metrics, inline images, negotiated widths, appearance palettes and cached redraws")
         exit(0)
     }
     require(desktop.statusItem?.isVisible == true && desktop.statusItem?.button?.image != nil,

@@ -186,6 +186,8 @@ final class DashboardTab: NSObject {
     private let grid = DashboardGrid()
     private let scroll = NSScrollView()
     private let notice = NSTextField(wrappingLabelWithString: "")
+    private var showingFeedback = false
+    private lazy var restore = NSButton(title: "Restore hidden dashboards", target: self, action: #selector(chooseDashboard(_:)))
     private lazy var pricing = NSButton(title: "View Gent plans", target: self, action: #selector(openPricing))
     @objc private func openPricing() { openURL(URL(string: "https://gent.link/pricing")!) }
     var openURL: (URL) -> Void = { url in _ = NSWorkspace.shared.open(url) }
@@ -194,6 +196,7 @@ final class DashboardTab: NSObject {
     private var lastWidths: [Int] = []
     private var pendingLayout: DispatchWorkItem?
     private var rows: [[String: Any]] = []
+    private var hidden: [[String: String]] = []
     private var cards: [NSBox] = []
     private var columns = 0
     private static let cardSpacing: CGFloat = 10
@@ -238,6 +241,16 @@ final class DashboardTab: NSObject {
         ])
         view.addArrangedSubview(scroll)
         view.addArrangedSubview(notice)
+        restore.isBordered = false
+        restore.controlSize = .small
+        restore.attributedTitle = NSAttributedString(string: restore.title, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.linkColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ])
+        restore.setAccessibilityRole(.link)
+        restore.isHidden = true
+        view.addArrangedSubview(restore)
         pricing.isHidden = true
         view.addArrangedSubview(pricing)
         scroll.widthAnchor.constraint(equalTo: view.widthAnchor, constant: -24).isActive = true
@@ -284,26 +297,71 @@ final class DashboardTab: NSObject {
     }
 
     func receive(_ reply: [String: Any]) {
-        if let next = reply["rows"] as? [[String: Any]] {
-            if !NSArray(array: rows).isEqual(to: next) {
-                let position = scroll.documentVisibleRect.origin
-                rows = next
-                cards = next.compactMap(makeCard)
-                arrangeCards()
-                view.layoutSubtreeIfNeeded()
-                grid.scroll(position)
-            }
-        } else if reply["unchanged"] as? Bool != true {
-            showNotice((reply["error"] ?? reply["notice"]) as? String ?? "")
+        let locked = reply["pro_required"] as? Bool == true
+        if locked {
+            setHidden([])
+        } else if let next = reply["hidden"] as? [[String: String]] {
+            setHidden(next)
+        }
+        let nextRows: [[String: Any]]? = locked ? [] : reply["rows"] as? [[String: Any]]
+        if let next = nextRows, !NSArray(array: rows).isEqual(to: next) {
+            let position = scroll.documentVisibleRect.origin
+            rows = next
+            cards = next.compactMap(makeCard)
+            arrangeCards()
+            view.layoutSubtreeIfNeeded()
+            grid.scroll(position)
+        }
+        guard nextRows != nil || reply["unchanged"] as? Bool == true || reply["hidden"] != nil else {
+            let message = (reply["error"] ?? reply["notice"]) as? String ?? ""
+            showingFeedback = !message.isEmpty
+            showNotice(message)
             return
         }
-        let locked = reply["pro_required"] as? Bool == true
         pricing.isHidden = !locked
         if locked {
+            showingFeedback = false
             showNotice("Dashboards require an active Gent Pro plan for this cluster.")
-        } else if reply["layout_only"] as? Bool != true {
-            showNotice(rows.isEmpty ? "No chats have published a dashboard." : "")
+        } else if !showingFeedback || reply["layout_only"] as? Bool != true {
+            showingFeedback = false
+            let empty = hidden.isEmpty ? "No chats have published a dashboard." : "All dashboards are hidden."
+            showNotice(rows.isEmpty ? empty : "")
         }
+    }
+
+    private func setHidden(_ next: [[String: String]]) {
+        guard hidden != next else { return }
+        hidden = next
+        restore.menu?.cancelTracking()
+        let menu = NSMenu()
+        let choices = next.compactMap { board -> (agent: String, label: String)? in
+            guard let agent = board["agent"], let title = board["title"], let chat = board["chat"] else { return nil }
+            return (agent, "\(title) — \(chat)")
+        }
+        let groups = Dictionary(grouping: choices, by: { $0.label })
+        for choice in choices {
+            let duplicate = (groups[choice.label]?.count ?? 0) > 1
+            let label = duplicate ? "\(choice.label) (\(choice.agent))" : choice.label
+            let item = menu.addItem(withTitle: label, action: #selector(restoreDashboard(_:)), keyEquivalent: "")
+            item.representedObject = choice.agent
+            item.target = self
+        }
+        restore.menu = menu.items.isEmpty ? nil : menu
+        restore.isHidden = menu.items.isEmpty
+    }
+
+    @objc private func chooseDashboard(_ button: NSButton) {
+        button.menu?.popUp(positioning: nil, at: NSPoint(x: button.bounds.minX, y: button.bounds.minY), in: button)
+    }
+
+    @objc private func restoreDashboard(_ item: NSMenuItem) {
+        guard let menu = restore.menu, item.menu === menu, let agent = item.representedObject as? String else { return }
+        sendPage("dashboard_restore", ["agent": agent])
+    }
+
+    @objc private func hideDashboard(_ button: NSButton) {
+        guard let agent = button.cell?.representedObject as? String else { return }
+        sendPage("dashboard_hide", ["agent": agent])
     }
 
     private func showNotice(_ message: String) {
@@ -367,7 +425,26 @@ final class DashboardTab: NSObject {
         content.distribution = .fill
         content.spacing = 12
         let header = content.addSection(spacing: 2)
-        header.addText(card.title, font: .systemFont(ofSize: 18, weight: .semibold))
+        let heading = NSStackView()
+        heading.alignment = .top
+        heading.distribution = .fill
+        heading.spacing = 6
+        header.addArrangedSubview(heading)
+        heading.widthAnchor.constraint(equalTo: header.widthAnchor).isActive = true
+        let title = heading.addText(card.title, font: .systemFont(ofSize: 18, weight: .semibold))
+        title.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        if let agent = row["agent"] as? String {
+            let hide = NSButton(title: "×", target: self, action: #selector(hideDashboard(_:)))
+            hide.isBordered = false
+            hide.font = .systemFont(ofSize: 16)
+            hide.toolTip = "Hide dashboard"
+            hide.setAccessibilityLabel("Hide dashboard")
+            hide.cell?.representedObject = agent
+            heading.addArrangedSubview(hide)
+            hide.widthAnchor.constraint(equalToConstant: 24).isActive = true
+            hide.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        }
         header.addText(row["chat"] as? String ?? "", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
         var previousMetric: NSView?
         for item in board["widgets"] as? [[String: Any]] ?? [] {

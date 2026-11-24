@@ -1,5 +1,7 @@
 //! Requests from the two native frontends travel only on the supervisor's private pipes.
-use super::{charts, login};
+mod dashboard;
+
+use super::login;
 use crate::{config_editor, integration::discovery, managed_file::Snapshot, owner, update};
 use anyhow::{Context, Result, ensure};
 use gent_daemon::config::{self, Direct};
@@ -9,70 +11,24 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum PageRequest {
+    Dashboard(dashboard::Request),
+    Other(Request),
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
-    Dashboard(DashboardLayout),
-    DashboardLayout(DashboardLayout),
-    DashboardClick {
-        agent: String,
-        revision: u64,
-        widget: String,
-    },
     About,
     Cluster,
     Permissions,
     Chats,
     Settings,
-    Set {
-        key: Preference,
-        enabled: bool,
-    },
+    Set { key: Preference, enabled: bool },
     Edit,
     Discard,
-    Save {
-        text: String,
-        publish: bool,
-    },
-}
-
-#[derive(Clone, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-struct DashboardLayout {
-    palette: charts::Palette,
-    // Index k-1 is the usable width of one chart when k cards share a row.
-    chart_widths: Vec<u16>,
-}
-
-impl Default for DashboardLayout {
-    fn default() -> Self {
-        Self {
-            palette: charts::Palette::default(),
-            chart_widths: vec![260],
-        }
-    }
-}
-
-impl DashboardLayout {
-    fn render(&self, rows: &[Value]) -> Result<Value> {
-        ensure!(
-            (1..=4).contains(&self.chart_widths.len())
-                && self.chart_widths.iter().all(|w| (160..=16384).contains(w)),
-            "invalid dashboard chart widths"
-        );
-        let mut display = rows.to_vec();
-        for line in display.chunks_mut(self.chart_widths.len()) {
-            let width = usize::from(self.chart_widths[line.len() - 1]);
-            for row in line {
-                for widget in row["board"]["widgets"]
-                    .as_array_mut()
-                    .context("invalid dashboard widgets")?
-                {
-                    charts::decorate(widget, &self.palette, width);
-                }
-            }
-        }
-        Ok(json!({"rows":display}))
-    }
+    Save { text: String, publish: bool },
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -188,68 +144,28 @@ fn chats(value: Value) -> Result<Value> {
 pub(super) struct Pages {
     // A private, in-memory edit session. The snapshot detects concurrent CLI or daemon writes.
     draft: Option<(Snapshot, uuid::Uuid)>,
-    // The same frontend keeps its last rendered dashboard until its pipe closes.
-    dashboard_snapshot: Option<(DashboardLayout, Vec<Value>)>,
+    dashboard: dashboard::Page,
 }
 
 impl Pages {
-    fn dashboard(&mut self, mut rows: Vec<Value>, layout: DashboardLayout) -> Result<Value> {
-        rows.sort_by_cached_key(|r| r["chat"].as_str().unwrap_or_default().to_lowercase());
-        if self
-            .dashboard_snapshot
-            .as_ref()
-            .is_some_and(|(_, previous_rows)| previous_rows == &rows)
-        {
-            return self.layout_dashboard(layout);
-        }
-        let reply = layout.render(&rows)?;
-        self.dashboard_snapshot = Some((layout, rows));
-        Ok(reply)
-    }
-
-    fn layout_dashboard(&mut self, layout: DashboardLayout) -> Result<Value> {
-        let Some((previous, rows)) = &mut self.dashboard_snapshot else {
-            return Ok(json!({"unchanged":true}));
-        };
-        if *previous == layout {
-            return Ok(json!({"unchanged":true}));
-        }
-        let reply = layout.render(rows)?;
-        *previous = layout;
-        Ok(reply)
-    }
-
     pub(super) async fn respond(&mut self, home: &Path, line: &str) -> Value {
-        let Ok(request) = serde_json::from_str::<Request>(line) else {
-            return json!({"page":"settings","error":"Invalid desktop request"});
+        let request = match serde_json::from_str::<PageRequest>(line) {
+            Ok(PageRequest::Dashboard(request)) => {
+                let mut reply = self.dashboard.respond(home, request).await;
+                reply["page"] = json!("dashboard");
+                return reply;
+            }
+            Ok(PageRequest::Other(request)) => request,
+            Err(_) => return json!({"page":"settings","error":"Invalid desktop request"}),
         };
         let page = match request {
-            Request::Dashboard(_)
-            | Request::DashboardLayout(_)
-            | Request::DashboardClick { .. } => "dashboard",
             Request::About => "about",
             Request::Cluster => "cluster",
             Request::Permissions => "permissions",
             Request::Chats => "chats",
             _ => "settings",
         };
-        let dashboard_locked = || {
-            page == "dashboard"
-                && !crate::node_home::inspect(home)
-                    .is_ok_and(|cfg| gent_daemon::entitlements::paid(home, &cfg))
-        };
-        if dashboard_locked() {
-            return self.lock_dashboard();
-        }
-        let waits_for_daemon = matches!(
-            request,
-            Request::Dashboard(_) | Request::DashboardClick { .. }
-        );
-        let result = self.handle(home, request).await;
-        if waits_for_daemon && dashboard_locked() {
-            return self.lock_dashboard();
-        }
-        match result {
+        match self.handle(home, request).await {
             Ok(mut response) => {
                 response["page"] = json!(page);
                 response
@@ -258,62 +174,8 @@ impl Pages {
         }
     }
 
-    fn lock_dashboard(&mut self) -> Value {
-        self.dashboard_snapshot = None;
-        json!({"page":"dashboard","pro_required":true,"rows":[]})
-    }
-
     async fn handle(&mut self, home: &Path, request: Request) -> Result<Value> {
         match request {
-            Request::Dashboard(layout) => {
-                let mut after = None;
-                let mut rows = Vec::new();
-                loop {
-                    let mut page = owner(
-                        home,
-                        OwnerOp::Dashboards {
-                            after: after.clone(),
-                        },
-                    )
-                    .await?;
-                    rows.append(
-                        page["rows"]
-                            .as_array_mut()
-                            .context("invalid dashboard page")?,
-                    );
-                    let Some(cursor) = page["next"].as_str() else {
-                        break;
-                    };
-                    ensure!(
-                        after.as_deref().is_none_or(|a| a < cursor),
-                        "invalid dashboard cursor"
-                    );
-                    after = Some(cursor.to_owned());
-                }
-                self.dashboard(rows, layout)
-            }
-            Request::DashboardLayout(layout) => {
-                let mut reply = self.layout_dashboard(layout)?;
-                reply["layout_only"] = true.into();
-                Ok(reply)
-            }
-            Request::DashboardClick {
-                agent,
-                revision,
-                widget,
-            } => {
-                owner(
-                    home,
-                    OwnerOp::DashboardClick {
-                        agent,
-                        revision,
-                        widget,
-                        request_id: uuid::Uuid::now_v7().to_string(),
-                    },
-                )
-                .await?;
-                Ok(json!({"notice":"Action sent to chat."}))
-            }
             Request::About => Ok(super::admin::about()),
             Request::Cluster => super::admin::cluster(home),
             Request::Permissions => super::admin::permissions(home).await,
@@ -377,106 +239,6 @@ impl Pages {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dashboard_refresh_only_sends_charts_when_the_snapshot_changes() {
-        let mut pages = Pages::default();
-        let read_layout = |request| match serde_json::from_value::<Request>(request).unwrap() {
-            Request::Dashboard(layout) => layout,
-            _ => unreachable!(),
-        };
-        let light = read_layout(json!({"op":"dashboard"}));
-        let dark = read_layout(json!({"op":"dashboard","palette":{
-            "surface":[32,33,37],"text":[240,241,242],"secondary":[159,160,161],"accent":[180,155,255]
-        }}));
-        let mut rows = vec![json!({"agent":"chat","chat":"Trainer","revision":1,
-            "board":{"title":"Training","widgets":[{"id":"loss","kind":"graph",
-                "label":"Loss","unit":"%","value":[4,2,3]}]}})];
-        let first = pages.dashboard(rows.clone(), light.clone()).unwrap();
-        assert!(first["rows"][0]["board"]["widgets"][0]["chart_svg"].is_string());
-        assert_eq!(
-            pages.dashboard(rows.clone(), light).unwrap(),
-            json!({"unchanged":true})
-        );
-        let recolored = pages.layout_dashboard(dark.clone()).unwrap();
-        assert_ne!(
-            first["rows"][0]["board"]["widgets"][0]["chart_svg"],
-            recolored["rows"][0]["board"]["widgets"][0]["chart_svg"]
-        );
-        assert_eq!(
-            pages.dashboard(rows.clone(), dark.clone()).unwrap(),
-            json!({"unchanged":true})
-        );
-        rows[0]["chat"] = json!("Renamed");
-        assert_eq!(
-            pages.dashboard(rows, dark.clone()).unwrap()["rows"][0]["chat"],
-            "Renamed"
-        );
-        assert_eq!(
-            pages.dashboard(vec![], dark.clone()).unwrap(),
-            json!({"rows":[]})
-        );
-        assert_eq!(
-            pages.dashboard(vec![], dark).unwrap(),
-            json!({"unchanged":true})
-        );
-    }
-
-    #[tokio::test]
-    async fn dashboard_resize_renders_each_row_at_its_width_from_cached_data() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().join("node");
-        let cfg = config::initialize(&home, "cached-resize").unwrap();
-        gent_daemon::entitlements::grant_test(&home, &cfg);
-        let mut pages = Pages::default();
-        let resize = r#"{"op":"dashboard_layout","chart_widths":[704,332]}"#;
-        assert_eq!(pages.respond(&home, resize).await["unchanged"], true);
-        let boards = ["C", "A", "B"].map(|chat| {
-            json!({
-                "chat":chat, "board":{"widgets":[{"kind":"graph","label":"Loss","value":[3,2]}]}
-            })
-        });
-        pages
-            .dashboard(boards.to_vec(), DashboardLayout::default())
-            .unwrap();
-        let reply = pages.respond(&home, resize).await;
-        assert_eq!(reply["layout_only"], true);
-        for (i, (chat, width)) in [("A", 332), ("B", 332), ("C", 704)].into_iter().enumerate() {
-            let row = &reply["rows"][i];
-            assert_eq!(row["chat"], chat);
-            let svg = row["board"]["widgets"][0]["chart_svg"].as_str().unwrap();
-            assert!(svg.contains(&format!(r#"viewBox="0 0 {width} "#)));
-        }
-        for invalid in ["[]", "[0]", "[65535]", "[240,240,240,240,240]"] {
-            let request = format!(r#"{{"op":"dashboard_layout","chart_widths":{invalid}}}"#);
-            assert!(pages.respond(&home, &request).await["error"].is_string());
-        }
-        assert_eq!(pages.respond(&home, resize).await["unchanged"], true);
-    }
-
-    #[tokio::test]
-    async fn free_desktop_clears_cached_boards_and_refuses_old_clicks() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("node");
-        config::initialize(&home, "free").unwrap();
-        let mut pages = Pages::default();
-        for op in [
-            r#"{"op":"dashboard_layout"}"#,
-            r#"{"op":"dashboard_click","agent":"old","revision":1,"widget":"run"}"#,
-            r#"{"op":"dashboard"}"#,
-        ] {
-            pages.dashboard_snapshot =
-                Some((DashboardLayout::default(), vec![json!({"chat":"former"})]));
-            assert_eq!(
-                pages.respond(&home, op).await,
-                json!({"page":"dashboard","pro_required":true,"rows":[]})
-            );
-            assert!(pages.dashboard_snapshot.is_none());
-        }
-        assert!(!settings(&home).unwrap()["paid"].as_bool().unwrap());
-        assert!(set(&home, Preference::Babysitter, false).await.is_err());
-        assert!(!home.join("babysitter-disabled").exists());
-    }
 
     #[tokio::test]
     async fn editor_saves_rejects_conflicts_and_retains_invalid_drafts() {
