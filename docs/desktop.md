@@ -36,6 +36,8 @@ Choose **Edit full configuration…** to edit the current node's TOML, including
 
 Installing the daemon registers the companion for graphical login. Existing managed installations register it when the upgraded daemon starts. Linux uses an XDG autostart entry and application launcher. On macOS the Aqua LaunchAgent starts the supervisor. The supervisor installs its signed menu-bar app at `~/Applications/Gent.app` and opens that bundle through Launch Services. A headless session can run the daemon without loading a GUI.
 
+Gent Desktop shows account notifications under the name **Gent**. On macOS, allow notifications when prompted. If you previously declined, open **System Settings → Notifications → Gent** and turn on **Allow Notifications**.
+
 | Command | Effect |
 | --- | --- |
 | `gent desktop` | Open the window, including after opting out of autostart. |
