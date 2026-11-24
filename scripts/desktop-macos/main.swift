@@ -455,10 +455,13 @@ func checkChartPixels(_ bitmap: NSBitmapImageRep, kind: String, expectSharp: Boo
             "edges=\(left)...\(right), solid pixels=\(core), reference=\(red), center=\(midline(12.5))")
 }
 
+let chartCategories = [["label": "A", "value": 1], ["label": "B", "value": 2], ["label": "C", "value": 3]]
+let fixtureCharts: [(kind: String, value: Any)] = [
+    ("graph", [0.5, 1.5]), ("bar", chartCategories), ("pie", chartCategories),
+    ("radar", chartCategories), ("scatter", [[1, 2], [2, 3]]),
+]
+
 func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
-    let chartKinds = ["graph", "bar", "pie", "radar", "scatter"]
-    let categories = [["label": "A", "value": 1], ["label": "B", "value": 2], ["label": "C", "value": 3]]
-    let values: [Any] = [[0.5, 1.5], categories, categories, categories, [[1, 2], [2, 3]]]
     let marks = [
         #"<path d="M1 8 C4 5 8 11 11 8" fill="none" stroke="blue" stroke-width="2"/>"#,
         #"<rect x="4" y="2" width="4" height="8" fill="blue"/>"#,
@@ -466,7 +469,8 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
         #"<polygon points="2,10 6,3 10,10" fill="blue"/>"#,
         #"<circle cx="6" cy="8" r="2" fill="blue"/>"#,
     ]
-    var widgets: [[String: Any]] = chartKinds.enumerated().map { i, kind in
+    var widgets: [[String: Any]] = fixtureCharts.enumerated().map { i, chart in
+        let kind = chart.kind
         // The half-unit stripe must remain solid red when AppKit enlarges the vector.
         let height = 16 + i * 2
         let svg = """
@@ -476,7 +480,7 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
         <g transform="translate(0 \(i))">\(marks[i])</g>
         <text x="20" y="12" font-size="7">\(kind)</text></svg>
         """
-        return ["kind": kind, "label": kind, "id": kind, "unit": "ms", "value": values[i],
+        return ["kind": kind, "label": kind, "id": kind, "unit": "ms", "value": chart.value,
                 "chart_svg": svg, "chart_description": "Summary of " + kind]
     }
     widgets.append(["kind": "metric", "id": "duration", "label": "Latency", "value": 21.5, "unit": "ms"])
@@ -502,7 +506,7 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
     for (i, source) in sources.enumerated() {
         widgets.append(["kind": "image", "id": "image-\(i)", "label": source.0, "value": source.1])
     }
-    widgets.append(["kind": "bar", "id": "missing", "label": "Missing chart", "value": categories,
+    widgets.append(["kind": "bar", "id": "missing", "label": "Missing chart", "value": chartCategories,
                     "chart_description": "Bar summary without a drawing"])
     let view = desktop.dashboard.view
     let board: [String: Any] = ["agent": "charts", "chat": "Chart fixture", "revision": 1,
@@ -515,7 +519,7 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
     reply(["rows": [board]])
     let card = descendants(view, of: NSBox.self).first!
     let images = descendants(card, of: NSImageView.self)
-    require(images.count == chartKinds.count + 2, "only charts and valid inline rasters produce images")
+    require(images.count == fixtureCharts.count + 2, "only charts and valid inline rasters produce images")
     func image(_ label: String) -> NSImageView {
         guard let image = images.first(where: { $0.accessibilityLabel() == label }) else {
             fatalError("Missing accessible image " + label)
@@ -543,7 +547,8 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
     for width: CGFloat in [850, 510] {
         resizeDesktop(desktop, width: width, height: 605)
         let contentWidth = card.contentView!.bounds.width
-        for (i, kind) in chartKinds.enumerated() {
+        for (i, example) in fixtureCharts.enumerated() {
+            let kind = example.kind
             let chart = image("Summary of " + kind)
             let size = chart.bounds.size
             require(abs(size.width - contentWidth) <= 1 && abs(size.height - size.width * CGFloat(16 + i * 2) / 60) <= 1,
@@ -565,9 +570,10 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
         }
         let landscape = image("Wide PNG").bounds
         let portrait = image("Tall JPEG").bounds
-        require(abs(landscape.width - contentWidth) <= 1 && abs(landscape.width - 4 * landscape.height) <= 2
+        require(abs(landscape.width - contentWidth) <= 1 && abs(landscape.height - landscape.width / 4) < 1
                 && portrait.height > 0 && portrait.height <= 360 && abs(portrait.width - portrait.height * 0.15) <= 1,
-                "PNG and JPEG fit at their aspect ratios")
+                "PNG and JPEG fit at their aspect ratios at \(width), content \(contentWidth), " +
+                "landscape \(landscape.size), portrait \(portrait.size)")
     }
 
     let clip = scroll.contentView
@@ -597,6 +603,40 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
     reply(["unchanged": true])
     require(!notice.isHiddenOrHasHiddenAncestor && notice.stringValue == "No chats have published a dashboard.",
             "unchanged empty reply restores empty state")
+}
+
+// Model the private supervisor reply: the last row uses the width for its own card count.
+func checkNegotiatedChartSizes(_ desktop: Desktop, widths: [Int], boards: Int) {
+    let rows: [[String: Any]] = (0..<boards).map { index in
+        let count = min(widths.count, boards - (index / widths.count) * widths.count)
+        let width = widths[count - 1]
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="\(width)" height="90" viewBox="0 0 \(width) 90">
+        <path d="M4 60 H\(width - 4)" stroke="blue" stroke-width="2"/><text x="4" y="80" font-size="12">Sample</text></svg>
+        """
+        let examples = boards == 1 ? fixtureCharts : [fixtureCharts[index % fixtureCharts.count]]
+        let widgets: [[String: Any]] = examples.map { chart in
+            ["kind": chart.kind, "id": chart.kind, "label": chart.kind, "value": chart.value,
+             "chart_svg": svg, "chart_description": "Series \(index) \(chart.kind)"]
+        }
+        return ["agent": "agent-\(index)", "chat": "Chat \(index)", "revision": 1,
+                "board": ["title": "Series \(index)", "widgets": widgets]]
+    }
+    desktop.receive(["page": "dashboard", "layout_only": true, "rows": rows])
+    desktop.tabs.layoutSubtreeIfNeeded()
+    let cards = descendants(desktop.dashboard.view, of: NSBox.self).sorted { $0.title < $1.title }
+    require(cards.count == boards, "render every board in the cached reply")
+    for (index, card) in cards.enumerated() {
+        let charts = descendants(card, of: NSImageView.self)
+        require(charts.count == (boards == 1 ? fixtureCharts.count : 1), "render every negotiated SVG")
+        let count = min(widths.count, boards - (index / widths.count) * widths.count)
+        let width = CGFloat(widths[count - 1])
+        for chart in charts {
+            require(chart.image!.size.width == width && abs(chart.bounds.width - card.contentView!.bounds.width) <= 1
+                    && abs(chart.bounds.width - width) <= 4.5 && abs(chart.bounds.height - 90) <= 2,
+                    "SVG at logical card width (\(count) across, negotiated \(width), native \(chart.bounds.size))")
+        }
+    }
 }
 
 func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
@@ -632,32 +672,37 @@ func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
         DispatchQueue.main.async { drained = true }
         require(waitInMainRunLoop { drained }, state(stage) + " could not drain the main dispatch queue")
     }
-    func readPalette(_ stage: String, _ expected: NSAppearance.Name, during action: () -> Void) -> [String: [Int]] {
+    typealias Layout = (palette: [String: [Int]], widths: [Int])
+    func readLayout(_ stage: String, _ expected: NSAppearance.Name, op: String, during action: () -> Void) -> Layout {
         let sent = requests(waitForOutput: true) { action(); settle(stage, expected) }
-        guard sent.count == 1, case .json(let message) = sent[0], message.count == 2,
-              message["op"] as? String == "dashboard", let palette = message["palette"] as? [String: [Int]] else {
-            require(false, state(stage) + " expected one dashboard palette read for \(expected.rawValue), received \(sent)")
-            return [:]
+        guard sent.count == 1, case .json(let message) = sent[0], message.count == 3,
+              message["op"] as? String == op, let palette = message["palette"] as? [String: [Int]],
+              let widths = message["chart_widths"] as? [Int] else {
+            fatalError(state(stage) + " expected one \(op) with a palette and chart widths, received \(sent)")
         }
         require(Set(palette.keys) == ["surface", "text", "secondary", "accent"] && palette.values.allSatisfy {
             $0.count == 3 && $0.allSatisfy { (0...255).contains($0) }
         }, state(stage) + " expected four local sRGB palette triples")
-        return palette
+        require(widths.count == max(1, min(4, Int(scroll.contentSize.width / 280)))
+                && widths.allSatisfy { (160...16384).contains($0) && $0.isMultiple(of: 8) },
+                state(stage) + " unexpected logical chart widths \(widths)")
+        return (palette, widths)
     }
     func expectNoRead(_ stage: String, _ expected: NSAppearance.Name, during action: () -> Void) {
         let sent = requests { action(); settle(stage, expected) }
         require(sent.isEmpty, state(stage) + " expected no reads, received \(sent)")
     }
-    func publish(_ palette: [String: [Int]]) {
+    func publish(_ layout: Layout, cached: Bool = false) {
+        let (palette, width) = (layout.palette, layout.widths[0])
         func rgb(_ role: String) -> String { "rgb(" + palette[role]!.map(String.init).joined(separator: ",") + ")" }
         let svg = """
-        <svg xmlns="http://www.w3.org/2000/svg" width="260" height="100" viewBox="0 0 260 100">
+        <svg xmlns="http://www.w3.org/2000/svg" width="\(width)" height="100" viewBox="0 0 \(width) 100">
         <rect x="8" width="4" height="100" fill="\(rgb("surface"))"/>
-        <path d="M32 10 V78 H250" stroke="\(rgb("secondary"))" fill="none"/>
+        <path d="M32 10 V78 H\(width - 10)" stroke="\(rgb("secondary"))" fill="none"/>
         <g font-family="sans-serif" font-size="8" fill="\(rgb("text"))">
         <text x="30" y="15" text-anchor="end">1.0</text><text x="30" y="77" text-anchor="end">0</text>
-        <text x="32" y="91">1</text><text x="246" y="91">3</text></g>
-        <path d="M32 17 C80 24 110 54 142 55 S210 60 250 66" stroke="\(rgb("accent"))" stroke-width="2" fill="none"/></svg>
+        <text x="32" y="91">1</text><text x="\(width - 14)" y="91">3</text></g>
+        <path d="M32 17 C80 24 110 54 142 55 S210 60 \(width - 10) 66" stroke="\(rgb("accent"))" stroke-width="2" fill="none"/></svg>
         """
         let widgets: [[String: Any]] = [
             ["id": "job", "kind": "text", "label": "Status", "value": "Training"],
@@ -668,11 +713,12 @@ func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
         ]
         let board: [String: Any] = ["agent": "trainer", "chat": "Research chat", "revision": 8,
                                     "board": ["title": "Training run", "widgets": widgets]]
-        require(requests { desktop.receive(["page": "dashboard", "rows": [board]]) }.isEmpty,
+        require(requests { desktop.receive(["page": "dashboard", "rows": [board], "layout_only": cached]) }.isEmpty,
                 "repainting a snapshot performs no reads or actions")
         desktop.tabs.layoutSubtreeIfNeeded()
     }
-    func inspect(_ palette: [String: [Int]], accent: NSColor) {
+    func inspect(_ layout: Layout, accent: NSColor) {
+        let (palette, width) = (layout.palette, layout.widths[0])
         let card = descendants(dashboard.view, of: NSBox.self).first!
         let fields = descendants(card, of: NSTextField.self)
         func field(_ value: String) -> NSTextField { fields.first { $0.stringValue == value }! }
@@ -707,17 +753,20 @@ func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
                 "compact native determinate progress")
         let chart = descendants(card, of: NSImageView.self).first!
         require(abs(chart.bounds.width - card.contentView!.bounds.width) <= 1
-                && abs(chart.bounds.height - chart.bounds.width * 100 / 260) <= 1, "responsive chart inside card inset")
+                && abs(chart.bounds.width - CGFloat(width)) <= 4.5
+                && abs(chart.bounds.height - chart.bounds.width * 100 / CGFloat(width)) <= 1,
+                "responsive chart at the negotiated width inside the card inset")
         // Rust paints on transparency. A patch of the negotiated surface should
         // disappear against the actual box, through the same display profile.
         let chartRect = chart.convert(chart.bounds, to: card)
         let pixels = card.bitmapImageRepForCachingDisplay(in: chartRect)!
         card.cacheDisplay(in: chartRect, to: pixels)
         func chartColor(_ x: Int) -> NSColor {
-            pixels.colorAt(x: x * pixels.pixelsWide / 260, y: pixels.pixelsHigh / 2)!.usingColorSpace(.sRGB)!
+            pixels.colorAt(x: x * pixels.pixelsWide / width, y: pixels.pixelsHigh / 2)!.usingColorSpace(.sRGB)!
         }
-        let patch = chartColor(10), background = chartColor(16), axis = chartColor(32)
-        require(abs(axis.greenComponent - background.greenComponent) > 0.15, "axis visible on chart surface")
+        let patch = chartColor(10), background = chartColor(16)
+        require((30...34).contains { abs(chartColor($0).greenComponent - background.greenComponent) > 0.15 },
+                "axis visible on chart surface")
         require(patch.alphaComponent > 0.98 && background.alphaComponent > 0.98
                 && max(abs(patch.redComponent - background.redComponent), abs(patch.greenComponent - background.greenComponent),
                        abs(patch.blueComponent - background.blueComponent)) < 0.025,
@@ -735,40 +784,88 @@ func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
         window.orderFront(nil)
         resizeDesktop(desktop, width: 766, height: 604)
     }
-    let light = readPalette("select Dashboard in Aqua", .aqua) {
+    let light = readLayout("select Dashboard in Aqua", .aqua, op: "dashboard") {
         desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
     }
     publish(light)
     inspect(light, accent: .controlAccentColor)
     scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
     let position = scroll.documentVisibleRect.origin
-    let dark = readPalette("visible Aqua to Dark Aqua", .darkAqua) {
+    desktop.receive(["page": "dashboard", "error": "Dashboard refresh failed"])
+    let notice = descendants(dashboard.view, of: NSTextField.self).first { $0.stringValue == "Dashboard refresh failed" }!
+    let dark = readLayout("visible Aqua to Dark Aqua", .darkAqua, op: "dashboard_layout") {
         window.appearance = NSAppearance(named: .darkAqua)!
     }
-    require(dark["surface"] != light["surface"] && dark["text"] != light["text"], "effective appearance changes palette")
-    publish(dark)
+    require(dark.palette["surface"] != light.palette["surface"] && dark.palette["text"] != light.palette["text"], "effective appearance changes palette")
+    require(dark.widths == light.widths, "appearance change retains width buckets")
+    publish(dark, cached: true)
+    require(notice.stringValue == "Dashboard refresh failed" && !notice.isHiddenOrHasHiddenAncestor,
+            "cached redraw preserves a refresh error")
+    desktop.receive(["page": "dashboard", "notice": "Action sent"])
+    desktop.receive(["page": "dashboard", "unchanged": true, "layout_only": true])
+    require(notice.stringValue == "Action sent" && !notice.isHiddenOrHasHiddenAncestor,
+            "unchanged cached layout preserves an action notice")
+    desktop.receive(["page": "dashboard", "unchanged": true])
+    require(notice.isHiddenOrHasHiddenAncestor, "successful data read clears the transient notice")
     inspect(dark, accent: .controlAccentColor)
     require(position.y > 0 && scroll.documentVisibleRect.origin == position, "chart recolor preserves scroll position")
 
     // Deliver the native system-color notification with a different accent in this fixture only.
     func notifyColors() { NotificationCenter.default.post(name: NSColor.systemColorsDidChangeNotification, object: nil) }
-    let alternate = dark["accent"] == [255, 0, 255]
+    let alternate = dark.palette["accent"] == [255, 0, 255]
         ? NSColor(srgbRed: 0, green: 1, blue: 0, alpha: 1) : NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1)
     dashboard.accentColor = { alternate }
-    let recolored = readPalette("accent change in Dark Aqua", .darkAqua) { notifyColors(); notifyColors() }
-    require(recolored["accent"] != dark["accent"] && recolored["surface"] == dark["surface"], "accent-only change")
-    publish(recolored)
+    let recolored = readLayout("accent change in Dark Aqua", .darkAqua, op: "dashboard_layout") { notifyColors(); notifyColors() }
+    require(recolored.palette["accent"] != dark.palette["accent"] && recolored.palette["surface"] == dark.palette["surface"], "accent-only change")
+    publish(recolored, cached: true)
     inspect(recolored, accent: alternate)
     expectNoRead("unchanged accent in Dark Aqua", .darkAqua) { notifyColors() }
+    let compact = readLayout("compact single column", .darkAqua, op: "dashboard_layout") {
+        resizeDesktop(desktop, width: 510, height: 604)
+    }
+    checkNegotiatedChartSizes(desktop, widths: compact.widths, boards: 1)
+    let compactResize = readLayout("coalesced single-column resize", .darkAqua, op: "dashboard_layout") {
+        for width: CGFloat in [522, 536, 550] {
+            resizeDesktop(desktop, width: width, height: 604)
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+    }
+    require(compactResize.widths.count == 1 && compactResize.widths[0] > compact.widths[0],
+            "resize inside the compact breakpoint updates the SVG width")
+    checkNegotiatedChartSizes(desktop, widths: compactResize.widths, boards: 1)
+    expectNoRead("one-point resize within a width bucket", .darkAqua) {
+        let chart = descendants(dashboard.view, of: NSImageView.self).first!
+        let before = chart.bounds.width
+        let step: CGFloat = before > CGFloat(compactResize.widths[0]) ? -1 : 1
+        resizeDesktop(desktop, width: 550 + step, height: 604)
+        require(abs(chart.bounds.width - before - step) < 0.5, "native chart follows the one-point resize")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+    }
+    let large = readLayout("large single board", .darkAqua, op: "dashboard_layout") {
+        resizeDesktop(desktop, width: 1192, height: 604)
+    }
+    checkNegotiatedChartSizes(desktop, widths: large.widths, boards: 1)
+    let wider = readLayout("resize within four-column capacity", .darkAqua, op: "dashboard_layout") {
+        resizeDesktop(desktop, width: 1240, height: 604)
+    }
+    require(wider.widths.count == 4 && large.widths.count == 4 && wider.widths[0] > large.widths[0]
+            && wider.palette == compactResize.palette, "same-capacity resize changes only logical widths")
+    expectNoRead("cached chart rows and height-only resize", .darkAqua) {
+        for count in [1, 5, 6, 7] { checkNegotiatedChartSizes(desktop, widths: wider.widths, boards: count) }
+        resizeDesktop(desktop, width: 1240, height: 620)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+    }
     _ = requests { desktop.tabs.selectTabViewItem(withIdentifier: "Chats") }
-    expectNoRead("Dark Aqua to Aqua on Chats", .aqua) {
+    expectNoRead("resize and change theme on Chats", .aqua) {
+        resizeDesktop(desktop, width: 766, height: 604)
         window.appearance = NSAppearance(named: .aqua)!
         notifyColors()
     }
-    let reselected = readPalette("reselect Dashboard in Aqua", .aqua) {
+    let reselected = readLayout("reselect Dashboard in Aqua", .aqua, op: "dashboard") {
         desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
     }
-    require(reselected["surface"] == light["surface"] && reselected["accent"] == recolored["accent"],
+    require(reselected.palette["surface"] == light.palette["surface"] && reselected.palette["accent"] == recolored.palette["accent"]
+            && reselected.widths == light.widths,
             state("reselect Dashboard in Aqua") + " did not send the current surface and accent")
     window.orderOut(nil)
     expectNoRead("hidden Aqua to Dark Aqua", .darkAqua) {
@@ -778,6 +875,10 @@ func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
 }
 
 func checkDashboard(_ desktop: Desktop) {
+    let initial = requests { DashboardTab().load() }
+    guard case .json(let initialPage)? = initial.first else { fatalError("Missing initial dashboard read") }
+    require(initial.count == 1 && initialPage["op"] as? String == "dashboard"
+            && initialPage["chart_widths"] as? [Int] == [260], "unallocated dashboard requests the fallback width")
     desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
     let view = desktop.dashboard.view
     guard let scroll = descendants(view, of: NSScrollView.self).first else {
@@ -853,6 +954,21 @@ func checkDashboard(_ desktop: Desktop) {
     layout(1240, 605, rows: [4, 2])
     publish(Array(rows.prefix(3)))
     layout(850, 605, rows: [2, 1])
+    // The ordinary poll supersedes pending resize work before exercising clicks.
+    let needsSnapshot = !desktop.pending
+    let polled = requests {
+        desktop.poll()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+    }
+    // AppKit can give the first card an extra pixel to split an odd-width row.
+    let nativeWidths = cards().map { $0.contentView!.bounds.width }
+    let measured = [nativeWidths[2], (nativeWidths[0] + nativeWidths[1]) / 2].map { Int(($0 / 8).rounded()) * 8 }
+    guard case .json(let page)? = polled.first else { fatalError("Missing dashboard poll") }
+    require(page["op"] as? String == "dashboard" && page["palette"] is [String: [Int]]
+            && page["chart_widths"] as? [Int] == measured && Array(polled.dropFirst()) == (needsSnapshot ? [snapshotRead] : []),
+            "ordinary poll at clip \(scroll.contentView.bounds.size), expected measured widths \(measured) " +
+            "and snapshot=\(needsSnapshot), received \(polled)")
+    if needsSnapshot { desktop.receive(["enrolled": false, "state": "Unavailable"]) }
     require(opened.isEmpty, "render, refresh and resize never open links")
 
     for (card, target) in zip(cards(), targets) {
@@ -929,7 +1045,7 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     if dashboardOnly {
         desktop.window.orderFront(nil)
         checkDashboard(desktop)
-        print("PASS: native Dashboard layout, scrolling, web links, button dispatch, SVG charts, metrics, inline images, unchanged replies and appearance palettes")
+        print("PASS: native Dashboard layout, scrolling, web links, button dispatch, SVG charts, metrics, inline images, negotiated widths, appearance palettes and cached redraws")
         exit(0)
     }
     require(desktop.statusItem?.isVisible == true && desktop.statusItem?.button?.image != nil,

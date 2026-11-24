@@ -189,12 +189,25 @@ final class DashboardTab: NSObject {
     var openURL: (URL) -> Void = { url in _ = NSWorkspace.shared.open(url) }
     var accentColor: () -> NSColor = { .controlAccentColor }
     private var lastPalette: [String: [Int]]?
-    private var lastAppearance: NSAppearance.Name?
-    private var appearanceRefreshPending = false
+    private var lastWidths: [Int] = []
+    private var pendingLayout: DispatchWorkItem?
     private var rows: [[String: Any]] = []
     private var cards: [NSBox] = []
     private var columns = 0
-    private var viewportColumns: Int { max(1, min(4, Int(scroll.contentSize.width / 280))) }
+    private static let cardSpacing: CGFloat = 10
+    private static let cardMargins = NSSize(width: 16, height: 14)
+    private static let cardBorder: CGFloat = 1
+    private var viewportWidth: CGFloat { scroll.contentView.bounds.width }
+    private var viewportColumns: Int { max(1, min(4, Int(viewportWidth / 280))) }
+    private var chartWidths: [Int] {
+        guard view.bounds.width > 0 && viewportWidth > 0 else { return [260] }
+        return (1...viewportColumns).map { count in
+            let gutters = Self.cardSpacing * CGFloat(count - 1)
+            let card = (viewportWidth - gutters) / CGFloat(count)
+            let content = card - 2 * (Self.cardMargins.width + Self.cardBorder)
+            return Int(min(16_384, max(160, (content / 8).rounded() * 8)))
+        }
+    }
 
     override init() {
         super.init()
@@ -205,7 +218,7 @@ final class DashboardTab: NSObject {
         grid.distribution = .fill
         grid.orientation = .vertical
         grid.alignment = .leading
-        grid.spacing = 10
+        grid.spacing = Self.cardSpacing
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.documentView = grid
@@ -231,15 +244,20 @@ final class DashboardTab: NSObject {
                                                name: NSColor.systemColorsDidChangeNotification, object: nil)
     }
 
-    func load() { requestDashboard(onlyIfChanged: false) }
+    func load() {
+        if view.bounds.width > 0 { view.layoutSubtreeIfNeeded() }
+        pendingLayout?.cancel()
+        pendingLayout = nil
+        requestDashboard(layoutOnly: false)
+    }
 
-    private func requestDashboard(onlyIfChanged: Bool) {
-        let appearance = grid.effectiveAppearance
-        let palette = dashboardPalette(appearance, accent: accentColor)
-        if onlyIfChanged && palette == lastPalette && appearance.name == lastAppearance { return }
+    private func requestDashboard(layoutOnly: Bool) {
+        let widths = chartWidths
+        let palette = dashboardPalette(grid.effectiveAppearance, accent: accentColor)
+        if layoutOnly && widths == lastWidths && palette == lastPalette { return }
+        lastWidths = widths
         lastPalette = palette
-        lastAppearance = appearance.name
-        sendPage("dashboard", ["palette": palette])
+        sendPage(layoutOnly ? "dashboard_layout" : "dashboard", ["palette": palette, "chart_widths": widths])
     }
 
     private var isMapped: Bool {
@@ -247,15 +265,18 @@ final class DashboardTab: NSObject {
         return window.isVisible && !window.isMiniaturized && !view.isHiddenOrHasHiddenAncestor
     }
 
-    @objc private func paletteDidChange() {
-        guard isMapped && !appearanceRefreshPending else { return }
-        // A system change may deliver both notifications while AppKit resolves the new colors.
-        appearanceRefreshPending = true
-        DispatchQueue.main.async { [weak self] in
+    @objc private func paletteDidChange() { scheduleLayout(after: 0) }
+
+    private func scheduleLayout(after delay: TimeInterval) {
+        guard isMapped && lastPalette != nil else { return }
+        pendingLayout?.cancel()
+        let update = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            self.appearanceRefreshPending = false
-            if self.isMapped { self.requestDashboard(onlyIfChanged: true) }
+            self.pendingLayout = nil
+            if self.isMapped { self.requestDashboard(layoutOnly: true) }
         }
+        pendingLayout = update
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: update)
     }
 
     func receive(_ reply: [String: Any]) {
@@ -272,7 +293,9 @@ final class DashboardTab: NSObject {
             showNotice((reply["error"] ?? reply["notice"]) as? String ?? "")
             return
         }
-        showNotice(rows.isEmpty ? "No chats have published a dashboard." : "")
+        if reply["layout_only"] as? Bool != true {
+            showNotice(rows.isEmpty ? "No chats have published a dashboard." : "")
+        }
     }
 
     private func showNotice(_ message: String) {
@@ -287,6 +310,7 @@ final class DashboardTab: NSObject {
 
     @objc private func resized() {
         if viewportColumns != columns { arrangeCards() }
+        if chartWidths != lastWidths { scheduleLayout(after: 0.08) }
     }
 
     private func arrangeCards() {
@@ -298,7 +322,7 @@ final class DashboardTab: NSObject {
         for start in stride(from: 0, to: cards.count, by: columns) {
             let rowCards = cards[start..<min(start + columns, cards.count)]
             let line = NSStackView()
-            line.spacing = 10
+            line.spacing = Self.cardSpacing
             line.distribution = .fillEqually
             grid.addArrangedSubview(line)
             line.widthAnchor.constraint(equalTo: grid.widthAnchor).isActive = true
@@ -326,9 +350,9 @@ final class DashboardTab: NSObject {
         card.isTransparent = false
         card.fillColor = cardSurface
         card.borderColor = .separatorColor
-        card.borderWidth = 1
+        card.borderWidth = Self.cardBorder
         card.cornerRadius = 10
-        card.contentViewMargins = NSSize(width: 16, height: 14)
+        card.contentViewMargins = Self.cardMargins
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading

@@ -144,15 +144,30 @@ class DashboardGrid(Gtk.Fixed):
     def do_get_preferred_width(self):
         return 0, self.column_width
 
+    def columns(self, width):
+        return max(1, min(4, width // self.column_width))
+
+    def row_space(self, width, count):
+        return width - self.gap * (count - 1)
+
+    def chart_widths(self, width, inset):
+        if width is None:
+            return [260]
+        widths = []
+        for count in range(1, self.columns(width) + 1):
+            content = self.row_space(width, count) / count - inset
+            widths.append(max(160, min(16384, 8 * math.floor(content / 8 + .5))))
+        return widths
+
     def measure_rows(self, width):
         cards = self.get_children()
-        columns = max(1, min(4, width // self.column_width))
+        columns = self.columns(width)
         rows = []
         minimums = []
         for start in range(0, len(cards), columns):
             children = cards[start:start + columns]
             count = len(children)
-            base, extra = divmod(width - self.gap * (count - 1), count)
+            base, extra = divmod(self.row_space(width, count), count)
             row = [(card, max(1, base + (i < extra))) for i, card in enumerate(children)]
             rows.append(row)
             natural = max(card.get_preferred_height_for_width(w)[1] for card, w in row)
@@ -235,6 +250,12 @@ class DashboardCard(Gtk.Frame):
         self.body.add(header)
         self.get_accessible().set_name(title)
 
+    def horizontal_inset(self):
+        context = self.get_style_context()
+        state = context.get_state()
+        border, padding = context.get_border(state), context.get_padding(state)
+        return border.left + border.right + padding.left + padding.right + 2 * self.body.get_border_width()
+
     def palette(self):
         context = self.get_style_context()
         state = context.get_state()
@@ -274,11 +295,13 @@ class DashboardPane(Gtk.Box):
         # The first request needs the same style nodes before a publisher has supplied a card.
         self.empty_card = DashboardCard("", "")
         self.rows = None
-        self.last_palette = None
+        self.grid_width = None
+        self.last_layout = None
         self.refresh_source = 0
         self.load_requested = False
         self.notice = notice_label()
         self.grid = DashboardGrid()
+        self.grid.connect("size-allocate", self.grid_allocated)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.add(self.grid)
@@ -292,30 +315,47 @@ class DashboardPane(Gtk.Box):
         self.load_requested = True
         self.queue_refresh()
 
+    def grid_allocated(self, _, allocation):
+        if allocation.width != self.grid_width:
+            self.grid_width = allocation.width
+            self.queue_refresh()
+
     def queue_refresh(self, *_):
-        if self.get_mapped() and not self.refresh_source:
+        if not self.get_mapped():
+            return
+        if self.refresh_source:
+            GLib.source_remove(self.refresh_source)
+        if self.load_requested:
             self.refresh_source = GLib.idle_add(self.refresh)
+        else:
+            # A window drag may span many GTK frames. Render the last allocation.
+            self.refresh_source = GLib.timeout_add(100, self.refresh)
 
     def refresh(self):
         self.refresh_source = 0
         if self.get_mapped():
             cards = self.grid.get_children()
-            palette = (cards[0] if cards else self.empty_card).palette()
-            if self.load_requested or palette != self.last_palette:
+            card = cards[0] if cards else self.empty_card
+            layout = {"palette": card.palette(),
+                      "chart_widths": self.grid.chart_widths(self.grid_width, card.horizontal_inset())}
+            if self.load_requested or layout != self.last_layout:
+                op = "dashboard" if self.load_requested else "dashboard_layout"
                 self.load_requested = False
-                self.last_palette = palette
-                page_request("dashboard", palette=palette)
+                self.last_layout = layout
+                page_request(op, **layout)
         return False
 
     def receive(self, reply):
         if reply.get("unchanged"):
-            self.show_dashboard_notice(self.rows)
+            if not reply.get("layout_only"):
+                self.show_dashboard_notice(self.rows)
             return
         if "rows" not in reply:
             self.notice.set_text(reply.get("error") or reply.get("notice", ""))
             return
         rows = reply["rows"]
-        self.show_dashboard_notice(rows)
+        if not reply.get("layout_only"):
+            self.show_dashboard_notice(rows)
         if self.rows != rows:
             self.rows = rows
             for card in self.grid.get_children():

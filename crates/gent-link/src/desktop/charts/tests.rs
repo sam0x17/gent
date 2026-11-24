@@ -2,11 +2,18 @@ use super::{Palette, decorate, scale::Axis};
 use serde_json::{Value, json};
 
 fn rendered(kind: &str, values: Value) -> (String, String) {
+    rendered_at(kind, values, 260)
+}
+
+fn rendered_at(kind: &str, values: Value, width: usize) -> (String, String) {
     let mut widget =
         json!({"kind":kind, "label":"Latency", "unit":"ms", "x_unit":"Bytes", "value":values});
-    decorate(&mut widget, &Palette::default());
+    decorate(&mut widget, &Palette::default(), width);
     let svg = widget["chart_svg"].as_str().unwrap().to_owned();
-    assert!(svg.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg" width="260""#));
+    let width = width.clamp(160, 16_384);
+    assert!(svg.starts_with(&format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}""#
+    )));
     assert!(svg.ends_with("</svg>"));
     assert!(!svg.contains("NaN") && !svg.contains("inf"));
     (
@@ -91,8 +98,13 @@ fn scatter_plots_numeric_coordinates_without_connecting_points() {
 fn bars_share_a_zero_baseline_and_preserve_signed_values() {
     let items = json!([{"label":"Loss","value":-4},{"label":"Gain","value":4}]);
     let (svg, description) = rendered("bar", items);
-    assert!(svg.contains(r#"rect x="34.00" y="45.00" width="96.00""#));
-    assert!(svg.contains(r#"rect x="130.00" y="82.00" width="96.00""#));
+    let mut bars = svg.split("<rect").skip(1);
+    let loss = bars.next().unwrap();
+    let gain = bars.next().unwrap();
+    let x = coordinate(gain, "x");
+    assert_eq!(coordinate(loss, "x") + coordinate(loss, "width"), x);
+    assert_eq!(coordinate(loss, "width"), coordinate(gain, "width"));
+    assert!(coordinate(loss, "width") > 110.0);
     assert!(svg.contains(">Loss<") && svg.contains(">Gain<") && description.contains("Loss: -4"));
 }
 
@@ -149,7 +161,7 @@ fn chart_text_is_bounded_and_cannot_supply_svg_elements_or_attributes() {
     let malicious = "<image href='file:///tmp'/> & \"\u{ffff}\0";
     let mut widget = json!({"kind":"pie","label":malicious,"unit":malicious,
         "value":[{"label":format!("{malicious}{}","X".repeat(10_000)),"value":1}]});
-    decorate(&mut widget, &Palette::default());
+    decorate(&mut widget, &Palette::default(), 260);
     let svg = widget["chart_svg"].as_str().unwrap();
     assert!(!svg.contains("<image") && !svg.contains('\u{ffff}') && !svg.contains('\0'));
     assert!(svg.contains("&lt;image") && svg.contains("&amp;") && svg.contains("&quot;"));
@@ -176,7 +188,7 @@ fn invalid_shapes_and_unrecognized_kinds_discard_stale_decorations() {
     ] {
         let mut widget =
             json!({"kind":kind,"value":value,"chart_svg":"stale","chart_description":"stale"});
-        decorate(&mut widget, &Palette::default());
+        decorate(&mut widget, &Palette::default(), 260);
         assert!(
             widget.get("chart_svg").is_none() && widget.get("chart_description").is_none(),
             "{kind}"
@@ -258,15 +270,18 @@ fn utilization_radar_keeps_a_hundred_percent_outer_ring_even_when_idle() {
     let render = |delta: f64| {
         let mut w = json!({"kind":"radar","label":"Utilization","unit":"%","value":[
             {"label":"CPU","value":delta},{"label":"GPU","value":0},{"label":"RAM","value":0}]});
-        decorate(&mut w, &Palette::default());
+        decorate(&mut w, &Palette::default(), 260);
         w["chart_svg"].as_str().unwrap().to_owned()
     };
     let quarter = render(25.0);
     assert!(quarter.contains("Center 0% · Rings 25%, 50%, 75%, 100%"));
     assert_eq!(quarter.matches("<polygon ").count(), 5);
-    assert!(quarter.contains(r#"<circle cx="130.00" cy="89.75""#));
-    assert!(render(0.0).contains("100%"));
-    assert!(render(100.0).contains(r#"<circle cx="130.00" cy="41.00""#));
+    let first_y = |svg: &str| coordinate(svg.split("<circle").nth(1).unwrap(), "cy");
+    let zero = render(0.0);
+    let center = first_y(&zero);
+    let outer = first_y(&render(100.0));
+    assert!(zero.contains("100%") && outer < center);
+    assert!((center - first_y(&quarter) - (center - outer) / 4.0).abs() < 0.02);
     let larger = render(150.0);
     assert!(larger.contains("Rings: 75 / 150"));
     assert_eq!(larger.matches("<polygon ").count(), 3);
@@ -392,7 +407,7 @@ fn all_five_renderers_use_transparent_canvases_and_semantic_colors() {
             ("radar", cats.clone()),
         ] {
             let mut widget = json!({"kind":kind,"value":values,"unit":"ms","label":"Delay"});
-            decorate(&mut widget, &palette);
+            decorate(&mut widget, &palette, 260);
             let svg = widget["chart_svg"].as_str().unwrap();
             assert_eq!(
                 svg.matches("<rect ").count(),
@@ -406,15 +421,18 @@ fn all_five_renderers_use_transparent_canvases_and_semantic_colors() {
             if matches!(kind, "graph" | "scatter" | "radar") {
                 assert!(svg.contains(&format!(r#"stroke="{}""#, colors.grid)));
                 assert!(svg.contains(&format!(
-                    r#"fill="{}" stroke="{}" stroke-width="0.8""#,
+                    r#"fill="{}" stroke="{}" stroke-width="0.4""#,
                     colors.accent, colors.surface
                 )));
             }
             if kind == "bar" {
-                assert!(svg.contains(&format!(r#"height="8" fill="{}""#, colors.accent)));
+                assert!(svg.contains(&format!(r#"height="5" fill="{}""#, colors.accent)));
             }
             if kind == "graph" || kind == "radar" {
-                assert!(svg.contains(&format!(r#"stroke="{}" stroke-width="2"#, colors.accent)));
+                assert!(svg.contains(&format!(
+                    r#"stroke="{}" stroke-width="1.25""#,
+                    colors.accent
+                )));
             }
             if kind == "pie" {
                 let slices: Vec<_> = svg.split("<path ").skip(1).collect();
@@ -429,7 +447,7 @@ fn all_five_renderers_use_transparent_canvases_and_semantic_colors() {
                         colors.slice_text(fill),
                         i + 1
                     )));
-                    assert!(svg.contains(&format!(r#"r="4.5" fill="{fill}""#)));
+                    assert!(svg.contains(&format!(r#"r="3" fill="{fill}""#)));
                 }
                 assert!(svg.contains(">50%</text>"));
             }
@@ -442,98 +460,15 @@ fn all_five_renderers_use_transparent_canvases_and_semantic_colors() {
     );
 }
 
-fn cartesian_layout(svg: &str) -> (f64, f64) {
-    let coordinate = |tag: &str, key: &str| -> f64 {
-        tag.split_once(&format!(" {key}=\""))
-            .unwrap()
-            .1
-            .split('"')
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap()
-    };
-    let axis = svg
-        .split("<line")
-        .skip(1)
-        .find(|line| coordinate(line, "y1") == 135.0 && coordinate(line, "y2") == 135.0)
-        .unwrap();
-    let (left, right) = (coordinate(axis, "x1"), coordinate(axis, "x2"));
-    let mut last_end = 0.0;
-    for tag in svg.split("<text").skip(1) {
-        let label = tag
-            .split_once('>')
-            .unwrap()
-            .1
-            .split_once("</text>")
-            .unwrap()
-            .0;
-        let width = super::text_width(label) as f64;
-        let (x, y) = (coordinate(tag, "x"), coordinate(tag, "y"));
-        if y == 152.0 {
-            assert!(
-                x - width / 2.0 >= last_end + 4.0 && x + width / 2.0 <= 256.0,
-                "{label} at {x}"
-            );
-            last_end = x + width / 2.0;
-        } else if tag
-            .split_once('>')
-            .unwrap()
-            .0
-            .contains(r#"text-anchor="end""#)
-        {
-            assert!(x - width >= 4.0 && x <= left - 4.0, "{label} at {x}");
-        } else if y == 17.0 {
-            assert_eq!(x, left, "y caption must align with its axis");
-            assert!(x + width <= 256.0);
-        }
-    }
-    assert!(last_end > 0.0);
-    (left, right)
+fn coordinate(tag: &str, key: &str) -> f64 {
+    tag.split_once(&format!(" {key}=\""))
+        .unwrap()
+        .1
+        .split('"')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
-#[test]
-fn cartesian_width_tracks_tick_strings_and_keeps_edge_labels_visible() {
-    let (graph, _) = rendered("graph", json!([-20, 20, 0]));
-    let (scatter, _) = rendered("scatter", json!([[1, -20], [2, 20], [3, 0]]));
-    for svg in [graph, scatter] {
-        let (left, right) = cartesian_layout(&svg);
-        assert!(
-            right - left >= 208.0,
-            "two-digit y ticks should leave 80% of a 260px card for data"
-        );
-        assert!(left <= 40.0 && right >= 248.0);
-        assert!(svg.contains(&format!(r#"<circle cx="{left:.2}""#)));
-        assert!(svg.contains(&format!(r#"<circle cx="{right:.2}""#)));
-        assert!(
-            svg.contains(">2</text>"),
-            "keep the middle tick when it fits"
-        );
-    }
-    let (long, _) = rendered(
-        "scatter",
-        json!([[-9.876e-179, -1.234e-233], [8.876e-179, 1.234e-233]]),
-    );
-    let (left, right) = cartesian_layout(&long);
-    assert!(left > 40.0 && right < 248.0);
-    // A wide first x label can set the left inset even with short y ticks.
-    let (wide_first, _) = rendered("scatter", json!([[-f64::from_bits(1), 0], [0, 1]]));
-    let (left, right) = cartesian_layout(&wide_first);
-    assert!(left > 50.0 && right >= 248.0);
-    // The nice ticks -3.26e-119 and -3.24e-119 are too close together.
-    // Keep two readable labels by placing them at the actual data endpoints.
-    let (crowded, _) = rendered(
-        "scatter",
-        json!([[-326.9e-121, -9.876e-310], [-323.4e-121, 9.876e-310]]),
-    );
-    cartesian_layout(&crowded);
-    assert!(crowded.contains(">-3.269e-119</text>") && crowded.contains(">-3.234e-119</text>"));
-    for points in [
-        json!([[-1.234e101, -1e-317], [9.876e103, 2e-317]]),
-        json!([[1e16, 1e16], [1e16 + 8.0, 1e16 + 8.0]]),
-        json!([[0.0000001, -300], [0.0000001, -300]]),
-        json!([[0, -1], [f64::from_bits(1), 0]]),
-    ] {
-        cartesian_layout(&rendered("scatter", points).0);
-    }
-}
+mod layout;

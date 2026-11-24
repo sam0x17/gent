@@ -7,11 +7,10 @@ use std::fmt::Write;
 mod cartesian;
 mod categories;
 mod colors;
+mod horizontal;
 mod scale;
 #[cfg(test)]
 mod tests;
-
-const WIDTH: usize = 260;
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -34,7 +33,7 @@ impl Default for Palette {
     }
 }
 
-pub(super) fn decorate(widget: &mut Value, palette: &Palette) {
+pub(super) fn decorate(widget: &mut Value, palette: &Palette, width: usize) {
     let Some(fields) = widget.as_object_mut() else {
         return;
     };
@@ -52,6 +51,7 @@ pub(super) fn decorate(widget: &mut Value, palette: &Palette) {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Value".into());
     let unit = field("unit").filter(|s| !s.is_empty());
+    let width = width.clamp(160, 16_384);
     let chart = match kind {
         "graph" | "scatter" if values.len() <= 256 => cartesian::render(
             kind,
@@ -60,9 +60,10 @@ pub(super) fn decorate(widget: &mut Value, palette: &Palette) {
             unit.as_deref(),
             field("x_unit").as_deref(),
             palette,
+            width,
         ),
         "bar" | "pie" | "radar" if values.len() <= 16 => {
-            categories::render(kind, values, &label, unit.as_deref(), palette)
+            categories::render(kind, values, &label, unit.as_deref(), palette, width)
         }
         _ => None,
     };
@@ -99,14 +100,15 @@ fn escape(input: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-// Conservative advances at the SVG's 12 px font size. Native font
-// substitutions and full-width glyphs need room on a 260 px card.
+// Conservative advances at the native SVG font size of 10 logical pixels.
 fn glyph_width(c: char) -> usize {
     match c {
-        'm' | 'w' | 'M' | 'W' | '@' => 12,
-        'a'..='z' | '0'..='9' => 8,
-        ' ' | '.' | ',' | ':' => 5,
-        _ => 12,
+        'm' | 'w' | 'M' | 'W' | '@' | '%' => 10,
+        'i' | 'j' | 'l' | 'I' => 4,
+        'A'..='Z' => 9,
+        'a'..='z' | '0'..='9' => 7,
+        ' ' | '.' | ',' | ':' | '-' | '·' => 4,
+        _ => 11,
     }
 }
 
@@ -118,7 +120,9 @@ fn fit(input: &str, pixels: usize) -> String {
     if text_width(input) <= pixels {
         return input.to_owned();
     }
-    let mut remaining = pixels.saturating_sub(12);
+    let Some(mut remaining) = pixels.checked_sub(glyph_width('…')) else {
+        return String::new();
+    };
     let mut label = String::new();
     for c in input.chars() {
         let Some(next) = remaining.checked_sub(glyph_width(c)) else {
@@ -132,6 +136,7 @@ fn fit(input: &str, pixels: usize) -> String {
 }
 
 struct Chart {
+    width: usize,
     colors: Colors,
     height: usize,
     description: String,
@@ -139,8 +144,9 @@ struct Chart {
 }
 
 impl Chart {
-    fn new(height: usize, description: String, palette: &Palette) -> Self {
+    fn new(width: usize, height: usize, description: String, palette: &Palette) -> Self {
         Self {
+            width,
             height,
             description,
             body: String::new(),
@@ -150,7 +156,8 @@ impl Chart {
 
     fn svg(&self) -> String {
         format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{h}" viewBox="0 0 {WIDTH} {h}" role="img"><title>{desc}</title><g font-family="sans-serif" font-size="12">{body}</g></svg>"##,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img"><title>{desc}</title><g font-family="sans-serif" font-size="10">{body}</g></svg>"##,
+            w = self.width,
             h = self.height,
             desc = escape(&self.description),
             body = self.body,
@@ -165,6 +172,33 @@ impl Chart {
         self.colored_text(x, y, anchor, text, self.colors.secondary);
     }
 
+    // Preserve every digit in origins and ring scales, wrapping only as needed.
+    // Subsequent content starts below the returned baseline.
+    fn caption(&mut self, x: f64, mut y: usize, anchor: &str, text: &str, pixels: usize) -> usize {
+        let mut line = String::new();
+        for word in text.split_whitespace() {
+            if !line.is_empty() {
+                if text_width(&line) + glyph_width(' ') + text_width(word) > pixels {
+                    self.secondary_text(x, y as f64, anchor, &line);
+                    y += 13;
+                    line.clear();
+                } else {
+                    line.push(' ');
+                }
+            }
+            for c in word.chars() {
+                if text_width(&line) + glyph_width(c) > pixels {
+                    self.secondary_text(x, y as f64, anchor, &line);
+                    y += 13;
+                    line.clear();
+                }
+                line.push(c);
+            }
+        }
+        self.secondary_text(x, y as f64, anchor, &line);
+        y
+    }
+
     fn colored_text(&mut self, x: f64, y: f64, anchor: &str, text: &str, color: Color) {
         write!(
             self.body,
@@ -177,7 +211,7 @@ impl Chart {
     fn line(&mut self, x: f64, y: f64, end_x: f64, end_y: f64, color: Color) {
         write!(
             self.body,
-            r#"<line x1="{x:.2}" y1="{y:.2}" x2="{end_x:.2}" y2="{end_y:.2}" stroke="{color}"/>"#
+            r#"<line x1="{x:.2}" y1="{y:.2}" x2="{end_x:.2}" y2="{end_y:.2}" stroke="{color}" stroke-width="0.6"/>"#
         )
         .unwrap();
     }
@@ -187,7 +221,7 @@ impl Chart {
     fn mark(&mut self, x: f64, y: f64) {
         write!(
             self.body,
-            r#"<circle cx="{x:.2}" cy="{y:.2}" r="3" fill="{}" stroke="{}" stroke-width="0.8"/>"#,
+            r#"<circle cx="{x:.2}" cy="{y:.2}" r="1.8" fill="{}" stroke="{}" stroke-width="0.4"/>"#,
             self.colors.accent, self.colors.surface
         )
         .unwrap();

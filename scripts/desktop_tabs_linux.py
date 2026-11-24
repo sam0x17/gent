@@ -2,7 +2,6 @@
 from collections import Counter
 from itertools import groupby
 import json
-import math
 from pathlib import Path
 import re
 import subprocess
@@ -13,7 +12,7 @@ import pyatspi
 
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkX11", "3.0")
-from gi.repository import Gdk, GdkPixbuf, GdkX11
+from gi.repository import Gdk, GdkX11
 
 from desktop_dashboard_samples import chart_widgets, image_uri
 
@@ -187,7 +186,74 @@ def dashboard_pixels(item):
     return wait_for(painted, "settled GTK pixels for " + item.name)
 
 
-def exercise_dashboard(fixture, agent, cli):
+def assert_chart_pixels(snap, kind, updated):
+    width, height = snap.get_width(), snap.get_height()
+    pixels, stride, channels = snap.get_pixels(), snap.get_rowstride(), snap.get_n_channels()
+    rows = [[pixels[k:k + 3] for k in range(y * stride, y * stride + width * channels, channels)]
+            for y in range(height)]
+    surface = rows[0][0]
+
+    if kind in ("graph", "scatter"):
+        # Locate horizontal gridlines from their common ink. The axes move with
+        # the tick labels, and a two-pixel marker can disappear in a thumbnail.
+        lines = []
+        for y, row in enumerate(rows):
+            color, count = Counter(row).most_common(1)[0]
+            if color != surface and count > .6 * width:
+                # Tick glyphs can contain the same antialias shade as the grid.
+                spans = [list(xs) for solid, xs in groupby(range(width), lambda x: row[x] == color) if solid]
+                spans = [xs for xs in spans if len(xs) >= 10]
+                lines.append((spans[0][0], spans[-1][-1], y))
+        assert lines, (kind, width, height)
+        left, right, _ = max(lines, key=lambda line: line[1] - line[0])
+        bottom = lines[-1][2]
+        middle = (left + right) // 2
+        between = range(left + (right - left) // 5, left + (right - left) // 3)
+        connected = set()
+        middle_ys = []
+        for y, row in enumerate(rows[:bottom + 4]):
+            # Subtract the background on this scanline, including gridlines.
+            background = Counter(row[left + 3:right - 2]).most_common(1)[0][0]
+            def ink(x):
+                return max(abs(a - b) for a, b in zip(row[x], background)) > 24
+            # A marker covers at least three adjacent pixels across its center.
+            # A one-pixel x tick beneath the baseline can land at the same x.
+            if sum(ink(x) for x in range(middle - 4, middle + 5)) >= 3:
+                middle_ys.append(y)
+            if y < bottom - 2:
+                connected.update(x for x in between if ink(x))
+        assert middle_ys, (kind, middle, bottom)
+        assert (min(middle_ys) > .8 * bottom if updated else max(middle_ys) < .35 * bottom), middle_ys
+        assert (len(connected) >= .9 * len(between) if kind == "graph" else not connected), (kind, connected)
+    elif kind == "bar":
+        # Each bar has several adjacent solid scanlines. Text and the thin axis
+        # do not form a band. Measure their lengths in publication order.
+        lengths = [max((sum(1 for _ in run) for color, run in groupby(row) if color != surface),
+                       default=0) for row in rows]
+        bars = []
+        for wide, lines in groupby(lengths, key=lambda n: n > width * .06):
+            band = list(lines)
+            if wide and len(band) >= 3:
+                bars.append(max(band))
+        expected = [9, 1, 5] if updated else [3, 5, 2]
+        assert len(bars) == 3, bars
+        assert all(abs(n / max(bars) - value / max(expected)) < .03 for n, value in zip(bars, expected)), bars
+    else:
+        # Sector area reflects the published share in both legend layouts.
+        # The radar's translucent interior forms its largest flat colored region.
+        fills = Counter(color for row in rows for color in row if color != surface)
+        if kind == "pie":
+            counts = [n for _, n in fills.most_common(3)]
+            expected = [.6, 1/3, 1/15] if updated else [.5, .3, .2]
+            assert len(counts) == 3 and min(counts) > 300, counts
+            assert all(abs(n / sum(counts) - share) < .025 for n, share in zip(counts, expected)), counts
+        else:
+            fill, area = fills.most_common(1)[0]
+            assert area > 400, (fill, area)
+            return sum(x for row in rows for x, color in enumerate(row) if color == fill) / area
+
+
+def exercise_dashboard(fixture, agent, cli, xid):
     instruction = "Report the synthetic job status."
     url = "https://example.test/report"
     updated_url = "http://localhost:8042/done"
@@ -245,72 +311,19 @@ def exercise_dashboard(fixture, agent, cli):
         raise AssertionError("could not reveal " + name)
 
     def chart_pixels(updated):
-        shapes = {}
+        dimensions = {}
+        radar_center = None
         for widget in chart_widgets():
             name, kind = widget["label"], widget["kind"]
             item = reveal(name, pyatspi.ROLE_IMAGE)
             detail = "ms" if kind in ("graph", "scatter") else kind
             assert name in item.description and detail in item.description, item.description
 
-            def series():
-                snap = dashboard_pixels(item)
-                scaled = snap.scale_simple(160, 100, GdkPixbuf.InterpType.BILINEAR)
-                pixels, stride, channels = scaled.get_pixels(), scaled.get_rowstride(), scaled.get_n_channels()
-                def rgb(x, y):
-                    k = y * stride + x * channels
-                    return pixels[k:k + 3]
-
-                def different(a, b, threshold=22):
-                    return max(abs(x - y) for x, y in zip(a, b)) > threshold
-
-                surface = rgb(0, 0)
-                if kind in ("graph", "scatter"):
-                    # Subtract each scanline's background (including horizontal gridlines).
-                    # The middle sample moves from the top of the plot to the bottom.
-                    # Locate the long horizontal axis/grid strokes. Tick labels determine
-                    # the plot margins, so the middle point need not be at the SVG center.
-                    spans = []
-                    for y in range(15, 79):
-                        for ink, xs in groupby(range(160), lambda x: different(rgb(x, y), surface, 8)):
-                            if ink:
-                                run = list(xs)
-                                spans.append((len(run), run[0], run[-1]))
-                    span, left, right = max(spans, default=(0, 0, 0))
-                    if span < 60:
-                        return None
-                    middle = (left + right) / 2
-                    marks = set()
-                    for y in range(15, 79):
-                        line = [rgb(x, y) for x in range(left + 3, right - 2)]
-                        background = Counter(line).most_common(1)[0][0]
-                        marks.update((x, y) for x, color in enumerate(line, start=left + 3)
-                                     if different(color, background))
-                    if not any(abs(x - middle) <= 3 and (y > 65 if updated else y < 26) for x, y in marks):
-                        return None
-                    between = any(left + .18 * span < x < left + .32 * span for x, y in marks)
-                    if between != (kind == "graph"):
-                        return None
-                elif kind == "bar":
-                    # Measure the three bars in their interiors, away from labels and ticks.
-                    lengths = [sum(different(rgb(x, y), surface) for x in range(22, 139)) for y in (30, 53, 76)]
-                    a, b, c = lengths
-                    if not (a > c > b > 4 if updated else b > a > c > 4):
-                        return None
-                elif kind == "pie":
-                    # Sample the sectors just inside the rim, beyond their labels.
-                    rim = Counter(rgb(round(80 + 34 * math.sin(i * math.tau / 180)),
-                                      round(42 - 23 * math.cos(i * math.tau / 180))) for i in range(180))
-                    shares = [n / 180 for color, n in rim.most_common(3) if different(color, surface)]
-                    expected = [.6, 1/3, 1/15] if updated else [.5, .3, .2]
-                    if len(shares) != 3 or any(abs(a-b) > .06 for a, b in zip(shares, expected)):
-                        return None
-                else:
-                    # The radar's translucent interior is distinct from the surrounding surface.
-                    fills = Counter(rgb(x, y) for y in range(18, 54) for x in range(53, 109))
-                    if not any(n > 60 and different(color, surface, 8) for color, n in fills.items()):
-                        return None
-                return {(x, y, rgb(x, y)) for x in range(22, 139, 2) for y in range(16, 79, 2)}
-            shapes[kind] = wait_for(series, "painted " + kind + " series")
+            snap = dashboard_pixels(item)
+            dimensions[kind] = (snap.get_width(), snap.get_height())
+            center = assert_chart_pixels(snap, kind, updated)
+            if kind == "radar":
+                radar_center = center
 
         preview = reveal("Job preview", pyatspi.ROLE_IMAGE)
         assert ("JPEG" if updated else "PNG") in preview.description
@@ -326,7 +339,7 @@ def exercise_dashboard(fixture, agent, cli):
                 left, right = right, left
             return p[left] > 180 > p[left + 2] and p[right + 2] > 170 > p[right]
         wait_for(preview_painted, "two-color inline preview")
-        return shapes
+        return dimensions, radar_center
 
     def call(tool, **args):
         return fixture.call("gent_dashboard_" + tool, args)[0]
@@ -343,7 +356,23 @@ def exercise_dashboard(fixture, agent, cli):
         get(name, "label")
     assert get(None, "progress bar").queryValue().currentValue == 0.25
     assert get(None, "level bar").queryValue().currentValue == 0.75
-    initial = chart_pixels(updated=False)
+    narrow, _ = chart_pixels(updated=False)
+    subprocess.run(["xdotool", "windowsize", "--sync", xid, "840", "690"], check=True)
+
+    def redrawn():
+        item = pyatspi.findDescendant(pyatspi.Registry.getDesktop(0), lambda c:
+                                     c.name == "Stage counts" and c.getRole() == pyatspi.ROLE_IMAGE)
+        if item:
+            r = item.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+            w, h = narrow["bar"]
+            return r.width > 1.5 * w and abs(r.height - h) <= 3
+
+    wait_for(redrawn, "cached chart redrawn at wide card width with constant-height bars", timeout=5)
+    wide, initial_center = chart_pixels(updated=False)
+    for kind, (width, height) in wide.items():
+        old_width, old_height = narrow[kind]
+        assert width > 1.5 * old_width and height < old_height * 1.35, (kind, narrow, wide)
+    print(f"GTK chart allocations before and after resize: {narrow} -> {wide}", flush=True)
     reveal("3 ms", pyatspi.ROLE_LABEL)
     reveal("Inspect job", pyatspi.ROLE_PUSH_BUTTON)
 
@@ -367,9 +396,9 @@ def exercise_dashboard(fixture, agent, cli):
         get(name, "label")
     assert get(None, "progress bar").queryValue().currentValue == 1
     assert get(None, "level bar").queryValue().currentValue == 0
-    changed = chart_pixels(updated=True)
-    for kind in initial:
-        assert len(initial[kind] ^ changed[kind]) > 12, kind
+    _, updated_center = chart_pixels(updated=True)
+    # The right-hand spoke drops from the maximum to 1/9 of the maximum.
+    assert updated_center < initial_center - 5, (initial_center, updated_center)
     reveal("9 ms", pyatspi.ROLE_LABEL)
 
     assert call("delete", expected_revision=2)["revision"] == 3
@@ -470,7 +499,7 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     try:
         # Fit each SVG (including its axes and legend) into the Xvfb viewport for pixel sampling.
         subprocess.run(["xdotool", "windowsize", "--sync", xid, "485", "690"], check=True)
-        exercise_dashboard(fixture, agent, cli)
+        exercise_dashboard(fixture, agent, cli, xid)
     finally:
         subprocess.run(["xdotool", "windowsize", xid, str(geometry.width), str(geometry.height)], check=True)
     tab("Settings")

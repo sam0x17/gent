@@ -51,6 +51,10 @@ def exercise(root):
             time.sleep(.01)
         assert check(), check.__name__
 
+    def settle():
+        deadline = time.monotonic() + .25
+        wait(lambda: time.monotonic() >= deadline)
+
     def row(i, widgets):
         return {"chat": f"Chat {i}", "agent": f"agent-{i}", "revision": i + 1,
                 "board": {"title": f"Board {i}", "widgets": widgets}}
@@ -93,8 +97,32 @@ def exercise(root):
 
     text = {"id": "state", "kind": "text", "label": "State", "value": "Ready"}
     boards = [row(i, [text]) for i in range(5)]
+    assert pane.grid.chart_widths(None, 32) == [260]
+    assert pane.grid.chart_widths(100, 32) == [160]
+    assert pane.grid.chart_widths(100000, 32) == [16384] * 4
     pane.receive({"rows": boards[:1]})
     layout(826, 500, [1])
+    wait(lambda: requests and requests[-1][1]["chart_widths"] == [792, 376])
+    assert [op for op, _ in requests].count("dashboard") == 1
+    assert requests[0][0] == "dashboard"
+    requests.clear()
+    # Coalesce several actual allocations. The final single board still reports
+    # every occupancy the viewport could support after the next publication.
+    rect = pane.grid.get_allocation()
+    for width in (827, 837, 848):
+        rect.width = width
+        pane.grid.size_allocate(rect)
+    layout(852, 500, [1])
+    settle()
+    assert [(op, f["chart_widths"]) for op, f in requests] == [("dashboard_layout", [824, 392, 248])], requests
+    layout(853, 505, [1])
+    settle()
+    assert len(requests) == 1  # Sub-bucket width and height changes.
+    pane.load()
+    pane.load()
+    settle()
+    assert [op for op, _ in requests] == ["dashboard_layout", "dashboard"]
+    assert requests[1][1] == requests[0][1]
     pane.receive({"rows": boards[:2]})
     two = layout(260, 450, [1, 1])
     assert two[0][3] == two[1][3] == 220
@@ -111,6 +139,7 @@ def exercise(root):
     clamped = layout(839, 501, [2, 2, 1])
     assert clamped[-1][-1] == 160 and abs(clamped[0][-1] - clamped[2][-1]) <= 1
     layout(1120, 500, [4, 1])
+    wait(lambda: requests[-1][1]["chart_widths"] == [1088, 520, 336, 240])
     stacked = layout(260, 500, [1] * 5, overflow=True)
     assert all(ht == 160 for _, _, _, ht in stacked)
     v.set_value(v.get_upper() - v.get_page_size())
@@ -155,6 +184,30 @@ def exercise(root):
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40" viewBox="0 0 100 40">'
            '<rect width="100" height="40" fill="white"/><rect x="50" width=".4" height="40" fill="red"/></svg>')
     charts = [dict(w, chart_svg=svg, chart_description=w["kind"] + " details") for w in chart_widgets()]
+    # Compare reported logical widths with GTK chart allocations in both rows.
+    # Apply a width-specific SVG as the cached supervisor would after a resize.
+    pane.receive({"rows": [row(i, charts[:1]) for i in range(3)]})
+    layout(800, 830, [2, 1])
+    wait(lambda: requests[-1][1]["chart_widths"] == [768, 360])
+    for plot, count in zip(widgets(pane, Gtk.DrawingArea), (2, 2, 1)):
+        assert abs(requests[-1][1]["chart_widths"][count - 1] - plot.get_allocated_width()) <= 4
+    cached = []
+    for i, width in enumerate((360, 360, 768)):
+        graphic = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="96" '
+                   f'viewBox="0 0 {width} 96"><circle cx="20" cy="20" r="6"/></svg>')
+        cached.append(row(i, [dict(charts[0], chart_svg=graphic)]))
+    before = list(requests)
+    pane.receive({"error": "Daemon temporarily unavailable"})
+    pane.receive({"layout_only": True, "rows": cached})
+    settle()
+    assert requests == before
+    assert pane.notice.get_text() == "Daemon temporarily unavailable"
+    pane.receive({"layout_only": True, "unchanged": True})
+    assert pane.notice.get_text() == "Daemon temporarily unavailable"
+    pane.receive({"unchanged": True})
+    assert not pane.notice.get_visible()
+    for plot in widgets(pane, Gtk.DrawingArea):
+        assert abs(plot.get_allocated_height() - 96) <= 2
     metric = {"id": "rate", "kind": "metric", "label": "Δ <rate>:  ", "value": 12.5, "unit": "jobs & runs"}
     pane.receive({"rows": [row(0, charts + [metric])]})
     for width in (800, 260):
@@ -230,9 +283,10 @@ def exercise(root):
               {"id": "count", "label": "Workers", "kind": "gauge", "value": 3.125, "max": 8},
               dict(metric, value=0.0), dict(item, value=image_uri("PNG"))]
 
-    def apply_palette():
+    def apply_palette(expected_op):
         action, fields = requests[-1]
-        assert action == "dashboard" and set(fields) == {"palette"}
+        assert action == expected_op and set(fields) == {"palette", "chart_widths"}
+        assert fields["chart_widths"] == [232]
         palette = fields["palette"]
         assert set(palette) == {"surface", "text", "secondary", "accent"}
         assert all(len(rgb) == 3 and all(type(v) is int and 0 <= v <= 255 for v in rgb) for rgb in palette.values())
@@ -240,7 +294,7 @@ def exercise(root):
         themed[0] = dict(themed[0], chart_svg=
             f'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40" viewBox="0 0 100 40">'
             f'<circle cx="50" cy="20" r="8" fill="{accent}"/></svg>')
-        pane.receive({"rows": [row(0, list(themed))]})
+        pane.receive({"rows": [row(0, list(themed))], "layout_only": expected_op == "dashboard_layout"})
         layout(260, 240, [1], overflow=True)
         frame, = widgets(pane, Gtk.Frame)
         card = rendered(frame)
@@ -271,17 +325,16 @@ def exercise(root):
             assert a.y == b.y and a.x + a.width <= b.x
         return palette, rendered(image).get_pixels()
 
-    def settle():
-        # Give GTK several frames to validate descendant styles and finish layout.
-        deadline = time.monotonic() + .15
-        wait(lambda: time.monotonic() >= deadline)
-
-    assert len(requests) == 1, requests
-    light, original_image = apply_palette()
+    settle()
+    requests.clear()
+    pane.queue_refresh()
+    pane.load()  # A poll takes precedence over a pending style/layout refresh.
+    wait(lambda: requests)
+    light, original_image = apply_palette("dashboard")
     v.set_value(80)
     settings.props.gtk_application_prefer_dark_theme = True
     wait(lambda: len(requests) > 1)
-    dark, dark_image = apply_palette()
+    dark, dark_image = apply_palette("dashboard_layout")
     settle()
     assert len(requests) == 2 and sum(dark["surface"]) < sum(light["surface"])
     assert dark_image == original_image and v.get_value() == 80
@@ -290,7 +343,7 @@ def exercise(root):
     custom.load_from_data(b"@define-color theme_selected_bg_color #bd4d87;")
     Gtk.StyleContext.add_provider_for_screen(window.get_screen(), custom, Gtk.STYLE_PROVIDER_PRIORITY_USER)
     wait(lambda: len(requests) > 2)
-    accented, accent_image = apply_palette()
+    accented, accent_image = apply_palette("dashboard_layout")
     settle()
     assert len(requests) == 3 and accented["accent"] == [189, 77, 135]
     assert dark["accent"] != accented["accent"] and accent_image == original_image and v.get_value() == 80
@@ -302,7 +355,25 @@ def exercise(root):
     window.show()
     wait(lambda: len(requests) == 4)
     settle()
-    assert len(requests) == 4 and requests[-1][1]["palette"] == light
+    assert requests[-1] == ("dashboard", requests[0][1]) and len(requests) == 4
+    requests.clear()
+
+    # A traditional scrollbar and user CSS both reduce the available plot width.
+    scroll, = widgets(pane, Gtk.ScrolledWindow)
+    scroll.set_overlay_scrolling(False)
+    inset = Gtk.CssProvider()
+    inset.load_from_data(b".gent-dashboard-card { padding-left: 5px; padding-right: 7px; }")
+    Gtk.StyleContext.add_provider_for_screen(window.get_screen(), inset, Gtk.STYLE_PROVIDER_PRIORITY_USER)
+    settle()
+    chart, _ = widgets(pane, Gtk.DrawingArea)
+    assert viewport.get_allocated_width() < 260
+    assert chart.get_allocated_width() == viewport.get_allocated_width() - 44
+    assert [op for op, _ in requests] == ["dashboard_layout"]
+    negotiated, = requests[0][1]["chart_widths"]
+    assert abs(chart.get_allocated_width() - negotiated) <= 4
+    Gtk.StyleContext.remove_provider_for_screen(window.get_screen(), inset)
+    scroll.set_overlay_scrolling(True)
+    settle()
     requests.clear()
 
     urls = ["http://localhost:8123/job?q=one%20two#chart", "HTTPS://192.168.1.2:444/report",

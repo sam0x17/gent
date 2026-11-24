@@ -1,5 +1,7 @@
 use super::{
-    Chart, Color, Palette, clean_text, fit, number,
+    Chart, Color, Palette, clean_text, fit,
+    horizontal::HorizontalAxis,
+    number,
     scale::{Axis, exact_number, format_number},
     text_width,
 };
@@ -8,9 +10,22 @@ use std::{f64::consts::TAU, fmt::Write};
 
 mod radar;
 
-const CX: f64 = 130.0;
-const CY: f64 = 106.0;
-const RADIUS: f64 = 65.0;
+// Wide cards place the legend beside a bounded, circular plot.
+#[derive(Clone, Copy)]
+struct PolarPlot {
+    left: usize,
+    width: usize,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+}
+
+impl PolarPlot {
+    fn point(self, turn: f64, radius: f64) -> (f64, f64) {
+        let (s, c) = (turn * TAU).sin_cos();
+        (self.cx + radius * s, self.cy - radius * c)
+    }
+}
 
 struct Category {
     name: String,
@@ -55,6 +70,7 @@ pub(super) fn render(
     label: &str,
     unit: Option<&str>,
     palette: &Palette,
+    width: usize,
 ) -> Option<Chart> {
     let items = values
         .iter()
@@ -73,7 +89,7 @@ pub(super) fn render(
     if let Some(unit) = unit {
         write!(description, " Values in {unit}.").unwrap();
     }
-    let mut chart = Chart::new(52, description, palette);
+    let mut chart = Chart::new(width, 40, description, palette);
     let slices = if kind == "pie" {
         pie_slices(&items, max, chart.colors)
     } else {
@@ -92,70 +108,107 @@ pub(super) fn render(
         }
         chart.description.push('.');
     }
-    if let Some(unit) = unit {
-        chart.text(8.0, 18.0, "start", &fit(unit, 244));
-    }
-    match kind {
-        "bar" => bars(&mut chart, &items, max),
-        "pie" => {
-            pie(&mut chart, &slices);
-            legend(&mut chart, &items, true, &slices);
-        }
-        _ => {
-            let numbered = radar::draw(&mut chart, &items, max, unit);
-            legend(&mut chart, &items, numbered, &[]);
-        }
+    let content_width = if kind == "bar" {
+        width
+    } else {
+        width.min(1080)
+    };
+    let left = (width - content_width) / 2;
+    let top = if let Some(unit) = unit {
+        chart.text(
+            (left + 6) as f64,
+            14.0,
+            "start",
+            &fit(unit, content_width - 12),
+        );
+        22
+    } else {
+        6
+    };
+    if kind == "bar" {
+        bars(&mut chart, &items, max, top);
+    } else {
+        let beside = content_width >= 480;
+        let plot_width = if beside {
+            content_width / 2
+        } else {
+            content_width
+        };
+        let radius = (plot_width as f64 / 4.0).clamp(40.0, 84.0);
+        let spoke_margin = if kind == "radar" { 18 } else { 2 };
+        let plot = PolarPlot {
+            left,
+            width: plot_width,
+            cx: left as f64 + plot_width as f64 / 2.0,
+            cy: (top + spoke_margin) as f64 + radius,
+            radius,
+        };
+        let (numbered, bottom) = if kind == "pie" {
+            pie(&mut chart, plot, &slices);
+            (true, (plot.cy + radius).ceil() as usize + spoke_margin)
+        } else {
+            radar::draw(&mut chart, plot, &items, max, unit)
+        };
+        let (legend_left, legend_width, legend_top) = if beside {
+            (left + plot_width + 8, content_width - plot_width - 8, top)
+        } else {
+            (left, content_width, bottom + 5)
+        };
+        chart.height = bottom.max(legend(
+            &mut chart,
+            &items,
+            &slices,
+            numbered,
+            LegendArea {
+                left: legend_left,
+                width: legend_width,
+                top: legend_top,
+                // Center short legends vertically beside the disc.
+                height: if beside { bottom - top } else { 0 },
+            },
+        )) + 4;
     }
     Some(chart)
 }
 
-fn bars(chart: &mut Chart, items: &[Category], max: f64) {
+fn bars(chart: &mut Chart, items: &[Category], max: f64, top: usize) {
     if items.is_empty() {
-        chart.text(130.0, 42.0, "middle", "No categories");
+        chart.text(
+            chart.width as f64 / 2.0,
+            (top + 13) as f64,
+            "middle",
+            "No categories",
+        );
         return;
     }
     let min = items.iter().map(|item| item.value).fold(0.0, f64::min);
     let axis = Axis::new(min, if min == 0.0 && max == 0.0 { 1.0 } else { max });
-    let x = |n| 34.0 + 192.0 * axis.fraction(n);
+    let layout = HorizontalAxis::new(axis, None, chart.width, 0.0);
+    let x = |n| layout.left + (layout.right - layout.left) * axis.fraction(n);
     let zero = x(0.0);
     for (i, item) in items.iter().enumerate() {
-        let y = 40.0 + 37.0 * i as f64;
-        chart.text(8.0, y, "start", &fit(&item.name, 166));
-        chart.text(252.0, y, "end", &format_number(item.value));
+        let y = (top + 9 + 25 * i) as f64;
+        let value = format_number(item.value);
+        let name_width = chart.width.saturating_sub(18 + text_width(&value));
+        chart.text(6.0, y, "start", &fit(&item.name, name_width));
+        chart.text((chart.width - 6) as f64, y, "end", &value);
         let end = x(item.value);
         write!(
             chart.body,
-            r#"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="8" fill="{}"/>"#,
+            r#"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="5" fill="{}"/>"#,
             zero.min(end),
-            y + 5.0,
+            y + 4.0,
             (end - zero).abs(),
             chart.colors.accent
         )
         .unwrap();
-        chart.line(zero, y + 3.0, zero, y + 15.0, chart.colors.secondary);
+        chart.line(zero, y + 2.0, zero, y + 11.0, chart.colors.secondary);
     }
-    let base = 26.0 + items.len() as f64 * 37.0;
-    chart.line(
-        x(axis.low),
-        base,
-        x(axis.high),
-        base,
-        chart.colors.secondary,
-    );
-    for tick in axis.ticks(2) {
-        chart.line(x(tick), base, x(tick), base + 4.0, chart.colors.secondary);
-        chart.secondary_text(x(tick), base + 17.0, "middle", &axis.tick_label(tick));
-    }
-    chart.height = base as usize + 24;
+    chart.height = layout.draw(chart, top + 25 * items.len()) + 4;
 }
 
-// Fractions start at twelve o'clock and increase clockwise on both plots.
-fn polar(turn: f64, radius: f64) -> (f64, f64) {
-    let (s, c) = (turn * TAU).sin_cos();
-    (CX + radius * s, CY - radius * c)
-}
-
-fn pie(chart: &mut Chart, slices: &[Slice]) {
+fn pie(chart: &mut Chart, plot: PolarPlot, slices: &[Slice]) {
+    let PolarPlot { cx, cy, radius, .. } = plot;
     let mut start = 0.0;
     for (i, slice) in slices.iter().enumerate() {
         let portion = slice.portion;
@@ -164,66 +217,88 @@ fn pie(chart: &mut Chart, slices: &[Slice]) {
         }
         let end = start + portion;
         let middle = start + portion / 2.0;
-        let (x0, y0) = polar(start, RADIUS);
-        let (xm, ym) = polar(middle, RADIUS);
-        let (x1, y1) = polar(end, RADIUS);
+        let (x0, y0) = plot.point(start, radius);
+        let (xm, ym) = plot.point(middle, radius);
+        let (x1, y1) = plot.point(end, radius);
         // Two arcs also draw a complete circle when one category owns the pie.
-        write!(chart.body, r##"<path d="M{CX},{CY} L{x0:.2},{y0:.2} A{RADIUS},{RADIUS} 0 0 1 {xm:.2},{ym:.2} A{RADIUS},{RADIUS} 0 0 1 {x1:.2},{y1:.2} Z" fill="{}" stroke="{}" stroke-width="1.5" stroke-linejoin="round"/>"##, slice.fill, chart.colors.surface).unwrap();
-        if portion >= 0.075 {
-            let (x, y) = polar(middle, RADIUS * 0.70);
+        write!(chart.body, r##"<path d="M{cx},{cy} L{x0:.2},{y0:.2} A{radius},{radius} 0 0 1 {xm:.2},{ym:.2} A{radius},{radius} 0 0 1 {x1:.2},{y1:.2} Z" fill="{}" stroke="{}" stroke-width="0.8" stroke-linejoin="round"/>"##, slice.fill, chart.colors.surface).unwrap();
+        let index = (i + 1).to_string();
+        let label_radius = radius * 0.68;
+        // Keep each numeral and its separator inside even a small sector.
+        let clearance = label_radius * (portion.min(0.5) * TAU / 2.0).sin();
+        if clearance >= (text_width(&index) as f64).hypot(10.0) / 2.0 + 1.0 {
+            let (x, y) = plot.point(middle, label_radius);
             chart.colored_text(
                 x,
-                y + 4.0,
+                y + 3.0,
                 "middle",
-                &(i + 1).to_string(),
+                &index,
                 chart.colors.slice_text(slice.fill),
             );
         }
         start = end;
     }
-    chart.height = 179;
 }
 
-fn legend(chart: &mut Chart, items: &[Category], numbered: bool, slices: &[Slice]) {
+struct LegendArea {
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+}
+
+fn legend(
+    chart: &mut Chart,
+    items: &[Category],
+    slices: &[Slice],
+    numbered: bool,
+    area: LegendArea,
+) -> usize {
     let share_width = slices
         .iter()
         .map(|s| text_width(&s.share))
         .max()
         .unwrap_or(0);
-    let value_end = if slices.is_empty() {
-        252
-    } else {
-        252 - share_width - 10
-    };
     let value_width = items
         .iter()
         .map(|item| text_width(&format_number(item.value)))
         .max()
         .unwrap_or(0);
-    let name_start = if numbered { 42 } else { 8 };
-    let name_width = value_end - value_width - 8 - name_start;
+    let end = area.width - 6;
+    let value_end = end.saturating_sub(if slices.is_empty() {
+        0
+    } else {
+        share_width + 8
+    });
+    let name_start = if numbered { 31 } else { 6 };
+    let single_line = value_end.saturating_sub(value_width + 6 + name_start);
+    let longest_name = items
+        .iter()
+        .map(|item| text_width(&item.name))
+        .max()
+        .unwrap_or(0);
+    let stacked = single_line < longest_name.min(52);
+    let name_width = if stacked {
+        end - name_start
+    } else {
+        single_line
+    };
+    let row_height = if stacked { 29 } else { 16 };
+    let height = row_height * items.len();
+    let top = area.top + area.height.saturating_sub(height) / 2;
+    let x = |local| (area.left + local) as f64;
     for (i, item) in items.iter().enumerate() {
-        let baseline = chart.height as f64 + 14.0;
+        let y = (top + 11 + i * row_height) as f64;
+        let value_y = if stacked { y + 12.0 } else { y };
         if let Some(slice) = slices.get(i) {
-            chart.dot(10.0, baseline - 4.0, 4.5, slice.fill);
-            chart.secondary_text(252.0, baseline, "end", &slice.share);
+            chart.dot(x(8), y - 3.0, 3.0, slice.fill);
+            chart.secondary_text(x(end), value_y, "end", &slice.share);
         }
         if numbered {
-            chart.secondary_text(35.0, baseline, "end", &(i + 1).to_string());
+            chart.secondary_text(x(26), y, "end", &(i + 1).to_string());
         }
-        chart.text(
-            name_start as f64,
-            baseline,
-            "start",
-            &fit(&item.name, name_width),
-        );
-        chart.text(
-            value_end as f64,
-            baseline,
-            "end",
-            &format_number(item.value),
-        );
-        chart.height += 21;
+        chart.text(x(name_start), y, "start", &fit(&item.name, name_width));
+        chart.text(x(value_end), value_y, "end", &format_number(item.value));
     }
-    chart.height += 3;
+    top + height
 }
