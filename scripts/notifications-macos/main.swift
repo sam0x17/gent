@@ -29,6 +29,8 @@ final class Center: NotificationCenterClient {
     }
 }
 
+final class Stages { var received: [String] = [] }
+
 final class Acknowledgment {
     var received: [Bool] = []
     func record(_ accepted: Bool) { received.append(accepted) }
@@ -36,14 +38,21 @@ final class Acknowledgment {
 
 let id = UUID()
 let banner = Banner(id: id, attempt: UUID(), title: "Goal resumed", body: "Example resumed.")
-let error = NSError(domain: "fixture", code: 1)
+let cause = NSError(domain: NSPOSIXErrorDomain, code: 1, userInfo: [NSFilePathErrorKey: "/private/fixture"])
+let error = NSError(domain: "private.fixture", code: 7, userInfo: [NSUnderlyingErrorKey: cause])
+let projected = Banner.diagnostic("permission_error", status: .notDetermined, error: error) as NSDictionary
+precondition(projected.isEqual(to: ["stage": "permission_error", "authorization": "not_determined",
+                                    "domain": "other", "code": 7, "underlying_domain": NSPOSIXErrorDomain, "underlying_code": 1]))
 
 for (granted, failure) in [(false, nil), (true, nil), (false, error as Error?)] {
     let center = Center(.notDetermined)
     let ack = Acknowledgment()
-    banner.submit(to: center) { ack.record($0) }
+    let trace = Stages()
+    banner.submit(to: center, trace: { stage, _, _ in trace.received.append(stage) }) { ack.record($0) }
+    precondition(trace.received == ["settings_requested", "settings_received", "permission_requested"])
     precondition(ack.received.isEmpty && center.request == nil)
     center.permission!(granted, failure)
+    precondition(trace.received.last == (failure != nil ? "permission_error" : granted ? "permission_granted" : "permission_not_granted"))
     precondition(ack.received == [false] && center.request == nil)
 }
 
@@ -91,6 +100,7 @@ precondition(replies.count == 1 && replies[0].0 == attempt && replies[0].1)
 precondition(desktop.lastRead == .distantPast && desktop.window == nil)
 desktop.useNotificationCenter(nil) { replies.append(($0, $1)) }
 desktop.receive(fields)
+RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
 precondition(replies.count == 2 && replies[1].0 == attempt && !replies[1].1)
 print("Tray JSON dispatch acknowledges only the native result and leaves the window closed")
 

@@ -1,19 +1,23 @@
 //! The tray belongs to the graphical login session. The service manager owns the daemon.
 use crate::{DaemonCommand, managed_file, service};
-use anyhow::{Context, Result, bail, ensure};
+#[cfg(not(target_os = "macos"))]
+use anyhow::Context;
+use anyhow::{Result, bail, ensure};
 use clap::{Args, Subcommand};
 use gent_daemon::config;
 use serde_json::json;
+#[cfg(not(target_os = "macos"))]
+use std::process::Stdio;
 use std::{
     fs,
     io::ErrorKind,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::Path,
-    process::Stdio,
 };
+use tokio::{io::AsyncWriteExt, net::UnixDatagram};
+#[cfg(not(target_os = "macos"))]
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixDatagram,
+    io::{AsyncBufReadExt, BufReader},
     process::Command,
 };
 
@@ -130,13 +134,6 @@ fn frontend(_home: &Path) -> Result<Command> {
     Ok(cmd)
 }
 
-#[cfg(target_os = "macos")]
-fn frontend(home: &Path) -> Result<Command> {
-    Ok(Command::new(
-        notification_app::install(home)?.join("Contents/MacOS/GentDesktop"),
-    ))
-}
-
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn frontend(_home: &Path) -> Result<Command> {
     bail!("Gent Desktop supports macOS and Linux")
@@ -223,22 +220,29 @@ async fn supervise(
     configured: bool,
 ) -> Result<()> {
     let icon = install_icon(runtime)?;
-    let mut child = frontend(runtime)?
-        .arg(&icon)
-        .arg(if background {
-            "tray"
-        } else if configured {
-            "window"
-        } else {
-            "setup"
-        })
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("cannot start Gent Desktop")?;
-    let mut input = child.stdin.take().unwrap();
-    let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mode = if background {
+        "tray"
+    } else if configured {
+        "window"
+    } else {
+        "setup"
+    };
+    #[cfg(target_os = "macos")]
+    let (mut child, mut input, mut events) = notification_app::launch(runtime, &icon, mode).await?;
+    #[cfg(not(target_os = "macos"))]
+    let (mut child, mut input, mut events) = {
+        let mut child = frontend(runtime)?
+            .arg(&icon)
+            .arg(mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("cannot start Gent Desktop")?;
+        let input = child.stdin.take().unwrap();
+        let events = BufReader::new(child.stdout.take().unwrap()).lines();
+        (child, input, events)
+    };
     let mut pages = pages::Pages::default();
     #[cfg(target_os = "macos")]
     let (destination, mut deliveries) = notification_delivery::channel();
@@ -254,6 +258,9 @@ async fn supervise(
         #[cfg(not(target_os = "macos"))]
         let next_banner = std::future::pending();
         let message = tokio::select! {
+            // macOS kqueue can miss the last writer closing a named FIFO.
+            // open -W also wakes us when the GUI quits without another message.
+            _ = child.wait() => break,
             banner = next_banner => banner,
             _=&mut watch=>anyhow::bail!("account notification watch stopped"),
             Some(result) = jobs.join_next() => result?,
@@ -298,6 +305,7 @@ async fn supervise(
             return Err(e.into());
         }
     }
+    drop(input);
     let status = child.wait().await?;
     if !status.success() {
         bail!("Gent Desktop exited with {status}")

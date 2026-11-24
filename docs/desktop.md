@@ -34,7 +34,7 @@ Choose **Edit full configuration…** to edit the current node's TOML, including
 
 ## Graphical login
 
-Installing the daemon registers the companion for graphical login. Existing managed installations register it when the upgraded daemon starts. Linux uses an XDG autostart entry and application launcher. macOS uses an Aqua LaunchAgent. A headless session can run the daemon without loading a GUI.
+Installing the daemon registers the companion for graphical login. Existing managed installations register it when the upgraded daemon starts. Linux uses an XDG autostart entry and application launcher. On macOS the Aqua LaunchAgent starts the supervisor. The supervisor installs its signed menu-bar app at `~/Applications/Gent.app` and opens that bundle through Launch Services. A headless session can run the daemon without loading a GUI.
 
 | Command | Effect |
 | --- | --- |

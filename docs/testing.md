@@ -64,10 +64,11 @@ The private parent has separate Worker and native-tool workspaces; this client w
 Linux CI also runs the GTK companion in an isolated D-Bus session, Xvfb display and Openbox window manager. With the desktop dependencies, AT-SPI and its system Python bindings (`python3-pyatspi`), `gio`, Xvfb, Xauth, xdotool and Openbox installed, run the same smoke test after building the binary.
 
 ```sh
+cargo build --locked -p gent-link --features test-entitlements
 dbus-run-session -- xvfb-run -a sh -c 'openbox >/dev/null 2>&1 & exec /usr/bin/python3 scripts/smoke_desktop_linux.py target/debug/gent'
 ```
 
-The GTK test creates its own node and login directories. It renames local, remote and hosted members in the Status tab’s Nodes table, checks their IDs and carrier in the daemon directory, and exercises cancel and invalid input. It also opens the real tray menu and checks the foreground daemon after the GUI quits. On a logged-in Mac, the standalone AppKit test exercises the native menu bar and window with synthetic supervisor replies.
+The GTK test creates its own node and login directories. Its disposable Pro fixture requires the test build above. Normal client builds accept only a signed account lease. It renames local, remote and hosted members in the Status tab’s Nodes table, checks their IDs and carrier in the daemon directory, and exercises cancel and invalid input. It also opens the real tray menu and checks the foreground daemon after the GUI quits. On a logged-in Mac, the standalone AppKit test exercises the native menu bar and window with synthetic supervisor replies.
 
 ```sh
 fixture=$(mktemp -d)
@@ -86,7 +87,11 @@ Append `--dashboard` after the icon path to exercise the Dashboard tab alone. Th
 
 ### macOS notification attribution
 
-In a logged-in Mac terminal, run `python3 scripts/notifications-macos/check_gui.py` from the client checkout. It builds the candidate and runs its signed tray executable with fixture pipes. The only notice is local to Notification Center. Allow Gent if macOS prompts. Check the sender above **Gent local sender check**, the Inkling icon, and the app selected by the notification’s settings action. Leave that entry in Notification Center during the replay and check that only one copy is listed. Record the sender separately from the notification title. Focus and the configured alert style can suppress a banner even after native acceptance.
+In a logged-in Mac terminal, run `python3 scripts/notifications-macos/check_gui.py` from the client checkout. It copies the signed candidate into a disposable folder under `~/Applications`, launches it through Launch Services, and exchanges fixture data on private pipes. The check leaves an existing `~/Applications/Gent.app` alone. Account publication, the watcher and the daemon stay offline throughout the check.
+
+Record the `launch`, `location` and `stage` lines. They distinguish the GUI handshake, Launch Services’ preferred bundle match, notification authorization, submission and replay. If macOS prompts, record which app is named. After acceptance, check the sender and Inkling icon above **Gent local sender check**, then leave the entry in Notification Center during replay. Focus and alert style can suppress a banner after acceptance.
+
+To compare launch methods on the exact same bundle URL, pass `--launch both`. This tries Launch Services first and direct execution second, including when the first launch fails. Repeat with `--launch both --location build` to compare against the Cargo build location. Compare the executable SHA-256 across runs. macOS may retain permission and bundle registrations between runs; each run uses a new local notice ID.
 
 ## Automatic update acceptance
 
