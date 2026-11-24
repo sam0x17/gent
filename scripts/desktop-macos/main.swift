@@ -515,12 +515,14 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
     require(fields.contains { $0.stringValue == "1.5 ms" } && fields.contains { $0.stringValue == "Bar summary without a drawing" },
             "latest graph value and fallback chart description")
     for (label, number) in [("Latency:", "21.5 ms"), ("Count:", "0")] {
-        let metric = fields.first { $0.stringValue == label + " " + number }!.attributedStringValue
-        for i in 0..<metric.length {
-            let font = metric.attribute(.font, at: i, effectiveRange: nil) as! NSFont
-            require(font.fontDescriptor.symbolicTraits.contains(.bold) == (i < label.utf16.count),
-                    "metric label and single colon bold, value and unit regular")
-        }
+        guard let caption = fields.first(where: { $0.stringValue == label }),
+              let line = caption.superview as? NSStackView,
+              let reading = line.arrangedSubviews.last as? NSTextField else { fatalError("Missing metric row") }
+        require(line.accessibilityLabel() == label + " " + number && reading.stringValue == number
+                && caption.font!.fontDescriptor.symbolicTraits.contains(.bold)
+                && !reading.font!.fontDescriptor.symbolicTraits.contains(.bold)
+                && reading.alignment == .right && abs(reading.alignmentRect(forFrame: reading.frame).maxX - line.bounds.maxX) <= 1,
+                "metric label and single colon bold, reading and unit regular and right aligned")
     }
     require(fields.filter { $0.stringValue == "Image unavailable" }.count == sources.count - 2,
             "invalid, remote and oversized images show placeholders")
@@ -575,13 +577,156 @@ func checkDashboardMedia(_ desktop: Desktop, scroll: NSScrollView) {
     ]]
     reply(["rows": [replacement]])
     require(descendants(view, of: NSImageView.self).isEmpty
-            && descendants(view, of: NSTextField.self).contains { $0.stringValue == "Latency: 42 ms" },
+            && descendants(view, of: NSStackView.self).contains { $0.accessibilityLabel() == "Latency: 42 ms" },
             "a differing full snapshot replaces stale media and values")
     reply(["rows": []])
     reply(["notice": "Waiting for refresh"])
     reply(["unchanged": true])
     require(!notice.isHiddenOrHasHiddenAncestor && notice.stringValue == "No chats have published a dashboard.",
             "unchanged empty reply restores empty state")
+}
+
+func checkDashboardAppearance(_ desktop: Desktop, scroll: NSScrollView) {
+    let window = desktop.window!
+    let dashboard = desktop.dashboard
+    let oldAppearance = window.appearance
+    let oldAccent = dashboard.accentColor
+    let wasVisible = window.isVisible
+    defer {
+        dashboard.accentColor = oldAccent
+        window.appearance = oldAppearance
+        if !wasVisible { window.orderOut(nil) }
+    }
+    func settle() {
+        desktop.tabs.layoutSubtreeIfNeeded()
+        // AppKit invalidates effective appearances during its display pass.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.04))
+    }
+    func readPalette(_ sent: [Request]) -> [String: [Int]] {
+        guard sent.count == 1, case .json(let message) = sent[0], message.count == 2,
+              message["op"] as? String == "dashboard", let palette = message["palette"] as? [String: [Int]] else {
+            fatalError("Expected exactly one dashboard read with a palette, received \(sent)")
+        }
+        require(Set(palette.keys) == ["surface", "text", "secondary", "accent"] && palette.values.allSatisfy {
+            $0.count == 3 && $0.allSatisfy { (0...255).contains($0) }
+        }, "four local sRGB palette triples")
+        return palette
+    }
+    func publish(_ palette: [String: [Int]]) {
+        func rgb(_ role: String) -> String { "rgb(" + palette[role]!.map(String.init).joined(separator: ",") + ")" }
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="260" height="100" viewBox="0 0 260 100">
+        <rect x="8" width="4" height="100" fill="\(rgb("surface"))"/>
+        <path d="M32 10 V78 H250" stroke="\(rgb("secondary"))" fill="none"/>
+        <g font-family="sans-serif" font-size="8" fill="\(rgb("text"))">
+        <text x="30" y="15" text-anchor="end">1.0</text><text x="30" y="77" text-anchor="end">0</text>
+        <text x="32" y="91">1</text><text x="246" y="91">3</text></g>
+        <path d="M32 17 C80 24 110 54 142 55 S210 60 250 66" stroke="\(rgb("accent"))" stroke-width="2" fill="none"/></svg>
+        """
+        let widgets: [[String: Any]] = [
+            ["id": "job", "kind": "text", "label": "Status", "value": "Training"],
+            ["id": "epochs", "kind": "progress", "label": "Epochs completed", "value": 72, "unit": "%"],
+            ["id": "loss", "kind": "graph", "label": "Validation loss", "value": [0.9, 0.44, 0.18],
+             "chart_svg": svg, "chart_description": "Validation loss decreased to 0.18"],
+            ["id": "history", "kind": "events", "label": "History", "value": (1...20).map { "Epoch \($0) completed" }],
+        ]
+        let board: [String: Any] = ["agent": "trainer", "chat": "Research chat", "revision": 8,
+                                    "board": ["title": "Training run", "widgets": widgets]]
+        require(requests { desktop.receive(["page": "dashboard", "rows": [board]]) }.isEmpty,
+                "repainting a snapshot performs no reads or actions")
+        desktop.tabs.layoutSubtreeIfNeeded()
+    }
+    func inspect(_ palette: [String: [Int]], accent: NSColor) {
+        let card = descendants(dashboard.view, of: NSBox.self).first!
+        let fields = descendants(card, of: NSTextField.self)
+        func field(_ value: String) -> NSTextField { fields.first { $0.stringValue == value }! }
+        let title = field("Training run"), publisher = field("Research chat")
+        let titleRect = title.convert(title.bounds, to: card)
+        require(card.titlePosition == .noTitle && card.cornerRadius >= 8 && card.borderWidth > 0
+                && title.font!.pointSize == 18 && titleRect.minX >= 13 && card.bounds.maxY - titleRect.maxY >= 12
+                && publisher.font!.pointSize < title.font!.pointSize && publisher.textColor == .secondaryLabelColor
+                && NSFontManager.shared.weight(of: title.font!) > NSFontManager.shared.weight(of: publisher.font!)
+                && NSFontManager.shared.weight(of: field("Status").font!) > NSFontManager.shared.weight(of: field("Training").font!),
+                "board title and subdued publisher sit inside the rounded, padded card")
+        card.effectiveAppearance.performAsCurrentDrawingAppearance {
+            let surface = card.fillColor.usingColorSpace(.sRGB)!
+            for (key, color) in [("surface", card.fillColor), ("text", title.textColor!),
+                                 ("secondary", publisher.textColor!), ("accent", accent)] {
+                let ink = color.usingColorSpace(.sRGB)!
+                let channels = zip([ink.redComponent, ink.greenComponent, ink.blueComponent],
+                                   [surface.redComponent, surface.greenComponent, surface.blueComponent])
+                let expected = channels.map { Int((255 * ($1 + ink.alphaComponent * ($0 - $1))).rounded()) }
+                require(palette[key] == expected, "sent \(key) matches native ink on the visible card surface")
+            }
+        }
+        for (label, value) in [("Epochs completed", "72%"), ("Validation loss", "0.18")] {
+            let name = field(label), reading = field(value)
+            require(name.superview === reading.superview && abs(name.frame.midY - reading.frame.midY) <= 1
+                    && name.frame.maxX <= reading.frame.minX && reading.alignment == .right,
+                    "inline reading beside " + label)
+        }
+        let progress = descendants(card, of: NSProgressIndicator.self).first!
+        require(!progress.isIndeterminate && progress.accessibilityLabel() == "Epochs completed"
+                && progress.controlSize == .small && progress.bounds.height <= 12 && progress.doubleValue == 72,
+                "compact native determinate progress")
+        let chart = descendants(card, of: NSImageView.self).first!
+        require(abs(chart.bounds.width - card.contentView!.bounds.width) <= 1
+                && abs(chart.bounds.height - chart.bounds.width * 100 / 260) <= 1, "responsive chart inside card inset")
+        // Rust paints on transparency. A patch of the negotiated surface should
+        // disappear against the actual box, through the same display profile.
+        let chartRect = chart.convert(chart.bounds, to: card)
+        let pixels = card.bitmapImageRepForCachingDisplay(in: chartRect)!
+        card.cacheDisplay(in: chartRect, to: pixels)
+        func chartColor(_ x: Int) -> NSColor {
+            pixels.colorAt(x: x * pixels.pixelsWide / 260, y: pixels.pixelsHigh / 2)!.usingColorSpace(.sRGB)!
+        }
+        let patch = chartColor(10), background = chartColor(16), axis = chartColor(32)
+        require(abs(axis.greenComponent - background.greenComponent) > 0.15, "axis visible on chart surface")
+        require(patch.alphaComponent > 0.98 && background.alphaComponent > 0.98
+                && max(abs(patch.redComponent - background.redComponent), abs(patch.greenComponent - background.greenComponent),
+                       abs(patch.blueComponent - background.blueComponent)) < 0.025,
+                "transparent chart matches negotiated surface, patch=\(patch), background=\(background)")
+        let events = fields.first { $0.stringValue.hasPrefix("Epoch 1 completed") }!
+        let style = events.attributedStringValue.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as! NSParagraphStyle
+        require(style.paragraphSpacing > 0 && style.paragraphSpacing <= 4, "compact selectable event entries")
+    }
+
+    window.appearance = NSAppearance(named: .aqua)
+    window.orderFront(nil)
+    resizeDesktop(desktop, width: 766, height: 604)
+    settle()
+    let light = readPalette(requests { dashboard.load() })
+    publish(light)
+    inspect(light, accent: .controlAccentColor)
+    scroll.contentView.scroll(to: NSPoint(x: 0, y: 100))
+    let position = scroll.documentVisibleRect.origin
+    let dark = readPalette(requests {
+        window.appearance = NSAppearance(named: .darkAqua)
+        settle()
+    })
+    require(dark["surface"] != light["surface"] && dark["text"] != light["text"], "effective appearance changes palette")
+    publish(dark)
+    inspect(dark, accent: .controlAccentColor)
+    require(position.y > 0 && scroll.documentVisibleRect.origin == position, "chart recolor preserves scroll position")
+
+    // Deliver the native system-color notification with a different accent in this fixture only.
+    func notifyColors() { NotificationCenter.default.post(name: NSColor.systemColorsDidChangeNotification, object: nil) }
+    let alternate = dark["accent"] == [255, 0, 255]
+        ? NSColor(srgbRed: 0, green: 1, blue: 0, alpha: 1) : NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1)
+    dashboard.accentColor = { alternate }
+    let recolored = readPalette(requests { notifyColors(); notifyColors(); settle() })
+    require(recolored["accent"] != dark["accent"] && recolored["surface"] == dark["surface"], "accent-only change")
+    publish(recolored)
+    inspect(recolored, accent: alternate)
+    require(requests { notifyColors(); settle() }.isEmpty, "identical palette sends no additional read")
+    _ = requests { desktop.tabs.selectTabViewItem(withIdentifier: "Chats") }
+    require(requests { window.appearance = NSAppearance(named: .aqua); notifyColors(); settle() }.isEmpty,
+            "appearance change on another tab sends no dashboard read")
+    _ = readPalette(requests { desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard"); settle() })
+    window.orderOut(nil)
+    require(requests { window.appearance = NSAppearance(named: .darkAqua); notifyColors(); settle() }.isEmpty,
+            "hidden dashboard window sends no appearance reads")
+    if wasVisible { window.orderFront(nil) }
 }
 
 func checkDashboard(_ desktop: Desktop) {
@@ -649,6 +794,7 @@ func checkDashboard(_ desktop: Desktop) {
     let smaller = layout(510, 400, rows: [1])
     require(smaller.width < single.width && smaller.height < single.height, "single board follows both dimensions")
     publish(Array(rows.prefix(3)))
+    layout(766, 604, rows: [2, 1])
     let wide = layout(810, 605, rows: [2, 1])
     require(layout(735, 605, rows: [2, 1]).width < wide.width, "cards resize within the same breakpoint")
     layout(810, 440, rows: [2, 1], equalAreas: false)
@@ -705,6 +851,7 @@ func checkDashboard(_ desktop: Desktop) {
     require(fitting.height > 160 && wrapped.bounds.height >= fitting.height - 1,
             "wrapped text gets its natural height in a partial row")
     checkDashboardMedia(desktop, scroll: scroll)
+    checkDashboardAppearance(desktop, scroll: scroll)
     require(opened == targets, "button, malformed links, media and scrolling leave opener idle")
     resizeDesktop(desktop, width: 850, height: 605)
 }
@@ -715,7 +862,7 @@ let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
 if CommandLine.arguments.dropFirst(2).contains("--dashboard") {
     desktop.makeWindow()
     checkDashboard(desktop)
-    print("PASS: native Dashboard layout, scrolling, web links, button dispatch, SVG charts, metrics, inline images and unchanged replies")
+    print("PASS: native Dashboard layout, scrolling, web links, button dispatch, SVG charts, metrics, inline images, unchanged replies and appearance palettes")
     exit(0)
 }
 if CommandLine.arguments.dropFirst(2).contains(where: { ["--cluster", "--nodes"].contains($0) }) {

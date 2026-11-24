@@ -77,8 +77,108 @@ private func dashboardURL(_ value: Any?) -> URL? {
     return parts.url
 }
 
+private func dashboardReading(_ value: NSNumber?, unit: String?) -> String {
+    guard let value = value else { return "—" }
+    var number = value.stringValue
+    if number.hasSuffix(".0") { number.removeLast(2) }
+    guard let unit = unit, !unit.isEmpty else { return number }
+    return number + (unit == "%" ? "" : " ") + unit
+}
+
+private let cardSurface = NSColor.textBackgroundColor
+
+private func dashboardPalette(_ appearance: NSAppearance, accent: () -> NSColor) -> [String: [Int]] {
+    var palette: [String: [Int]] = [:]
+    appearance.performAsCurrentDrawingAppearance {
+        let surface = cardSurface.usingColorSpace(.sRGB)!
+        for (name, color) in [("surface", cardSurface), ("text", .labelColor),
+                              ("secondary", .secondaryLabelColor), ("accent", accent())] {
+            let ink = color.usingColorSpace(.sRGB)!
+            func channel(_ foreground: CGFloat, over background: CGFloat) -> Int {
+                let composited = foreground * ink.alphaComponent + background * (1 - ink.alphaComponent)
+                return Int((min(1, max(0, composited)) * 255).rounded())
+            }
+            palette[name] = [channel(ink.redComponent, over: surface.redComponent),
+                             channel(ink.greenComponent, over: surface.greenComponent),
+                             channel(ink.blueComponent, over: surface.blueComponent)]
+        }
+    }
+    return palette
+}
+
 private final class DashboardGrid: NSStackView {
+    var appearanceChanged: (() -> Void)?
     override var isFlipped: Bool { true }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        appearanceChanged?()
+    }
+}
+
+private extension NSStackView {
+    func addSection(spacing: CGFloat = 4) -> NSStackView {
+        let section = NSStackView()
+        section.orientation = .vertical
+        section.alignment = .leading
+        section.distribution = .fill
+        section.spacing = spacing
+        addArrangedSubview(section)
+        section.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+        return section
+    }
+
+    @discardableResult
+    func addText(_ value: String, font: NSFont = .systemFont(ofSize: NSFont.systemFontSize),
+                 color: NSColor = .labelColor) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: value)
+        field.font = font
+        field.textColor = color
+        field.isSelectable = true
+        addArrangedSubview(field)
+        field.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor).isActive = true
+        return field
+    }
+
+    func addReading(_ label: String, _ value: String, metric: Bool = false) {
+        let line = NSStackView()
+        line.distribution = .fill
+        line.alignment = .firstBaseline
+        line.spacing = 8
+        addArrangedSubview(line)
+        line.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+        let caption = line.addText(label, font: .systemFont(ofSize: 13, weight: metric ? .bold : .semibold))
+        let reading = line.addText(value, font: .monospacedDigitSystemFont(ofSize: 13, weight: .regular))
+        reading.alignment = .right
+        caption.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        caption.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        reading.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        reading.widthAnchor.constraint(lessThanOrEqualTo: line.widthAnchor, multiplier: 0.55).isActive = true
+        line.setAccessibilityRole(.group)
+        line.setAccessibilityLabel(label + " " + value)
+    }
+
+    func addImage(_ image: NSImage, description: String, chart: Bool) {
+        let view = NSImageView()
+        view.image = image
+        view.imageScaling = .scaleProportionallyUpOrDown
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(.image)
+        view.setAccessibilityLabel(description)
+        view.toolTip = description
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        addArrangedSubview(view)
+        let width = view.widthAnchor.constraint(equalTo: widthAnchor)
+        if !chart {
+            // Keep small images at native size and fit portraits on a laptop screen.
+            width.priority = NSLayoutConstraint.Priority(495)
+            view.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor).isActive = true
+            view.widthAnchor.constraint(lessThanOrEqualToConstant: image.size.width).isActive = true
+            view.heightAnchor.constraint(lessThanOrEqualToConstant: 360).isActive = true
+        }
+        width.isActive = true
+        view.heightAnchor.constraint(equalTo: view.widthAnchor, multiplier: image.size.height / image.size.width).isActive = true
+    }
 }
 
 final class DashboardTab: NSObject {
@@ -87,6 +187,10 @@ final class DashboardTab: NSObject {
     private let scroll = NSScrollView()
     private let notice = NSTextField(wrappingLabelWithString: "")
     var openURL: (URL) -> Void = { url in _ = NSWorkspace.shared.open(url) }
+    var accentColor: () -> NSColor = { .controlAccentColor }
+    private var lastPalette: [String: [Int]]?
+    private var lastAppearance: NSAppearance.Name?
+    private var appearanceRefreshPending = false
     private var rows: [[String: Any]] = []
     private var cards: [NSBox] = []
     private var columns = 0
@@ -101,6 +205,8 @@ final class DashboardTab: NSObject {
         grid.distribution = .fill
         grid.orientation = .vertical
         grid.alignment = .leading
+        grid.spacing = 10
+        scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.documentView = grid
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -120,16 +226,47 @@ final class DashboardTab: NSObject {
         scroll.widthAnchor.constraint(equalTo: view.widthAnchor, constant: -24).isActive = true
         scroll.contentView.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(resized), name: NSView.frameDidChangeNotification, object: scroll.contentView)
+        grid.appearanceChanged = { [weak self] in self?.paletteDidChange() }
+        NotificationCenter.default.addObserver(self, selector: #selector(paletteDidChange),
+                                               name: NSColor.systemColorsDidChangeNotification, object: nil)
     }
 
-    func load() { sendPage("dashboard") }
+    func load() { requestDashboard(onlyIfChanged: false) }
+
+    private func requestDashboard(onlyIfChanged: Bool) {
+        let appearance = grid.effectiveAppearance
+        let palette = dashboardPalette(appearance, accent: accentColor)
+        if onlyIfChanged && palette == lastPalette && appearance.name == lastAppearance { return }
+        lastPalette = palette
+        lastAppearance = appearance.name
+        sendPage("dashboard", ["palette": palette])
+    }
+
+    private var isMapped: Bool {
+        guard let window = view.window else { return false }
+        return window.isVisible && !window.isMiniaturized && !view.isHiddenOrHasHiddenAncestor
+    }
+
+    @objc private func paletteDidChange() {
+        guard isMapped && !appearanceRefreshPending else { return }
+        // A system change may deliver both notifications while AppKit resolves the new colors.
+        appearanceRefreshPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.appearanceRefreshPending = false
+            if self.isMapped { self.requestDashboard(onlyIfChanged: true) }
+        }
+    }
 
     func receive(_ reply: [String: Any]) {
         if let next = reply["rows"] as? [[String: Any]] {
             if !NSArray(array: rows).isEqual(to: next) {
+                let position = scroll.documentVisibleRect.origin
                 rows = next
                 cards = next.compactMap(makeCard)
                 arrangeCards()
+                view.layoutSubtreeIfNeeded()
+                grid.scroll(position)
             }
         } else if reply["unchanged"] as? Bool != true {
             showNotice((reply["error"] ?? reply["notice"]) as? String ?? "")
@@ -161,6 +298,7 @@ final class DashboardTab: NSObject {
         for start in stride(from: 0, to: cards.count, by: columns) {
             let rowCards = cards[start..<min(start + columns, cards.count)]
             let line = NSStackView()
+            line.spacing = 10
             line.distribution = .fillEqually
             grid.addArrangedSubview(line)
             line.widthAnchor.constraint(equalTo: grid.widthAnchor).isActive = true
@@ -181,83 +319,68 @@ final class DashboardTab: NSObject {
     private func makeCard(_ row: [String: Any]) -> NSBox? {
         guard let board = row["board"] as? [String: Any] else { return nil }
         let card = NSBox()
+        card.boxType = .custom
         card.title = board["title"] as? String ?? ""
+        card.titlePosition = .noTitle
+        card.setAccessibilityLabel(card.title)
+        card.isTransparent = false
+        card.fillColor = cardSurface
+        card.borderColor = .separatorColor
+        card.borderWidth = 1
+        card.cornerRadius = 10
+        card.contentViewMargins = NSSize(width: 16, height: 14)
         let content = NSStackView()
         content.orientation = .vertical
         content.alignment = .leading
-
-        @discardableResult
-        func addText(_ value: String) -> NSTextField {
-            let field = NSTextField(wrappingLabelWithString: value)
-            field.isSelectable = true
-            content.addArrangedSubview(field)
-            field.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor).isActive = true
-            return field
-        }
-
-        func addImage(_ image: NSImage, description: String, chart: Bool) {
-            let view = NSImageView()
-            view.image = image
-            view.imageScaling = .scaleProportionallyUpOrDown
-            view.setAccessibilityElement(true)
-            view.setAccessibilityRole(.image)
-            view.setAccessibilityLabel(description)
-            view.toolTip = description
-            view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-            content.addArrangedSubview(view)
-            let width = view.widthAnchor.constraint(equalTo: content.widthAnchor)
-            if !chart {
-                // Keep small images at native size and fit portraits on a laptop screen.
-                width.priority = NSLayoutConstraint.Priority(495)
-                view.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor).isActive = true
-                view.widthAnchor.constraint(lessThanOrEqualToConstant: image.size.width).isActive = true
-                view.heightAnchor.constraint(lessThanOrEqualToConstant: 360).isActive = true
-            }
-            width.isActive = true
-            view.heightAnchor.constraint(equalTo: view.widthAnchor, multiplier: image.size.height / image.size.width).isActive = true
-        }
-
-        addText(row["chat"] as? String ?? "")
+        content.distribution = .fill
+        content.spacing = 12
+        let header = content.addSection(spacing: 2)
+        header.addText(card.title, font: .systemFont(ofSize: 18, weight: .semibold))
+        header.addText(row["chat"] as? String ?? "", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
+        var previousMetric: NSView?
         for item in board["widgets"] as? [[String: Any]] ?? [] {
             let title = item["label"] as? String ?? ""
             let kind = item["kind"] as? String ?? ""
             let value = item["value"]
+            let section = content.addSection()
+            if kind == "metric", let previous = previousMetric { content.setCustomSpacing(4, after: previous) }
+            previousMetric = kind == "metric" ? section : nil
             if kind == "link" {
                 if let url = dashboardURL(value) {
                     let link = DashboardLink(title: title, url: url)
                     link.target = self
                     link.action = #selector(openLink(_:))
-                    content.addArrangedSubview(link)
-                    link.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor).isActive = true
+                    section.addArrangedSubview(link)
+                    link.widthAnchor.constraint(lessThanOrEqualTo: section.widthAnchor).isActive = true
                 } else {
-                    addText(title)
+                    section.addText(title)
                 }
                 continue
             }
             if kind == "button" {
                 let button = DashboardButton(title: title, target: nil, action: #selector(DashboardButton.invoke))
                 button.target = button
+                button.cell?.lineBreakMode = .byTruncatingTail
                 button.toolTip = value as? String
                 button.fields = ["agent": row["agent"]!, "revision": row["revision"]!, "widget": item["id"]!]
-                content.addArrangedSubview(button)
+                section.addArrangedSubview(button)
+                button.widthAnchor.constraint(lessThanOrEqualTo: section.widthAnchor).isActive = true
                 continue
             }
-            let unit = (item["unit"] as? String).map { " " + $0 } ?? ""
+            let unit = item["unit"] as? String
             if kind == "metric" {
-                let number = (value as? NSNumber)?.stringValue ?? "—"
                 var label = title[...]
                 while let last = label.last, last.isWhitespace || last == ":" { label = label.dropLast() }
-                let text = NSMutableAttributedString(string: label + ":", attributes: [
-                    .font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
-                ])
-                text.append(NSAttributedString(string: " " + number + unit, attributes: [
-                    .font: NSFont.systemFont(ofSize: NSFont.systemFontSize)
-                ]))
-                addText("").attributedStringValue = text
+                section.addReading(String(label) + ":", dashboardReading(value as? NSNumber, unit: unit), metric: true)
                 continue
             }
-            addText(title)
+            if kind == "graph" {
+                section.addReading(title, dashboardReading((value as? [NSNumber])?.last, unit: unit))
+            } else if kind == "progress" || kind == "gauge" {
+                section.addReading(title, dashboardReading(value as? NSNumber, unit: unit))
+            } else {
+                section.addText(title, font: .systemFont(ofSize: 13, weight: .semibold))
+            }
             switch kind {
             case "graph", "bar", "pie", "radar", "scatter":
                 let description = item["chart_description"] as? String ?? title
@@ -265,35 +388,54 @@ final class DashboardTab: NSObject {
                 if let svg = item["chart_svg"] as? String, let chart = NSImage(data: Data(svg.utf8)),
                    chart.size.width > 0, chart.size.height > 0 {
                     chart.cacheMode = .never
-                    addImage(chart, description: description, chart: true)
+                    section.addImage(chart, description: description, chart: true)
                 } else {
-                    addText(item["chart_description"] as? String ?? "Chart unavailable")
-                }
-                if kind == "graph" {
-                    addText((value as? [Double])?.last.map { String($0) + unit } ?? "—")
+                    section.addText(item["chart_description"] as? String ?? "Chart unavailable")
                 }
             case "image":
                 if let image = dashboardRaster(value) {
-                    addImage(image, description: title, chart: false)
+                    section.addImage(image, description: title, chart: false)
                 } else {
-                    addText("Image unavailable")
+                    section.addText("Image unavailable")
                 }
-            case "progress", "gauge":
+            case "progress":
+                let bar = NSProgressIndicator()
+                bar.style = .bar
+                bar.isIndeterminate = false
+                bar.controlSize = .small
+                bar.minValue = (item["min"] as? NSNumber)?.doubleValue ?? 0
+                bar.maxValue = (item["max"] as? NSNumber)?.doubleValue ?? 100
+                bar.doubleValue = (value as? NSNumber)?.doubleValue ?? 0
+                bar.setAccessibilityLabel(title)
+                section.addArrangedSubview(bar)
+                bar.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
+            case "gauge":
                 let bar = NSLevelIndicator()
+                bar.controlSize = .small
+                bar.fillColor = .controlAccentColor
+                bar.setAccessibilityLabel(title)
                 bar.levelIndicatorStyle = .continuousCapacity
-                bar.minValue = item["min"] as? Double ?? 0
-                bar.maxValue = item["max"] as? Double ?? 100
-                bar.doubleValue = value as? Double ?? 0
-                content.addArrangedSubview(bar)
-                bar.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
-                addText(String(bar.doubleValue) + unit)
+                bar.minValue = (item["min"] as? NSNumber)?.doubleValue ?? 0
+                bar.maxValue = (item["max"] as? NSNumber)?.doubleValue ?? 100
+                bar.doubleValue = (value as? NSNumber)?.doubleValue ?? 0
+                section.addArrangedSubview(bar)
+                bar.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
+            case "events":
+                let entries = (value as? [String] ?? []).joined(separator: "\n")
+                let style = NSMutableParagraphStyle()
+                style.paragraphSpacing = 3
+                let field = section.addText(entries)
+                field.attributedStringValue = NSAttributedString(string: entries, attributes: [
+                    .paragraphStyle: style, .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor,
+                ])
             default:
-                addText((value as? [String])?.joined(separator: "\n") ?? value as? String ?? "")
+                section.addText(value as? String ?? "")
             }
         }
         // Keep controls at their natural height, grouped at the top of a tall card.
-        content.distribution = .fill
-        content.addArrangedSubview(NSView())
+        let spacer = NSView()
+        if let last = content.arrangedSubviews.last { content.setCustomSpacing(0, after: last) }
+        content.addArrangedSubview(spacer)
         card.contentView = content
         card.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
         return card

@@ -25,6 +25,15 @@ def dashboard_label(text, style=None):
     return widget
 
 
+def dashboard_reading(value, unit):
+    if value is None:
+        return "—"
+    number = str(value).removesuffix(".0")
+    if not unit:
+        return number
+    return number + ("" if unit == "%" else " ") + unit
+
+
 class DashboardGraphic(Gtk.DrawingArea):
     def __init__(self, width, height, title, description, upscale):
         super().__init__()
@@ -182,10 +191,82 @@ class DashboardGrid(Gtk.Fixed):
             y += height + self.gap
 
 
+DASHBOARD_CSS = b"""
+.gent-dashboard { padding: 12px; outline-color: @theme_selected_bg_color; }
+.gent-dashboard, .gent-dashboard viewport { background-color: @theme_bg_color; }
+.gent-dashboard-card {
+    background: @theme_base_color;
+    color: @theme_text_color;
+    border: 1px solid alpha(@theme_text_color, .15);
+    border-radius: 10px;
+    outline-color: @theme_selected_bg_color;
+}
+.gent-dashboard-card > border { border: none; }
+.gent-dashboard-title { font-size: 18px; font-weight: bold; }
+.gent-dashboard-publisher { color: mix(@theme_text_color, @theme_base_color, .30); }
+.gent-dashboard-heading { font-weight: bold; }
+.gent-dashboard-current { font-feature-settings: "tnum"; }
+.gent-dashboard-card levelbar trough { padding: 0; border: none; background: none; }
+.gent-dashboard-card progressbar trough, .gent-dashboard-card progressbar progress,
+.gent-dashboard-card levelbar block {
+    margin: 0;
+    padding: 0;
+    min-height: 4px;
+    border-radius: 3px;
+    border: none;
+}
+.gent-dashboard-card progressbar trough, .gent-dashboard-card levelbar block.empty { background: alpha(@theme_text_color, .15); }
+.gent-dashboard-card progressbar progress, .gent-dashboard-card levelbar block.filled { background: @theme_selected_bg_color; }
+.gent-dashboard-link { padding: 2px 0; }
+"""
+
+
+class DashboardCard(Gtk.Frame):
+    def __init__(self, title, publisher):
+        super().__init__(shadow_type=Gtk.ShadowType.NONE)
+        self.get_style_context().add_class("gent-dashboard-card")
+        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, border_width=15)
+        self.add(self.body)
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.title = dashboard_label(title, "gent-dashboard-title")
+        self.publisher = dashboard_label(publisher, "gent-dashboard-publisher")
+        header.add(self.title)
+        header.add(self.publisher)
+        self.body.add(header)
+        self.get_accessible().set_name(title)
+
+    def palette(self):
+        context = self.get_style_context()
+        state = context.get_state()
+        surface = context.get_property("background-color", state)
+
+        def rgb(color):
+            return [round(255 * (v * color.alpha + bg * (1 - color.alpha)))
+                    for v, bg in zip((color.red, color.green, color.blue),
+                                     (surface.red, surface.green, surface.blue))]
+
+        def foreground(widget):
+            style = widget.get_style_context()
+            return rgb(style.get_color(style.get_state()))
+
+        return {"surface": rgb(surface), "text": foreground(self.title),
+                "secondary": foreground(self.publisher), "accent": rgb(context.get_property("outline-color", state))}
+
+
 class DashboardPane(Gtk.Box):
     def __init__(self):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, border_width=12)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.get_style_context().add_class("gent-dashboard")
+        provider = Gtk.CssProvider()
+        provider.load_from_data(DASHBOARD_CSS)
+        screen = self.get_screen()
+        Gtk.StyleContext.add_provider_for_screen(screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.connect("destroy", lambda *_: Gtk.StyleContext.remove_provider_for_screen(screen, provider))
+        self.empty_card = DashboardCard("", "")
         self.rows = None
+        self.last_palette = None
+        self.refresh_source = 0
+        self.load_requested = False
         self.notice = notice_label()
         self.grid = DashboardGrid()
         scroll = Gtk.ScrolledWindow()
@@ -194,8 +275,27 @@ class DashboardPane(Gtk.Box):
         self.pack_start(scroll, True, True, 0)
         self.pack_start(self.notice, False, False, 0)
 
+        self.connect("map", lambda *_: self.load())
+        self.connect("style-updated", self.queue_refresh)
+
     def load(self):
-        page_request("dashboard")
+        self.load_requested = True
+        self.queue_refresh()
+
+    def queue_refresh(self, *_):
+        if self.get_mapped() and not self.refresh_source:
+            self.refresh_source = GLib.idle_add(self.refresh)
+
+    def refresh(self):
+        self.refresh_source = 0
+        if self.get_mapped():
+            cards = self.grid.get_children()
+            palette = (cards[0] if cards else self.empty_card).palette()
+            if self.load_requested or palette != self.last_palette:
+                self.load_requested = False
+                self.last_palette = palette
+                page_request("dashboard", palette=palette)
+        return False
 
     def receive(self, reply):
         if reply.get("unchanged"):
@@ -213,23 +313,28 @@ class DashboardPane(Gtk.Box):
             for row in rows:
                 self.grid.put(self.card(row), 0, 0)
             self.grid.show_all()
+            cards = self.grid.get_children()
+            if cards:
+                first = cards[0]
+                for widget in (first, first.title, first.publisher):
+                    widget.connect("style-updated", self.queue_refresh)
+                self.queue_refresh()
 
     def show_dashboard_notice(self, rows):
         self.notice.set_text("" if rows else "No chats have published a dashboard.")
 
     def card(self, row):
         board = row["board"]
-        frame = Gtk.Frame(label=board["title"])
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, border_width=12)
-        frame.get_label_widget().set_ellipsize(Pango.EllipsizeMode.END)
-        frame.get_label_widget().set_tooltip_text(board["title"])
-        box.pack_start(dashboard_label(row["chat"], "quiet"), False, False, 0)
-        frame.add(box)
+        frame = DashboardCard(board["title"], row["chat"])
         for w in board["widgets"]:
             v, kind = w["value"], w["kind"]
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            frame.body.add(box)
             if kind == "link":
                 if dashboard_web_url(v):
                     link = Gtk.LinkButton.new_with_label(v, w["label"])
+                    link.set_halign(Gtk.Align.START)
+                    link.get_style_context().add_class("gent-dashboard-link")
                     link.set_tooltip_text(v)
                     link.get_child().set_ellipsize(Pango.EllipsizeMode.END)
                     box.pack_start(link, False, False, 0)
@@ -238,39 +343,46 @@ class DashboardPane(Gtk.Box):
                 continue
             if kind == "button":
                 button = Gtk.Button(label=w["label"], tooltip_text=v)
+                button.set_halign(Gtk.Align.START)
                 button.get_child().set_ellipsize(Pango.EllipsizeMode.END)
                 button.connect("clicked", lambda _, r=row, k=w["id"]: page_request(
                     "dashboard_click", agent=r["agent"], revision=r["revision"], widget=k))
                 box.pack_start(button, False, False, 0)
                 continue
-            unit = " " + w["unit"] if w.get("unit") else ""
             if kind == "metric":
                 metric = dashboard_label("")
                 title = GLib.markup_escape_text(re.sub(r"[:\s]+\Z", "", w["label"]))
-                number = GLib.markup_escape_text(str(v) + unit)
+                number = GLib.markup_escape_text(dashboard_reading(v, w.get("unit")))
                 metric.set_markup(f"<b>{title}:</b> {number}")
                 metric.set_selectable(True)
                 box.pack_start(metric, False, False, 0)
                 continue
-            caption = dashboard_label(w["label"], "section")
-            box.pack_start(caption, False, False, 0)
+            caption = dashboard_label(w["label"], "gent-dashboard-heading")
+            if kind in ("graph", "progress", "gauge"):
+                heading = Gtk.Box(spacing=8)
+                heading.pack_start(caption, True, True, 0)
+                current = (v[-1] if v else None) if kind == "graph" else v
+                readout = dashboard_label(dashboard_reading(current, w.get("unit")), "gent-dashboard-current")
+                readout.set_xalign(1)
+                readout.set_selectable(True)
+                heading.pack_end(readout, False, False, 0)
+                box.add(heading)
+            else:
+                box.add(caption)
             if kind == "image":
-                box.pack_start(dashboard_image(w["label"], v), False, False, 0)
+                box.add(dashboard_image(w["label"], v))
                 continue
             if kind in ("graph", "bar", "pie", "radar", "scatter"):
-                box.pack_start(dashboard_chart(w), False, False, 0)
-                if kind != "graph":
-                    continue
-                shown = str(v[-1]) if v else "—"
-            elif kind in ("progress", "gauge"):
+                box.add(dashboard_chart(w))
+                continue
+            if kind in ("progress", "gauge"):
                 low, high = w.get("min", 0), w.get("max", 100)
                 fraction = (v - low) / (high - low)
                 bar = Gtk.ProgressBar(fraction=fraction) if kind == "progress" else Gtk.LevelBar(value=fraction)
-                box.pack_start(bar, False, False, 0)
-                shown = str(v)
-            else:
-                shown = "\n".join(v) if kind == "events" else v
-            value = dashboard_label(shown + unit)
+                box.add(bar)
+                continue
+            shown = "\n".join(v) if kind == "events" else v
+            value = dashboard_label(shown + (" " + w["unit"] if w.get("unit") else ""))
             value.set_max_width_chars(38)
             value.set_selectable(True)
             box.pack_start(value, False, False, 0)

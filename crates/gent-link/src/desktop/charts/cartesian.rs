@@ -1,13 +1,14 @@
 use super::{
-    Chart, GRID, INK, SERIES, fit, number,
+    Chart, Palette, WIDTH, fit, number,
     scale::{Axis, exact_number},
+    text_width,
 };
 use serde_json::Value;
 use std::fmt::Write;
 
 type Point = (f64, f64);
-const LEFT: f64 = 76.0;
-const RIGHT: f64 = 222.0;
+const EDGE: f64 = 6.0;
+const TICK_GAP: f64 = 6.0;
 const TOP: f64 = 32.0;
 const BOTTOM: f64 = 135.0;
 
@@ -20,12 +21,58 @@ fn extent(points: &[Point], get: impl Fn(&Point) -> f64) -> (f64, f64) {
         })
 }
 
+struct HorizontalLayout {
+    left: f64,
+    right: f64,
+    ticks: Vec<(f64, String)>,
+}
+
+impl HorizontalLayout {
+    fn measure(axis: Axis, values: &[f64], y_tick_width: usize) -> Self {
+        let mut ticks: Vec<_> = values
+            .iter()
+            .map(|&n| (axis.fraction(n), axis.tick_label(n)))
+            .collect();
+        // Leave room for the right-aligned y ticks and the centered x labels
+        // at either end of the plot.
+        let half_label = |label: &str| text_width(label) as f64 / 2.0;
+        let left = EDGE + (y_tick_width as f64 + TICK_GAP).max(half_label(&ticks[0].1));
+        let right = WIDTH as f64 - EDGE - half_label(&ticks.last().unwrap().1);
+        for (fraction, _) in &mut ticks {
+            *fraction = left + *fraction * (right - left);
+        }
+        Self { left, right, ticks }
+    }
+
+    fn for_axis(axis: Axis, samples: Option<usize>, y_tick_width: usize) -> Self {
+        let values = if let Some(count) = samples {
+            let mut ticks = vec![1.0, count.div_ceil(2) as f64, count as f64];
+            ticks.dedup();
+            ticks
+        } else {
+            axis.ticks(2)
+        };
+        let layout = Self::measure(axis, &values, y_tick_width);
+        // Two long scientific labels can crowd each other if the nice ticks
+        // lie inside the domain. Give the endpoint labels the full plot span.
+        if layout.ticks.windows(2).any(|pair| {
+            let ((a, first), (b, second)) = (&pair[0], &pair[1]);
+            b - a < (text_width(first) + text_width(second)) as f64 / 2.0 + TICK_GAP
+        }) {
+            Self::measure(axis, &[axis.low, axis.high], y_tick_width)
+        } else {
+            layout
+        }
+    }
+}
+
 pub(super) fn render(
     kind: &str,
     values: &[Value],
     label: &str,
     unit: Option<&str>,
     x_unit: Option<&str>,
+    palette: &Palette,
 ) -> Option<Chart> {
     let graph = kind == "graph";
     let points = values
@@ -49,7 +96,11 @@ pub(super) fn render(
     };
     let y_label = unit.unwrap_or(label);
     if points.is_empty() {
-        let mut chart = Chart::new(84, format!("{label}. No data. Axes: {x_label}, {y_label}."));
+        let mut chart = Chart::new(
+            84,
+            format!("{label}. No data. Axes: {x_label}, {y_label}."),
+            palette,
+        );
         chart.text(130.0, 24.0, "middle", &fit(y_label, 244));
         chart.text(
             130.0,
@@ -64,7 +115,19 @@ pub(super) fn render(
     let (min_y, max_y) = extent(&points, |p| p.1);
     let x_axis = Axis::new(min_x, max_x);
     let y_axis = Axis::new(min_y, max_y);
-    let x = |n| LEFT + x_axis.fraction(n) * (RIGHT - LEFT);
+    let y_ticks: Vec<_> = y_axis
+        .ticks(4)
+        .into_iter()
+        .map(|n| (n, y_axis.tick_label(n)))
+        .collect();
+    let y_tick_width = y_ticks
+        .iter()
+        .map(|(_, label)| text_width(label))
+        .max()
+        .unwrap();
+    let HorizontalLayout { left, right, ticks } =
+        HorizontalLayout::for_axis(x_axis, graph.then_some(points.len()), y_tick_width);
+    let x = |n| left + x_axis.fraction(n) * (right - left);
     let y = |n| BOTTOM - y_axis.fraction(n) * (BOTTOM - TOP);
     let description = format!(
         "{label}. {} {}. {x_label}: {} to {}. {y_label}: {} to {}.",
@@ -75,30 +138,34 @@ pub(super) fn render(
         exact_number(min_y),
         exact_number(max_y)
     );
-    let mut chart = Chart::new(178, description);
-    chart.text(8.0, 17.0, "start", &fit(y_label, 244));
-    for tick in y_axis.ticks(4) {
-        chart.line(LEFT, y(tick), RIGHT, y(tick), GRID);
-        chart.text(LEFT - 6.0, y(tick) + 4.0, "end", &y_axis.tick_label(tick));
+    let mut chart = Chart::new(178, description, palette);
+    let colors = chart.colors;
+    chart.text(
+        left,
+        17.0,
+        "start",
+        &fit(y_label, (WIDTH as f64 - EDGE - left) as usize),
+    );
+    for (tick, label) in y_ticks {
+        chart.line(left, y(tick), right, y(tick), colors.grid);
+        chart.secondary_text(left - TICK_GAP, y(tick) + 4.0, "end", &label);
     }
-    chart.line(LEFT, TOP, LEFT, BOTTOM, INK);
-    chart.line(LEFT, BOTTOM, RIGHT, BOTTOM, INK);
-    let ticks = if graph {
-        let mut samples = vec![1.0, (points.len() as f64 / 2.0).ceil(), points.len() as f64];
-        samples.dedup();
-        samples
-    } else {
-        x_axis.ticks(2)
-    };
-    for tick in ticks {
-        chart.line(x(tick), BOTTOM, x(tick), BOTTOM + 4.0, INK);
-        chart.text(x(tick), BOTTOM + 17.0, "middle", &x_axis.tick_label(tick));
+    chart.line(left, TOP, left, BOTTOM, colors.secondary);
+    chart.line(left, BOTTOM, right, BOTTOM, colors.secondary);
+    for (position, label) in ticks {
+        chart.line(position, BOTTOM, position, BOTTOM + 4.0, colors.secondary);
+        chart.secondary_text(position, BOTTOM + 17.0, "middle", &label);
     }
-    chart.text((LEFT + RIGHT) / 2.0, 171.0, "middle", &fit(x_label, 206));
+    chart.text(
+        (left + right) / 2.0,
+        171.0,
+        "middle",
+        &fit(x_label, (right - left) as usize),
+    );
     for (axis_name, axis) in [("X", x_axis), ("Y", y_axis)] {
         if let Some(origin) = axis.origin_label() {
             chart.height += 18;
-            chart.text(
+            chart.secondary_text(
                 8.0,
                 chart.height as f64 - 5.0,
                 "start",
@@ -109,11 +176,11 @@ pub(super) fn render(
     let pixels: Vec<_> = points.iter().map(|&(a, b)| (x(a), y(b))).collect();
     if graph && pixels.len() > 1 {
         let path = spline(&pixels);
-        write!(chart.body, r#"<path d="{path}" fill="none" stroke="{SERIES}" stroke-width="2.2" stroke-linejoin="round"/>"#).unwrap();
+        write!(chart.body, r#"<path d="{path}" fill="none" stroke="{}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>"#, colors.accent).unwrap();
     }
     if !graph || pixels.len() <= 12 {
         for (a, b) in pixels {
-            chart.dot(a, b, 2.6, SERIES);
+            chart.mark(a, b);
         }
     }
     Some(chart)

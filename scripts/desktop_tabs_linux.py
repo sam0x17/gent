@@ -1,5 +1,8 @@
 """Drive the real tab widgets via AT-SPI in the smoke test's private graphical session."""
+from collections import Counter
+from itertools import groupby
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -192,9 +195,9 @@ def exercise_dashboard(fixture, agent, cli):
         {"id": "inspect", "kind": "button", "label": "Inspect job", "value": instruction},
         {"id": "report", "kind": "link", "label": "Job report", "value": url},
         {"id": "status", "kind": "text", "label": "Job status", "value": "Job queued"},
-        {"id": "rate", "kind": "metric", "label": "Throughput:", "value": 12.5, "unit": "jobs/s"},
+        {"id": "rate", "kind": "metric", "label": "Throughput:", "value": 72.0, "unit": "%"},
         {"id": "log", "kind": "events", "label": "Recent events", "value": ["Queued", "Started"]},
-        {"id": "work", "kind": "progress", "label": "Work completed", "value": 15, "min": 10, "max": 30},
+        {"id": "work", "kind": "progress", "label": "Work completed", "value": 15.0, "min": 10, "max": 30, "unit": "ms"},
         {"id": "load", "kind": "gauge", "label": "Queue depth", "value": 6, "max": 8, "unit": "jobs"},
         *chart_widgets(),
         {"id": "preview", "kind": "image", "label": "Job preview", "value": image_uri("PNG")},
@@ -253,32 +256,60 @@ def exercise_dashboard(fixture, agent, cli):
                 snap = dashboard_pixels(item)
                 scaled = snap.scale_simple(160, 100, GdkPixbuf.InterpType.BILINEAR)
                 pixels, stride, channels = scaled.get_pixels(), scaled.get_rowstride(), scaled.get_n_channels()
-                colored = set()
-                warm = 0
-                pale_blue = 0
-                for y in range(10, 86):
-                    for x in range(6, 154):
-                        k = y * stride + x * channels
-                        r, g, b = pixels[k:k + 3]
-                        warm += r > b + 45
-                        pale_blue += 205 < r < 235 and b > r + 10
-                        if max(r, g, b) - min(r, g, b) > 45:
-                            colored.add((x, y))
-                # Both cartesian fixtures reverse their middle sample on update.
-                if kind in ("graph", "scatter") and not any(
-                    85 <= x <= 96 and ((y >= 50) if updated else (y < 40)) for x, y in colored
-                ):
-                    return None
-                if kind == "bar" and not all(
-                    any(sum((x, y) in colored for x in range(18, 140)) >= 9 for y in band)
-                    for band in (range(26, 35), range(49, 58), range(72, 81))
-                ):
-                    return None
-                if (kind == "pie" and warm < 100) or (kind == "radar" and pale_blue < 50):
-                    return None
-                if kind == "scatter" and any(57 < x < 82 for x, y in colored):
-                    return None
-                return colored if len(colored) >= 12 else None
+                def rgb(x, y):
+                    k = y * stride + x * channels
+                    return pixels[k:k + 3]
+
+                def different(a, b, threshold=22):
+                    return max(abs(x - y) for x, y in zip(a, b)) > threshold
+
+                surface = rgb(0, 0)
+                if kind in ("graph", "scatter"):
+                    # Subtract each scanline's background (including horizontal gridlines).
+                    # The middle sample moves from the top of the plot to the bottom.
+                    # Locate the long horizontal axis/grid strokes. Tick labels determine
+                    # the plot margins, so the middle point need not be at the SVG center.
+                    spans = []
+                    for y in range(15, 79):
+                        for ink, xs in groupby(range(160), lambda x: different(rgb(x, y), surface, 8)):
+                            if ink:
+                                run = list(xs)
+                                spans.append((len(run), run[0], run[-1]))
+                    span, left, right = max(spans, default=(0, 0, 0))
+                    if span < 60:
+                        return None
+                    middle = (left + right) / 2
+                    marks = set()
+                    for y in range(15, 79):
+                        line = [rgb(x, y) for x in range(left + 3, right - 2)]
+                        background = Counter(line).most_common(1)[0][0]
+                        marks.update((x, y) for x, color in enumerate(line, start=left + 3)
+                                     if different(color, background))
+                    if not any(abs(x - middle) <= 3 and (y > 65 if updated else y < 26) for x, y in marks):
+                        return None
+                    between = any(left + .18 * span < x < left + .32 * span for x, y in marks)
+                    if between != (kind == "graph"):
+                        return None
+                elif kind == "bar":
+                    # Measure the three bars in their interiors, away from labels and ticks.
+                    lengths = [sum(different(rgb(x, y), surface) for x in range(22, 139)) for y in (30, 53, 76)]
+                    a, b, c = lengths
+                    if not (a > c > b > 4 if updated else b > a > c > 4):
+                        return None
+                elif kind == "pie":
+                    # Sample the sectors just inside the rim, beyond their labels.
+                    rim = Counter(rgb(round(80 + 34 * math.sin(i * math.tau / 180)),
+                                      round(42 - 23 * math.cos(i * math.tau / 180))) for i in range(180))
+                    shares = [n / 180 for color, n in rim.most_common(3) if different(color, surface)]
+                    expected = [.6, 1/3, 1/15] if updated else [.5, .3, .2]
+                    if len(shares) != 3 or any(abs(a-b) > .06 for a, b in zip(shares, expected)):
+                        return None
+                else:
+                    # The radar's translucent interior is distinct from the surrounding surface.
+                    fills = Counter(rgb(x, y) for y in range(18, 54) for x in range(53, 109))
+                    if not any(n > 60 and different(color, surface, 8) for color, n in fills.items()):
+                        return None
+                return {(x, y, rgb(x, y)) for x in range(22, 139, 2) for y in range(16, 79, 2)}
             shapes[kind] = wait_for(series, "painted " + kind + " series")
 
         preview = reveal("Job preview", pyatspi.ROLE_IMAGE)
@@ -308,7 +339,7 @@ def exercise_dashboard(fixture, agent, cli):
     get(board["title"], "label", timeout=35)
     get(agent["name"], "label")
     open_report([url])
-    for name in ("Job queued", "Throughput: 12.5 jobs/s", "Queued\nStarted", "15", "6 jobs"):
+    for name in ("Job queued", "Throughput: 72%", "Queued\nStarted", "15 ms", "6 jobs"):
         get(name, "label")
     assert get(None, "progress bar").queryValue().currentValue == 0.25
     assert get(None, "level bar").queryValue().currentValue == 0.75
@@ -326,16 +357,16 @@ def exercise_dashboard(fixture, agent, cli):
     fixture.call("gent_ack", {"message_id": message["id"]})
 
     assert call("update", expected_revision=1, values={"status": "Job done", "trend": [8, 1, 9],
-                "work": 30, "load": 2, "log": ["Finished"], "report": updated_url, "rate": 18,
+                "work": 30, "load": 0.0, "log": ["Finished"], "report": updated_url, "rate": 18.125,
                 "preview": image_uri("JPEG", reverse=True), "runs": [[1, 8], [2, 1], [3, 9]],
                 **{key: [{"label": label, "value": n} for label, n in [("Build", 9), ("Test", 1), ("Ship", 5)]]
                    for key in ("counts", "share", "profile")}})["revision"] == 2
     get("Job done", "label", timeout=35)
     open_report([url, updated_url])
-    for name in ("Throughput: 18 jobs/s", "30", "2 jobs", "Finished"):
+    for name in ("Throughput: 18.125%", "30 ms", "0 jobs", "Finished"):
         get(name, "label")
     assert get(None, "progress bar").queryValue().currentValue == 1
-    assert get(None, "level bar").queryValue().currentValue == 0.25
+    assert get(None, "level bar").queryValue().currentValue == 0
     changed = chart_pixels(updated=True)
     for kind in initial:
         assert len(initial[kind] ^ changed[kind]) > 12, kind

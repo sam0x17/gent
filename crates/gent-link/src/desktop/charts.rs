@@ -1,19 +1,40 @@
 //! Static dashboard graphics shared by the native desktop frontends.
+use colors::{Color, Colors};
+use serde::Deserialize;
 use serde_json::Value;
 use std::fmt::Write;
 
 mod cartesian;
 mod categories;
+mod colors;
 mod scale;
 #[cfg(test)]
 mod tests;
 
-const INK: &str = "#253342";
-const GRID: &str = "#c8cfd6";
-const SERIES: &str = "#245d78";
 const WIDTH: usize = 260;
 
-pub(super) fn decorate(widget: &mut Value) {
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Palette {
+    pub(super) surface: [u8; 3],
+    pub(super) text: [u8; 3],
+    pub(super) secondary: [u8; 3],
+    pub(super) accent: [u8; 3],
+}
+
+// Local fixtures predating palette negotiation use a neutral light surface.
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            surface: [250, 250, 250],
+            text: [36, 38, 40],
+            secondary: [85, 88, 92],
+            accent: [44, 94, 122],
+        }
+    }
+}
+
+pub(super) fn decorate(widget: &mut Value, palette: &Palette) {
     let Some(fields) = widget.as_object_mut() else {
         return;
     };
@@ -38,9 +59,10 @@ pub(super) fn decorate(widget: &mut Value) {
             &label,
             unit.as_deref(),
             field("x_unit").as_deref(),
+            palette,
         ),
         "bar" | "pie" | "radar" if values.len() <= 16 => {
-            categories::render(kind, values, &label, unit.as_deref())
+            categories::render(kind, values, &label, unit.as_deref(), palette)
         }
         _ => None,
     };
@@ -110,23 +132,25 @@ fn fit(input: &str, pixels: usize) -> String {
 }
 
 struct Chart {
+    colors: Colors,
     height: usize,
     description: String,
     body: String,
 }
 
 impl Chart {
-    fn new(height: usize, description: String) -> Self {
+    fn new(height: usize, description: String, palette: &Palette) -> Self {
         Self {
             height,
             description,
             body: String::new(),
+            colors: Colors::new(palette),
         }
     }
 
     fn svg(&self) -> String {
         format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{h}" viewBox="0 0 {WIDTH} {h}" role="img"><title>{desc}</title><rect width="{WIDTH}" height="{h}" fill="#ffffff"/><g font-family="sans-serif" font-size="12" fill="{INK}">{body}</g></svg>"##,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{h}" viewBox="0 0 {WIDTH} {h}" role="img"><title>{desc}</title><g font-family="sans-serif" font-size="12">{body}</g></svg>"##,
             h = self.height,
             desc = escape(&self.description),
             body = self.body,
@@ -134,15 +158,23 @@ impl Chart {
     }
 
     fn text(&mut self, x: f64, y: f64, anchor: &str, text: &str) {
+        self.colored_text(x, y, anchor, text, self.colors.text);
+    }
+
+    fn secondary_text(&mut self, x: f64, y: f64, anchor: &str, text: &str) {
+        self.colored_text(x, y, anchor, text, self.colors.secondary);
+    }
+
+    fn colored_text(&mut self, x: f64, y: f64, anchor: &str, text: &str, color: Color) {
         write!(
             self.body,
-            r#"<text x="{x:.2}" y="{y:.2}" text-anchor="{anchor}">{}</text>"#,
+            r#"<text x="{x:.2}" y="{y:.2}" fill="{color}" text-anchor="{anchor}">{}</text>"#,
             escape(text)
         )
         .unwrap();
     }
 
-    fn line(&mut self, x: f64, y: f64, end_x: f64, end_y: f64, color: &str) {
+    fn line(&mut self, x: f64, y: f64, end_x: f64, end_y: f64, color: Color) {
         write!(
             self.body,
             r#"<line x1="{x:.2}" y1="{y:.2}" x2="{end_x:.2}" y2="{end_y:.2}" stroke="{color}"/>"#
@@ -150,7 +182,18 @@ impl Chart {
         .unwrap();
     }
 
-    fn dot(&mut self, x: f64, y: f64, radius: f64, color: &str) {
+    // A narrow surface-colored rim separates samples that land on an axis,
+    // a gridline or another sample.
+    fn mark(&mut self, x: f64, y: f64) {
+        write!(
+            self.body,
+            r#"<circle cx="{x:.2}" cy="{y:.2}" r="3" fill="{}" stroke="{}" stroke-width="0.8"/>"#,
+            self.colors.accent, self.colors.surface
+        )
+        .unwrap();
+    }
+
+    fn dot(&mut self, x: f64, y: f64, radius: f64, color: Color) {
         write!(
             self.body,
             r#"<circle cx="{x:.2}" cy="{y:.2}" r="{radius}" fill="{color}"/>"#

@@ -1,4 +1,4 @@
-use super::{CX, Category, Chart, GRID, RADIUS, SERIES, format_number, polar, text_width};
+use super::{CX, Category, Chart, RADIUS, format_number, polar, text_width};
 use std::fmt::Write;
 
 // Spokes above and below the center take centered labels. Labels to either
@@ -60,7 +60,8 @@ pub(super) fn draw(chart: &mut Chart, items: &[Category], max: f64, unit: Option
         }
         write!(
             chart.body,
-            r#"<polygon points="{coordinates}" fill="none" stroke="{GRID}"/>"#
+            r#"<polygon points="{coordinates}" fill="none" stroke="{}"/>"#,
+            chart.colors.grid
         )
         .unwrap();
     }
@@ -68,12 +69,12 @@ pub(super) fn draw(chart: &mut Chart, items: &[Category], max: f64, unit: Option
     let mut markers = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let (x, y) = polar(turn(i), radius);
-        chart.line(CX, super::CY, x, y, GRID);
+        chart.line(CX, super::CY, x, y, chart.colors.grid);
         let (x, y, anchor) = label_position(turn(i), radius);
         if named_radius.is_some() {
             chart.text(x, y, anchor, &item.name);
         } else {
-            chart.text(x, y, "middle", &(i + 1).to_string());
+            chart.secondary_text(x, y, "middle", &(i + 1).to_string());
         }
         let distance = if limit == 0.0 {
             0.0
@@ -84,9 +85,9 @@ pub(super) fn draw(chart: &mut Chart, items: &[Category], max: f64, unit: Option
         write!(shape, "{:.2},{:.2} ", point.0, point.1).unwrap();
         markers.push(point);
     }
-    write!(chart.body, r#"<polygon points="{shape}" fill="{SERIES}" fill-opacity="0.18" stroke="{SERIES}" stroke-width="2"/>"#).unwrap();
+    write!(chart.body, r#"<polygon points="{shape}" fill="{0}" fill-opacity="0.18" stroke="{0}" stroke-width="2" stroke-linejoin="round"/>"#, chart.colors.accent).unwrap();
     for (x, y) in markers {
-        chart.dot(x, y, 2.6, SERIES);
+        chart.mark(x, y);
     }
     let scale = if percentage {
         "Center 0% · Rings 25%, 50%, 75%, 100%".to_owned()
@@ -99,7 +100,7 @@ pub(super) fn draw(chart: &mut Chart, items: &[Category], max: f64, unit: Option
             format_number(max)
         )
     };
-    chart.text(CX, 202.0, "middle", &scale);
+    chart.secondary_text(CX, 202.0, "middle", &scale);
     write!(chart.description, " {scale}.").unwrap();
     chart.height = 212;
     named_radius.is_none()

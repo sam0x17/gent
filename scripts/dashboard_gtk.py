@@ -1,4 +1,5 @@
 """Exercise the GTK dashboard in a private Xvfb display (no daemon required)."""
+import os
 from pathlib import Path
 import runpy
 import sys
@@ -13,11 +14,17 @@ from desktop_fixture_browser import install_fixture_browser
 
 
 def exercise(root):
+    # GTK_THEME forces a variant even when GtkSettings changes. This subprocess
+    # exercises live changes; the daemon smoke inherits the caller's chosen theme.
+    os.environ.pop("GTK_THEME", None)
     install_fixture_browser(root)
     desktop = Path(__file__).resolve().parents[1] / "crates/gent-link/src/desktop"
     with patch.object(sys, "argv", ["linux.py", "", "window"]):
         ui = runpy.run_path(str(desktop / "linux.py"), run_name="linux")
     Gtk, GLib = ui["Gtk"], ui["GLib"]
+    settings = Gtk.Settings.get_default()
+    settings.props.gtk_theme_name = "Adwaita"
+    settings.props.gtk_application_prefer_dark_theme = False
     requests = []
     ui["page_request"] = lambda action, **fields: requests.append((action, fields))
     pane = runpy.run_path(str(desktop / "dashboard.py"), init_globals=ui, run_name="dashboard")["DashboardPane"]()
@@ -217,6 +224,75 @@ def exercise(root):
         pane.receive({"rows": [row(0, [dict(item, value=bad)])]})
         assert not widgets(pane, Gtk.DrawingArea)
         assert "Image unavailable" in [w.get_text() for w in widgets(pane, Gtk.Label)]
+
+    themed = [dict(charts[0], value=[15.0]),
+              {"id": "pct", "label": "Complete", "kind": "progress", "value": 72.0, "unit": "%"},
+              {"id": "count", "label": "Workers", "kind": "gauge", "value": 3.125, "max": 8},
+              dict(metric, value=0.0), dict(item, value=image_uri("PNG"))]
+
+    def apply_palette():
+        action, fields = requests[-1]
+        assert action == "dashboard" and set(fields) == {"palette"}
+        palette = fields["palette"]
+        assert set(palette) == {"surface", "text", "secondary", "accent"}
+        assert all(len(rgb) == 3 and all(type(v) is int and 0 <= v <= 255 for v in rgb) for rgb in palette.values())
+        accent = "#%02x%02x%02x" % tuple(palette["accent"])
+        themed[0] = dict(themed[0], chart_svg=
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40" viewBox="0 0 100 40">'
+            f'<circle cx="50" cy="20" r="8" fill="{accent}"/></svg>')
+        pane.receive({"rows": [row(0, list(themed))]})
+        layout(260, 240, [1], overflow=True)
+        frame, = widgets(pane, Gtk.Frame)
+        card = rendered(frame)
+        assert rgb(card, card.get_width() - 5, 40) == tuple(palette["surface"])
+        for cls in (Gtk.ProgressBar, Gtk.LevelBar):
+            bar, = widgets(frame, cls)
+            pixels = rendered(bar)
+            assert rgb(pixels, pixels.get_width() // 8, pixels.get_height() // 2) == tuple(palette["accent"])
+            assert pixels.get_height() <= 8
+        chart, image = widgets(frame, Gtk.DrawingArea)
+        pixels = rendered(chart)
+        assert rgb(pixels, pixels.get_width() // 2, pixels.get_height() // 2) == tuple(palette["accent"])
+        labels = {w.get_text(): w for w in widgets(frame, Gtk.Label)}
+        assert "Δ <rate>: 0 jobs & runs" in labels
+        for title, value in [("Sample history", "15 ms"), ("Complete", "72%"), ("Workers", "3.125")]:
+            a, b = labels[title].get_allocation(), labels[value].get_allocation()
+            assert a.y == b.y and a.x + a.width <= b.x
+        return palette, rendered(image).get_pixels()
+
+    def settle():
+        # Give GTK several frames to validate descendant styles and finish layout.
+        deadline = time.monotonic() + .15
+        wait(lambda: time.monotonic() >= deadline)
+
+    assert len(requests) == 1, requests
+    light, original_image = apply_palette()
+    v.set_value(80)
+    settings.props.gtk_application_prefer_dark_theme = True
+    wait(lambda: len(requests) > 1)
+    dark, dark_image = apply_palette()
+    settle()
+    assert len(requests) == 2 and sum(dark["surface"]) < sum(light["surface"])
+    assert dark_image == original_image and v.get_value() == 80
+
+    custom = Gtk.CssProvider()
+    custom.load_from_data(b"@define-color theme_selected_bg_color #bd4d87;")
+    Gtk.StyleContext.add_provider_for_screen(window.get_screen(), custom, Gtk.STYLE_PROVIDER_PRIORITY_USER)
+    wait(lambda: len(requests) > 2)
+    accented, accent_image = apply_palette()
+    settle()
+    assert len(requests) == 3 and accented["accent"] == [189, 77, 135]
+    assert dark["accent"] != accented["accent"] and accent_image == original_image and v.get_value() == 80
+    window.hide()
+    Gtk.StyleContext.remove_provider_for_screen(window.get_screen(), custom)
+    settings.props.gtk_application_prefer_dark_theme = False
+    settle()
+    assert len(requests) == 3
+    window.show()
+    wait(lambda: len(requests) == 4)
+    settle()
+    assert len(requests) == 4 and requests[-1][1]["palette"] == light
+    requests.clear()
 
     urls = ["http://localhost:8123/job?q=one%20two#chart", "HTTPS://192.168.1.2:444/report",
             "http://[::1]/status"]

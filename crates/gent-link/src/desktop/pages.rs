@@ -1,5 +1,5 @@
 //! Requests from the two native frontends travel only on the supervisor's private pipes.
-use super::login;
+use super::{charts, login};
 use crate::{config_editor, integration::discovery, managed_file::Snapshot, owner, update};
 use anyhow::{Context, Result, ensure};
 use gent_daemon::config::{self, Direct};
@@ -11,7 +11,10 @@ use std::path::Path;
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
-    Dashboard,
+    Dashboard {
+        #[serde(default)]
+        palette: charts::Palette,
+    },
     DashboardClick {
         agent: String,
         revision: u64,
@@ -130,13 +133,19 @@ pub(super) struct Pages {
     // A private, in-memory edit session. The snapshot detects concurrent CLI or daemon writes.
     draft: Option<(Snapshot, uuid::Uuid)>,
     // The same frontend keeps its last rendered dashboard until its pipe closes.
-    dashboard_rows: Option<Vec<Value>>,
+    dashboard_snapshot: Option<(charts::Palette, Vec<Value>)>,
 }
 
 impl Pages {
-    fn dashboard(&mut self, mut rows: Vec<Value>) -> Result<Value> {
+    fn dashboard(&mut self, mut rows: Vec<Value>, palette: charts::Palette) -> Result<Value> {
         rows.sort_by_cached_key(|r| r["chat"].as_str().unwrap_or_default().to_lowercase());
-        if self.dashboard_rows.as_ref() == Some(&rows) {
+        if self
+            .dashboard_snapshot
+            .as_ref()
+            .is_some_and(|(previous_palette, previous_rows)| {
+                previous_palette == &palette && previous_rows == &rows
+            })
+        {
             return Ok(json!({"unchanged":true}));
         }
         let mut display = rows.clone();
@@ -145,10 +154,10 @@ impl Pages {
                 .as_array_mut()
                 .context("invalid dashboard widgets")?
             {
-                super::charts::decorate(widget);
+                charts::decorate(widget, &palette);
             }
         }
-        self.dashboard_rows = Some(rows);
+        self.dashboard_snapshot = Some((palette, rows));
         Ok(json!({"rows":display}))
     }
 
@@ -157,7 +166,7 @@ impl Pages {
             return json!({"page":"settings","error":"Invalid desktop request"});
         };
         let page = match request {
-            Request::Dashboard | Request::DashboardClick { .. } => "dashboard",
+            Request::Dashboard { .. } | Request::DashboardClick { .. } => "dashboard",
             Request::About => "about",
             Request::Cluster => "cluster",
             Request::Permissions => "permissions",
@@ -175,7 +184,7 @@ impl Pages {
 
     async fn handle(&mut self, home: &Path, request: Request) -> Result<Value> {
         match request {
-            Request::Dashboard => {
+            Request::Dashboard { palette } => {
                 let mut after = None;
                 let mut rows = Vec::new();
                 loop {
@@ -200,7 +209,7 @@ impl Pages {
                     );
                     after = Some(cursor.to_owned());
                 }
-                self.dashboard(rows)
+                self.dashboard(rows, palette)
             }
             Request::DashboardClick {
                 agent,
@@ -286,19 +295,42 @@ mod tests {
     #[test]
     fn dashboard_refresh_only_sends_charts_when_the_snapshot_changes() {
         let mut pages = Pages::default();
+        let read_palette = |request| match serde_json::from_value::<Request>(request).unwrap() {
+            Request::Dashboard { palette } => palette,
+            _ => unreachable!(),
+        };
+        let light = read_palette(json!({"op":"dashboard"}));
+        let dark = read_palette(json!({"op":"dashboard","palette":{
+            "surface":[32,33,37],"text":[240,241,242],"secondary":[159,160,161],"accent":[180,155,255]
+        }}));
         let mut rows = vec![json!({"agent":"chat","chat":"Trainer","revision":1,
             "board":{"title":"Training","widgets":[{"id":"loss","kind":"graph",
                 "label":"Loss","unit":"%","value":[4,2,3]}]}})];
-        let first = pages.dashboard(rows.clone()).unwrap();
+        let first = pages.dashboard(rows.clone(), light).unwrap();
         assert!(first["rows"][0]["board"]["widgets"][0]["chart_svg"].is_string());
         assert_eq!(
-            pages.dashboard(rows.clone()).unwrap(),
+            pages.dashboard(rows.clone(), light).unwrap(),
+            json!({"unchanged":true})
+        );
+        let recolored = pages.dashboard(rows.clone(), dark).unwrap();
+        assert_ne!(
+            first["rows"][0]["board"]["widgets"][0]["chart_svg"],
+            recolored["rows"][0]["board"]["widgets"][0]["chart_svg"]
+        );
+        assert_eq!(
+            pages.dashboard(rows.clone(), dark).unwrap(),
             json!({"unchanged":true})
         );
         rows[0]["chat"] = json!("Renamed");
-        assert_eq!(pages.dashboard(rows).unwrap()["rows"][0]["chat"], "Renamed");
-        assert_eq!(pages.dashboard(vec![]).unwrap(), json!({"rows":[]}));
-        assert_eq!(pages.dashboard(vec![]).unwrap(), json!({"unchanged":true}));
+        assert_eq!(
+            pages.dashboard(rows, dark).unwrap()["rows"][0]["chat"],
+            "Renamed"
+        );
+        assert_eq!(pages.dashboard(vec![], dark).unwrap(), json!({"rows":[]}));
+        assert_eq!(
+            pages.dashboard(vec![], dark).unwrap(),
+            json!({"unchanged":true})
+        );
     }
 
     #[tokio::test]

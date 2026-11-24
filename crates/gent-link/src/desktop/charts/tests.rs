@@ -1,10 +1,10 @@
-use super::{decorate, scale::Axis};
+use super::{Palette, decorate, scale::Axis};
 use serde_json::{Value, json};
 
 fn rendered(kind: &str, values: Value) -> (String, String) {
     let mut widget =
         json!({"kind":kind, "label":"Latency", "unit":"ms", "x_unit":"Bytes", "value":values});
-    decorate(&mut widget);
+    decorate(&mut widget, &Palette::default());
     let svg = widget["chart_svg"].as_str().unwrap().to_owned();
     assert!(svg.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg" width="260""#));
     assert!(svg.ends_with("</svg>"));
@@ -149,7 +149,7 @@ fn chart_text_is_bounded_and_cannot_supply_svg_elements_or_attributes() {
     let malicious = "<image href='file:///tmp'/> & \"\u{ffff}\0";
     let mut widget = json!({"kind":"pie","label":malicious,"unit":malicious,
         "value":[{"label":format!("{malicious}{}","X".repeat(10_000)),"value":1}]});
-    decorate(&mut widget);
+    decorate(&mut widget, &Palette::default());
     let svg = widget["chart_svg"].as_str().unwrap();
     assert!(!svg.contains("<image") && !svg.contains('\u{ffff}') && !svg.contains('\0'));
     assert!(svg.contains("&lt;image") && svg.contains("&amp;") && svg.contains("&quot;"));
@@ -176,7 +176,7 @@ fn invalid_shapes_and_unrecognized_kinds_discard_stale_decorations() {
     ] {
         let mut widget =
             json!({"kind":kind,"value":value,"chart_svg":"stale","chart_description":"stale"});
-        decorate(&mut widget);
+        decorate(&mut widget, &Palette::default());
         assert!(
             widget.get("chart_svg").is_none() && widget.get("chart_description").is_none(),
             "{kind}"
@@ -258,7 +258,7 @@ fn utilization_radar_keeps_a_hundred_percent_outer_ring_even_when_idle() {
     let render = |delta: f64| {
         let mut w = json!({"kind":"radar","label":"Utilization","unit":"%","value":[
             {"label":"CPU","value":delta},{"label":"GPU","value":0},{"label":"RAM","value":0}]});
-        decorate(&mut w);
+        decorate(&mut w, &Palette::default());
         w["chart_svg"].as_str().unwrap().to_owned()
     };
     let quarter = render(25.0);
@@ -270,4 +270,267 @@ fn utilization_radar_keeps_a_hundred_percent_outer_ring_even_when_idle() {
     let larger = render(150.0);
     assert!(larger.contains("Rings: 75 / 150"));
     assert_eq!(larger.matches("<polygon ").count(), 3);
+}
+
+#[test]
+fn palette_accepts_only_the_native_rgb_contract() {
+    let mut input =
+        json!({"surface":[255,254,240],"text":[5,10,0],"secondary":[7,20,18],"accent":[42,0,137]});
+    let palette: Palette = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(palette.accent, [42, 0, 137]);
+    for invalid in [
+        json!([0, 0]),
+        json!([0, 0, 0, 0]),
+        json!([-1, 0, 1]),
+        json!([0, 0, 256]),
+        json!("#ff0000"),
+    ] {
+        input["accent"] = invalid;
+        assert!(serde_json::from_value::<Palette>(input.clone()).is_err());
+    }
+    input["accent"] = json!([1, 2, 3]);
+    input["extra"] = json!("ignored?");
+    assert!(serde_json::from_value::<Palette>(input).is_err());
+}
+
+fn appearances() -> [Palette; 6] {
+    [
+        Palette::default(),
+        Palette {
+            surface: [251, 235, 224],
+            text: [53, 22, 42],
+            secondary: [103, 74, 89],
+            accent: [139, 24, 100],
+        },
+        Palette {
+            surface: [41, 27, 60],
+            text: [248, 230, 252],
+            secondary: [185, 165, 206],
+            accent: [110, 219, 178],
+        },
+        // Intentionally unreadable native colors on a mid-tone chromatic surface.
+        Palette {
+            surface: [79, 139, 93],
+            text: [83, 141, 89],
+            secondary: [72, 134, 96],
+            accent: [79, 139, 93],
+        },
+        Palette {
+            surface: [0; 3],
+            text: [255; 3],
+            secondary: [255, 245, 198],
+            accent: [255, 220, 0],
+        },
+        Palette {
+            surface: [255; 3],
+            text: [0; 3],
+            secondary: [15, 10, 0],
+            accent: [18, 0, 126],
+        },
+    ]
+}
+
+#[test]
+fn roles_preserve_readable_native_colors_and_correct_low_contrast_on_the_actual_surface() {
+    use super::colors::{Color, Colors};
+    assert!((Color([0; 3]).contrast(Color([255; 3])) - 21.0).abs() < 1e-9);
+    assert!(Color([118; 3]).contrast(Color([255; 3])) >= 4.5);
+    assert!(Color([119; 3]).contrast(Color([255; 3])) < 4.5);
+    for palette in appearances() {
+        let colors = Colors::new(&palette);
+        assert_eq!(colors.surface.0, palette.surface);
+        for (actual, native, target) in [
+            (colors.text, palette.text, 4.5),
+            (colors.secondary, palette.secondary, 4.5),
+            (colors.accent, palette.accent, 3.0),
+        ] {
+            assert!(
+                actual.contrast(colors.surface) >= target,
+                "{actual} on {}",
+                colors.surface
+            );
+            if Color(native).contrast(colors.surface) >= target {
+                assert_eq!(actual, Color(native));
+            }
+        }
+        let grid_contrast = colors.grid.contrast(colors.surface);
+        assert!(
+            (1.6..2.2).contains(&grid_contrast),
+            "grid contrast {grid_contrast}"
+        );
+        for ((grid, bg), fg) in colors
+            .grid
+            .0
+            .into_iter()
+            .zip(palette.surface)
+            .zip(colors.text.0)
+        {
+            assert!((bg.min(fg)..=bg.max(fg)).contains(&grid));
+        }
+        let swatches = colors.categories();
+        assert_eq!(swatches[0], colors.accent);
+        for (i, fill) in swatches.into_iter().enumerate() {
+            assert!(!swatches[..i].contains(&fill));
+            assert!(fill.contrast(colors.surface) >= 3.0);
+            assert!(colors.slice_text(fill).contrast(fill) >= 4.5);
+        }
+    }
+}
+
+#[test]
+fn all_five_renderers_use_transparent_canvases_and_semantic_colors() {
+    use super::colors::Colors;
+    for palette in appearances() {
+        let colors = Colors::new(&palette);
+        let cats =
+            json!([{"label":"CPU","value":3},{"label":"GPU","value":2},{"label":"Disk","value":1}]);
+        for (kind, values) in [
+            ("graph", json!([1, 3, 2])),
+            ("scatter", json!([[0, 1], [1, 3]])),
+            ("bar", cats.clone()),
+            ("pie", cats.clone()),
+            ("radar", cats.clone()),
+        ] {
+            let mut widget = json!({"kind":kind,"value":values,"unit":"ms","label":"Delay"});
+            decorate(&mut widget, &palette);
+            let svg = widget["chart_svg"].as_str().unwrap();
+            assert_eq!(
+                svg.matches("<rect ").count(),
+                if kind == "bar" { 3 } else { 0 }
+            );
+            assert!(svg.contains(&format!(
+                r#"fill="{}" text-anchor="start">ms<"#,
+                colors.text
+            )));
+            assert!(svg.contains(&format!(r#"fill="{}" text-anchor="#, colors.secondary)));
+            if matches!(kind, "graph" | "scatter" | "radar") {
+                assert!(svg.contains(&format!(r#"stroke="{}""#, colors.grid)));
+                assert!(svg.contains(&format!(
+                    r#"fill="{}" stroke="{}" stroke-width="0.8""#,
+                    colors.accent, colors.surface
+                )));
+            }
+            if kind == "bar" {
+                assert!(svg.contains(&format!(r#"height="8" fill="{}""#, colors.accent)));
+            }
+            if kind == "graph" || kind == "radar" {
+                assert!(svg.contains(&format!(r#"stroke="{}" stroke-width="2"#, colors.accent)));
+            }
+            if kind == "pie" {
+                let slices: Vec<_> = svg.split("<path ").skip(1).collect();
+                assert_eq!(slices.len(), 3);
+                for (i, slice) in slices.iter().enumerate() {
+                    let fill = colors.categories()[i];
+                    assert!(
+                        slice.contains(&format!(r#"fill="{fill}" stroke="{}""#, colors.surface))
+                    );
+                    assert!(slice.contains(&format!(
+                        r#"fill="{}" text-anchor="middle">{}</text>"#,
+                        colors.slice_text(fill),
+                        i + 1
+                    )));
+                    assert!(svg.contains(&format!(r#"r="4.5" fill="{fill}""#)));
+                }
+                assert!(svg.contains(">50%</text>"));
+            }
+        }
+    }
+    let [_, light, dark, ..] = appearances();
+    assert_ne!(
+        Colors::new(&light).categories(),
+        Colors::new(&dark).categories()
+    );
+}
+
+fn cartesian_layout(svg: &str) -> (f64, f64) {
+    let coordinate = |tag: &str, key: &str| -> f64 {
+        tag.split_once(&format!(" {key}=\""))
+            .unwrap()
+            .1
+            .split('"')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let axis = svg
+        .split("<line")
+        .skip(1)
+        .find(|line| coordinate(line, "y1") == 135.0 && coordinate(line, "y2") == 135.0)
+        .unwrap();
+    let (left, right) = (coordinate(axis, "x1"), coordinate(axis, "x2"));
+    let mut last_end = 0.0;
+    for tag in svg.split("<text").skip(1) {
+        let label = tag
+            .split_once('>')
+            .unwrap()
+            .1
+            .split_once("</text>")
+            .unwrap()
+            .0;
+        let width = super::text_width(label) as f64;
+        let (x, y) = (coordinate(tag, "x"), coordinate(tag, "y"));
+        if y == 152.0 {
+            assert!(
+                x - width / 2.0 >= last_end + 4.0 && x + width / 2.0 <= 256.0,
+                "{label} at {x}"
+            );
+            last_end = x + width / 2.0;
+        } else if tag
+            .split_once('>')
+            .unwrap()
+            .0
+            .contains(r#"text-anchor="end""#)
+        {
+            assert!(x - width >= 4.0 && x <= left - 4.0, "{label} at {x}");
+        } else if y == 17.0 {
+            assert_eq!(x, left, "y caption must align with its axis");
+            assert!(x + width <= 256.0);
+        }
+    }
+    assert!(last_end > 0.0);
+    (left, right)
+}
+
+#[test]
+fn cartesian_width_tracks_tick_strings_and_keeps_edge_labels_visible() {
+    let (graph, _) = rendered("graph", json!([-20, 20, 0]));
+    let (scatter, _) = rendered("scatter", json!([[1, -20], [2, 20], [3, 0]]));
+    for svg in [graph, scatter] {
+        let (left, right) = cartesian_layout(&svg);
+        assert!(
+            right - left >= 208.0,
+            "two-digit y ticks should leave 80% of a 260px card for data"
+        );
+        assert!(left <= 40.0 && right >= 248.0);
+        assert!(svg.contains(&format!(r#"<circle cx="{left:.2}""#)));
+        assert!(svg.contains(&format!(r#"<circle cx="{right:.2}""#)));
+        assert!(svg.contains(">2</text>"), "keep the middle tick when it fits");
+    }
+    let (long, _) = rendered(
+        "scatter",
+        json!([[-9.876e-179, -1.234e-233], [8.876e-179, 1.234e-233]]),
+    );
+    let (left, right) = cartesian_layout(&long);
+    assert!(left > 40.0 && right < 248.0);
+    // A wide first x label can set the left inset even with short y ticks.
+    let (wide_first, _) = rendered("scatter", json!([[-f64::from_bits(1), 0], [0, 1]]));
+    let (left, right) = cartesian_layout(&wide_first);
+    assert!(left > 50.0 && right >= 248.0);
+    // The nice ticks -3.26e-119 and -3.24e-119 are too close together.
+    // Keep two readable labels by placing them at the actual data endpoints.
+    let (crowded, _) = rendered(
+        "scatter",
+        json!([[-326.9e-121, -9.876e-310], [-323.4e-121, 9.876e-310]]),
+    );
+    cartesian_layout(&crowded);
+    assert!(crowded.contains(">-3.269e-119</text>") && crowded.contains(">-3.234e-119</text>"));
+    for points in [
+        json!([[-1.234e101, -1e-317], [9.876e103, 2e-317]]),
+        json!([[1e16, 1e16], [1e16 + 8.0, 1e16 + 8.0]]),
+        json!([[0.0000001, -300], [0.0000001, -300]]),
+        json!([[0, -1], [f64::from_bits(1), 0]]),
+    ] {
+        cartesian_layout(&rendered("scatter", points).0);
+    }
 }
