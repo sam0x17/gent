@@ -4,6 +4,11 @@ Expose cluster resources from every enrolled machine with the required permissio
 Resolve the resource through the cluster directory. When a conversation needs its
 native host, route the request there on the caller's behalf.
 
+# Completing work and releases
+
+- Land completed client changes on the remote `main` branch and verify that it contains the finished commit.
+- Before reporting a client release complete, verify that remote `main` contains the released commit. Maintainers working across both repositories must also land and verify the corresponding client submodule update and release work on the parent repository’s remote `main`.
+
 # CI
 
 - macOS CI must be manual-only. Put macOS jobs in workflows triggered solely by `workflow_dispatch`; do not trigger them through pushes, pull requests, schedules, or automatic workflow chaining.
