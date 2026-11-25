@@ -44,13 +44,45 @@ pub(crate) fn classify(code: &str, details: &str) -> Option<Failure> {
             let body = text.get(text.find('{')?..=text.rfind('}')?)?;
             let envelope: serde_json::Value = serde_json::from_str(body).ok()?;
             let error = &envelope["error"];
-            (error["type"] == "invalid_request_error"
-                && error["message"] == "invalid request payload")
-                .then_some(Failure::RequestPayload)
+            if error["type"] != "invalid_request_error" {
+                return None;
+            }
+            if error["message"] == "invalid request payload" {
+                return Some(Failure::RequestPayload);
+            }
+            if error["code"] != "unknown_parameter" {
+                return None;
+            }
+            let path = error["param"].as_str()?;
+            if error["message"].as_str()? != format!("unknown parameter: '{path}'.") {
+                return None;
+            }
+            unknown_input_role(path)
         }),
         _ => None,
     }
 }
+
+fn unknown_input_role(path: &str) -> Option<Failure> {
+    fn indexed(field: &str, name: &str) -> bool {
+        field.split_once('[').is_some_and(|(key, index)| {
+            key == name
+                && index.strip_suffix(']').is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+        })
+    }
+    let mut fields = path.strip_suffix(".role")?.split('.');
+    if !indexed(fields.next()?, "input") {
+        return None;
+    }
+    let first = fields.next()?;
+    if indexed(first, "content") && fields.next().is_none() {
+        return Some(Failure::RequestPayload);
+    }
+    (indexed(first, "tools") && fields.all(|f| indexed(f, "tools"))).then_some(Failure::ToolSchema)
+}
+
 fn classify_details(text: &str) -> Option<Failure> {
     match () {
         _ if text.contains("at capacity")
@@ -98,6 +130,43 @@ fn classify_details(text: &str) -> Option<Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn matches_unknown_role_only_in_provider_input_content_or_tools() {
+        fn failure(path: &str, message_path: &str) -> String {
+            serde_json::json!({"error":{"message": format!("Unknown parameter: '{message_path}'."),
+                "type": "invalid_request_error", "code":"unknown_parameter", "param":path}})
+            .to_string()
+        }
+        for (path, expected) in [
+            ("input[0].tools[0].tools[0].role", Some(Failure::ToolSchema)),
+            ("input[12].tools[3].role", Some(Failure::ToolSchema)),
+            ("input[1].content[0].role", Some(Failure::RequestPayload)),
+            ("input[0].tools[].role", None),
+            ("input[0].content[0].tools[0].role", None),
+            ("input[x].tools[0].role", None),
+            ("input[0].metadata[0].role", None),
+            ("input[0].tools[0].name", None),
+            ("role", None),
+        ] {
+            let details = format!("■ {}", failure(path, path));
+            assert_eq!(classify("other", &details), expected, "{path}");
+            assert_eq!(classify("authentication_failed", &details), None);
+        }
+        let path = "input[0].tools[0].tools[0].role";
+        assert_eq!(classify("other", &failure(path, "other")), None);
+        assert_eq!(
+            classify(
+                "other",
+                &failure(path, path).replace("unknown_parameter", "unauthorized")
+            ),
+            None
+        );
+        assert_eq!(
+            classify("other", &format!("Unknown parameter: '{path}'.")),
+            None
+        );
+    }
+
     #[test]
     fn matches_provider_failures_and_excludes_unrelated_invalid_requests() {
         assert_eq!(
