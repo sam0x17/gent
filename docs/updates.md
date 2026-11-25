@@ -2,6 +2,8 @@
 
 With automatic updates enabled, a running Gent daemon checks its cluster’s selected release every five minutes in `sam0x17/gent`. Existing clusters default to stable. Stable resolves `refs/tags/stable` and peels annotated tags. Beta resolves the branch `refs/heads/beta`. Both channels resolve their refs directly through Git. A clean installed executable whose embedded commit matches the selected SHA skips the build.
 
+One early Stable release, `2e07f92`, predates release channels and cannot open a cluster that has selected Beta, even after a switch back to Stable. While the public Stable tag points to that commit, the channel-aware updater uses the compatible release tagged `channel-v1-bootstrap`. It checks that tag against the commit pinned in the client. `gent update check --json` shows the advertised Stable commit, the ref actually used in `resolved_ref`, and the install target in `blessed_commit`. The next compatible public Stable release takes precedence automatically.
+
 Use `gent cluster channel get --json` to inspect the selection. Run `gent cluster channel set beta` to follow beta or `gent cluster channel set stable` to return to stable. Channel-aware nodes follow the selected commit even when it is older than their installed build. Upgrade each node to a channel-aware stable build before the cluster’s first switch to beta. Earlier daemons only follow the stable tag and cannot read the signed beta selection.
 
 Install the first updater-capable release once on each machine:
