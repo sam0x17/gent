@@ -62,13 +62,13 @@ fn stable_tag_resolution_supports_lightweight_and_annotated_tags_without_other_r
     let b = "b".repeat(40);
     assert_eq!(
         release::STABLE
-            .parse(format!("{a}\trefs/tags/stable\n").as_bytes())
+            .parse(format!("{a}\trefs/tags/stable\n").lines())
             .unwrap(),
         a
     );
     assert_eq!(
         release::STABLE
-            .parse(format!("{a}\trefs/tags/stable\n{b}\trefs/tags/stable^{{}}\n").as_bytes())
+            .parse(format!("{a}\trefs/tags/stable\n{b}\trefs/tags/stable^{{}}\n").lines())
             .unwrap(),
         b
     );
@@ -80,7 +80,7 @@ fn stable_tag_resolution_supports_lightweight_and_annotated_tags_without_other_r
         format!("{a}\trefs/tags/stable^{{}}\n"),
         format!("{a}\trefs/tags/stable\n{b}\trefs/tags/stable\n"),
     ] {
-        assert!(release::STABLE.parse(bytes.as_bytes()).is_err());
+        assert!(release::STABLE.parse(bytes.lines()).is_err());
     }
 }
 
@@ -90,7 +90,7 @@ fn beta_resolution_requires_one_exact_branch() {
     let b = "b".repeat(40);
     assert_eq!(
         release::BETA
-            .parse(format!("{a}\trefs/heads/beta\n").as_bytes())
+            .parse(format!("{a}\trefs/heads/beta\n").lines())
             .unwrap(),
         a
     );
@@ -102,7 +102,7 @@ fn beta_resolution_requires_one_exact_branch() {
         format!("{a}\trefs/heads/beta\n{b}\trefs/heads/beta\n"),
         "abcd\trefs/heads/beta\n".into(),
     ] {
-        assert!(release::BETA.parse(bytes.as_bytes()).is_err());
+        assert!(release::BETA.parse(bytes.lines()).is_err());
     }
 }
 
