@@ -55,24 +55,27 @@ fn eligible(build: &Build) -> bool {
 }
 
 async fn check(home: &Path, installation: &Installation) -> Result<Value> {
-    compare_release(home, install::inspect(&installation.binary).await?).await
+    compare_release(home, install::version(&installation.binary).await?).await
 }
 
 pub(crate) async fn desktop_check(home: &Path) -> Result<Value> {
     match Installation::discover()? {
         Some(installation) => check(home, &installation).await,
-        None => compare_release(home, build_info::current()).await,
+        None => compare_release(home, build_info::version()).await,
     }
 }
 
-async fn compare_release(home: &Path, installed: Build) -> Result<Value> {
+async fn compare_release(home: &Path, version: build_info::Version) -> Result<Value> {
+    let installed = version.build;
     let channel = ReleaseRef::current(home)?;
     let _progress = crate::ui::Progress::start(&format!("Checking GitHub {}", channel.channel));
     let blessed = channel.resolve().await?;
+    let resolution = blessed.resolution;
     Ok(
-        json!({"installed":installed,"blessed_commit":blessed.commit,
-        "update_available": installed.commit != blessed.commit || installed.dirty,
-        "repository":blessed.repository,"channel":channel.channel,"release_ref":channel.reference,"source":channel.source}),
+        json!({"installed":installed,"blessed_commit":resolution.blessed_commit,
+        "resolved_ref":resolution.resolved_ref,"advertised_commit":resolution.advertised_commit,
+        "update_available": !resolution.matches_build(&installed, version.bootstrap_commit.as_deref()),
+        "repository":blessed.repository,"channel":channel.channel,"release_ref":channel.reference,"source":resolution.source}),
     )
 }
 

@@ -11,6 +11,27 @@ pub(crate) struct Build {
     pub test_build: bool,
 }
 
+// Keep updater protocol v1 Build and its activation-journal equality intact.
+// Older publishers only include the original Build fields in pending.json.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Version {
+    #[serde(flatten)]
+    pub build: Build,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_commit: Option<String>,
+}
+
+pub(crate) fn version() -> Version {
+    Version {
+        build: current(),
+        bootstrap_commit: bootstrap_commit().map(str::to_owned),
+    }
+}
+
+pub(crate) fn bootstrap_commit() -> Option<&'static str> {
+    option_env!("GENT_BOOTSTRAP_COMMIT").filter(|pin| valid_commit(pin))
+}
+
 pub(crate) fn current() -> Build {
     Build {
         package: "gent-link".into(),

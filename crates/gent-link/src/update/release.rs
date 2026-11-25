@@ -2,6 +2,7 @@
 //! crates.io backend without changing publication or daemon activation.
 use anyhow::{Context, Result, ensure};
 use gent_daemon::release_channel::{self, ReleaseChannel};
+use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -11,8 +12,28 @@ use tokio::process::Command;
 pub(super) const REPOSITORY: &str = "https://github.com/sam0x17/gent.git";
 const SSH_REPOSITORY: &str = "ssh://git@github.com/sam0x17/gent.git";
 
+const LEGACY_STABLE: &str = "2e07f9214f1e119c4c181fe135c12c32f569e38c";
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct Resolution {
+    pub release_ref: String,
+    pub advertised_commit: String,
+    pub resolved_ref: String,
+    pub source: String,
+    pub blessed_commit: String,
+}
+
+impl Resolution {
+    pub fn matches_build(&self, build: &crate::build_info::Build, pin: Option<&str>) -> bool {
+        build.commit == self.blessed_commit
+            && !build.dirty
+            && (self.resolved_ref != BOOTSTRAP.reference
+                || pin == Some(self.blessed_commit.as_str()))
+    }
+}
+
 pub(super) struct Release {
-    pub commit: String,
+    pub resolution: Resolution,
     pub repository: String,
 }
 
@@ -44,6 +65,12 @@ pub(super) const STABLE: ReleaseRef = ReleaseRef {
     source: "github_stable_tag",
     peeled: Some("refs/tags/stable^{}"),
 };
+const BOOTSTRAP: ReleaseRef = ReleaseRef {
+    channel: ReleaseChannel::Stable,
+    reference: "refs/tags/channel-v1-bootstrap",
+    source: "github_channel_bootstrap_tag",
+    peeled: Some("refs/tags/channel-v1-bootstrap^{}"),
+};
 pub(super) const BETA: ReleaseRef = ReleaseRef {
     channel: ReleaseChannel::Beta,
     reference: "refs/heads/beta",
@@ -62,12 +89,16 @@ impl ReleaseRef {
         })
     }
 
-    pub fn parse(self, bytes: &[u8]) -> Result<String> {
+    pub fn parse<'a>(self, lines: impl Iterator<Item = &'a str>) -> Result<String> {
         let mut direct = None;
         let mut peeled = None;
-        for line in std::str::from_utf8(bytes)?.lines() {
+        for line in lines {
             let (sha, reference) = line.split_once('\t').context("invalid Git ref response")?;
-            ensure!(crate::build_info::valid_commit(sha), "invalid Git revision");
+            ensure!(
+                crate::build_info::valid_commit(sha),
+                "invalid Git revision for {}",
+                self.reference
+            );
             let target = if reference == self.reference {
                 &mut direct
             } else if self.peeled == Some(reference) {
@@ -75,13 +106,16 @@ impl ReleaseRef {
             } else {
                 anyhow::bail!("unexpected reference when resolving {}", self.reference);
             };
-            ensure!(target.replace(sha).is_none(), "duplicate Git reference");
+            ensure!(
+                target.replace(sha).is_none(),
+                "duplicate Git reference {reference}"
+            );
         }
         let direct = direct.with_context(|| format!("the repository has no {}", self.reference))?;
         Ok(peeled.unwrap_or(direct).into())
     }
 
-    async fn resolve_from(self, repository: &str) -> Result<Release> {
+    async fn list_refs(self, repository: &str) -> Result<Vec<u8>> {
         let namespace = match self.channel {
             ReleaseChannel::Stable => "--tags",
             ReleaseChannel::Beta => "--heads",
@@ -96,26 +130,73 @@ impl ReleaseRef {
                 self.reference,
             ])
             .args(self.peeled);
-        let commit = self
-            .parse(&super::process::capture(&mut command, 512, Duration::from_secs(30)).await?)?;
-        Ok(Release {
-            commit,
-            repository: repository.into(),
+        if self == STABLE {
+            command.arg(BOOTSTRAP.reference).args(BOOTSTRAP.peeled);
+        }
+        super::process::capture(&mut command, 512, Duration::from_secs(30)).await
+    }
+
+    // Both tags come from one advertisement of the same official repository.
+    // A missing bootstrap tag matters only during the single legacy exception.
+    fn advertisement(
+        self,
+        response: &str,
+        build: &crate::build_info::Build,
+        pin: Option<&str>,
+    ) -> Result<Resolution> {
+        let (floor, selected): (Vec<_>, Vec<_>) = response.lines().partition(|line| {
+            self == STABLE
+                && line
+                    .split_once('\t')
+                    .is_some_and(|(_, r)| r == BOOTSTRAP.reference || Some(r) == BOOTSTRAP.peeled)
+        });
+        let advertised = self.parse(selected.into_iter())?;
+        let (effective, commit) = if self == STABLE && advertised == LEGACY_STABLE {
+            ensure!(
+                !build.dirty && crate::build_info::valid_commit(&build.commit),
+                "legacy stable requires a clean, revision-identified bootstrap-aware updater"
+            );
+            let expected = pin
+                .filter(|sha| crate::build_info::valid_commit(sha) && *sha != LEGACY_STABLE)
+                .context("legacy stable requires a qualified channel-v1 bootstrap pin")?;
+            let commit = BOOTSTRAP.parse(floor.into_iter())?;
+            ensure!(
+                commit == expected,
+                "channel-v1 bootstrap tag differs from the qualified pin"
+            );
+            (BOOTSTRAP, commit)
+        } else {
+            (self, advertised.clone())
+        };
+        Ok(Resolution {
+            release_ref: self.reference.into(),
+            advertised_commit: advertised,
+            resolved_ref: effective.reference.into(),
+            source: effective.source.into(),
+            blessed_commit: commit,
         })
     }
 
     pub async fn resolve(self) -> Result<Release> {
         let primary = repository()?;
-        match self.resolve_from(&primary).await {
-            Ok(release) => Ok(release),
-            // Disposable proofs must never fall back to a network repository.
+        let (repository, bytes) = match self.list_refs(&primary).await {
+            Ok(bytes) => (primary, bytes),
             Err(error) if primary.starts_with("file://") => {
-                Err(error).with_context(|| format!("cannot resolve {}", self.reference))
+                return Err(error).with_context(|| format!("cannot resolve {}", self.reference));
             }
-            Err(_) => self.resolve_from(SSH_REPOSITORY).await.with_context(|| format!(
+            Err(_) => (SSH_REPOSITORY.into(), self.list_refs(SSH_REPOSITORY).await.with_context(|| format!(
                 "cannot read {} over HTTPS or SSH; check the ref and repository access from the daemon's environment", self.reference
-            )),
-        }
+            ))?),
+        };
+        let resolution = self.advertisement(
+            std::str::from_utf8(&bytes)?,
+            &crate::build_info::current(),
+            crate::build_info::bootstrap_commit(),
+        )?;
+        Ok(Release {
+            resolution,
+            repository,
+        })
     }
 }
 
@@ -138,7 +219,7 @@ pub(super) async fn stage(
     installed: &str,
     log: &Path,
 ) -> Result<PathBuf> {
-    let commit = &release.commit;
+    let commit = &release.resolution.blessed_commit;
     ensure!(
         crate::build_info::valid_commit(commit),
         "invalid update revision"
@@ -197,4 +278,66 @@ pub(super) async fn prune(cache: &Path, keep: &[&str]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod floor_tests {
+    use super::*;
+
+    #[test]
+    fn the_legacy_exception_requires_the_exact_clean_source_pin_and_tag() {
+        let sha = "a".repeat(40);
+        let tag = "b".repeat(40);
+        let mut build = crate::build_info::current();
+        build.commit = sha.clone();
+        build.dirty = false;
+        let mut pin = Some(sha.as_str());
+        let legacy = format!("{LEGACY_STABLE}\trefs/tags/stable\n");
+        let floor = format!(
+            "{tag}\trefs/tags/channel-v1-bootstrap\n{sha}\trefs/tags/channel-v1-bootstrap^{{}}\n"
+        );
+        let result = STABLE
+            .advertisement(&format!("{legacy}{floor}"), &build, pin)
+            .unwrap();
+        assert_eq!(result.resolved_ref, BOOTSTRAP.reference);
+        assert!(result.matches_build(&build, pin));
+        for extra in [
+            String::new(),
+            floor.repeat(2),
+            format!("{tag}\trefs/tags/channel-v1-bootstrap\n"),
+            format!("{sha}\trefs/heads/channel-v1-bootstrap\n"),
+        ] {
+            assert!(
+                STABLE
+                    .advertisement(&format!("{legacy}{extra}"), &build, pin)
+                    .is_err()
+            );
+        }
+        pin = None;
+        assert!(!result.matches_build(&build, pin));
+        assert!(
+            STABLE
+                .advertisement(&format!("{legacy}{floor}"), &build, pin)
+                .is_err()
+        );
+        let promoted = STABLE
+            .advertisement(&format!("{sha}\trefs/tags/stable\n"), &build, pin)
+            .unwrap();
+        assert_eq!(promoted.blessed_commit, result.blessed_commit);
+        assert!(promoted != result); // same bytes, different authorizing ref
+        assert_eq!(promoted.resolved_ref, STABLE.reference);
+        assert_eq!(
+            BETA.advertisement(&format!("{sha}\trefs/heads/beta\n"), &build, pin)
+                .unwrap()
+                .resolved_ref,
+            BETA.reference
+        );
+        pin = Some(sha.as_str());
+        build.dirty = true;
+        assert!(
+            STABLE
+                .advertisement(&format!("{legacy}{floor}"), &build, pin)
+                .is_err()
+        );
+    }
 }

@@ -76,14 +76,19 @@ async fn run(
             _ => {}
         }
     }
-    let installed = install::inspect(&installation.binary).await?;
+    let version = install::version(&installation.binary).await?;
+    let installed = version.build;
     if automatic && !eligible(&installed) {
         return Ok(json!({"state":"development_build","installed":installed}));
     }
     let expected_old = install::hash(&installation.binary)?;
     let progress = crate::ui::Progress::start(&format!("Checking GitHub {}", channel.channel));
     let release = channel.resolve().await?;
-    let blessed = release.commit.clone();
+    let resolution = &release.resolution;
+    let blessed = resolution.blessed_commit.clone();
+    if let Err(error) = installation.write("last-resolution.json", resolution) {
+        eprintln!("Gent could not save the last Git resolution: {error}");
+    }
     drop(progress);
     status.last_checked = Some(now());
     status.blessed_commit = Some(blessed.clone());
@@ -92,8 +97,14 @@ async fn run(
     if status.failed_commit.as_deref() != Some(&blessed) {
         status.failed_commit = None;
     }
-    if installed.commit == blessed && !installed.dirty && (!transition || eligible(&installed)) {
+    if resolution.matches_build(&installed, version.bootstrap_commit.as_deref())
+        && (!transition || eligible(&installed))
+    {
         if transition {
+            ensure!(
+                channel.resolve().await?.resolution == *resolution,
+                "release resolution changed during the channel switch"
+            );
             ensure!(
                 ReleaseRef::current(home)? == channel
                     && install::hash(&installation.binary)? == expected_old,
@@ -124,14 +135,14 @@ async fn run(
         status.error = None;
         installation.write("status.json", &status)?;
         return Ok(
-            json!({"state":"current","channel":channel.channel,"release_ref":channel.reference,"installed":installed}),
+            json!({"state":"current","channel":channel.channel,"release_ref":channel.reference,"resolved_ref":resolution.resolved_ref,"advertised_commit":resolution.advertised_commit,"installed":installed}),
         );
     }
     if automatic && status.failed_commit.as_deref() == Some(&blessed) {
         status.phase = "rolled_back".into();
         installation.write("status.json", &status)?;
         return Ok(
-            json!({"state":"rolled_back","channel":channel.channel,"release_ref":channel.reference,"commit":blessed,"next":"Run gent update install to retry this revision explicitly."}),
+            json!({"state":"rolled_back","channel":channel.channel,"release_ref":channel.reference,"resolved_ref":resolution.resolved_ref,"advertised_commit":resolution.advertised_commit,"commit":blessed,"next":"Run gent update install to retry this revision explicitly."}),
         );
     }
     status.phase = "building".into();
@@ -152,11 +163,33 @@ async fn run(
         &installation.directory.join("build.log"),
     )
     .await?;
-    let new = install::inspect(&candidate).await?;
+    let candidate_version = install::version(&candidate).await?;
+    let new = candidate_version.build;
     ensure!(
-        eligible(&new) && new.commit == blessed,
+        eligible(&new)
+            && resolution.matches_build(&new, candidate_version.bootstrap_commit.as_deref()),
         "built binary does not match the selected revision and platform"
     );
+    if channel == release::STABLE && crate::build_info::bootstrap_commit().is_some() {
+        // Retained beta history survives a return to Stable. Verify any new
+        // Stable candidate against the local channel before publishing it.
+        let bytes = super::process::capture(
+            tokio::process::Command::new(&candidate)
+                .arg("--home")
+                .arg(home)
+                .args(["--json", "cluster", "channel", "get"]),
+            1024,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("stable candidate cannot read this node's signed release channel")
+        })?;
+        ensure!(
+            serde_json::from_slice::<Value>(&bytes)?["channel"] == "stable",
+            "stable candidate does not confirm the selected release channel"
+        );
+    }
     if let Err(error) = release::prune(
         &installation.directory.join("target"),
         &[&installed.commit, &blessed],
@@ -166,7 +199,7 @@ async fn run(
         eprintln!("Gent update cache cleanup pending: {error}");
     }
     ensure!(
-        channel.resolve().await?.commit == blessed,
+        channel.resolve().await?.resolution == *resolution,
         "{} changed during the build; retry for the current release",
         channel.reference
     );
@@ -196,6 +229,6 @@ async fn run(
     status.failed_commit = None;
     installation.write("status.json", &status)?;
     Ok(
-        json!({"state":"updated","channel":channel.channel,"release_ref":channel.reference,"commit":blessed,"activation":"The running Gent daemon will restart itself after draining accepted requests. Active chats stay open."}),
+        json!({"state":"updated","channel":channel.channel,"release_ref":channel.reference,"resolved_ref":resolution.resolved_ref,"advertised_commit":resolution.advertised_commit,"commit":blessed,"activation":"The running Gent daemon will restart itself after draining accepted requests. Active chats stay open."}),
     )
 }

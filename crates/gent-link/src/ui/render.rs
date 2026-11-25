@@ -168,6 +168,22 @@ fn updates(out: &mut String, value: &Value) {
             ));
         }
     }
+    let resolution = if value.get("resolved_ref").is_some() {
+        value
+    } else {
+        &value["last_resolution"]
+    };
+    if let (Some(selected), Some(effective)) = (
+        resolution["release_ref"].as_str(),
+        resolution["resolved_ref"].as_str(),
+    ) && selected != effective
+    {
+        rows.push(("Advertised ref", visible(selected)));
+        if let Some(sha) = resolution["advertised_commit"].as_str() {
+            rows.push(("Advertised revision", visible(sha)));
+        }
+        rows.push(("Resolved ref", visible(effective)));
+    }
     if let Some(commit) = value["blessed_commit"].as_str() {
         rows.push(("Release revision", visible(commit)));
     } else if let Some(commit) = value["update"]["blessed_commit"].as_str() {
@@ -220,6 +236,7 @@ fn updates(out: &mut String, value: &Value) {
         "error",
         "channel_error",
         "applied_channel_error",
+        "resolution_error",
         "next",
         "activation",
     ] {

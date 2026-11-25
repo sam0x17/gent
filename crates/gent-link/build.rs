@@ -17,6 +17,32 @@ fn git(root: &std::path::Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+// The first release cannot contain its own commit ID. Only the qualified
+// baseline uses "self". Read its commit header directly, even in shallow Git
+// installations. Other builds carry the qualified SHA as tracked source.
+fn bootstrap_commit(root: &Path, head: Option<&str>) -> Option<String> {
+    const BASE: &str = "49cf99a1d39e4bfa0f37c08636aea4e2e893cf97";
+    let pin = include_str!("channel-v1-bootstrap.pin").trim();
+    if pin == "self" {
+        let object = git(
+            root,
+            &["--no-replace-objects", "cat-file", "commit", "HEAD"],
+        )?;
+        let header = object.split_once("\n\n")?.0;
+        let mut parents = header
+            .lines()
+            .filter_map(|line| line.strip_prefix("parent "));
+        return (parents.next() == Some(BASE) && parents.next().is_none())
+            .then(|| head.map(str::to_owned))
+            .flatten();
+    }
+    (pin.len() == 40
+        && pin
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then(|| pin.to_owned())
+}
+
 fn build_desktop() {
     let source = "src/desktop/macos.swift";
     let main = "src/desktop/main.swift";
@@ -154,6 +180,10 @@ fn main() {
     println!(
         "cargo:rustc-env=GENT_COMMIT={}",
         commit.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "cargo:rustc-env=GENT_BOOTSTRAP_COMMIT={}",
+        bootstrap_commit(&root, commit.as_deref()).unwrap_or_default()
     );
     println!("cargo:rustc-env=GENT_DIRTY={dirty}");
     println!(

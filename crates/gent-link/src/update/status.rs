@@ -46,6 +46,7 @@ pub(super) async fn report(home: &Path, installation: &Installation) -> Result<V
     };
     let pending = installation.pending()?;
     let applied = installation.applied_channel(home);
+    let resolution = installation.read::<super::release::Resolution>("last-resolution.json");
     Ok(with_channel(
         home,
         json!({
@@ -59,6 +60,8 @@ pub(super) async fn report(home: &Path, installation: &Installation) -> Result<V
             "installed":install::inspect(&installation.binary).await?,
             "update_in_progress":installation.try_lock()?.is_none(),
             "update":installation.status()?,
+            "last_resolution":resolution.as_ref().ok().and_then(Option::as_ref),
+            "resolution_error":resolution.err().map(|_| "cannot read the last Git resolution"),
             "activation_pending":pending.is_some(),
             "activation_home":pending.as_ref().map(|p| &p.home),
             "activation_starting":pending.as_ref().map(|p| p.starting),

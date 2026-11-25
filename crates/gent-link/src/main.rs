@@ -617,7 +617,7 @@ async fn execute(cli: Cli) -> Result<()> {
     if matches!(cli.command, Some(Command::Version)) {
         let build = build_info::current();
         if output_format.raw() {
-            output_format.print(&serde_json::to_value(&build)?)?;
+            output_format.print(&serde_json::to_value(build_info::version())?)?;
         } else {
             println!(
                 "gent {} ({}{})",
