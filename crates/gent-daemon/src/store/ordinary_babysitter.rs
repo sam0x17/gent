@@ -1,0 +1,211 @@
+//! Claims and native submission receipts stay on the registered chat's node.
+use super::*;
+use gent_protocol::{
+    babysitter::{CHAT_CHAIN_MAX_AGE, CHAT_FAILURE_MAX_AGE, ChatOrigin},
+    notifications::Failure,
+};
+use uuid::Uuid;
+
+pub(super) fn schema(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS babysitter_chat_attempts(
+            agent TEXT NOT NULL, turn TEXT NOT NULL, failed_at INTEGER NOT NULL,
+            operator TEXT NOT NULL, operator_at INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+            reason TEXT NOT NULL, attempt TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL,
+            admitted INTEGER NOT NULL DEFAULT 0, submitted INTEGER NOT NULL DEFAULT 0,
+            cancelled INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(agent,turn), UNIQUE(agent,operator,ordinal)
+        );
+        CREATE INDEX IF NOT EXISTS babysitter_chat_retention ON babysitter_chat_attempts(claimed_at);",
+    )?;
+    Ok(())
+}
+
+fn retry_due(previous: i64, failed: i64, now: i64) -> bool {
+    let delay = match previous {
+        1 => 15,
+        2 => 60,
+        _ => return false,
+    };
+    failed.saturating_add(delay) <= now
+}
+
+impl StoreSession<'_> {
+    fn chat_enabled(&self, who: &Agent) -> Result<bool> {
+        Ok(config::ordinary_babysitter_enabled(self.home)? && self.babysitter_allowed(who)?)
+    }
+
+    pub(super) fn chat_claimed_turn(&self, who: &Agent, turn: Uuid) -> Result<bool> {
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM babysitter_chat_attempts WHERE agent=?1 AND turn=?2)",
+            params![who.id, turn.to_string()],
+            |r| r.get(0),
+        )?)
+    }
+
+    fn chat_available(&self, who: &Agent, turn: Uuid, failed: i64) -> Result<bool> {
+        if !self.chat_enabled(who)?
+            || turn.is_nil()
+            || !(self.timestamp - CHAT_FAILURE_MAX_AGE..=self.timestamp).contains(&failed)
+        {
+            return Ok(false);
+        }
+        Ok(!self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM babysitter_chat_attempts WHERE agent=?1 AND turn=?2
+             UNION ALL SELECT 1 FROM babysitter_attempts WHERE agent=?1 AND turn=?2 AND attempt IS NOT NULL)",
+            params![who.id, turn.to_string()], |row| row.get::<_, bool>(0),
+        )?)
+    }
+
+    // Keep opted-out, already-claimed and exhausted threads out of the rollout
+    // reader. This cheap probe grants no right to submit or reserve an attempt.
+    pub(super) fn babysitter_chat_probe(
+        &self,
+        who: &Agent,
+        turn: Uuid,
+        operator: Uuid,
+        failed: i64,
+    ) -> Result<bool> {
+        if !self.chat_available(who, turn, failed)? {
+            return Ok(false);
+        }
+        if operator == turn {
+            return Ok(true);
+        }
+        let previous = self
+            .db
+            .query_row(
+                "SELECT ordinal FROM babysitter_chat_attempts WHERE agent=?1 AND operator=?2
+             AND admitted=1 AND cancelled=0 AND EXISTS(
+                SELECT 1 FROM babysitter_chat_attempts root WHERE root.agent=?1 AND root.turn=?2 AND root.failed_at>=?3)
+             AND rowid=(SELECT MAX(rowid) FROM babysitter_chat_attempts WHERE agent=?1)",
+                params![
+                    who.id,
+                    operator.to_string(),
+                    self.timestamp - CHAT_CHAIN_MAX_AGE
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(previous.is_some_and(|previous| retry_due(previous, failed, self.timestamp)))
+    }
+
+    pub(super) fn babysitter_chat_claim(
+        &self,
+        who: &Agent,
+        turn: Uuid,
+        failed: i64,
+        reason: Failure,
+        origin: ChatOrigin,
+    ) -> Result<Value> {
+        let no = json!({"claim":null});
+        let now = self.timestamp;
+        if !self.chat_available(who, turn, failed)? {
+            return Ok(no);
+        }
+        let turn = turn.to_string();
+
+        let (operator, operator_at, ordinal, parent) = match origin {
+            ChatOrigin::Operator {
+                turn: operator,
+                started_at,
+                client_id,
+            } => {
+                if operator.to_string() != turn
+                    || client_id.as_ref().is_some_and(|id| id.len() > 256)
+                {
+                    return Ok(no);
+                }
+                if let Some(client_id) = client_id
+                    && self.db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM wake_dispatches WHERE agent=?1 AND attempt_id=?2
+                            UNION ALL SELECT 1 FROM babysitter_chat_attempts WHERE agent=?1 AND attempt=?2)",
+                        params![who.id,client_id], |r| r.get::<_, bool>(0),
+                    )?
+                {
+                    return Ok(no);
+                }
+                (operator.to_string(), started_at, 1, None)
+            }
+            ChatOrigin::Continuation { attempt } => {
+                // Admission is durable even if turn/start's reply was lost. Only
+                // the host adapter that observed the matching native input can continue it.
+                let parent = self.db.query_row(
+                    "SELECT operator,operator_at,ordinal,claimed_at,turn FROM babysitter_chat_attempts
+                     WHERE agent=?1 AND attempt=?2 AND admitted=1 AND cancelled=0
+                     AND EXISTS(SELECT 1 FROM babysitter_chat_attempts root WHERE root.agent=?1
+                                AND root.turn=babysitter_chat_attempts.operator AND root.failed_at>=?3)
+                     AND rowid=(SELECT MAX(rowid) FROM babysitter_chat_attempts WHERE agent=?1)",
+                    params![who.id, attempt.to_string(), now-CHAT_CHAIN_MAX_AGE],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                ).optional()?;
+                let Some((operator, operator_at, previous, claimed, parent)) = parent else {
+                    return Ok(no);
+                };
+                if failed < claimed || !retry_due(previous, failed, now) {
+                    return Ok(no);
+                }
+                (operator, operator_at, previous + 1, Some(parent))
+            }
+        };
+        if !(0..=failed).contains(&operator_at) {
+            return Ok(no);
+        }
+        // Keep tombstones beyond every admissible failure and operator window.
+        self.db.execute(
+            "DELETE FROM babysitter_chat_attempts WHERE claimed_at<?1",
+            [now - 86400],
+        )?;
+        let id = Uuid::new_v4();
+        let inserted = self.db.execute(
+            "INSERT INTO babysitter_chat_attempts(agent,turn,failed_at,operator,operator_at,ordinal,reason,attempt,claimed_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT DO NOTHING",
+            params![who.id,turn,failed,operator,operator_at,ordinal,serde_json::to_string(&reason)?,id.to_string(),now],
+        )?;
+        if inserted == 0 {
+            return Ok(no);
+        }
+        Ok(json!({"claim":id,"operator":operator,"operator_at":operator_at,"parent":parent}))
+    }
+
+    pub(super) fn babysitter_chat_check(&self, who: &Agent, attempt: Uuid) -> Result<Value> {
+        let eligible = self.chat_enabled(who)?
+            && self.wake_pending(who)?["pending"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+            && self.db.execute(
+                "UPDATE babysitter_chat_attempts SET admitted=1 WHERE agent=?1 AND attempt=?2
+             AND admitted=0 AND cancelled=0 AND claimed_at>=?3 AND failed_at>=?4
+             AND EXISTS(SELECT 1 FROM babysitter_chat_attempts root WHERE root.agent=?1
+                        AND root.turn=babysitter_chat_attempts.operator AND root.failed_at>=?5)
+             AND rowid=(SELECT MAX(rowid) FROM babysitter_chat_attempts WHERE agent=?1)
+             AND NOT EXISTS(SELECT 1 FROM wake_dispatches WHERE agent=?1
+                            AND claimed_at>=babysitter_chat_attempts.failed_at)",
+                params![
+                    who.id,
+                    attempt.to_string(),
+                    self.timestamp - 30,
+                    self.timestamp - CHAT_FAILURE_MAX_AGE,
+                    self.timestamp - CHAT_CHAIN_MAX_AGE
+                ],
+            )? == 1;
+        Ok(json!({"eligible":eligible}))
+    }
+
+    pub(super) fn babysitter_chat_submitted(&self, who: &Agent, attempt: Uuid) -> Result<Value> {
+        // A host acceptance is not evidence of a resumed goal or successful work.
+        let changed = self.db.execute(
+            "UPDATE babysitter_chat_attempts SET submitted=1 WHERE agent=?1 AND attempt=?2 AND admitted=1",
+            params![who.id,attempt.to_string()],
+        )?;
+        Ok(json!({"submitted":changed==1}))
+    }
+}

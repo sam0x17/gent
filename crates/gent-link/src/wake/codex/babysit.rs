@@ -5,7 +5,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 mod history;
-mod rollout;
+pub(super) mod rollout;
 
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -37,7 +37,7 @@ struct Stall {
     rollout: Option<rollout::Evidence>,
 }
 
-fn terminal_failure(last: &Value) -> Option<Failure> {
+pub(super) fn terminal_failure(last: &Value) -> Option<Failure> {
     // An interrupted turn can retain an earlier provider error after the user
     // cancels. Only the terminal failed state attributes the stop to the error.
     let error = &last["error"];

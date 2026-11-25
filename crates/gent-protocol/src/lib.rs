@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub mod administration;
+pub mod babysitter;
 pub mod configuration_log;
 pub mod dashboard;
 pub mod directory;
@@ -267,6 +268,23 @@ pub enum AgentOp {
         scope: Option<notifications::Scope>,
     },
     BabysitterCheck {
+        attempt: uuid::Uuid,
+    },
+    BabysitterChatProbe {
+        turn: uuid::Uuid,
+        operator: uuid::Uuid,
+        failed_at: i64,
+    },
+    BabysitterChatClaim {
+        turn: uuid::Uuid,
+        failed_at: i64,
+        reason: notifications::Failure,
+        origin: babysitter::ChatOrigin,
+    },
+    BabysitterChatCheck {
+        attempt: uuid::Uuid,
+    },
+    BabysitterChatSubmitted {
         attempt: uuid::Uuid,
     },
     DashboardDefine {

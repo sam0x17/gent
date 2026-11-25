@@ -23,6 +23,7 @@ mod babysit;
 mod daemon;
 pub(crate) use daemon::maintain_babysitter;
 mod direct;
+mod ordinary;
 pub(crate) mod recovery;
 
 /// Owner diagnostic only. Initialization and a bounded list never load a thread
@@ -62,7 +63,7 @@ impl Attached {
     }
 
     fn inspect_goals(&mut self, registry: &Registry, home: &Path) -> Result<bool> {
-        if home.join("babysitter-disabled").try_exists()? {
+        if !babysitter_running(home)? {
             self.goals = None;
         } else if self.goals.is_none() {
             self.goals = registry.attached_babysitter()?;
@@ -71,6 +72,11 @@ impl Attached {
         // even while a standalone fallback is waiting on a slow host.
         Ok(self.goals.is_some() && registry.daemon_babysitter()?.is_some())
     }
+}
+
+fn babysitter_running(home: &Path) -> Result<bool> {
+    Ok(!home.join("babysitter-disabled").try_exists()?
+        || gent_daemon::config::ordinary_babysitter_enabled(home)?)
 }
 
 impl Drop for Runner {
@@ -163,6 +169,12 @@ async fn sweep(
                     failed |= dispatch(home, socket, &thread, &credential).await.is_err();
                 }
                 if mode != Sweep::WakeOnly {
+                    if gent_daemon::config::ordinary_babysitter_enabled(home).unwrap_or(false) {
+                        failed |= ordinary::inspect(home, registry, &thread, &credential)
+                            .await
+                            .is_err()
+                            && mode == Sweep::GoalsOnly;
+                    }
                     let inspection = babysit::inspect(home, socket, &thread, &credential).await;
                     // Older servers may support inbox delivery without a goal API.
                     failed |= mode == Sweep::GoalsOnly && inspection.is_err();

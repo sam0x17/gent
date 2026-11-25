@@ -176,7 +176,7 @@ impl Evidence {
 // Read backwards a block at a time.
 // Memory follows the largest individual record, independent of turn length.
 #[derive(Clone)]
-struct ReverseLines<'a> {
+pub(in crate::wake::codex) struct ReverseLines<'a> {
     floor: u64,
     file: &'a File,
     offset: u64,
@@ -185,7 +185,11 @@ struct ReverseLines<'a> {
 }
 
 impl<'a> ReverseLines<'a> {
-    fn new(file: &'a File, size: u64, retrospective: bool) -> Result<Self> {
+    pub(in crate::wake::codex) fn new(
+        file: &'a File,
+        size: u64,
+        retrospective: bool,
+    ) -> Result<Self> {
         let mut newline = [0];
         file.read_exact_at(&mut newline, size - 1)?;
         ensure!(newline[0] == b'\n', "incomplete Codex rollout record");
@@ -204,7 +208,7 @@ impl<'a> ReverseLines<'a> {
         })
     }
 
-    fn previous(&mut self, line: &mut Vec<u8>) -> Result<bool> {
+    pub(in crate::wake::codex) fn previous(&mut self, line: &mut Vec<u8>) -> Result<bool> {
         line.clear();
         loop {
             if self.end == 0 {
