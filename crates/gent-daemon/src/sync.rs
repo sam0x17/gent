@@ -22,7 +22,7 @@ pub(crate) mod health;
 mod network_error;
 mod notifications;
 #[cfg(test)]
-pub(crate) use notifications::wss::tests::exercise_peer_watch;
+pub(crate) use notifications::wss::tests::{exercise_peer_watch, exercise_stats_refresh};
 mod schedule;
 mod sweep;
 #[cfg(test)]
@@ -455,7 +455,7 @@ async fn run(
     let mut next_control = Instant::now();
     loop {
         let cycle_started = Instant::now();
-        push.stats_tick.notify_one();
+        health.stats.tick.notify_one();
         if let Some(direct) = &direct {
             let _ = direct.advertise(store.clone()).await;
         }

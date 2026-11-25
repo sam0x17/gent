@@ -668,6 +668,8 @@ pub enum ConfigurationEdit {
 pub enum OwnerOp {
     /// Read owner-visible Gent usage without probing hosts or modifying state.
     Stats,
+    /// Refresh peer usage and return the latest available cluster totals.
+    RefreshStats,
     Dashboards {
         after: Option<String>,
     },

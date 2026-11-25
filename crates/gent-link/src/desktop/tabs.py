@@ -120,7 +120,8 @@ class StatsTable(Gtk.ScrolledWindow):
 class StatsPane(Gtk.Box):
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, border_width=16)
-        self.busy = False
+        self.request = None
+        self.refresh_queued = False
         self.notice = notice_label()
         self.pack_start(self.notice, False, False, 0)
         self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -153,27 +154,33 @@ class StatsPane(Gtk.Box):
         self.body.hide()
         self.body.set_no_show_all(True)
 
-    def load(self):
-        if not self.busy:
-            self.busy = True
+    def load(self, *, live=False):
+        if self.request is not None:
+            if live and self.request == "stats":
+                self.refresh_queued = True
+            return
+        self.request = "refresh_stats" if live else "stats"
+        if not live:
             self.body.hide()
-            self.notice.set_text("Loading stats…")
-            page_request("stats")
+        self.notice.set_text("Requesting current reports from cluster nodes…" if live else "Loading stats…")
+        page_request(self.request)
 
     def receive(self, reply):
-        self.busy = False
+        self.request = None
         self.senders.receive(reply.get("rows", []))
         self.nodes.receive(reply.get("nodes", []))
+        self.notice.set_text(reply.get("error") or reply.get("notice", ""))
         if "error" in reply:
             self.body.hide()
-            self.notice.set_text(reply["error"])
-            return
-        self.notice.set_text("")
-        for key, field in self.fields.items():
-            field.set_text(reply[key])
-        self.senders.set_visible(bool(reply["rows"]))
-        self.empty.set_visible(not reply["rows"])
-        self.body.show()
+        else:
+            for key, field in self.fields.items():
+                field.set_text(reply[key])
+            self.senders.set_visible(bool(reply["rows"]))
+            self.empty.set_visible(not reply["rows"])
+            self.body.show()
+        if self.refresh_queued:
+            self.refresh_queued = False
+            self.load(live=True)
 
 
 class ReleaseChannelRow(Gtk.Box):

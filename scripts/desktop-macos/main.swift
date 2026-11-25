@@ -141,6 +141,7 @@ func checkReleaseChannel(_ desktop: Desktop) {
 func checkStats(_ desktop: Desktop) {
     let stats = desktop.stats
     let read = Request.json(["op": "stats"])
+    let live = Request.json(["op": "refresh_stats"])
     func shows(_ text: String) -> Bool {
         descendants(stats.view, of: NSTextField.self).contains { $0.stringValue == text && !$0.isHiddenOrHasHiddenAncestor }
     }
@@ -153,8 +154,8 @@ func checkStats(_ desktop: Desktop) {
     let row = ["name": "Fixture Ω", "messages": "1,234", "bytes": "56,789", "chat_id": "fixture-chat"]
     let node = ["name": "Studio", "status": "stale", "as_of": "2026-11-25 01:34:00",
                 "started": "2026-11-24 15:00:00", "messages": "1,234", "bytes": "56,789"]
-    func receive(_ rows: [[String: String]]) {
-        desktop.receive(["page": "stats", "coverage": scope, "outbound": traffic, "babysitter": recoveries, "rows": rows, "nodes": [node, ["name":"Offline", "status":"unavailable", "messages":"—"]]])
+    func receive(_ rows: [[String: String]], notice: String = "", outbound: String? = nil) {
+        desktop.receive(["notice":notice, "page": "stats", "coverage": scope, "outbound": outbound ?? traffic, "babysitter": recoveries, "rows": rows, "nodes": [node, ["name":"Offline", "status":"unavailable", "messages":"—"]]])
     }
     receive([row])
     require(shows(scope) && shows(traffic) && shows(recoveries), "Stats displays coverage and both activity summaries")
@@ -174,9 +175,23 @@ func checkStats(_ desktop: Desktop) {
     let empty = "No sending chats in the reported activity."
     require(!shows(empty), "populated Stats hides the empty state")
     let refresh = descendants(stats.view, of: NSButton.self).first { $0.title == "Refresh" }!
+    for notice in ["Node reports confirmed on refresh: 2 of 2.",
+                   "Node reports confirmed on refresh: 1 of 2. Other nodes may be offline or still responding.",
+                   "Showing cached figures. Update the local daemon to refresh peers."] {
+        require(requests { refresh.performClick(nil) } == [live], "Refresh requests live peer reports")
+        require(!refresh.isEnabled && shows(traffic) && shows("Requesting current reports from cluster nodes…"),
+                "cached counts remain visible while peers respond")
+        require(requests { stats.load(); refresh.performClick(nil) }.isEmpty, "only one in-flight request")
+        receive([row], notice: notice, outbound: "Accepted sends: 1,235")
+        require(shows(notice) && shows("Accepted sends: 1,235") && refresh.isEnabled,
+                "display bounded results and confirmation coverage together")
+        require(requests { stats.load() } == [read], "ordinary reload still uses the cache")
+        receive([row])
+        require(!shows(notice), "opening the cached snapshot clears the previous refresh receipt")
+    }
     for error in ["Stats unavailable. Start the local Gent daemon, then refresh.",
                   "This daemon does not support Stats. Update the daemon, then refresh."] {
-        require(requests { refresh.performClick(nil) } == [read], "Stats refresh reads again")
+        require(requests { refresh.performClick(nil) } == [live], "Stats refresh can retry unavailable peers")
         desktop.receive(["page": "stats", "error": error])
         require(stats.senders.table.numberOfRows == 0 && nodes.numberOfRows == 0 && shows(error) && !shows(traffic) && !shows(empty),
                 "Stats clears stale counts and distinguishes unavailable from zero")

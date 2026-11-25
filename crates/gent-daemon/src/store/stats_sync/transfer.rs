@@ -21,7 +21,12 @@ impl StoreSession<'_> {
         }
     }
 
-    fn send_stats_pages(&self, peer: &str, round: Uuid, base: Option<Mark>) -> Result<()> {
+    pub(super) fn send_stats_pages(
+        &self,
+        peer: &str,
+        round: Uuid,
+        base: Option<Mark>,
+    ) -> Result<()> {
         let busy = self
             .db
             .prepare(
@@ -29,12 +34,23 @@ impl StoreSession<'_> {
           (s.last_read>?2 OR EXISTS(SELECT 1 FROM stats_pending WHERE id=s.last_event))",
             )?
             .exists(params![peer, self.timestamp - 5])?;
+        if busy {
+            // A refresh immediately after bootstrap is subject to the same
+            // page-building throttle. Keep only the latest round for this key.
+            let base = base.filter(|mark| mark.1.len() == 32);
+            self.db.execute("INSERT OR REPLACE INTO stats_deferred
+                SELECT peer,key,?2,?3,MAX(?4,COALESCE(last_read+5,0)) FROM stats_peers WHERE peer=?1",
+                params![peer, round.to_string(), base.map(|m| serde_json::to_string(&m)).transpose()?, self.timestamp])?;
+            return Ok(());
+        }
+        self.db
+            .execute("DELETE FROM stats_deferred WHERE peer=?1", [peer])?;
         let reserved: bool = self.db.query_row(
             "SELECT COALESCE(SUM(length(body)),0)>?1 FROM stats_pending",
             [32 * 1024 * 1024],
             |r| r.get(0),
         )?;
-        if busy || reserved {
+        if reserved {
             return Ok(());
         }
         // Keep the last sent and acknowledged bases per physical peer. Thousands

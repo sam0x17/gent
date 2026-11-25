@@ -114,6 +114,7 @@ async fn storage_timeout_returns_a_protocol_error_and_does_not_rename_later() {
         Arc::new(Semaphore::new(2)),
         permit,
         Arc::new(serde_json::Value::Null),
+        Arc::new(Semaphore::new(64)),
     ));
     let request = Request::Owner {
         credential,
@@ -152,4 +153,24 @@ async fn storage_timeout_returns_a_protocol_error_and_does_not_rename_later() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn one_node_refresh_returns_local_counts_immediately() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let home = root.path().join("node");
+    config::initialize(&home, "local stats")?;
+    let credential = config::read_private(&home.join("owner.key"))?;
+    let mut store = store::Store::open(&home)?;
+    let wait = store.begin_stats_refresh(&credential)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let poll = tokio::time::timeout(Duration::from_millis(100), wait.wait(deadline)).await?;
+    let snapshot = store.stats_snapshot(Some(poll))?;
+    assert_eq!(
+        snapshot["refresh"],
+        serde_json::json!({"confirmed_nodes":1,"expected_nodes":1})
+    );
+    assert_eq!(snapshot["nodes"][0]["status"], "local");
+    assert!(store.next_stats_send()?.is_none());
+    Ok(())
 }

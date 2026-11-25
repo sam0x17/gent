@@ -236,3 +236,6 @@ pub(crate) async fn exercise_peer_watch(stores: &[SharedStore; 2], stream: Strea
     requests.await.unwrap();
     assert_eq!(sender_observation(), observed);
 }
+
+mod stats_refresh;
+pub(crate) use stats_refresh::exercise_stats_refresh;

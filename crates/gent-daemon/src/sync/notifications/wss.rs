@@ -76,14 +76,24 @@ impl Route {
 pub(in crate::sync) struct Wss {
     channel: Arc<Mutex<Option<Arc<Route>>>>,
     pub(super) metrics: Arc<Metrics>,
+    stats: Arc<crate::sync::health::StatsWatch>,
 }
 
 impl Wss {
+    pub(super) fn new(stats: Arc<crate::sync::health::StatsWatch>) -> Self {
+        Self {
+            stats,
+            ..Default::default()
+        }
+    }
     // One side request at a time. Stats never marks a chat route failed or
     // waits for remote I/O on the ordinary transfer loop.
-    pub(super) async fn stats_worker(self, store: SharedStore, tick: Arc<tokio::sync::Notify>) {
+    pub(super) async fn stats_worker(self, store: SharedStore) {
+        let tick = &self.stats.tick;
+        let mut delay = COOLDOWN;
         loop {
-            tokio::select! { _=tick.notified()=>{}, _=tokio::time::sleep(Duration::from_secs(30))=>{} }
+            tokio::select! { _=tick.notified()=>{}, _=tokio::time::sleep(delay)=>{} }
+            delay = COOLDOWN;
             for batch in 0..16 {
                 let route = self
                     .channel
@@ -94,6 +104,9 @@ impl Wss {
                     break;
                 };
                 let Ok(Some(sent)) = local(store.clone(), |s| s.next_stats_send()).await else {
+                    delay = local(store.clone(), |s| s.stats_worker_delay())
+                        .await
+                        .unwrap_or(COOLDOWN);
                     break;
                 };
                 let (reply, result) = oneshot::channel();
@@ -230,6 +243,8 @@ impl Connection {
             channel: tx,
             failed: Mutex::default(),
         }));
+        route.stats.routes.send_modify(|n| *n += 1);
+        route.stats.tick.notify_one();
         Self {
             route: route.clone(),
             incoming,
@@ -340,6 +355,7 @@ impl Drop for Connection {
             .lock()
             .expect("peer watch lock poisoned")
             .take();
+        self.route.stats.routes.send_modify(|n| *n -= 1);
     }
 }
 

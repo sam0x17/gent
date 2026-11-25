@@ -135,7 +135,7 @@ class Desktop:
         self.refresh = Gtk.Button.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON)
         self.refresh.set_tooltip_text("Refresh status")
         self.refresh.get_accessible().set_name("Refresh status")
-        self.refresh.connect("clicked", lambda *_: self.refresh_tab())
+        self.refresh.connect("clicked", lambda *_: self.refresh_tab(live=True))
         header.pack_end(self.refresh)
         self.window.set_titlebar(header)
         header.show_all()
@@ -212,8 +212,12 @@ class Desktop:
             self.refresh_tab()
         self.send("refresh")
 
-    def refresh_tab(self):
-        self.tabs.get_nth_page(self.tabs.get_current_page()).load()
+    def refresh_tab(self, *, live=False):
+        page = self.tabs.get_nth_page(self.tabs.get_current_page())
+        if live and page is self.replies["stats"]:
+            page.load(live=True)
+        else:
+            page.load()
 
     def refresh_after_operation(self):
         # An in-flight snapshot may predate the mutation.

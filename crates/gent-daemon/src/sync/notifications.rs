@@ -22,7 +22,6 @@ pub(super) struct Listener {
     connected: Arc<AtomicBool>,
     task: JoinHandle<()>,
     stats_task: JoinHandle<()>,
-    pub(super) stats_tick: Arc<Notify>,
 }
 impl Drop for Listener {
     fn drop(&mut self) {
@@ -40,11 +39,10 @@ impl Listener {
         hints: Arc<Hints>,
         health: Arc<Health>,
     ) -> Self {
-        let wss = wss::Wss::default();
+        let wss = wss::Wss::new(health.stats.clone());
         health.set_wss(wss.metrics.clone());
         let route = wss.clone();
-        let stats_tick = Arc::new(Notify::new());
-        let stats_task = tokio::spawn(wss.clone().stats_worker(store.clone(), stats_tick.clone()));
+        let stats_task = tokio::spawn(wss.clone().stats_worker(store.clone()));
         let flag = connected.clone();
         let task = tokio::spawn(async move {
             let mut delay = Duration::from_secs(1);
@@ -82,7 +80,6 @@ impl Listener {
             connected,
             task,
             stats_task,
-            stats_tick,
             wss,
         }
     }

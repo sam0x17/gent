@@ -22,7 +22,7 @@ Closing the window hides it in the tray. **Quit Gent Desktop** exits the compani
 
 In **Chats**, select the conversation and choose **Unregister chat…**. The confirmation identifies the chat and its ID. Revocation disables its Gent registration and preserves the conversation in the provider app. A remote host handles the request over its authenticated node link and publishes the updated registration. Remote unregistration requires node protocol 8 on the host and carrier.
 
-**Stats** shows the same cluster totals, top sending chats, and per-node counts as `gent stats`. Each report includes its observation time. Nodes that have yet to report appear without counts. [Counting and coverage](cli.md#stats)
+**Stats** opens with cached cluster totals, top sending chats and per-node counts. Click **Refresh** or run `gent stats` to ask peers for their latest counters. Each report includes its observation time. Nodes that have yet to report appear without counts. [Counting and coverage](cli.md#stats)
 
 **Settings** controls graphical login, automatic updates, Babysitter, native chat discovery, direct connections, UDP and transport helpers. Use **Cluster release channel** to select Stable or Beta for the whole cluster. The selector shows the latest signed choice this node has received. A queued request appears below it until the cluster decides. Switching channels requests one update per node, including nodes with automatic updates paused. **Automatically update Gent** controls future automatic updates on this node. The discovery switch allows the node to publish supported native chats. Network changes take effect on daemon restart.
 

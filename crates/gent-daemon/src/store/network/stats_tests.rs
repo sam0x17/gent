@@ -119,6 +119,13 @@ async fn physical_carriers_merge_before_ranking_and_only_send_changed_rows() -> 
         )?;
     }
     tx.commit()?;
+    // Changes immediately following a successful advertisement coalesce.
+    for store in &pair.stores {
+        store
+            .db
+            .execute("UPDATE stats_peers SET last_ad=?1", [now()])?;
+    }
+    assert_eq!(drain(&mut pair)?.frames, 0);
     let begin = Instant::now();
     for store in &pair.stores {
         store.db.execute(
@@ -147,7 +154,13 @@ async fn physical_carriers_merge_before_ranking_and_only_send_changed_rows() -> 
     for store in &pair.stores {
         store
             .db
-            .execute("UPDATE stats_peers SET last_ad=last_ad-301", [])?;
+            .execute("UPDATE stats_peers SET last_ad=?1", [now() - 3500])?;
+    }
+    assert_eq!(drain(&mut pair)?.frames, 0);
+    for store in &pair.stores {
+        store
+            .db
+            .execute("UPDATE stats_peers SET last_ad=?1", [now() - 3601])?;
     }
     let begin = Instant::now();
     let heartbeat = drain(&mut pair)?;
@@ -156,7 +169,7 @@ async fn physical_carriers_merge_before_ranking_and_only_send_changed_rows() -> 
     assert!((2..=4).contains(&heartbeat.frames));
     pair.stores[1]
         .db
-        .execute("UPDATE request_clock SET floor=floor+601", [])?;
+        .execute("UPDATE request_clock SET floor=floor+7205", [])?;
     let stale = read(&mut pair, 1)?;
     assert!(!stale.coverage.complete);
     assert_eq!(
@@ -165,4 +178,119 @@ async fn physical_carriers_merge_before_ranking_and_only_send_changed_rows() -> 
     );
     assert_eq!(stale.outbound, after.outbound);
     Ok(())
+}
+
+#[tokio::test]
+async fn refresh_counts_live_proofs_separately_from_cache_age_and_staged_pages() -> Result<()> {
+    use tokio::time::{Duration, Instant as Clock};
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    drain(&mut pair)?;
+    let owner = config::read_private(&pair.homes[0].path().join("owner.key"))?;
+    let [local, remote] = &mut pair.stores;
+    assert!(local.begin_stats_refresh("invalid").is_err());
+    assert!(local.stats_poll.is_none());
+    tokio::time::pause();
+    let deadline = || Clock::now() + Duration::from_secs(12);
+    let started = Clock::now();
+    let id = local.begin_stats_refresh(&owner)?.wait(deadline()).await;
+    let cached = local.stats_snapshot(Some(id))?;
+    assert_eq!(Clock::now(), started);
+    assert_eq!(cached["coverage"]["fresh_nodes"], 2);
+    assert_eq!(
+        cached["refresh"],
+        json!({"confirmed_nodes":1,"expected_nodes":2})
+    );
+    assert!(local.next_stats_send()?.is_none());
+
+    local.sync_health.stats.routes.send_replace(1);
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let remote_id = Uuid::parse_str(remote.local_node_id())?;
+    let local_id = Uuid::parse_str(local.local_node_id())?;
+    let tx = remote.db.transaction()?;
+    for i in 1..=300 {
+        tx.execute(
+            "INSERT INTO usage_senders VALUES(?1,'sample',1,1,0)",
+            [Uuid::from_u128(i).to_string()],
+        )?;
+    }
+    tx.execute("UPDATE stats_peers SET last_read=last_read-6", [])?;
+    tx.commit()?;
+    let wait = local.begin_stats_refresh(&owner)?;
+    // Challenge and Read both have authentic replies but neither installs totals.
+    for _ in 0..2 {
+        let send = local.next_stats_send()?.unwrap();
+        let ack = remote.accept_stats_send(local_id, &send.wire)?;
+        local.finish_stats_send(&send, Some(&ack))?;
+    }
+    let first = remote.next_stats_send()?.unwrap();
+    let ack = local.accept_stats_send(remote_id, &first.wire)?;
+    remote.finish_stats_send(&first, Some(&ack))?;
+    let last = remote.next_stats_send()?.unwrap();
+    let before = Clock::now();
+    let id = wait.wait(deadline()).await;
+    assert!(
+        (Duration::from_secs(8)..=Duration::from_millis(8010)).contains(&(Clock::now() - before))
+    );
+    let partial = local.stats_snapshot(Some(id))?;
+    assert_eq!(partial["outbound"], cached["outbound"]);
+    assert_eq!(partial["refresh"], cached["refresh"]);
+    let ack = local.accept_stats_send(remote_id, &last.wire)?;
+    remote.finish_stats_send(&last, Some(&ack))?;
+    let after = local.stats_snapshot(Some(id))?;
+    assert_eq!(after["outbound"]["messages"], 300);
+    assert_eq!(
+        after["refresh"], partial["refresh"],
+        "late pages cannot retroactively complete the poll"
+    );
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let wait = local.begin_stats_refresh(&owner)?;
+    let probe = local.next_stats_send()?.unwrap();
+    let ack = remote.accept_stats_send(local_id, &probe.wire)?;
+    local.finish_stats_send(&probe, Some(&ack))?;
+    let id = wait.wait(deadline()).await;
+    assert_eq!(
+        local.stats_snapshot(Some(id))?["refresh"]["confirmed_nodes"],
+        2
+    );
+    assert!(local.next_stats_send()?.is_none());
+
+    // Immutable peers that decline the initial side request keep their hourly
+    // backoff, even when the operator opens Stats or refreshes repeatedly.
+    local.db.execute(
+        "UPDATE stats_peers SET supported=0,attempt_at=?1,failed_at=?2",
+        params![now() + 3600, now()],
+    )?;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let before = Clock::now();
+    let id = local.begin_stats_refresh(&owner)?.wait(deadline()).await;
+    assert_eq!(Clock::now(), before);
+    assert_eq!(
+        local.stats_snapshot(Some(id))?["refresh"],
+        cached["refresh"]
+    );
+    assert!(local.next_stats_send()?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn stats_refresh_socket_waiters_share_the_wss_round_and_leave_chat_capacity() -> Result<()> {
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    drain(&mut pair)?;
+    let owner = config::read_private(&pair.homes[0].path().join("owner.key"))?;
+    let remote = &mut pair.stores[1];
+    let tx = remote.db.transaction()?;
+    tx.execute("UPDATE stats_peers SET last_read=?1", [now()])?;
+    for i in 1..=600 {
+        tx.execute(
+            "INSERT INTO usage_senders VALUES(?1,'sample',1,2,0)",
+            [Uuid::from_u128(i).to_string()],
+        )?;
+    }
+    tx.commit()?;
+    let stores = pair
+        .stores
+        .map(|store| Arc::new(std::sync::Mutex::new(store)));
+    crate::sync::exercise_stats_refresh(stores, owner, pair.keys[0].clone()).await
 }

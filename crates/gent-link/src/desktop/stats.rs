@@ -9,6 +9,7 @@ use std::path::Path;
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Request {
     Stats,
+    RefreshStats,
 }
 
 fn count(number: u64) -> String {
@@ -103,41 +104,91 @@ fn view(snapshot: Stats) -> Value {
         "rows":rows, "nodes":nodes})
 }
 
-pub(super) async fn read(home: &Path) -> Value {
-    let notice = match owner(home, OwnerOp::Stats).await {
-        Ok(value) => match serde_json::from_value::<Stats>(value) {
-            Ok(snapshot) if snapshot.scope == "cluster" => return view(snapshot),
-            Ok(_) => "The daemon returned an unsupported Stats scope. Update Gent, then refresh.",
-            Err(_) => {
-                "The daemon returned an unreadable Stats snapshot. Update Gent, then refresh."
-            }
-        },
-        Err(error) if error.to_string() == "invalid request" => {
-            "This daemon does not support Stats. Update the daemon, then refresh."
-        }
-        Err(_) if !home.join("config.toml").is_file() => {
-            "Set up this node in Status to view cluster stats."
-        }
-        Err(error) if error.to_string().starts_with("daemon unavailable;") => {
-            "Stats unavailable. Start the local Gent daemon, then refresh."
-        }
-        Err(_) => "Stats unavailable. Check the local daemon and owner access, then refresh.",
+fn refresh_notice(refresh: Option<&gent_protocol::stats::Refresh>) -> String {
+    let Some(refresh) = refresh else {
+        return "Showing cached figures. Update the local daemon to refresh peers.".into();
     };
-    json!({"page":"stats", "error":notice})
+    let mut notice = format!(
+        "Node reports confirmed on refresh: {} of {}.",
+        refresh.confirmed_nodes, refresh.expected_nodes
+    );
+    if refresh.confirmed_nodes < refresh.expected_nodes {
+        notice.push_str(" Other nodes may be offline or still responding. Totals include their last available reports.");
+    }
+    notice
+}
+
+impl Request {
+    pub(super) async fn respond(self, home: &Path) -> Value {
+        let result = match self {
+            Self::Stats => owner(home, OwnerOp::Stats).await,
+            Self::RefreshStats => crate::refresh_stats(home).await,
+        };
+        let notice = match result {
+            Ok(value) => match serde_json::from_value::<Stats>(value) {
+                Ok(snapshot) if snapshot.scope == "cluster" => {
+                    let notice = match self {
+                        Self::Stats => None,
+                        Self::RefreshStats => Some(refresh_notice(snapshot.refresh.as_ref())),
+                    };
+                    let mut page = view(snapshot);
+                    if let Some(notice) = notice {
+                        page["notice"] = notice.into();
+                    }
+                    return page;
+                }
+                Ok(_) => {
+                    "The daemon returned an unsupported Stats scope. Update Gent, then refresh."
+                }
+                Err(_) => {
+                    "The daemon returned an unreadable Stats snapshot. Update Gent, then refresh."
+                }
+            },
+            Err(error) if error.to_string() == "invalid request" => {
+                "This daemon does not support Stats. Update the daemon, then refresh."
+            }
+            Err(_) if !home.join("config.toml").is_file() => {
+                "Set up this node in Status to view cluster stats."
+            }
+            Err(error) if error.to_string().starts_with("daemon unavailable;") => {
+                "Stats unavailable. Start the local Gent daemon, then refresh."
+            }
+            Err(_) => "Stats unavailable. Check the local daemon and owner access, then refresh.",
+        };
+        json!({"page":"stats", "error":notice})
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use gent_protocol::Response;
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::UnixListener,
+    };
+
+    async fn answer(listener: &UnixListener, operation: &str, response: Response) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        let mut frame = String::new();
+        stream.read_line(&mut frame).await.unwrap();
+        let gent_protocol::Request::Owner { action, .. } = serde_json::from_str(&frame).unwrap()
+        else {
+            panic!("Stats must use the local owner socket")
+        };
+        assert_eq!(
+            serde_json::to_value(action).unwrap(),
+            json!({"op":operation})
+        );
+        let mut bytes = serde_json::to_vec(&response).unwrap();
+        bytes.push(b'\n');
+        stream.get_mut().write_all(&bytes).await.unwrap();
+    }
+
     #[tokio::test]
     async fn an_older_daemon_or_incomplete_snapshot_is_unavailable() {
-        use gent_protocol::Response;
-        use tokio::{
-            io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-            net::UnixListener,
-        };
-
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("fixture");
         gent_daemon::config::initialize(&home, "stats").unwrap();
@@ -149,27 +200,72 @@ mod tests {
             ),
             (Response::Ok(json!({})), "unreadable Stats snapshot"),
         ] {
-            let server = async {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut stream = BufReader::new(stream);
-                let mut frame = String::new();
-                stream.read_line(&mut frame).await.unwrap();
-                assert!(matches!(
-                    serde_json::from_str(&frame),
-                    Ok(gent_protocol::Request::Owner {
-                        action: OwnerOp::Stats,
-                        ..
-                    })
-                ));
-                let mut bytes = serde_json::to_vec(&response).unwrap();
-                bytes.push(b'\n');
-                stream.get_mut().write_all(&bytes).await.unwrap();
-            };
-            let (page, ()) = tokio::join!(read(&home), server);
+            let (page, ()) = tokio::join!(
+                Request::Stats.respond(&home),
+                answer(&listener, "stats", response)
+            );
             assert_eq!(page["page"], "stats");
             assert!(page["error"].as_str().unwrap().contains(expected));
             assert!(page.get("outbound").is_none() && page.get("nodes").is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn cached_reads_and_live_confirmations_use_distinct_owner_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("fixture");
+        gent_daemon::config::initialize(&home, "stats").unwrap();
+        let listener = UnixListener::bind(home.join("daemon.sock")).unwrap();
+        let cached = json!({
+            "scope":"cluster", "outbound":{"messages":7,"text_bytes":40,"attachment_bytes":0,"bytes":40},
+            "babysitter":{"ordinary_submitted":0,"goal_submitted":0}, "top_senders":[], "nodes":[],
+            "coverage":{"reporting_nodes":2,"expected_nodes":2,"fresh_nodes":2,"complete":true}
+        });
+        let (page, ()) = tokio::join!(
+            Request::Stats.respond(&home),
+            answer(&listener, "stats", Response::Ok(cached.clone()))
+        );
+        assert!(page.get("notice").is_none());
+        for confirmed in [1, 2] {
+            let mut snapshot = cached.clone();
+            snapshot["outbound"]["messages"] = 8.into();
+            snapshot["refresh"] = json!({"confirmed_nodes":confirmed, "expected_nodes":2});
+            let (page, ()) = tokio::join!(
+                Request::RefreshStats.respond(&home),
+                answer(&listener, "refresh_stats", Response::Ok(snapshot))
+            );
+            assert!(
+                page["outbound"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Accepted sends: 8")
+            );
+            let notice = page["notice"].as_str().unwrap();
+            assert!(notice.contains(&format!("{confirmed} of 2")));
+            assert_eq!(notice.contains("offline"), confirmed < 2);
+        }
+        let old_daemon = async {
+            answer(
+                &listener,
+                "refresh_stats",
+                Response::Error("invalid request".into()),
+            )
+            .await;
+            answer(&listener, "stats", Response::Ok(cached)).await;
+        };
+        let (page, ()) = tokio::join!(Request::RefreshStats.respond(&home), old_daemon);
+        assert!(
+            page["notice"]
+                .as_str()
+                .unwrap()
+                .contains("Update the local daemon")
+        );
+        assert!(
+            page["outbound"]
+                .as_str()
+                .unwrap()
+                .contains("Accepted sends: 7")
+        );
     }
 
     #[test]

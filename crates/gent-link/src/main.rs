@@ -108,7 +108,7 @@ enum Command {
     },
     /// Diagnose local setup without repairing state or running a model.
     Doctor(doctor::Options),
-    /// Show Gent message traffic, top sending chats, and Babysitter interventions.
+    /// Refresh and show cluster message traffic, top sending chats, and Babysitter interventions.
     Stats,
     /// Show current relay synchronization progress and queued records.
     Sync {
@@ -543,6 +543,15 @@ async fn owner(home: &std::path::Path, action: OwnerOp) -> Result<Value> {
     )
     .await
 }
+
+/// During an update the installed CLI or Desktop can be newer than the daemon.
+async fn refresh_stats(home: &std::path::Path) -> Result<Value> {
+    match owner(home, OwnerOp::RefreshStats).await {
+        Err(error) if error.to_string() == "invalid request" => owner(home, OwnerOp::Stats).await,
+        result => result,
+    }
+}
+
 async fn configure(home: &std::path::Path, id: &str, edit: ConfigurationEdit) -> Result<Value> {
     let mut value = owner(
         home,
@@ -1041,7 +1050,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 "this daemon does not report sync progress; update Gent and restart its daemon",
             )?,
         Some(Command::Nodes) => node::connections(&home).await?,
-        Some(Command::Stats) => owner(&home, OwnerOp::Stats).await?,
+        Some(Command::Stats) => refresh_stats(&home).await?,
         Some(Command::Files { command }) => {
             let action = match command.unwrap_or(FilesCommand::Status) {
                 FilesCommand::Status => OwnerOp::FilesStatus,

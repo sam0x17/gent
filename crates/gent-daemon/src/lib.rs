@@ -149,6 +149,7 @@ pub async fn run_locked_until(
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
     let permits = Arc::new(Semaphore::new(32));
     let uploads = Arc::new(Semaphore::new(2));
+    let refresh_waiters = Arc::new(Semaphore::new(64));
     let mut maintenance = tokio::time::interval(Duration::from_secs(15 * 60));
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut maintenance_tasks = tokio::task::JoinSet::new();
@@ -182,9 +183,10 @@ pub async fn run_locked_until(
                 };
                 let store=store.clone();
                 let uploads=uploads.clone();
+                let refresh_waiters=refresh_waiters.clone();
                 let build_info=build_info.clone();
                 requests.spawn(async move {
-                    let _=serve(stream,store,uploads,permit,build_info).await;
+                    let _=serve(stream,store,uploads,permit,build_info,refresh_waiters).await;
                 });
             }
         }
@@ -210,6 +212,7 @@ async fn serve(
     uploads: Arc<Semaphore>,
     permit: OwnedSemaphorePermit,
     build_info: Arc<serde_json::Value>,
+    refresh_waiters: Arc<Semaphore>,
 ) -> Result<()> {
     let started = tokio::time::Instant::now();
     let mut stream = BufReader::new(stream);
@@ -248,6 +251,40 @@ async fn serve(
             Duration::from_secs(10)
         };
     let mut response = match decoded {
+        Ok(Request::Owner {
+            credential,
+            action: gent_protocol::OwnerOp::RefreshStats,
+        }) => {
+            // Move long-lived waiters out of the ordinary request pool as soon
+            // as the frame is classified. Bound their sockets independently.
+            drop(permit);
+            match refresh_waiters.try_acquire_owned() {
+                Ok(_slot) => {
+                    let refresh = async {
+                        let wait =
+                            access::run(store.clone(), "start statistics refresh", move |s| {
+                                s.begin_stats_refresh(&credential)
+                            })
+                            .await?;
+                        let id = wait.wait(deadline - Duration::from_secs(1)).await;
+                        access::run(store, "read refreshed statistics", move |s| {
+                            s.stats_snapshot(Some(id))
+                        })
+                        .await
+                    };
+                    match tokio::time::timeout_at(deadline, refresh).await {
+                        Ok(Ok(value)) => Response::Ok(value),
+                        Ok(Err(error)) => Response::Error(error.to_string()),
+                        Err(_) => Response::Error(
+                            "statistics request timed out waiting for local storage".into(),
+                        ),
+                    }
+                }
+                Err(_) => {
+                    Response::Error("too many statistics refresh waiters; retry shortly".into())
+                }
+            }
+        }
         Ok(request) => {
             if matches!(
                 &request,

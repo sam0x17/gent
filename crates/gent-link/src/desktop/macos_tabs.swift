@@ -243,7 +243,7 @@ final class StatsTab: NSObject {
     private let babysitter = NSTextField(wrappingLabelWithString: "")
     private let empty = NSTextField(wrappingLabelWithString: "No sending chats in the reported activity.")
     private var loading = false
-    private lazy var refresh = NSButton(title: "Refresh", target: self, action: #selector(load))
+    private lazy var refresh = NSButton(title: "Refresh", target: self, action: #selector(refreshPeers))
     private lazy var body = column([coverage, heading("Outbound messages"), outbound,
                                     heading("Babysitter"), babysitter, details])
 
@@ -275,14 +275,16 @@ final class StatsTab: NSObject {
         pin(column([header, notice, body]), in: view, inset: 12)
     }
 
-    @objc func load() {
+    @objc private func refreshPeers() { load(live: true) }
+
+    func load(live: Bool = false) {
         guard !loading else { return }
         loading = true
         refresh.isEnabled = false
-        body.isHidden = true
-        notice.stringValue = "Loading stats…"
+        if !live { body.isHidden = true }
+        notice.stringValue = live ? "Requesting current reports from cluster nodes…" : "Loading stats…"
         notice.isHidden = false
-        sendPage("stats")
+        sendPage(live ? "refresh_stats" : "stats")
     }
 
     func receive(_ reply: [String: Any]) {
@@ -291,9 +293,9 @@ final class StatsTab: NSObject {
         let rows = reply["rows"] as? [[String: String]] ?? []
         senders.receive(rows)
         nodes.receive(reply["nodes"] as? [[String: String]] ?? [])
-        notice.stringValue = reply["error"] as? String ?? ""
+        notice.stringValue = reply["error"] as? String ?? reply["notice"] as? String ?? ""
         notice.isHidden = notice.stringValue.isEmpty
-        body.isHidden = !notice.isHidden
+        body.isHidden = reply["error"] != nil
         coverage.stringValue = reply["coverage"] as? String ?? ""
         outbound.stringValue = reply["outbound"] as? String ?? ""
         babysitter.stringValue = reply["babysitter"] as? String ?? ""

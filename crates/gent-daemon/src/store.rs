@@ -85,6 +85,7 @@ pub struct Store {
     identity: Identity,
     owner_hash: String,
     stats_cache: Option<stats_sync::Ranking>,
+    stats_poll: Option<stats_sync::Poll>,
     pub(crate) sync_wakeup: Arc<Notify>,
     pub(crate) sync_health: Arc<crate::sync::health::Health>,
 }
@@ -248,6 +249,7 @@ impl Store {
             sync_wakeup: Arc::new(Notify::new()),
             sync_health: Arc::default(),
             stats_cache: None,
+            stats_poll: None,
         };
         // Projection failure must never replace committed authority with TOML.
         let _ = store.project_config();
@@ -259,6 +261,11 @@ impl Store {
             Ok(value) => Response::Ok(value),
             Err(error) => Response::Error(error.to_string()),
         }
+    }
+
+    fn require_owner_credential(&self, credential: &str) -> Result<()> {
+        ensure!(hash(credential) == self.owner_hash, "unauthorized");
+        Ok(())
     }
 
     fn execute(&mut self, request: Request) -> Result<Value> {
@@ -294,7 +301,16 @@ impl Store {
 
     fn execute_step(&mut self, request: Request, export_step: files::ExportStep) -> Result<Value> {
         if let Request::Owner { credential, .. } = &request {
-            ensure!(hash(credential) == self.owner_hash, "unauthorized");
+            self.require_owner_credential(credential)?;
+            if matches!(
+                &request,
+                Request::Owner {
+                    action: OwnerOp::Stats,
+                    ..
+                }
+            ) {
+                return self.stats_snapshot(None);
+            }
         }
         if let Request::Owner {
             action:
@@ -377,37 +393,29 @@ impl Store {
                 ..
             }
         );
-        let stats_request = matches!(
+        let read_only = (matches!(
             &request,
             Request::Owner {
-                action: OwnerOp::Stats,
+                action: OwnerOp::Status
+                    | OwnerOp::Agents
+                    | OwnerOp::Nodes
+                    | OwnerOp::Dashboards { .. }
+                    | OwnerOp::NotificationPending { .. }
+                    | OwnerOp::WebCheckpoint { .. }
+                    | OwnerOp::WebDeliveryDemand { .. }
+                    | OwnerOp::NodeRemovals { .. }
+                    | OwnerOp::WakePendingAgents { .. }
+                    | OwnerOp::WakeDirectTurnEvidence { .. },
                 ..
             }
-        );
-        let read_only = stats_request
-            || (matches!(
-                &request,
-                Request::Owner {
-                    action: OwnerOp::Status
-                        | OwnerOp::Agents
-                        | OwnerOp::Nodes
-                        | OwnerOp::Dashboards { .. }
-                        | OwnerOp::NotificationPending { .. }
-                        | OwnerOp::WebCheckpoint { .. }
-                        | OwnerOp::WebDeliveryDemand { .. }
-                        | OwnerOp::NodeRemovals { .. }
-                        | OwnerOp::WakePendingAgents { .. }
-                        | OwnerOp::WakeDirectTurnEvidence { .. },
+        ) || matches!(
+            &request,
+            Request::HostedStatus { .. }
+                | Request::Agent {
+                    action: AgentOp::BabysitterChatProbe { .. },
                     ..
                 }
-            ) || matches!(
-                &request,
-                Request::HostedStatus { .. }
-                    | Request::Agent {
-                        action: AgentOp::BabysitterChatProbe { .. },
-                        ..
-                    }
-            )) && !projection_pending;
+        )) && !projection_pending;
         let tx = self.db.transaction_with_behavior(if read_only {
             TransactionBehavior::Deferred
         } else {
@@ -450,9 +458,7 @@ impl Store {
             }
         );
         let mut value = match request {
-            Request::Owner { action, .. } => {
-                session.owner(action, &self.sync_health, &mut self.stats_cache)?
-            }
+            Request::Owner { action, .. } => session.owner(action, &self.sync_health)?,
             Request::Agent { credential, action } => {
                 session.state.authorize_node(
                     self.identity.node.id(),
@@ -891,12 +897,7 @@ impl StoreSession<'_> {
         }
         Ok(agents)
     }
-    fn owner(
-        &mut self,
-        action: OwnerOp,
-        health: &crate::sync::health::Health,
-        stats_cache: &mut Option<stats_sync::Ranking>,
-    ) -> Result<Value> {
+    fn owner(&mut self, action: OwnerOp, health: &crate::sync::health::Health) -> Result<Value> {
         match action {
             OwnerOp::WebDeliveryDemand { node_id } => self.web_delivery_demand(&node_id),
             OwnerOp::WebDeliveryChecked {
@@ -990,7 +991,9 @@ impl StoreSession<'_> {
             | OwnerOp::PreparePeerConfiguration => {
                 anyhow::bail!("pairing must use its owner-authenticated entry point")
             }
-            OwnerOp::Stats => self.cluster_usage_stats(stats_cache),
+            OwnerOp::Stats | OwnerOp::RefreshStats => {
+                anyhow::bail!("statistics require the owner statistics entry point")
+            }
             OwnerOp::Status => Ok(
                 json!({"process_id":std::process::id(),"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,
                     "release_channel":self.state.state().release_channel,

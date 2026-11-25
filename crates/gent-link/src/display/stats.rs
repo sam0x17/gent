@@ -6,6 +6,21 @@ pub(super) fn render(output: &mut String, value: &Value) -> Result<()> {
         serde_json::from_value(value.clone()).context("invalid Gent stats response")?;
     anyhow::ensure!(stats.scope == "cluster", "unsupported Gent stats scope");
     header(output, "Stats")?;
+    match &stats.refresh {
+        Some(refresh) => row(
+            output,
+            "Refresh",
+            &format!(
+                "{} of {} nodes confirmed",
+                refresh.confirmed_nodes, refresh.expected_nodes
+            ),
+        )?,
+        None => row(
+            output,
+            "Refresh",
+            "Showing cached figures. Update the daemon to refresh peers.",
+        )?,
+    }
     let coverage = &stats.coverage;
     row(
         output,

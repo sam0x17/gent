@@ -285,11 +285,11 @@ async fn supervise(
                 #[cfg(target_os = "macos")]
                 if deliveries.receive(&line) { continue; }
                 if line.starts_with('{') {
-                    if let Ok(stats::Request::Stats) = serde_json::from_str(&line) {
-                        // Keep daemon controls responsive if the local owner socket is offline.
+                    if let Ok(request) = serde_json::from_str::<stats::Request>(&line) {
+                        // A live refresh may wait for peer reports. Keep daemon controls responsive.
                         if stats_jobs.is_empty() {
                             let home = home.to_owned();
-                            stats_jobs.spawn(async move { stats::read(&home).await });
+                            stats_jobs.spawn(async move { request.respond(&home).await });
                         }
                         continue;
                     }

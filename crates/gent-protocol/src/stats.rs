@@ -64,6 +64,13 @@ pub struct Coverage {
     pub complete: bool,
 }
 
+/// Counts from a bounded refresh, including the local node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refresh {
+    pub confirmed_nodes: usize,
+    pub expected_nodes: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stats {
     pub scope: String,
@@ -72,4 +79,6 @@ pub struct Stats {
     pub top_senders: Vec<Sender>,
     pub nodes: Vec<NodeStats>,
     pub coverage: Coverage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<Refresh>,
 }

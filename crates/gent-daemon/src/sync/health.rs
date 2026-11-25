@@ -42,11 +42,18 @@ struct Observation {
 #[derive(Default)]
 pub(crate) struct Health {
     pub(crate) connected: Arc<AtomicBool>,
+    pub(crate) stats: Arc<StatsWatch>,
     pub(crate) verify_watch: tokio::sync::Notify,
     pass: Mutex<Pass>,
     wss: Mutex<Option<Arc<super::notifications::wss::Metrics>>>,
     exchange: Mutex<Option<Arc<super::exchange::Exchange>>>,
     direct: Mutex<Option<Arc<super::direct::Metrics>>>,
+}
+/// Only negotiated peer routes can service an optional statistics request.
+#[derive(Default)]
+pub(crate) struct StatsWatch {
+    pub(crate) tick: tokio::sync::Notify,
+    pub(crate) routes: tokio::sync::watch::Sender<usize>,
 }
 #[derive(Default, Serialize)]
 struct Pass {

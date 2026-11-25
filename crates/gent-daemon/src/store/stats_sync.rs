@@ -5,16 +5,20 @@ use uuid::Uuid;
 
 mod aggregate;
 pub(super) use aggregate::Ranking;
+mod refresh;
+pub(super) use refresh::Poll;
 mod transfer;
 mod transport;
 
 const COALESCE: i64 = 30;
-const FRESH: i64 = 600;
-const HEARTBEAT: i64 = 300;
+const HEARTBEAT: i64 = 3600;
+const FRESH: i64 = 2 * HEARTBEAT;
 const RETRY: i64 = 120;
 
 pub(super) fn schema(db: &Connection) -> Result<()> {
-    db.execute_batch("CREATE TEMP TABLE IF NOT EXISTS stats_pending(id TEXT PRIMARY KEY,peer TEXT NOT NULL,key BLOB NOT NULL,body BLOB NOT NULL,created INTEGER NOT NULL);
+    db.execute_batch("CREATE TEMP TABLE IF NOT EXISTS stats_poll(peer TEXT PRIMARY KEY,poll TEXT NOT NULL,key BLOB NOT NULL,probe INTEGER NOT NULL,failed INTEGER NOT NULL,head TEXT,confirmed INTEGER NOT NULL DEFAULT 0);
+         CREATE TEMP TABLE IF NOT EXISTS stats_deferred(peer TEXT PRIMARY KEY,key BLOB NOT NULL,round TEXT NOT NULL,base TEXT,due INTEGER NOT NULL);
+         CREATE TEMP TABLE IF NOT EXISTS stats_pending(id TEXT PRIMARY KEY,peer TEXT NOT NULL,key BLOB NOT NULL,body BLOB NOT NULL,created INTEGER NOT NULL);
          CREATE INDEX IF NOT EXISTS temp.stats_pending_peer ON stats_pending(peer);")?;
     if db.table_exists(None, "stats_history")? {
         return Ok(());

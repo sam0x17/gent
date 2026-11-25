@@ -524,6 +524,9 @@ def exercise_stats(cli, *, empty):
     def shows(fragment):
         return pyatspi.findDescendant(pyatspi.Registry.getDesktop(0), lambda c:
             c.getRoleName() == "label" and c.getState().contains(pyatspi.STATE_SHOWING) and fragment in c.name)
+    confirmed = snapshot["refresh"]
+    receipt = f'Node reports confirmed on refresh: {confirmed["confirmed_nodes"]} of {confirmed["expected_nodes"]}.'
+    wait_for(lambda: shows(receipt), "explicit Stats refresh confirmation")
     wait_for(lambda: shows(scope), "CLI cluster reporting and freshness in Stats")
     traffic = snapshot["outbound"]
     assert shows(f'Accepted sends: {traffic["messages"]:,}   ·   Payload bytes: {traffic["bytes"]:,}')

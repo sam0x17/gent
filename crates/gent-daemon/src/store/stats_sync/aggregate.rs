@@ -1,6 +1,6 @@
 use super::*;
 use gent_protocol::stats::{
-    Babysitter, Coverage, Node, NodeStats, Sender, Stats, Tracking, Traffic,
+    Babysitter, Coverage, Node, NodeStats, Refresh, Sender, Stats, Tracking, Traffic,
 };
 
 // Store owns one bounded result, keyed by the included contributions. Status,
@@ -90,19 +90,24 @@ impl StoreSession<'_> {
         })
     }
 
-    pub(in crate::store) fn cluster_usage_stats(
+    fn cluster_usage_stats(
         &self,
         cache: &mut Option<Ranking>,
+        poll: Option<Uuid>,
     ) -> Result<Value> {
         let mut nodes = Vec::new();
+        let round = poll.map(|id| id.to_string());
+        let mut confirmed_nodes = 0;
         let mut revisions = Revisions {
             local: None,
             remote: Vec::new(),
         };
         let authority_fresh = self.state.require_fresh(self.timestamp as u64).is_ok();
         let mut cache_row=self.db.prepare(
-            "SELECT s.head,s.as_of,s.started,s.ordinary,s.goals,s.m,s.t,s.a,s.round IS NOT NULL OR s.failed_at IS NOT NULL
+            "SELECT s.head,s.as_of,s.started,s.ordinary,s.goals,s.m,s.t,s.a,s.round IS NOT NULL OR s.failed_at IS NOT NULL,
+                    p.confirmed=1 AND p.head=s.head AND p.failed=0 AND s.round IS NULL
              FROM stats_peers s JOIN network_links l ON l.peer=s.peer AND l.peer_key=s.key
+             LEFT JOIN stats_poll p ON p.peer=s.peer AND p.key=s.key AND p.poll=?3
              WHERE s.peer=?1 AND s.key=?2 AND s.head IS NOT NULL")?;
         for (id, member) in &self.state.state().nodes {
             if member.hosted_by.is_some() {
@@ -122,13 +127,17 @@ impl StoreSession<'_> {
             if id == self.identity.node.id()
                 && member.signing_key == self.identity.node.public_key()
             {
+                confirmed_nodes += 1;
                 revisions.local = Some(self.stats_head()?);
                 detail.status = "local".into();
                 detail.as_of = Some(self.timestamp);
             } else if let Some(row) = cache_row
-                .query(params![id, member.signing_key.as_slice()])?
+                .query(params![id, member.signing_key.as_slice(), round])?
                 .next()?
             {
+                if row.get::<_, Option<bool>>(9)? == Some(true) {
+                    confirmed_nodes += 1;
+                }
                 let at: i64 = row.get(1)?;
                 let fresh = authority_fresh
                     && !row.get::<_, bool>(8)?
@@ -205,7 +214,28 @@ impl StoreSession<'_> {
             top_senders,
             babysitter,
             nodes,
+            refresh: poll.is_some().then_some(Refresh {
+                confirmed_nodes,
+                expected_nodes: coverage.expected_nodes,
+            }),
             coverage,
         })?)
+    }
+}
+
+impl Store {
+    pub(crate) fn stats_snapshot(&mut self, poll: Option<Uuid>) -> Result<Value> {
+        let tx = self.db.transaction()?;
+        let session = StoreSession {
+            home: &self.home,
+            config: self.config.clone(),
+            identity: &self.identity,
+            state: self.identity.state(&tx)?,
+            timestamp: requests::diagnostic_clock(&tx, now())?,
+            db: &tx,
+        };
+        let result = session.cluster_usage_stats(&mut self.stats_cache, poll)?;
+        tx.commit()?;
+        Ok(result)
     }
 }
