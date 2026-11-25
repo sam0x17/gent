@@ -4,22 +4,28 @@ use super::*;
 #[tokio::test]
 #[ignore = "requires an installed Codex app-server"]
 async fn ordinary_claim_reaches_native_input_once_without_a_goal() -> Result<()> {
-    ordinary_native_trial(false, false).await
+    ordinary_native_trial(false, None).await
 }
 
 #[tokio::test]
 #[ignore = "requires an installed Codex app-server"]
 async fn ordinary_user_turn_after_a_completed_native_goal_is_retried() -> Result<()> {
-    ordinary_native_trial(true, false).await
+    ordinary_native_trial(true, None).await
 }
 
 #[tokio::test]
 #[ignore = "requires an installed Codex app-server"]
 async fn composer_recovers_a_failed_request_after_a_user_steer() -> Result<()> {
-    ordinary_native_trial(false, true).await
+    ordinary_native_trial(false, Some("composer")).await
 }
 
-async fn ordinary_native_trial(completed_goal: bool, composer: bool) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires an installed Codex app-server"]
+async fn user_trigger_recovers_a_failed_request_after_a_user_steer() -> Result<()> {
+    ordinary_native_trial(true, Some("user")).await
+}
+
+async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&str>) -> Result<()> {
     const FIXTURE_ROOT: &str = "GENT_TEST_ORDINARY_CODEX_ROOT";
     if let Some(root) = std::env::var_os(FIXTURE_ROOT) {
         let root = PathBuf::from(root);
@@ -32,7 +38,9 @@ async fn ordinary_native_trial(completed_goal: bool, composer: bool) -> Result<(
     let (mut child, socket) = start_host(node.root.path(), listener.local_addr()?).await?;
     let calls = Arc::new(AtomicUsize::new(0));
     let received = calls.clone();
-    let initial_calls = 1 + usize::from(composer);
+    let steered = steered_trigger.is_some();
+    let composer = steered_trigger == Some("composer");
+    let initial_calls = 1 + usize::from(steered);
     let release = Arc::new(tokio::sync::Notify::new());
     let hold = release.clone();
     let provider = Router::new().route("/v1/responses",post(move || {
@@ -40,11 +48,11 @@ async fn ordinary_native_trial(completed_goal: bool, composer: bool) -> Result<(
         let hold = hold.clone();
         async move {
             if index > initial_calls { std::future::pending().await }
-            if composer && index == 0 { hold.notified().await; }
+            if steered && index == 0 { hold.notified().await; }
             let error = if composer && index == initial_calls {
                 json!({"type":"invalid_request_error","code":"invalid_value","message":"Invalid value: ''. Supported values are: 'assistant', 'system', 'developer', and 'user'.","param":"input[12]"})
-            } else if composer {
-                json!({"type":"invalid_request_error","code":"invalid_request_error","message":"Invalid request payload","param":"0"})
+            } else if steered {
+                json!({"type":"invalid_request_error","code":"invalid_request_error","message":"Invalid request payload","param":"56959"})
             } else {
                 json!({"type":"invalid_request_error","code":"unknown_parameter","message":"Unknown parameter: 'input[0].tools[0].role'.","param":"input[0].tools[0].role"})
             };
@@ -79,13 +87,13 @@ async fn ordinary_native_trial(completed_goal: bool, composer: bool) -> Result<(
         let id = host
             .rpc(
                 "turn/start",
-                json!({"threadId":thread,"turnTrigger":if composer {"composer"} else {"user"},
+                json!({"threadId":thread,"turnTrigger":steered_trigger.unwrap_or("user"),
             "clientUserMessageId":Uuid::new_v4(),
             "input":[{"type":"text","text":"please continue"}]}),
             )
             .await?["turn"]["id"]
             .clone();
-        if composer {
+        if steered {
             while calls.load(Ordering::SeqCst) == 0 {
                 sleep(Duration::from_millis(20)).await;
             }
@@ -106,7 +114,7 @@ async fn ordinary_native_trial(completed_goal: bool, composer: bool) -> Result<(
         }
         sweep(&node.home, &registry, &mut None, Sweep::WakeAndGoals).await?;
         assert_eq!(calls.load(Ordering::SeqCst), initial_calls);
-        if composer {
+        if steered {
             let items = host
                 .rpc("thread/items/list", json!({"threadId":thread,"turnId":id}))
                 .await?;

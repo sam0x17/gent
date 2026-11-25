@@ -53,6 +53,8 @@ enum Change {
     GoalTrigger,
     LaterInputInRollout,
     SecondInputInTurn,
+    UserSteer,
+    UnattributedSteer,
     LongOperator,
     SupersededRollout,
     ComposerCommandDuringCheck,
@@ -87,6 +89,8 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
         GoalTrigger,
         LaterInputInRollout,
         SecondInputInTurn,
+        UserSteer,
+        UnattributedSteer,
         LongOperator,
         SupersededRollout,
         ComposerCommandDuringCheck,
@@ -129,7 +133,10 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
         if change == SecondInputInTurn {
             rows.push(input.clone());
         }
-        if composer {
+        if change == UnattributedSteer {
+            rows[1]["payload"]["turn_attribution"]["turn_trigger"] = Value::Null;
+        }
+        if composer || matches!(change, UserSteer | UnattributedSteer) {
             let mut steer = input.clone();
             steer["payload"]["item"] =
                 json!({"type":"UserMessage","id":"two","client_id":"second"});
@@ -144,6 +151,14 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
             rows.push(steer);
         }
         rows.push(envelope(json!({"type":"task_complete","turn_id":turn,"started_at":started,"completed_at":ended,"error":{"message":"Model at capacity"}})));
+        if change == UserSteer {
+            for id in ["one-command", "two-command", "three-command"] {
+                rows.push(envelope(
+                    json!({"type":"item_completed","thread_id":thread,"turn_id":turn,
+                    "item":{"type":"CommandExecution","id":id,"status":"completed"}}),
+                ));
+            }
+        }
         if change == LaterInputInRollout {
             rows.push(input);
         }
@@ -220,14 +235,14 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
                 "turn/start" => {
                     assert!(matches!(
                         change,
-                        LongOperator | LostReply | ComposerCommandDuringCheck
+                        LongOperator | LostReply | UserSteer | ComposerCommandDuringCheck
                     ));
                     assert_eq!(
                         r["params"]["input"],
                         json!([{"type":"text","text":"please continue"}])
                     );
                     assert_eq!(r["params"]["parentTurnId"], turn.to_string());
-                    matches!(change, LongOperator | ComposerCommandDuringCheck)
+                    (change != LostReply)
                         .then(|| json!({"turn":{"id":Uuid::now_v7(),"rootTurnId":turn}}))
                 }
                 other => panic!("unexpected host operation {other}"),
@@ -270,7 +285,7 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
             starts,
             usize::from(matches!(
                 change,
-                LongOperator | LostReply | ComposerCommandDuringCheck
+                LongOperator | LostReply | UserSteer | ComposerCommandDuringCheck
             )),
             "{change:?}"
         );
