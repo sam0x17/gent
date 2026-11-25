@@ -709,12 +709,14 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
         }
         let endpoint = account_endpoint(home, &saved.service)?;
         return match service_session(&client, &endpoint, &saved).await {
-            Ok(Some(session)) => {
-                Ok(json!({"status":"active","service":saved.service,"account":session}))
-            }
-            Ok(None) => Ok(json!({"status":"signed_out","service":saved.service})),
+            Ok(Some(session)) => Ok(
+                json!({"status":"active","service":saved.service,"endpoint":endpoint.as_str(),"account":session}),
+            ),
+            Ok(None) => Ok(
+                json!({"status":"signed_out","service":saved.service,"endpoint":endpoint.as_str()}),
+            ),
             Err(_) => Ok(
-                json!({"status":"unavailable","service":saved.service,"cached_account":saved.session}),
+                json!({"status":"unavailable","service":saved.service,"endpoint":endpoint.as_str(),"cached_account":saved.session}),
             ),
         };
     }
@@ -1133,7 +1135,10 @@ pub fn print(value: &Value) {
             value["account"]["github_login"]
                 .as_str()
                 .unwrap_or("unknown"),
-            value["service"].as_str().unwrap_or("")
+            value["endpoint"]
+                .as_str()
+                .or(value["service"].as_str())
+                .unwrap_or("")
         ),
         Some("revocation_pending") => println!(
             "Signed out locally. Service revocation is pending; retry gent auth logout when connected."
