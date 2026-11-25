@@ -27,6 +27,19 @@ pub fn print(value: &Value) {
     if let Some(pid) = daemon["pid"].as_u64() {
         ui::field("Process", &pid.to_string());
     }
+    if kind == "gateway" {
+        if let Some(commit) = value["build"]["commit"]
+            .as_str()
+            .filter(|s| crate::build_info::valid_commit(s))
+        {
+            ui::field("Running build", commit);
+        }
+        if let Some(host @ ("mcp.gent.link" | "beta-mcp.gent.link")) =
+            value["destination_host"].as_str()
+        {
+            ui::field("Bridge destination", host);
+        }
+    }
     ui::field(
         "Service",
         &format!(

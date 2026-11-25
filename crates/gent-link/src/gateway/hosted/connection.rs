@@ -25,6 +25,7 @@ use tower::ServiceExt;
 
 pub(super) async fn run(
     endpoint: &Endpoint,
+    destination: &super::Destination,
     token: String,
     app: Router,
     connected: Arc<AtomicBool>,
@@ -32,6 +33,7 @@ pub(super) async fn run(
     session: Option<Arc<crate::web::failover::Session>>,
 ) -> Result<()> {
     let selected = endpoint.route.destination()?;
+    destination.dialing(&selected);
     let mut url = selected.join(&endpoint.connect_path)?;
     url.set_scheme(if selected.scheme() == "https" {
         "wss"

@@ -202,10 +202,19 @@ pub async fn execute(home: &Path, command: Command) -> Result<Option<Value>> {
                 OAuthCommand::Deny { request } => registry.oauth_decide(&request, false)?,
             }))
         }
-        Command::Run(options) => {
-            server::run(home, options).await?;
-            Ok(None)
-        }
+        Command::Run(options) => loop {
+            let drain = tokio_util::sync::CancellationToken::new();
+            let serving = server::run(home.clone(), options.clone(), drain.clone());
+            tokio::pin!(serving);
+            tokio::select! {
+                result = &mut serving => break result.map(|()| None),
+                adoption = crate::service::adoption::watch(&home) => {
+                    drain.cancel();
+                    serving.await?;
+                    adoption.exec_if_ready(&home).await?;
+                }
+            }
+        },
         Command::Status
         | Command::Clients {
             command: None | Some(ClientCommand::List),

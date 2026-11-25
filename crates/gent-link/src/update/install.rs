@@ -167,7 +167,7 @@ fn replace(source: &Path, destination: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn inspect(binary: &Path) -> Result<Build> {
+pub(crate) async fn inspect(binary: &Path) -> Result<Build> {
     Ok(version(binary).await?.build)
 }
 

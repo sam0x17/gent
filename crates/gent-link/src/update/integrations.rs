@@ -9,6 +9,9 @@ pub(super) async fn refresh(home: &Path, installation: &Installation) {
         Ok(installed) if installed == build_info::current() => {}
         _ => return,
     }
+    if let Err(err) = crate::service::adoption::refresh_legacy(home, &installation.binary).await {
+        eprintln!("Gent managed gateway adoption pending: {err}");
+    }
     let home = home.to_owned();
     let result =
         tokio::task::spawn_blocking(move || crate::integration::refresh::refresh(&home)).await;

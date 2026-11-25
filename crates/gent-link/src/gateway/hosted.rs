@@ -12,11 +12,35 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+
+// Record the actual outbound dial, including failed attempts. Only these two
+// public host names may be exposed by readiness; custom destinations stay private.
+#[derive(Default)]
+struct Destination(AtomicU8);
+impl Destination {
+    fn dialing(&self, url: &url::Url) {
+        let bridge = gent_daemon::backend::MCP;
+        let value = match url.origin().ascii_serialization().as_str() {
+            host if host == bridge.stable => 1,
+            host if host == bridge.beta => 2,
+            _ => 0,
+        };
+        self.0.store(value, Ordering::Release);
+    }
+
+    fn host(&self) -> Option<&'static str> {
+        match self.0.load(Ordering::Acquire) {
+            1 => Some("mcp.gent.link"),
+            2 => Some("beta-mcp.gent.link"),
+            _ => None,
+        }
+    }
+}
 
 pub(super) struct Endpoint {
     pub origin: String,
@@ -118,10 +142,6 @@ pub(super) async fn validate(home: &Path, options: &Run) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
-    run_until(home, options, CancellationToken::new()).await
-}
-
 pub(super) async fn run_until(
     home: PathBuf,
     options: Run,
@@ -155,6 +175,7 @@ pub(super) async fn run_portable(
     .await?;
     let control = super::control::Server::bind(&home)?;
     let connected = Arc::new(AtomicBool::new(false));
+    let destination = Destination::default();
     eprintln!(
         "Gent hosted MCP: {}/mcp\n{}",
         endpoint.base,
@@ -178,6 +199,7 @@ pub(super) async fn run_portable(
                 let began = tokio::time::Instant::now();
                 let result = connection::run(
                     &endpoint,
+                    &destination,
                     token,
                     app.clone(),
                     connected.clone(),
@@ -217,7 +239,7 @@ pub(super) async fn run_portable(
         result=&mut publish=>result,
         result=control.serve_status(||json!({"version":1,"process_id":std::process::id(),"listen":null,
             "origin":endpoint.origin,"endpoint":format!("{}/mcp",endpoint.base),"transport":"hosted_bridge",
-            "connected":connected.load(Ordering::Acquire),
+            "connected":connected.load(Ordering::Acquire),"destination_host":destination.host(),
             "carrier_epoch":session.as_ref().map(|s|s.epoch),
             "checkpoint_management":session.as_ref().and_then(|s|s.management())}))=>result,
         result=tokio::signal::ctrl_c()=>{
@@ -242,6 +264,23 @@ mod tests {
         store::Store,
     };
     use gent_protocol::{ConfigurationEdit, OwnerOp, ReleaseChannel, Request, Response};
+
+    #[test]
+    fn readiness_exposes_only_the_first_party_bridge_just_dialed() -> Result<()> {
+        let destination = Destination::default();
+        assert_eq!(destination.host(), None);
+        for (origin, host) in [
+            (MCP.stable, Some("mcp.gent.link")),
+            (MCP.beta, Some("beta-mcp.gent.link")),
+            ("https://staging.gent.link", None),
+            ("https://mcp.gent.link:8443", None),
+            ("https://beta-mcp.gent.link.example", None),
+        ] {
+            destination.dialing(&url::Url::parse(origin)?);
+            assert_eq!(destination.host(), host);
+        }
+        Ok(())
+    }
 
     #[test]
     fn portable_web_uses_carrier_channel_and_retains_its_public_issuer() -> Result<()> {

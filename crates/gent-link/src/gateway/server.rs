@@ -311,7 +311,11 @@ pub(super) fn router(
         ))
 }
 
-async fn connection<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(io: T, app: Router) {
+async fn connection<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    io: T,
+    app: Router,
+    stop: CancellationToken,
+) {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
         .timer(TokioTimer::new())
@@ -320,9 +324,15 @@ async fn connection<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(io: T, a
         .max_buf_size(16 * 1024);
     // Connection failures carry no useful user action and may include private
     // request data; deliberately do not print errors from peers.
-    let _ = builder
-        .serve_connection(TokioIo::new(io), TowerToHyperService::new(app))
-        .await;
+    let connection = builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(app));
+    tokio::pin!(connection);
+    tokio::select! {
+        _ = &mut connection => {},
+        _ = stop.cancelled() => {
+            connection.as_mut().graceful_shutdown();
+            let _ = connection.await;
+        }
+    }
 }
 
 async fn serve(
@@ -342,27 +352,28 @@ async fn serve(
                 if tasks.len()>=MAX_CONNECTIONS {continue;}
                 let app=app.clone();
                 let tls=tls.clone();
+                let drain = stop.clone();
                 tasks.spawn(async move {
                     let _=tokio::time::timeout(CONNECTION_TIME,async move {
                         if let Some(tls)=tls {
                             if let Ok(Ok(stream))=tokio::time::timeout(Duration::from_secs(10),tls.accept(socket)).await
                                 && let Ok(peer)=Peer::from_tls(stream.get_ref().1.peer_certificates()) {
-                                connection(stream,app.layer(axum::Extension(peer))).await;
+                                connection(stream,app.layer(axum::Extension(peer)),drain).await;
                             }
-                        } else {connection(socket,app).await;}
+                        } else {connection(socket,app,drain).await;}
                     }).await;
                 });
             }
         }
     }
-    tasks.abort_all();
+    drop(listener);
     while tasks.join_next().await.is_some() {}
     Ok(())
 }
 
-pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
+pub(super) async fn run(home: PathBuf, options: Run, drain: CancellationToken) -> Result<()> {
     if options.hosted.is_some() {
-        return super::hosted::run(home, options).await;
+        return super::hosted::run_until(home, options, drain).await;
     }
     let registry = Registry::open(&home)?.with_file_origins(&options.file_origin)?;
     let _lock = managed_file::lock(&home.join("gateway/runtime.lock"))?;
@@ -384,11 +395,13 @@ pub(super) async fn run(home: PathBuf, options: Run) -> Result<()> {
     let app = router(home, registry, host, origin.clone(), stop.clone(), metadata);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     eprintln!("Gent gateway: {origin}/mcp (user-controlled endpoint, listening on {address})");
+    let serving = serve(listener, app, tls, drain.clone());
+    tokio::pin!(serving);
     let result = tokio::select! {
-        result=serve(listener,app,tls,stop.clone())=>result,
+        result=&mut serving => result,
         result=control.serve(address,&origin)=>result,
-        result=tokio::signal::ctrl_c()=>result.map_err(Into::into),
-        _=terminate.recv()=>Ok(()),
+        result=tokio::signal::ctrl_c()=>{ result?; drain.cancel(); serving.await },
+        _=terminate.recv()=>{ drain.cancel(); serving.await },
     };
     stop.cancel();
     result
