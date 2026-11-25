@@ -27,6 +27,32 @@ enum Request: Equatable {
     case json(NSDictionary)
 }
 
+func checkOrdinaryRecovery() {
+    let pane = SettingsTab()
+    let buttons = descendants(pane.view, of: NSButton.self)
+    require(descendants(pane.view, of: NSTextField.self).contains { $0.stringValue.contains("eligible Codex chats") },
+            "ordinary recovery identifies the supported host")
+    let ordinary = buttons.first { $0.title == "Continue ordinary chats after provider errors" }!
+    let goal = buttons.first { $0.title == "Resume goals after provider failures" }!
+    func show(paid: Bool, goals: Bool, chats: Bool) {
+        pane.receive(["values": ["paid": paid, "babysitter": goals, "ordinary_babysitter": chats]])
+    }
+    show(paid: true, goals: true, chats: false)
+    require(goal.state == .on && ordinary.state == .off && ordinary.isEnabled, "independent initial recovery preferences")
+    require(requests { ordinary.performClick(nil) } == [.json(["op":"set","key":"ordinary_babysitter","enabled":true])],
+            "ordinary recovery click submits just its own preference")
+    show(paid: true, goals: true, chats: true)
+    require(goal.state == .on && ordinary.state == .on, "ordinary recovery preserves enabled goal recovery")
+    require(requests { goal.performClick(nil) } == [.json(["op":"set","key":"babysitter","enabled":false])],
+            "goal recovery click submits just the goal preference")
+    show(paid: true, goals: false, chats: true)
+    require(goal.state == .off && ordinary.state == .on, "goals can be disabled while ordinary recovery runs")
+    show(paid: false, goals: false, chats: false)
+    require(!ordinary.isEnabled, "free node cannot opt into ordinary recovery")
+    show(paid: false, goals: false, chats: true)
+    require(ordinary.isEnabled && ordinary.state == .on, "a lapsed plan can clear a saved opt-in")
+}
+
 let accountRead = Request.json(["op": "cluster"])
 let snapshotRead = Request.command("refresh")
 
@@ -1172,6 +1198,11 @@ if CommandLine.arguments.dropFirst(2).contains(where: { ["--cluster", "--nodes"]
 var permissionChecks = 0
 desktop.prepareNotifications = { permissionChecks += 1 }
 let dashboardOnly = CommandLine.arguments.dropFirst(2).contains("--dashboard")
+checkOrdinaryRecovery()
+if CommandLine.arguments.dropFirst(2).contains("--ordinary-recovery") {
+    print("PASS: independent ordinary chat and goal recovery preferences")
+    exit(0)
+}
 let lifetime = Pipe()
 if dashboardOnly {
     // A screenless SSH session can construct the native window without a tray.

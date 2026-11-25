@@ -11,6 +11,8 @@ use std::{
 
 mod host_recovery;
 pub use host_recovery::{HostRecovery, MAX_RECOVERY_AGENTS, RecoveryAgent, RecoveryHost};
+mod ordinary_babysitter;
+pub use ordinary_babysitter::{ordinary_babysitter_enabled, set_ordinary_babysitter_enabled};
 mod discovery;
 mod transport;
 pub use discovery::Discovery;

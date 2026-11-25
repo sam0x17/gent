@@ -166,7 +166,9 @@ class ReleaseChannelRow(Gtk.Box):
 class SettingsPane(Gtk.Box):
     options = (("login", "Start Gent Desktop at graphical login"),
                ("updates", "Automatically update Gent"),
-               ("babysitter", "Resume goals after provider failures"), ("discovery", "Discover and publish native chats"),
+               ("babysitter", "Resume goals after provider failures"),
+               ("ordinary_babysitter", "Continue ordinary chats after provider errors"),
+               ("discovery", "Discover and publish native chats"),
                ("direct", "Prefer direct connections"), ("udp", "Allow UDP for direct connections"),
                ("helper", "Offer this node as a transport helper"))
 
@@ -197,6 +199,10 @@ class SettingsPane(Gtk.Box):
                 self.pricing.set_halign(Gtk.Align.START)
                 self.pricing.set_no_show_all(True)
                 form.pack_start(self.pricing, False, False, 0)
+            if key == "ordinary_babysitter":
+                detail = label("Sends “please continue” in eligible Codex chats on this node.", "quiet")
+                detail.set_line_wrap(True)
+                form.pack_start(detail, False, False, 0)
         form.pack_start(label("Network changes take effect when the daemon restarts.", "quiet"), False, False, 0)
         edit = Gtk.Button(label="Edit full configuration…")
         edit.set_halign(Gtk.Align.START)
@@ -268,7 +274,8 @@ class SettingsPane(Gtk.Box):
         self.updating = True
         self.values = reply.get("values", self.values)
         for key, button in self.checks.items():
-            available = key in self.values and (key != "babysitter" or self.values.get("paid") is True)
+            needs_pro = key == "babysitter" or (key == "ordinary_babysitter" and not self.values.get(key))
+            available = key in self.values and (not needs_pro or self.values.get("paid") is True)
             button.set_active(bool(available and self.values[key]))
             button.set_sensitive(available)
         self.pricing.set_visible(self.values.get("paid") is False)

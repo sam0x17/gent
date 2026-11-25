@@ -467,6 +467,11 @@ enum NodeNameCommand {
 }
 #[derive(Subcommand)]
 enum ConfigCommand {
+    /// Read or change this node's opt-in to continue ordinary Codex chats after provider errors.
+    OrdinaryChatRecovery {
+        #[command(subcommand)]
+        command: OrdinaryRecoveryCommand,
+    },
     Path,
     Validate,
     /// Edit a private draft and save validated changes without publishing them.
@@ -478,6 +483,15 @@ enum ConfigCommand {
     Request {
         id: String,
     },
+}
+#[derive(Subcommand)]
+enum OrdinaryRecoveryCommand {
+    /// Show the saved node preference.
+    Status,
+    /// Allow recovery for eligible ordinary chats on this node (Gent Pro).
+    Enable,
+    /// Stop ordinary chat recovery on this node.
+    Disable,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum PermissionName {
@@ -1144,6 +1158,22 @@ async fn execute(cli: Cli) -> Result<()> {
             }
         }
         Some(Command::Node { command: None }) => json!(config::load(&home)?.node),
+        Some(Command::Config {
+            command: Some(ConfigCommand::OrdinaryChatRecovery { command }),
+        }) => {
+            match command {
+                OrdinaryRecoveryCommand::Status => {
+                    node_home::inspect(&home)?;
+                }
+                OrdinaryRecoveryCommand::Enable => {
+                    config::set_ordinary_babysitter_enabled(&home, true)?
+                }
+                OrdinaryRecoveryCommand::Disable => {
+                    config::set_ordinary_babysitter_enabled(&home, false)?
+                }
+            }
+            json!({"enabled":config::ordinary_babysitter_enabled(&home)?, "scope":"this_node"})
+        }
         Some(Command::Config {
             command: Some(ConfigCommand::Path),
         }) => {
