@@ -384,6 +384,10 @@ fn remove_restore_retries_and_agent_revocation_cannot_resurrect_old_access() {
     }));
     error(f.import(Some(2)));
     assert_eq!(ok(f.import(Some(4)))["revision"], 5);
+    let stats: gent_protocol::stats::Stats =
+        serde_json::from_value(ok(f.owner(OwnerOp::Stats))).unwrap();
+    assert_eq!(stats.outbound, gent_protocol::stats::Traffic::default());
+    assert!(stats.top_senders.is_empty());
     ok(f.owner(OwnerOp::Revoke {
         agent_id: f.agents[0].clone(),
     }));

@@ -14,6 +14,7 @@ pub mod owner_transfer;
 pub mod permissions;
 mod release_channel;
 pub mod service;
+pub mod stats;
 pub mod transport_batch;
 pub mod transport_exchange;
 pub mod transport_sweep;
@@ -665,6 +666,8 @@ pub enum ConfigurationEdit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OwnerOp {
+    /// Read owner-visible Gent usage without probing hosts or modifying state.
+    Stats,
     Dashboards {
         after: Option<String>,
     },

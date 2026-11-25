@@ -41,6 +41,12 @@ mod wire_tests;
 mod dashboard_tests;
 #[path = "ordinary_babysitter_tests.rs"]
 mod ordinary_babysitter_tests;
+#[path = "stats_encryption_tests.rs"]
+mod stats_encryption_tests;
+#[path = "stats_tests.rs"]
+mod stats_tests;
+#[path = "usage_tests.rs"]
+mod usage_tests;
 struct OwnerPeer<'a>(&'a mut Store, String);
 impl Peer for OwnerPeer<'_> {
     async fn call(&mut self, action: PairingOp) -> Result<Value> {

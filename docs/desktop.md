@@ -22,11 +22,13 @@ Closing the window hides it in the tray. **Quit Gent Desktop** exits the compani
 
 In **Chats**, select the conversation and choose **Unregister chat…**. The confirmation identifies the chat and its ID. Revocation disables its Gent registration and preserves the conversation in the provider app. A remote host handles the request over its authenticated node link and publishes the updated registration. Remote unregistration requires node protocol 8 on the host and carrier.
 
-**Settings** controls graphical login, automatic updates, automatic goal recovery, native chat discovery, direct connections, UDP and transport helpers. Use **Cluster release channel** to select Stable or Beta for the whole cluster. The selector shows the latest signed choice this node has received. A queued request appears below it until the cluster decides. Switching channels requests one update per node, including nodes with automatic updates paused. **Automatically update Gent** controls future automatic updates on this node. The discovery switch allows the node to publish supported native chats. Network changes take effect on daemon restart.
+**Stats** shows the same cluster totals, top sending chats, and per-node counts as `gent stats`. Each report includes its observation time. Nodes that have yet to report appear without counts. [Counting and coverage](cli.md#stats)
+
+**Settings** controls graphical login, automatic updates, Babysitter, native chat discovery, direct connections, UDP and transport helpers. Use **Cluster release channel** to select Stable or Beta for the whole cluster. The selector shows the latest signed choice this node has received. A queued request appears below it until the cluster decides. Switching channels requests one update per node, including nodes with automatic updates paused. **Automatically update Gent** controls future automatic updates on this node. The discovery switch allows the node to publish supported native chats. Network changes take effect on daemon restart.
 
 Choose **Edit full configuration…** to edit the current node's TOML, including node and cluster names, policy, relay URLs and helper address settings. **Save locally** validates and writes the file. **Save and publish…** additionally submits the shared names and policy for cluster approval. The editor preserves the draft on a validation error and detects changes made while it was open. Identity and service-managed fields use the same protections as `gent config edit`.
 
-**Continue ordinary chats after provider errors** is off by default. With Gent Pro, enabling it allows a qualifying provider error to send “please continue” in an eligible ordinary Codex chat on this node. Chats with an explicit Babysitter opt-out are excluded. **Resume goals after provider failures** controls goal recovery separately. On a console-only node, use `gent config ordinary-chat-recovery status`, `enable`, or `disable`. Each subcommand accepts `--json`.
+Under **Babysitter**, **Continue ordinary chats after provider errors** is off by default. With Gent Pro, enabling it allows a qualifying provider error to send “please continue” in an eligible ordinary Codex chat on this node. Chats with an explicit Babysitter opt-out are excluded. **Resume goals after provider failures** controls goal recovery separately. On a console-only node, use `gent config ordinary-chat-recovery status`, `enable`, or `disable`. Each subcommand accepts `--json`.
 
 Gent checks the latest failed turn of a loaded, input-ready chat with an empty queue. The latest provider failure must be within the past 10 minutes. A user turn can run for hours before it fails. Automatic retries stop 30 minutes after the original failure. A completed goal can stay in the chat if it finished before the user started that turn. Gent can send up to three `please continue` messages for that user turn. If an automatic continuation also fails, Gent waits at least 15 seconds before the second attempt and 60 seconds before the third. An uncertain submission consumes its attempt. After the third attempt, another user turn is required.
 
@@ -36,7 +38,7 @@ In a managed Codex VS Code chat, you can send another instruction while a turn i
 
 **Permissions** shows the signed communication rules. Select **Edit permission…**, choose the source, destination, permission and decision, then apply. Selectors include individual chats, nodes, groups, all chats and chats on the same node. **Inherit** removes the exact override. Other matching denies still apply.
 
-**About** displays the Inkling logo, version and build revision, copyright and project website. **Check for updates** compares the installed build with the stable release when clicked.
+**About** displays Gent's vector Inkling logo, version, build revision, copyright and website. **Check for updates** compares the installed build with the release on the cluster's selected channel.
 
 ## Graphical login
 

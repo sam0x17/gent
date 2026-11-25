@@ -31,6 +31,7 @@ mod notification_app;
 pub(crate) mod notification_delivery;
 mod pages;
 mod release_channel;
+mod stats;
 #[cfg(target_os = "linux")]
 pub(crate) use login::label as desktop_entry_id;
 pub(crate) use login::{installed, migrate, previously_configured, removed};
@@ -143,6 +144,7 @@ fn frontend(_home: &Path) -> Result<Command> {
 fn install_icon(home: &Path) -> Result<std::path::PathBuf> {
     let icon = home.join("desktop-icon.png");
     let tray = home.join("inkling-tray-128.png");
+    let about = home.join("inkling.svg");
     for (path, image) in [
         (
             &icon,
@@ -151,6 +153,10 @@ fn install_icon(home: &Path) -> Result<std::path::PathBuf> {
         (
             &tray,
             include_bytes!("../../../assets/branding/inkling-tray-128.png").as_slice(),
+        ),
+        (
+            &about,
+            include_bytes!("../../../assets/branding/inkling.svg").as_slice(),
         ),
     ] {
         if fs::read(path).ok().as_deref() != Some(image) {
@@ -253,6 +259,7 @@ async fn supervise(
     tokio::pin!(watch);
     let mut jobs = tokio::task::JoinSet::new();
     let mut channel_jobs = tokio::task::JoinSet::new();
+    let mut stats_jobs = tokio::task::JoinSet::new();
     let mut activation = [0; 16];
     loop {
         #[cfg(target_os = "macos")]
@@ -267,6 +274,7 @@ async fn supervise(
             _=&mut watch=>anyhow::bail!("account notification watch stopped"),
             Some(result) = jobs.join_next() => result?,
             Some(result) = channel_jobs.join_next() => result?,
+            Some(result) = stats_jobs.join_next() => result?,
             size = socket.recv(&mut activation) => match &activation[..size?] {
                 b"show" => json!({"show":true}),
                 b"quit" => json!({"quit":true}),
@@ -277,6 +285,14 @@ async fn supervise(
                 #[cfg(target_os = "macos")]
                 if deliveries.receive(&line) { continue; }
                 if line.starts_with('{') {
+                    if let Ok(stats::Request::Stats) = serde_json::from_str(&line) {
+                        // Keep daemon controls responsive if the local owner socket is offline.
+                        if stats_jobs.is_empty() {
+                            let home = home.to_owned();
+                            stats_jobs.spawn(async move { stats::read(&home).await });
+                        }
+                        continue;
+                    }
                     if let Ok(request) = serde_json::from_str::<release_channel::Request>(&line) {
                         if channel_jobs.is_empty() {
                             let home = home.to_owned();

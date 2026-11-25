@@ -276,6 +276,13 @@ fn takeover_restores_committed_request_and_discards_unpublished_send() {
     let mut pair = fixture();
     let node = pair.child.identity.node.id().to_owned();
     let committed = sent(&mut pair);
+    let usage = |pair: &Pair| {
+        pair.parent
+            .network_session(&pair.parent.db, pair.state.clone())
+            .usage_stats_export()
+            .unwrap()
+    };
+    assert_eq!(usage(&pair).outbound.messages, 0);
     let snapshot = snapshot::export(pair.homes[0].path(), &node).unwrap();
     owner(
         &mut pair,
@@ -285,6 +292,17 @@ fn takeover_restores_committed_request_and_discards_unpublished_send() {
             revision: snapshot.revision,
         },
     );
+    assert_eq!(usage(&pair).outbound.messages, 1);
+    assert_eq!(usage(&pair).senders[0].chat_id, pair.agents[1]);
+    owner(
+        &mut pair,
+        OwnerOp::WebCommit {
+            epoch: None,
+            node_id: node.clone(),
+            revision: snapshot.revision,
+        },
+    );
+    assert_eq!(usage(&pair).outbound.messages, 1);
     let unpublished = sent(&mut pair);
     let tx = pair.parent.db.transaction().unwrap();
     snapshot::restore(&tx, &snapshot, pair.state.anchor(), &snapshot.node).unwrap();
@@ -311,6 +329,7 @@ fn takeover_restores_committed_request_and_discards_unpublished_send() {
             .unwrap(),
         1
     );
+    assert_eq!(usage(&pair).outbound.messages, 1);
 }
 
 #[test]

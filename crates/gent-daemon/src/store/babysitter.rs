@@ -194,6 +194,10 @@ impl StoreSession<'_> {
                 "UPDATE babysitter_attempts SET submitted=1 WHERE agent=?1",
                 [&who.id],
             )?;
+            self.db.execute(
+                "UPDATE usage_tracking SET goal_submitted=goal_submitted+1 WHERE singleton=1",
+                [],
+            )?;
         }
         Ok(json!({"submitted":true}))
     }

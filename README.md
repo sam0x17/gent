@@ -12,7 +12,7 @@ cargo install --git https://github.com/sam0x17/gent.git --tag stable --locked ge
 
 On your first machine, choose **Create a cluster** and sign in with GitHub. Anyone with a GitHub account can sign up for Free, which includes one person and one active node per cluster. Multiple chats on that node can discover each other, send files and exchange replies. The wizard starts your daemon and offers Codex CLI, Codex in VS Code, Claude Code, shell completions and native chat discovery. You can rerun it to finish skipped steps. [Installation prerequisites](docs/installation.md) · [Cluster setup](docs/service-setup.md)
 
-Pro costs $8 USD per month for one person. It adds chat dashboards and Babysitter goal recovery. You can enroll multiple active nodes in a cluster, up to the protocol’s technical limits. Run `gent auth billing` on a signed-in machine to review your plan and see whether checkout is available. [Plans and pricing](https://gent.link/pricing)
+Pro costs $8 USD per month for one person. It adds chat dashboards and Gent Babysitter, which can resume a goal after a provider error interrupts a managed Codex or Claude Code session. You can enroll multiple active nodes in a cluster, up to the protocol’s technical limits. Run `gent auth billing` on a signed-in machine to review your plan and see whether checkout is available. [Plans and pricing](https://gent.link/pricing)
 
 ## How Gent works
 
@@ -56,7 +56,9 @@ The daemon applies [signed cluster authority](docs/security.md#live-daemon-autho
 
 ## Desktop and CLI
 
-On macOS and Linux, `gent desktop` opens the **Status** tab with daemon health, sync activity and a searchable table of native and hosted members. With Pro, open **Dashboard** to see status published by your chats. In **Settings**, choose whether Babysitter resumes eligible goals interrupted by a provider failure. [Desktop setup](docs/desktop.md) · [Dashboards and goal recovery](docs/dashboards.md)
+On Beta, `gent desktop` opens **Dashboard**. Choose **Status** for daemon health and cluster membership. **Stats** and `gent stats` show Gent message counts, bytes sent, top sending chats, and how often Babysitter continued a chat or resumed a goal. [Desktop setup](docs/desktop.md)
+
+In **Settings**, Babysitter has separate controls for recovering goals and continuing ordinary Codex chats. Ordinary chat recovery is available on Beta. When enabled, Babysitter can send `please continue` after an eligible provider failure. [How Babysitter works](https://gent.link/babysitter)
 
 The development build implements [daemon lifecycle commands](docs/local-proof.md#daemon-services) through systemd user services and macOS LaunchAgents. After installing from source, `gent daemon install --local demo` initializes a development cluster and starts its service. Existing or joined nodes use `gent daemon install`. Start, stop, restart, status, logs, and uninstall preserve node state; uninstall retains keys and queued messages. Hosted installation guides login and owner/invitation enrollment, with explicit flags for noninteractive use. `gent cluster connect` resumes interrupted setup or replaces an invalid credential. [Shell integration](docs/local-proof.md#shell-integration) provides PATH setup and completion for Zsh, Bash, and Fish through `gent hooks install`, with status and removal commands.
 

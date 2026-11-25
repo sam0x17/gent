@@ -96,6 +96,86 @@ class DirectoryPane(Gtk.Box):
         self.status.set_text(self.error or f"{len(self.store)} of {len(self.rows or [])} {self.name}")
 
 
+class StatsTable(Gtk.ScrolledWindow):
+    def __init__(self, columns):
+        super().__init__()
+        self.keys = [key for key, _ in columns]
+        self.store = Gtk.ListStore(*([str] * len(columns)))
+        table = Gtk.TreeView(model=self.store)
+        for i, (key, title) in enumerate(columns):
+            numeric = key in ("messages", "bytes", "ordinary", "goals")
+            renderer = Gtk.CellRendererText(xalign=1.0 if numeric else 0.0)
+            column = Gtk.TreeViewColumn(title, renderer, text=i)
+            column.set_resizable(True)
+            column.set_alignment(renderer.get_property("xalign"))
+            table.append_column(column)
+        self.add(table)
+
+    def receive(self, rows):
+        self.store.clear()
+        for row in rows:
+            self.store.append([row[key] for key in self.keys])
+
+
+class StatsPane(Gtk.Box):
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, border_width=16)
+        self.busy = False
+        self.notice = notice_label()
+        self.pack_start(self.notice, False, False, 0)
+        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.pack_start(self.body, True, True, 0)
+        self.fields = {}
+        for key, title in (("coverage", "Cluster activity"), ("outbound", "Outbound messages"),
+                           ("babysitter", "Babysitter")):
+            self.body.pack_start(label(title, "section"), False, False, 0)
+            field = label()
+            field.set_line_wrap(True)
+            field.set_selectable(True)
+            self.body.pack_start(field, False, False, 0)
+            self.fields[key] = field
+
+        details = Gtk.Notebook()
+        self.body.pack_start(details, True, True, 0)
+        ranks = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.empty = label("No sending chats in the reported activity.", "quiet")
+        self.empty.set_margin_start(8)
+        ranks.pack_start(self.empty, False, False, 8)
+        self.senders = StatsTable((("name", "Chat"), ("messages", "Messages"), ("bytes", "Bytes"), ("chat_id", "Chat ID")))
+        ranks.pack_start(self.senders, True, True, 0)
+        details.append_page(ranks, label("Top 10 sending chats"))
+        self.nodes = StatsTable((("name", "Node"), ("status", "Report"), ("messages", "Messages"),
+                                 ("bytes", "Bytes"), ("ordinary", "Continuations"), ("goals", "Goal resumes"),
+                                 ("as_of", "As of (UTC)"), ("started", "Tracking since (UTC)"),
+                                 ("backfill", "Earlier activity"), ("older_daemon", "Older daemon activity"), ("id", "Node ID")))
+        details.append_page(self.nodes, label("Node reports"))
+        self.body.show_all()
+        self.body.hide()
+        self.body.set_no_show_all(True)
+
+    def load(self):
+        if not self.busy:
+            self.busy = True
+            self.body.hide()
+            self.notice.set_text("Loading stats…")
+            page_request("stats")
+
+    def receive(self, reply):
+        self.busy = False
+        self.senders.receive(reply.get("rows", []))
+        self.nodes.receive(reply.get("nodes", []))
+        if "error" in reply:
+            self.body.hide()
+            self.notice.set_text(reply["error"])
+            return
+        self.notice.set_text("")
+        for key, field in self.fields.items():
+            field.set_text(reply[key])
+        self.senders.set_visible(bool(reply["rows"]))
+        self.empty.set_visible(not reply["rows"])
+        self.body.show()
+
+
 class ReleaseChannelRow(Gtk.Box):
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=3)
@@ -166,9 +246,9 @@ class ReleaseChannelRow(Gtk.Box):
 class SettingsPane(Gtk.Box):
     options = (("login", "Start Gent Desktop at graphical login"),
                ("updates", "Automatically update Gent"),
+               ("discovery", "Discover and publish native chats"),
                ("babysitter", "Resume goals after provider failures"),
                ("ordinary_babysitter", "Continue ordinary chats after provider errors"),
-               ("discovery", "Discover and publish native chats"),
                ("direct", "Prefer direct connections"), ("udp", "Allow UDP for direct connections"),
                ("helper", "Offer this node as a transport helper"))
 
@@ -185,24 +265,24 @@ class SettingsPane(Gtk.Box):
         self.stack.add_named(form_scroll, "preferences")
         self.channel = ReleaseChannelRow()
         self.checks = {}
+        headings = {"login": "General", "babysitter": "Babysitter", "direct": "Network"}
         for key, title in self.options:
-            if key in ("login", "direct"):
-                form.pack_start(label("General" if key == "login" else "Network", "section"), False, False, 0)
+            if key in headings:
+                form.pack_start(label(headings[key], "section"), False, False, 0)
             button = Gtk.CheckButton(label=title)
             button.connect("toggled", self.toggle, key)
             form.pack_start(button, False, False, 0)
             self.checks[key] = button
             if key == "updates":
                 form.pack_start(self.channel, False, False, 0)
-            if key == "babysitter":
-                self.pricing = Gtk.LinkButton.new_with_label("https://gent.link/pricing", "Babysitter requires Gent Pro · View plans")
-                self.pricing.set_halign(Gtk.Align.START)
-                self.pricing.set_no_show_all(True)
-                form.pack_start(self.pricing, False, False, 0)
             if key == "ordinary_babysitter":
                 detail = label("Sends “please continue” in eligible Codex chats on this node.", "quiet")
                 detail.set_line_wrap(True)
                 form.pack_start(detail, False, False, 0)
+                self.pricing = Gtk.LinkButton.new_with_label("https://gent.link/pricing", "Babysitter requires Gent Pro · View plans")
+                self.pricing.set_halign(Gtk.Align.START)
+                self.pricing.set_no_show_all(True)
+                form.pack_start(self.pricing, False, False, 0)
         form.pack_start(label("Network changes take effect when the daemon restarts.", "quiet"), False, False, 0)
         edit = Gtk.Button(label="Edit full configuration…")
         edit.set_halign(Gtk.Align.START)

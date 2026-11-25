@@ -46,6 +46,20 @@ Every command has `--help`, examples, and errors that name the next useful comma
 
 Interactive commands can guide missing setup steps. For automation, support explicit arguments and `--no-input`. Suggest close command matches without executing a guessed command. Destructive operations identify their target and require an explicit confirmation or documented noninteractive confirmation flag. Status, listing, and idempotent setup do not need repeated confirmations.
 
+## Stats
+
+Run `gent stats` or open **Stats** in Gent Desktop to see activity across the cluster. Use `gent stats --json` for the counts, chat IDs, observation times and per-node coverage. Both views read the local daemon's latest reports. A node with an older report contributes its last known counts. A node that has never reported has no figures to contribute.
+
+**Messages sent** counts messages accepted through Gent, including replies. Retrying the same request, delivering a message to its recipient and acknowledging it all preserve the original count. **Bytes sent** adds the UTF-8 size of message text and the original bytes of the attachments sent with it. Transport headers, encryption overhead and retransmissions belong to transport diagnostics. The top ten chats are ranked by messages sent. Chats that share a display name keep separate IDs.
+
+**Babysitter** counts host-confirmed chat continuations and goal resumes separately. A recovery check, a reserved attempt or a manual `carry on` adds nothing. Each native node reports work it accepted locally, including messages sent by web chats it hosted. A chat that changes hosts keeps one entry in the cluster ranking. For portable web chats, the original host records the send when it confirms the saved checkpoint. Losing that host before it records confirmation can leave the send out of Stats.
+
+Each node shows when tracking began. On upgrade, Gent can include native sends and confirmed ordinary chat continuations that still have local records. Earlier goal resumes and earlier hosted sends have incomplete records and are excluded. Activity on an older daemon during a subsequent downgrade can also be missing.
+
+Opening or refreshing Stats reads the local cache. Nodes exchange encrypted counters over Gent's live relay WebSocket connection. After the initial sync, Gent batches changes over 30 seconds and sends only updated totals, with up to 256 chat IDs per page. Chat names, message text and filenames stay out of these reports.
+
+Idle peers check in every five minutes. A report more than ten minutes old is marked stale. Gent keeps the last complete figures when a peer goes offline or uses only the durable mailbox. The coverage line shows how many nodes have reported and how many reports are fresh.
+
 ## Setup
 
 With Rust and Cargo installed, the shortest intended setup is:

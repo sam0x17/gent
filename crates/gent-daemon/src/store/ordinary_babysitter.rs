@@ -237,10 +237,17 @@ impl StoreSession<'_> {
 
     pub(super) fn babysitter_chat_submitted(&self, who: &Agent, attempt: Uuid) -> Result<Value> {
         // A host acceptance is not evidence of a resumed goal or successful work.
-        let changed = self.db.execute(
-            "UPDATE babysitter_chat_attempts SET submitted=1 WHERE agent=?1 AND attempt=?2 AND admitted=1",
-            params![who.id,attempt.to_string()],
-        )?;
-        Ok(json!({"submitted":changed==1}))
+        let submitted: Option<bool> = self.db.query_row(
+            "SELECT submitted FROM babysitter_chat_attempts WHERE agent=?1 AND attempt=?2 AND admitted=1",
+            params![who.id,attempt.to_string()], |row| row.get(0)
+        ).optional()?;
+        if submitted == Some(false) {
+            self.db.execute(
+                "UPDATE babysitter_chat_attempts SET submitted=1 WHERE agent=?1 AND attempt=?2",
+                params![who.id, attempt.to_string()],
+            )?;
+            self.db.execute("UPDATE usage_tracking SET ordinary_submitted=ordinary_submitted+1 WHERE singleton=1", [])?;
+        }
+        Ok(json!({"submitted":submitted.is_some()}))
     }
 }

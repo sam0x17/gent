@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub(crate) mod dashboard;
 pub mod directory;
 pub mod owner_preparation;
+pub mod stats;
 pub mod wire;
 
 pub const FRAGMENT_BYTES: usize = 256 * 1024;

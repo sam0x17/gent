@@ -116,22 +116,33 @@ class ActionBar(Gtk.Box):
             code.select_region(0, -1)
 
 
-class AboutLogo(Gtk.Layout):
+class AboutLogo(Gtk.DrawingArea):
     def __init__(self):
         super().__init__()
-        self.source = GdkPixbuf.Pixbuf.new_from_file(ICON)
-        self.image = Gtk.Image()
-        self.image.get_accessible().set_name("Gent logo")
-        self.put(self.image, 0, 0)
-        self.size = 0
-        self.connect("size-allocate", self.resize)
+        from gi.repository import Atk
+        self.get_accessible().set_role(Atk.Role.IMAGE)
+        self.get_accessible().set_name("Gent logo")
+        try:
+            gi.require_version("Rsvg", "2.0")
+            from gi.repository import Rsvg
+            self.viewport = Rsvg.Rectangle()
+            self.logo = Rsvg.Handle.new_from_file(os.path.join(os.path.dirname(ICON), "inkling.svg"))
+        except (ImportError, ValueError, GLib.Error):
+            self.logo = None
+            self.fallback = GdkPixbuf.Pixbuf.new_from_file(ICON)
 
-    def resize(self, _, rect):
-        size = max(1, min(512, rect.width, rect.height))
-        if size != self.size:
-            self.image.set_from_pixbuf(self.source.scale_simple(size, size, GdkPixbuf.InterpType.BILINEAR))
-            self.size = size
-        self.move(self.image, (rect.width - size) // 2, (rect.height - size) // 2)
+    def do_draw(self, cr):
+        width, height = self.get_allocated_width(), self.get_allocated_height()
+        size = min(512, width, height)
+        cr.translate((width - size) / 2, (height - size) / 2)
+        if self.logo is not None:
+            self.viewport.width = self.viewport.height = size
+            self.logo.render_document(cr, self.viewport)
+        else:
+            cr.scale(size / self.fallback.get_width(), size / self.fallback.get_height())
+            Gdk.cairo_set_source_pixbuf(cr, self.fallback, 0, 0)
+            cr.paint()
+        return False
 
 
 class ManagementPane(Gtk.Box):

@@ -32,6 +32,8 @@ func checkOrdinaryRecovery() {
     let buttons = descendants(pane.view, of: NSButton.self)
     require(descendants(pane.view, of: NSTextField.self).contains { $0.stringValue.contains("eligible Codex chats") },
             "ordinary recovery identifies the supported host")
+    require(descendants(pane.view, of: NSTextField.self).contains { $0.stringValue == "Babysitter" },
+            "Settings names Babysitter for goal and ordinary recovery")
     let ordinary = buttons.first { $0.title == "Continue ordinary chats after provider errors" }!
     let goal = buttons.first { $0.title == "Resume goals after provider failures" }!
     func show(paid: Bool, goals: Bool, chats: Bool) {
@@ -136,8 +138,57 @@ func checkReleaseChannel(_ desktop: Desktop) {
     require(!row.choice.isEnabled && row.choice.indexOfSelectedItem == -1, "unknown channel remains unselected")
 }
 
+func checkStats(_ desktop: Desktop) {
+    let stats = desktop.stats
+    let read = Request.json(["op": "stats"])
+    func shows(_ text: String) -> Bool {
+        descendants(stats.view, of: NSTextField.self).contains { $0.stringValue == text && !$0.isHiddenOrHasHiddenAncestor }
+    }
+    require(requests { desktop.tabs.selectTabViewItem(withIdentifier: "Stats") } == [read],
+            "selecting Stats reads one owner snapshot")
+    require(requests { stats.load() }.isEmpty && shows("Loading stats…"), "Stats coalesces an in-flight refresh")
+    let scope = "1 of 2 cluster nodes reporting · 0 fresh. Partial coverage. Totals include the latest available reports."
+    let traffic = "Accepted sends: 1,234   ·   Payload bytes: 56,789\nUTF-8 text: 55,589 bytes   ·   Original attachments: 1,200 bytes\nEach accepted send counts once. Retries add nothing."
+    let recoveries = "Ordinary chat continuations: 8   ·   Goal resumes: 25\nCounts confirmed submissions to the chat host."
+    let row = ["name": "Fixture Ω", "messages": "1,234", "bytes": "56,789", "chat_id": "fixture-chat"]
+    let node = ["name": "Studio", "status": "stale", "as_of": "2026-11-25 01:34:00",
+                "started": "2026-11-24 15:00:00", "messages": "1,234", "bytes": "56,789"]
+    func receive(_ rows: [[String: String]]) {
+        desktop.receive(["page": "stats", "coverage": scope, "outbound": traffic, "babysitter": recoveries, "rows": rows, "nodes": [node, ["name":"Offline", "status":"unavailable", "messages":"—"]]])
+    }
+    receive([row])
+    require(shows(scope) && shows(traffic) && shows(recoveries), "Stats displays coverage and both activity summaries")
+    require(stats.senders.table.numberOfRows == 1 && cell(stats.senders.table, "name", row: 0) == "Fixture Ω" &&
+            cell(stats.senders.table, "messages", row: 0) == "1,234" && cell(stats.senders.table, "bytes", row: 0) == "56,789",
+            "Stats displays named and formatted sender rows")
+    resizeDesktop(desktop, height: 400)
+    require(stats.details.contentRect.height >= stats.senders.table.rowHeight * 2 &&
+            stats.view.bounds.contains(stats.details.convert(stats.details.bounds, to: stats.view)),
+            "Stats leaves visible space for the detail table in a narrow window")
+    stats.details.selectTabViewItem(withIdentifier: "Node reports")
+    let nodes = stats.nodes.table
+    require(nodes.numberOfRows == 2 && cell(nodes, "status", row: 0) == "stale" &&
+            cell(nodes, "started", row: 0) == node["started"] && cell(nodes, "messages", row: 1) == "—",
+            "Node reports distinguish stale and unavailable tracking")
+    stats.details.selectTabViewItem(withIdentifier: "Top 10 sending chats")
+    let empty = "No sending chats in the reported activity."
+    require(!shows(empty), "populated Stats hides the empty state")
+    let refresh = descendants(stats.view, of: NSButton.self).first { $0.title == "Refresh" }!
+    for error in ["Stats unavailable. Start the local Gent daemon, then refresh.",
+                  "This daemon does not support Stats. Update the daemon, then refresh."] {
+        require(requests { refresh.performClick(nil) } == [read], "Stats refresh reads again")
+        desktop.receive(["page": "stats", "error": error])
+        require(stats.senders.table.numberOfRows == 0 && nodes.numberOfRows == 0 && shows(error) && !shows(traffic) && !shows(empty),
+                "Stats clears stale counts and distinguishes unavailable from zero")
+        receive([row])
+    }
+    receive([])
+    require(shows(empty) && stats.senders.table.numberOfRows == 0 && !shows("Loading stats…"), "Stats shows empty rankings")
+    resizeDesktop(desktop, width: 850, height: 605)
+}
+
 func checkCluster(_ desktop: Desktop, open: () -> Void) {
-    require(desktop.tabs.tabViewItems.map { $0.label } == ["Dashboard", "Status", "Chats", "Settings", "Permissions", "About"]
+    require(desktop.tabs.tabViewItems.map { $0.label } == ["Dashboard", "Status", "Chats", "Stats", "Settings", "Permissions", "About"]
             && desktop.tabs.selectedTabViewItem?.label == "Dashboard", "Dashboard is the first and selected tab")
     let opened = requests(during: open)
     require(opened.filter { if case .json(let page) = $0 { return page["op"] as? String == "dashboard" }; return false }.count == 1,
@@ -1175,6 +1226,13 @@ func checkDashboard(_ desktop: Desktop) {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
+if CommandLine.arguments.dropFirst(2).contains("--stats") {
+    desktop.makeWindow()
+    checkStats(desktop)
+    checkOrdinaryRecovery()
+    print("PASS: Stats and Babysitter settings")
+    exit(0)
+}
 if CommandLine.arguments.dropFirst(2).contains("--settings") {
     desktop.makeWindow()
     checkReleaseChannel(desktop)
@@ -1235,6 +1293,7 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
         require(app.sendAction(action, to: open.target, from: open), "open through actual menu target")
         require(desktop.window.isVisible && desktop.window.windowNumber > 0, "ordered AppKit window")
     }
+    checkStats(desktop)
     checkDashboard(desktop)
     desktop.tabs.selectTabViewItem(withIdentifier: "Chats")
     let chats = desktop.chats
@@ -1283,7 +1342,8 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     desktop.window.contentView?.layoutSubtreeIfNeeded()
     let row = desktop.about.view.subviews.compactMap { $0 as? NSStackView }.first
     let logo = row?.arrangedSubviews.compactMap { $0 as? NSImageView }.first
-    require(logo?.image != nil && (logo?.bounds.width ?? 0) >= 512 && (logo?.bounds.height ?? 0) >= 512, "room for the full 512px logo")
+    require(logo?.image != nil && logo?.image === desktop.aboutLogo && logo?.image?.cacheMode == .never &&
+        (logo?.bounds.width ?? 0) >= 512 && (logo?.bounds.height ?? 0) >= 512, "scalable Inkling logo on About")
     let check = desktop.about.actions.view.arrangedSubviews[0] as! NSButton
     check.performClick(nil)
     require(!check.isEnabled, "one update check in flight")

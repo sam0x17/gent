@@ -142,7 +142,7 @@ def check_node_action_row(node_id):
 
 def assert_selected_tab(title):
     item = get(title, "page tab")
-    assert [page.name for page in item.parent] == ["Dashboard", "Status", "Chats", "Settings", "Permissions", "About"]
+    assert [page.name for page in item.parent] == ["Dashboard", "Status", "Chats", "Stats", "Settings", "Permissions", "About"]
     wait_for(lambda: item.getState().contains(pyatspi.STATE_SELECTED), title + " selected")
 
 
@@ -166,6 +166,7 @@ def exercise_ordinary_recovery(cli):
     def toggle(button):
         wait_for(lambda: button.getState().contains(pyatspi.STATE_SENSITIVE), "writable recovery preference")
         assert button.queryAction().doAction(0)
+    get("Babysitter", "label")
     ordinary = get("Continue ordinary chats after provider errors", "check box")
     get("Sends “please continue” in eligible Codex chats on this node.", "label")
     goal = get("Resume goals after provider failures", "check box")
@@ -201,6 +202,9 @@ def exercise_enrolled_without_daemon(node):
     assert get("Account", "toggle button").queryAction().doAction(0)
     get("Install or repair daemon…")
     assert not find("Create cluster…") and not find("Join with invitation…")
+    tab("Stats")
+    get("Stats unavailable. Start the local Gent daemon, then refresh.", "label", timeout=20)
+    assert not find("No sending chats in the reported activity.")
 
 
 def dashboard_pixels(item):
@@ -511,6 +515,43 @@ def exercise_node_rename(cli, remote, hosted, parent):
     assert row(hosted["id"])[5] == expected[parent["id"]]
 
 
+def exercise_stats(cli, *, empty):
+    tab("Stats")
+    click("Refresh status")
+    snapshot = json.loads(cli("--json", "stats").stdout)
+    coverage = snapshot["coverage"]
+    scope = f'{coverage["reporting_nodes"]} of {coverage["expected_nodes"]} cluster nodes reporting · {coverage["fresh_nodes"]} fresh.'
+    def shows(fragment):
+        return pyatspi.findDescendant(pyatspi.Registry.getDesktop(0), lambda c:
+            c.getRoleName() == "label" and c.getState().contains(pyatspi.STATE_SHOWING) and fragment in c.name)
+    wait_for(lambda: shows(scope), "CLI cluster reporting and freshness in Stats")
+    traffic = snapshot["outbound"]
+    assert shows(f'Accepted sends: {traffic["messages"]:,}   ·   Payload bytes: {traffic["bytes"]:,}')
+    assert shows(f'UTF-8 text: {traffic["text_bytes"]:,} bytes   ·   Original attachments: {traffic["attachment_bytes"]:,} bytes')
+    babysitter = snapshot["babysitter"]
+    assert shows(f'Ordinary chat continuations: {babysitter["ordinary_submitted"]:,}   ·   Goal resumes: {babysitter["goal_submitted"]:,}')
+    if empty:
+        assert traffic["messages"] == 0 and not snapshot["top_senders"]
+        get("No sending chats in the reported activity.", "label")
+    else:
+        assert traffic["messages"] > 0
+        tab("Top 10 sending chats")
+        table = member_table()
+        assert table.nRows == len(snapshot["top_senders"]) > 0
+        for i, sender in enumerate(snapshot["top_senders"]):
+            assert [table.getAccessibleAt(i, col).name for col in range(4)] == [
+                sender["name"], f'{sender["messages"]:,}', f'{sender["bytes"]:,}', sender["chat_id"]]
+    tab("Node reports")
+    table = member_table()
+    assert table.nRows == len(snapshot["nodes"]) > 0
+    for i, entry in enumerate(snapshot["nodes"]):
+        cols = [table.getAccessibleAt(i, col).name for col in range(table.nColumns)]
+        assert cols[:2] == [entry["node"]["name"], entry["status"]]
+        assert cols[-1] == entry["node"]["id"]
+        assert cols[2] == ("—" if entry["outbound"] is None else f'{entry["outbound"]["messages"]:,}')
+        assert (cols[7] == "—") == (entry["coverage"] is None)
+
+
 def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     desktop = pyatspi.Registry.getDesktop(0)
 
@@ -551,6 +592,7 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
         exercise_dashboard(fixture, agent, cli, xid)
     finally:
         subprocess.run(["xdotool", "windowsize", xid, str(geometry.width), str(geometry.height)], check=True)
+    exercise_stats(cli, empty=False)
     tab("Settings")
     toggle = get("Automatically update Gent", "check box")
     assert toggle.getState().contains(pyatspi.STATE_CHECKED)
@@ -590,6 +632,7 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     wait_for(lambda: json.loads(cli("daemon", "status", "--json").stdout)["cluster"]["name"] == "desktop-published",
              "published cluster name")
     tab("About")
+    get("Gent logo", "image")
     get("Check for updates")
     get("https://gent.link")
     wait_for(lambda: pyatspi.findDescendant(desktop, lambda c: c.getRoleName() == "label" and

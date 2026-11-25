@@ -150,7 +150,7 @@ class Desktop:
         self.dashboard = DashboardPane()
         pages = {
             "Dashboard": self.dashboard, "Status": self.cluster, "Chats": DirectoryPane("chats"),
-            "Settings": SettingsPane(), "Permissions": ManagementPane("permissions"), "About": ManagementPane("about"),
+            "Stats": StatsPane(), "Settings": SettingsPane(), "Permissions": ManagementPane("permissions"), "About": ManagementPane("about"),
         }
         for title, page in pages.items():
             self.tabs.append_page(page, Gtk.Label(label=title))

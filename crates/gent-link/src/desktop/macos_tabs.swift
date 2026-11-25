@@ -184,6 +184,124 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     }
 }
 
+final class StatsTable: NSObject, NSTableViewDelegate, NSTableViewDataSource {
+    let table = NSTableView()
+    let scroll = NSScrollView()
+    private var rows: [[String: String]] = []
+    private let numeric = ["messages", "bytes", "ordinary", "goals"]
+
+    init(_ columns: [(String, String, CGFloat)]) {
+        super.init()
+        for (key, title, width) in columns {
+            let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(key))
+            col.title = title
+            col.width = width
+            if numeric.contains(key) { col.headerCell.alignment = .right }
+            table.addTableColumn(col)
+        }
+        table.columnAutoresizingStyle = .noColumnAutoresizing
+        table.dataSource = self
+        table.delegate = self
+        table.usesAlternatingRowBackgroundColors = true
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        scroll.borderType = .bezelBorder
+    }
+
+    func receive(_ rows: [[String: String]]) {
+        self.rows = rows
+        table.reloadData()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let id = tableColumn?.identifier else { return nil }
+        let cell = table.makeView(withIdentifier: id, owner: self) as? NSTextField ?? NSTextField(labelWithString: "")
+        cell.identifier = id
+        cell.stringValue = rows[row][id.rawValue] ?? ""
+        cell.toolTip = cell.stringValue
+        cell.lineBreakMode = .byTruncatingTail
+        cell.alignment = numeric.contains(id.rawValue) ? .right : .left
+        return cell
+    }
+}
+
+final class StatsTab: NSObject {
+    let view = NSView()
+    let senders = StatsTable([("name", "Chat", 180), ("messages", "Messages", 90),
+                              ("bytes", "Bytes", 105), ("chat_id", "Chat ID", 265)])
+    let nodes = StatsTable([("name", "Node", 150), ("status", "Report", 90), ("messages", "Messages", 85),
+                            ("bytes", "Bytes", 95), ("ordinary", "Continuations", 110), ("goals", "Goal resumes", 105),
+                            ("as_of", "As of (UTC)", 165), ("started", "Tracking since (UTC)", 165),
+                            ("backfill", "Earlier activity", 200), ("older_daemon", "Older daemon activity", 180), ("id", "Node ID", 265)])
+    let details = NSTabView()
+    private let notice = NSTextField(wrappingLabelWithString: "")
+    private let coverage = NSTextField(wrappingLabelWithString: "")
+    private let outbound = NSTextField(wrappingLabelWithString: "")
+    private let babysitter = NSTextField(wrappingLabelWithString: "")
+    private let empty = NSTextField(wrappingLabelWithString: "No sending chats in the reported activity.")
+    private var loading = false
+    private lazy var refresh = NSButton(title: "Refresh", target: self, action: #selector(load))
+    private lazy var body = column([coverage, heading("Outbound messages"), outbound,
+                                    heading("Babysitter"), babysitter, details])
+
+    private func heading(_ title: String) -> NSTextField {
+        let field = NSTextField(labelWithString: title)
+        field.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        return field
+    }
+
+    override init() {
+        super.init()
+        let ranks = NSView()
+        pin(senders.scroll, in: ranks)
+        empty.translatesAutoresizingMaskIntoConstraints = false
+        ranks.addSubview(empty)
+        NSLayoutConstraint.activate([empty.leadingAnchor.constraint(equalTo: ranks.leadingAnchor, constant: 8),
+                                     empty.topAnchor.constraint(equalTo: ranks.topAnchor, constant: 8)])
+        for (title, child) in [("Top 10 sending chats", ranks), ("Node reports", nodes.scroll)] {
+            let tab = NSTabViewItem(identifier: title)
+            tab.label = title
+            tab.view = child
+            details.addTabViewItem(tab)
+        }
+        empty.textColor = .secondaryLabelColor
+        [coverage, outbound, babysitter].forEach { $0.isSelectable = true }
+        let header = NSStackView(views: [heading("Cluster activity"), NSView(), refresh])
+        body.isHidden = true
+        notice.isHidden = true
+        pin(column([header, notice, body]), in: view, inset: 12)
+    }
+
+    @objc func load() {
+        guard !loading else { return }
+        loading = true
+        refresh.isEnabled = false
+        body.isHidden = true
+        notice.stringValue = "Loading stats…"
+        notice.isHidden = false
+        sendPage("stats")
+    }
+
+    func receive(_ reply: [String: Any]) {
+        loading = false
+        refresh.isEnabled = true
+        let rows = reply["rows"] as? [[String: String]] ?? []
+        senders.receive(rows)
+        nodes.receive(reply["nodes"] as? [[String: String]] ?? [])
+        notice.stringValue = reply["error"] as? String ?? ""
+        notice.isHidden = notice.stringValue.isEmpty
+        body.isHidden = !notice.isHidden
+        coverage.stringValue = reply["coverage"] as? String ?? ""
+        outbound.stringValue = reply["outbound"] as? String ?? ""
+        babysitter.stringValue = reply["babysitter"] as? String ?? ""
+        empty.isHidden = !rows.isEmpty
+        senders.scroll.isHidden = rows.isEmpty
+    }
+}
+
 final class ReleaseChannelRow: NSObject {
     let choice = NSPopUpButton(frame: .zero, pullsDown: false)
     let detail = NSTextField(wrappingLabelWithString: "")
@@ -277,14 +395,16 @@ final class SettingsTab: NSObject {
     override init() {
         super.init()
         let options = [("login", "Start Gent Desktop at graphical login"), ("updates", "Automatically update Gent"),
+                       ("discovery", "Discover and publish native chats"),
                        ("babysitter", "Resume goals after provider failures"),
                        ("ordinary_babysitter", "Continue ordinary chats after provider errors"),
-                       ("discovery", "Discover and publish native chats"), ("direct", "Prefer direct connections"),
+                       ("direct", "Prefer direct connections"),
                        ("udp", "Allow UDP for direct connections"), ("helper", "Offer this node as a transport helper")]
         var fields: [NSView] = []
+        let headings = ["login": "General", "babysitter": "Babysitter", "direct": "Network"]
         for (key, title) in options {
-            if key == "login" || key == "direct" {
-                let heading = NSTextField(labelWithString: key == "login" ? "General" : "Network")
+            if let section = headings[key] {
+                let heading = NSTextField(labelWithString: section)
                 heading.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
                 fields.append(heading)
             }
@@ -294,14 +414,12 @@ final class SettingsTab: NSObject {
             checks[key] = button
             fields.append(button)
             if key == "updates" { fields.append(channel.view) }
-            if key == "babysitter" {
-                pricing.isHidden = true
-                fields.append(pricing)
-            }
             if key == "ordinary_babysitter" {
                 let detail = NSTextField(wrappingLabelWithString: "Sends “please continue” in eligible Codex chats on this node.")
                 detail.textColor = .secondaryLabelColor
                 fields.append(detail)
+                pricing.isHidden = true
+                fields.append(pricing)
             }
         }
         let hint = NSTextField(labelWithString: "Network changes take effect when the daemon restarts.")

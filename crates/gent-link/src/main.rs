@@ -108,6 +108,8 @@ enum Command {
     },
     /// Diagnose local setup without repairing state or running a model.
     Doctor(doctor::Options),
+    /// Show Gent message traffic, top sending chats, and Babysitter interventions.
+    Stats,
     /// Show current relay synchronization progress and queued records.
     Sync {
         #[command(subcommand)]
@@ -847,6 +849,7 @@ async fn execute(cli: Cli) -> Result<()> {
         }) => Some(display::View::Cluster),
         Some(Command::Node { command: None }) => Some(display::View::Node),
         Some(Command::Nodes) => Some(display::View::Nodes),
+        Some(Command::Stats) => Some(display::View::Stats),
         Some(Command::Sync { .. }) => Some(display::View::Sync),
         Some(Command::Agents { command: None }) => Some(display::View::Agents),
         Some(Command::Resolve { .. }) => Some(display::View::Resolution),
@@ -1038,6 +1041,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 "this daemon does not report sync progress; update Gent and restart its daemon",
             )?,
         Some(Command::Nodes) => node::connections(&home).await?,
+        Some(Command::Stats) => owner(&home, OwnerOp::Stats).await?,
         Some(Command::Files { command }) => {
             let action = match command.unwrap_or(FilesCommand::Status) {
                 FilesCommand::Status => OwnerOp::FilesStatus,

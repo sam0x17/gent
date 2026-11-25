@@ -79,6 +79,52 @@ pub(in crate::sync) struct Wss {
 }
 
 impl Wss {
+    // One side request at a time. Stats never marks a chat route failed or
+    // waits for remote I/O on the ordinary transfer loop.
+    pub(super) async fn stats_worker(self, store: SharedStore, tick: Arc<tokio::sync::Notify>) {
+        loop {
+            tokio::select! { _=tick.notified()=>{}, _=tokio::time::sleep(Duration::from_secs(30))=>{} }
+            for batch in 0..16 {
+                let route = self
+                    .channel
+                    .lock()
+                    .expect("peer watch lock poisoned")
+                    .clone();
+                let Some(route) = route else {
+                    break;
+                };
+                let Ok(Some(sent)) = local(store.clone(), |s| s.next_stats_send()).await else {
+                    break;
+                };
+                let (reply, result) = oneshot::channel();
+                let response = if route
+                    .channel
+                    .try_send(Request {
+                        peer: sent.peer,
+                        payload: sent.wire.clone(),
+                        reply,
+                    })
+                    .is_ok()
+                {
+                    tokio::time::timeout(REPLY_TIMEOUT, result)
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                } else {
+                    None
+                };
+                let _ = local(store.clone(), move |s| {
+                    s.finish_stats_send(&sent, response.as_deref())
+                })
+                .await;
+                if batch == 15 {
+                    tick.notify_one();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
     pub(in crate::sync) async fn transfer(
         &self,
         store: &SharedStore,
@@ -174,6 +220,7 @@ pub(super) struct Connection {
     incoming: mpsc::Receiver<Request>,
     pending: Pending,
     receivers: JoinSet<Reply>,
+    stats_receivers: JoinSet<Reply>,
 }
 
 impl Connection {
@@ -188,6 +235,7 @@ impl Connection {
             incoming,
             pending: Pending::new(),
             receivers: JoinSet::new(),
+            stats_receivers: JoinSet::new(),
         }
     }
 
@@ -200,10 +248,14 @@ impl Connection {
                 reply = self.receivers.join_next(), if !self.receivers.is_empty() => {
                     return reply.context("peer receiver stopped")??.encode();
                 }
+                reply = self.stats_receivers.join_next(), if !self.stats_receivers.is_empty() => {
+                    return reply.context("stats receiver stopped")??.encode();
+                }
                 request = self.incoming.recv() => {
                     let request = request.context("peer watch closed")?;
                     self.pending.retain(|_, (_, reply)| !reply.is_closed());
-                    if request.reply.is_closed() || self.pending.len() >= CONCURRENT {
+                    if request.reply.is_closed() || self.pending.len() >= CONCURRENT ||
+                        (request.payload.starts_with(crate::encrypted::stats::MAGIC) && !self.pending.is_empty()) {
                         continue;
                     }
                     let id = Uuid::new_v4();
@@ -223,23 +275,38 @@ impl Connection {
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         match frame.kind {
             Kind::Push => {
-                // There are no detached jobs or payload queue behind the store.
-                // A relay exceeding the negotiated receiver bound loses this watch.
-                ensure!(
-                    self.receivers.len() < CONCURRENT,
-                    "peer watch receiver busy"
-                );
                 let store = store.clone();
                 let peer = frame.peer;
                 let id = frame.id;
-                let payload = frame.payload.to_vec();
-                self.receivers.spawn(async move {
-                    let receipt =
-                        session::accept(store, session::Peer::Node(peer.to_string()), &payload)
+                if frame.payload.starts_with(crate::encrypted::stats::MAGIC) {
+                    // An optional or oversized push cannot consume messaging's
+                    // receiver slots or tear down the shared watch.
+                    if !self.stats_receivers.is_empty()
+                        || frame.payload.len() > crate::encrypted::stats::MAX_WIRE_BYTES
+                    {
+                        return Ok(());
+                    }
+                    let payload = frame.payload.to_vec();
+                    self.stats_receivers.spawn(async move {
+                        let receipt = local(store, move |s| s.accept_stats_send(peer, &payload))
                             .await
                             .ok();
-                    Reply { peer, id, receipt }
-                });
+                        Reply { peer, id, receipt }
+                    });
+                } else {
+                    ensure!(
+                        self.receivers.len() < CONCURRENT,
+                        "peer watch receiver busy"
+                    );
+                    let payload = frame.payload.to_vec();
+                    self.receivers.spawn(async move {
+                        let receipt =
+                            session::accept(store, session::Peer::Node(peer.to_string()), &payload)
+                                .await
+                                .ok();
+                        Reply { peer, id, receipt }
+                    });
+                }
             }
             Kind::Receipt | Kind::Unavailable => {
                 if self

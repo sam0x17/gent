@@ -152,14 +152,13 @@ impl StoreSession<'_> {
         Ok(())
     }
 
-    pub(in crate::store) fn gate_web_message(&self, message: &Message) -> Result<()> {
-        self.db.execute(
+    pub(in crate::store) fn gate_web_message(&self, message: &Message) -> Result<bool> {
+        Ok(self.db.execute(
             "INSERT INTO hosted_message_gates SELECT ?1,c.node,c.revision FROM hosted_checkpoints c
             JOIN agents a ON a.node_id=c.node WHERE a.id=?2 AND c.revision>c.durable
             ON CONFLICT(id) DO NOTHING",
             params![message.id, message.sender],
-        )?;
-        Ok(())
+        )? == 1)
     }
     pub(in crate::store) fn web_admission(&self, node: &str, body_hash: [u8; 32]) -> Result<Value> {
         require_pro(self.home, &self.config, "Hosted node admission")?;
@@ -308,6 +307,7 @@ impl StoreSession<'_> {
             "DELETE FROM hosted_event_gates WHERE node=?1 AND revision<=?2",
             params![node, revision],
         )?;
+        crate::store::usage::record_web_commit(self.db, node, revision)?;
         self.db.execute(
             "DELETE FROM hosted_message_gates WHERE node=?1 AND revision<=?2",
             params![node, revision],

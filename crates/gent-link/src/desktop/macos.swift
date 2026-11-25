@@ -9,12 +9,13 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     let tabs = NSTabView()
     let chats = DirectoryTab(page: "chats")
     let nodes = DirectoryTab(page: "nodes")
+    let stats = StatsTab()
     let settings = SettingsTab()
     let dashboard = DashboardTab()
     let account = AccountSection()
     let permissions = ManagementTab(page: "permissions")
-    lazy var about = ManagementTab(page: "about", icon: icon)
-    let icon: NSImage?
+    lazy var about = ManagementTab(page: "about", icon: aboutLogo)
+    let aboutLogo: NSImage?
     let trayIcon: NSImage?
     var prepareNotifications: (() -> Void)?
     var deliverNotification: (([String: Any]) -> Void)?
@@ -43,7 +44,9 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     private var refreshAfterPending = false
 
     init(iconPath: String, openAtLaunch: Bool, setupAtLaunch: Bool = false) {
-        self.icon = NSImage(contentsOfFile: iconPath)
+        self.aboutLogo = NSImage(contentsOf: URL(fileURLWithPath: iconPath)
+            .deletingLastPathComponent().appendingPathComponent("inkling.svg"))
+        self.aboutLogo?.cacheMode = .never
         self.trayIcon = NSImage(contentsOf: URL(fileURLWithPath: iconPath)
             .deletingLastPathComponent().appendingPathComponent("inkling-tray-128.png"))
         self.openAtLaunch = openAtLaunch
@@ -126,6 +129,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         case "Permissions": permissions.load()
         case "About": about.load()
         case "Chats": chats.loadChats()
+        case "Stats": stats.load()
         case "Settings": settings.load()
         default: request("refresh")
         }
@@ -155,7 +159,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         window.delegate = self
         window.center()
         let content = NSScrollView()
-        for (title, child) in [("Dashboard", dashboard.view), ("Status", content), ("Chats", chats.view), ("Settings", settings.view), ("Permissions", permissions.view), ("About", about.view)] {
+        for (title, child) in [("Dashboard", dashboard.view), ("Status", content), ("Chats", chats.view), ("Stats", stats.view), ("Settings", settings.view), ("Permissions", permissions.view), ("About", about.view)] {
             let tab = NSTabViewItem(identifier: title)
             tab.label = title
             tab.view = child
@@ -192,8 +196,8 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
             button.action = #selector(clicked(_:))
             button.bezelStyle = .rounded
         }
-        let stats = NSStackView()
-        stats.distribution = .fillEqually
+        let metricsRow = NSStackView()
+        metricsRow.distribution = .fillEqually
         for (key, name) in [("sync", "Sync"), ("queue", "Queued"), ("chats", "Known chats")] {
             let caption = NSTextField(labelWithString: name)
             caption.textColor = .secondaryLabelColor
@@ -202,10 +206,10 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
             metrics[key] = value
             let metric = column([caption, value])
             metric.spacing = 2
-            stats.addArrangedSubview(metric)
+            metricsRow.addArrangedSubview(metric)
         }
         connection.textColor = .secondaryLabelColor
-        pin(column([controls, stats, connection]), in: health)
+        pin(column([controls, metricsRow, connection]), in: health)
 
         let header = NSStackView(views: [identity, NSView(), refresh])
         identity.spacing = 2
@@ -265,6 +269,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         case "dashboard": dashboard.receive(m); return
         case "about": about.receive(m); return
         case "chats": chats.receive(m); return
+        case "stats": stats.receive(m); return
         case "nodes":
             if m["operation"] as? Bool == true {
                 nodes.actions.completed(m)

@@ -11,6 +11,7 @@ pub mod history;
 pub mod ordered;
 mod payload;
 mod requests;
+pub(crate) mod stats;
 #[cfg(test)]
 mod storage_tests;
 use anyhow::{Context, Result, bail, ensure};

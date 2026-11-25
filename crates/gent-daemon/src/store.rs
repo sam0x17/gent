@@ -25,6 +25,8 @@ mod configuration;
 mod message_dates;
 mod notifications;
 mod ordinary_babysitter;
+mod stats_sync;
+mod usage;
 mod wire;
 pub(crate) use configuration::pending::schema as pending_configuration_schema;
 pub(crate) use configuration::routing::schema as configuration_routing_schema;
@@ -82,6 +84,7 @@ pub struct Store {
     config: Config,
     identity: Identity,
     owner_hash: String,
+    stats_cache: Option<stats_sync::Ranking>,
     pub(crate) sync_wakeup: Arc<Notify>,
     pub(crate) sync_health: Arc<crate::sync::health::Health>,
 }
@@ -215,6 +218,8 @@ impl Store {
         peer_configuration::check_state(&tx, &identity.state(&tx)?)?;
         directory::backfill_names(&tx, &identity.state(&tx)?)?;
         message_dates::migrate(&tx, identity.node.id())?;
+        usage::migrate(&tx, identity.node.id(), now())?;
+        stats_sync::schema(&tx)?;
         configuration::pending::recover(&tx, identity.node.id())?;
         if let Some(record) = replacement {
             record.verify_node(&identity.node)?;
@@ -242,6 +247,7 @@ impl Store {
             identity,
             sync_wakeup: Arc::new(Notify::new()),
             sync_health: Arc::default(),
+            stats_cache: None,
         };
         // Projection failure must never replace committed authority with TOML.
         let _ = store.project_config();
@@ -371,29 +377,37 @@ impl Store {
                 ..
             }
         );
-        let read_only = (matches!(
+        let stats_request = matches!(
             &request,
             Request::Owner {
-                action: OwnerOp::Status
-                    | OwnerOp::Agents
-                    | OwnerOp::Nodes
-                    | OwnerOp::Dashboards { .. }
-                    | OwnerOp::NotificationPending { .. }
-                    | OwnerOp::WebCheckpoint { .. }
-                    | OwnerOp::WebDeliveryDemand { .. }
-                    | OwnerOp::NodeRemovals { .. }
-                    | OwnerOp::WakePendingAgents { .. }
-                    | OwnerOp::WakeDirectTurnEvidence { .. },
+                action: OwnerOp::Stats,
                 ..
             }
-        ) || matches!(
-            &request,
-            Request::HostedStatus { .. }
-                | Request::Agent {
-                    action: AgentOp::BabysitterChatProbe { .. },
+        );
+        let read_only = stats_request
+            || (matches!(
+                &request,
+                Request::Owner {
+                    action: OwnerOp::Status
+                        | OwnerOp::Agents
+                        | OwnerOp::Nodes
+                        | OwnerOp::Dashboards { .. }
+                        | OwnerOp::NotificationPending { .. }
+                        | OwnerOp::WebCheckpoint { .. }
+                        | OwnerOp::WebDeliveryDemand { .. }
+                        | OwnerOp::NodeRemovals { .. }
+                        | OwnerOp::WakePendingAgents { .. }
+                        | OwnerOp::WakeDirectTurnEvidence { .. },
                     ..
                 }
-        )) && !projection_pending;
+            ) || matches!(
+                &request,
+                Request::HostedStatus { .. }
+                    | Request::Agent {
+                        action: AgentOp::BabysitterChatProbe { .. },
+                        ..
+                    }
+            )) && !projection_pending;
         let tx = self.db.transaction_with_behavior(if read_only {
             TransactionBehavior::Deferred
         } else {
@@ -436,7 +450,9 @@ impl Store {
             }
         );
         let mut value = match request {
-            Request::Owner { action, .. } => session.owner(action, &self.sync_health)?,
+            Request::Owner { action, .. } => {
+                session.owner(action, &self.sync_health, &mut self.stats_cache)?
+            }
             Request::Agent { credential, action } => {
                 session.state.authorize_node(
                     self.identity.node.id(),
@@ -875,7 +891,12 @@ impl StoreSession<'_> {
         }
         Ok(agents)
     }
-    fn owner(&mut self, action: OwnerOp, health: &crate::sync::health::Health) -> Result<Value> {
+    fn owner(
+        &mut self,
+        action: OwnerOp,
+        health: &crate::sync::health::Health,
+        stats_cache: &mut Option<stats_sync::Ranking>,
+    ) -> Result<Value> {
         match action {
             OwnerOp::WebDeliveryDemand { node_id } => self.web_delivery_demand(&node_id),
             OwnerOp::WebDeliveryChecked {
@@ -969,6 +990,7 @@ impl StoreSession<'_> {
             | OwnerOp::PreparePeerConfiguration => {
                 anyhow::bail!("pairing must use its owner-authenticated entry point")
             }
+            OwnerOp::Stats => self.cluster_usage_stats(stats_cache),
             OwnerOp::Status => Ok(
                 json!({"process_id":std::process::id(),"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,
                     "release_channel":self.state.state().release_channel,
@@ -1780,7 +1802,9 @@ impl StoreSession<'_> {
         self.bind_attachments(&message, &attachments)?;
         self.record_relay_message(&message)?;
         self.web_state_changed(&recipient.node_id)?;
-        self.gate_web_message(&message)?;
+        if !self.gate_web_message(&message)? {
+            usage::record_send(tx, &sender.name, &message)?;
+        }
         self.save_activity(&sender.id, message.created_at)?;
         self.record_gent_message(&sender.id, message.created_at)?;
         if !remote {

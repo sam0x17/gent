@@ -16,7 +16,7 @@ import uuid
 
 from gi.repository import Gio, GLib
 from desktop_fixture_browser import install_fixture_browser
-from desktop_tabs_linux import assert_selected_tab, exercise_enrolled_without_daemon, exercise_setup, exercise_tabs, wait_for
+from desktop_tabs_linux import assert_selected_tab, exercise_enrolled_without_daemon, exercise_setup, exercise_stats, exercise_tabs, wait_for
 from mcp_client import Client
 
 
@@ -148,6 +148,7 @@ def main():
     if not args.setup_only:
         subprocess.run([sys.executable, Path(__file__).with_name("dashboard_gtk.py")], check=True)
         subprocess.run([sys.executable, Path(__file__).with_name("release_channel_gtk.py")], check=True)
+        subprocess.run([sys.executable, Path(__file__).with_name("stats_gtk.py")], check=True)
         # Each proof gets its own GTK process, accessibility bus, watcher and node home.
         with tempfile.TemporaryDirectory(prefix="gent-setup-runtime-") as runtime:
             env = dict(os.environ, XDG_RUNTIME_DIR=runtime)
@@ -165,6 +166,13 @@ def main():
             process = subprocess.Popen(base + list(args))
             cleanup.callback(stop, process)
             return process
+        def launch_daemon():
+            daemon = launch("daemon", "run")
+            def ready():
+                assert daemon.poll() is None, "fixture daemon exited before opening its socket"
+                return (home / "daemon.sock").is_socket()
+            wait_for(ready, "fixture daemon socket", timeout=30)
+            return daemon
         def visible():
             return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Gent Desktop$"],
                                   text=True, capture_output=True).stdout.strip()
@@ -177,6 +185,9 @@ def main():
             quit_setup = tray.menu("Quit Gent Desktop")
             created = json.loads(cli("--json", "cluster", "new", "desktop-test", "--local").stdout)
             exercise_enrolled_without_daemon(created["node"])
+            # A Free node can read the owner snapshot as soon as the daemon returns.
+            launch_daemon()
+            exercise_stats(cli, empty=True)
             quit_setup("Quit Gent Desktop")
             assert setup.wait(timeout=12) == 0
             return
@@ -190,8 +201,7 @@ def main():
         with (home / "config.toml").open("a") as cfg:
             cfg.write('\n[relay]\nendpoint = "http://127.0.0.1:9"\ncredential_file = "fixture-relay.key"\n'
                       '\n[transport]\ndirect = "off"\nrelays = []\n')
-        daemon = launch("daemon", "run")
-        wait_for(lambda: (home/"daemon.sock").is_socket(), "daemon")
+        daemon = launch_daemon()
         remote, hosted = enroll_fixture_nodes(binary, home, created)
         fixture = Client(base + ["mcp", "serve", "--binding", str(home / "fixture.key")])
         cleanup.callback(fixture.close)
@@ -226,7 +236,15 @@ def main():
         assert_selected_tab("Dashboard")
         click("Quit Gent Desktop")
         wait_for(lambda: not visible(), "tray quit")
-        assert daemon.poll() is None and json.loads(cli("daemon", "status", "--json").stdout)["daemon"]["running"]
+        def foreground_ready():
+            assert daemon.poll() is None, "quitting the desktop stopped the foreground daemon"
+            probe = subprocess.run(base + ["--json", "daemon", "status"], timeout=20, capture_output=True)
+            if probe.returncode == 3:
+                return False  # The CLI uses a one-second status probe.
+            probe.check_returncode()
+            status = json.loads(probe.stdout)["daemon"]
+            return status["running"] and status["pid"] == daemon.pid
+        wait_for(foreground_ready, "same foreground daemon responding after tray quit", timeout=20)
         wait_for(lambda: not (home / "desktop.sock").exists(), "tray socket released")
         cli("desktop", "disable")
         assert not entry.exists() and not app.exists()

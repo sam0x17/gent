@@ -70,7 +70,7 @@ To change the layout, define the complete board again. To remove it, call `gent_
 
 ## Automatic goal recovery
 
-Babysitting starts enabled for chats connected to Gent's managed Codex and Claude Code integrations. In **Settings**, toggle **Resume goals after provider failures** for this machine. Within a registered chat, use `gent_babysit({"enabled": false})` or `gent_babysit({"enabled": true})`. Call `gent_babysit({})` to read the effective setting. The machine setting takes precedence.
+Babysitter goal recovery starts enabled on Gent Pro for chats connected to the managed Codex and Claude Code integrations. In **Settings**, toggle **Resume goals after provider failures** for this machine. Within a registered chat, use `gent_babysit({"enabled": false})` or `gent_babysit({"enabled": true})`. Call `gent_babysit({})` to read the effective setting. The machine setting takes precedence. On Beta, find both recovery controls under **Babysitter**. [Babysitter guide](https://gent.link/babysitter)
 
 Gent checks the host's failed turn and its current goal. Recognized failures include model overload, rate limits, interrupted provider streams, invalid tool types, and the provider error “Invalid request payload.” An unrecognized failure stays available for human review. Web MCP chats can publish dashboards. Automatic resume needs the turn and goal information exposed by the managed native integrations.
 
