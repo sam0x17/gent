@@ -114,6 +114,7 @@ struct Read {
     older_turns: Vec<Value>,
     queue: Vec<Value>,
     append_on_queue_read: Option<Value>,
+    retire_dispatch_on_queue_read: Option<(PathBuf, Uuid)>,
 }
 impl Read {
     fn new(thread: &str) -> Self {
@@ -122,6 +123,7 @@ impl Read {
             older_turns: Vec::new(),
             queue: Vec::new(),
             append_on_queue_read: None,
+            retire_dispatch_on_queue_read: None,
             meta: json!({"id":thread,"canAcceptDirectInput":true,"status":{"type":"systemError"}}),
             goal: json!({"threadId":thread,"objective":"Finish synthetic task","status":"active","createdAt":now-40,"updatedAt":now-1,"tokenBudget":120,"tokensUsed":1,"timeUsedSeconds":1}),
             turn: json!({"id":Uuid::now_v7(),"status":"failed","items":[],"itemsView":"notLoaded","startedAt":now-3,"completedAt":now,
@@ -171,6 +173,15 @@ fn host(thread: &str, before: Read, after: Read, lose_reply: bool) -> Fixture {
             }
             "thread/goal/get" => json!({"goal":r.goal}),
             "thread/queue/list" => {
+                if let Some((path, attempt)) = &r.retire_dispatch_on_queue_read {
+                    rusqlite::Connection::open(path)
+                        .unwrap()
+                        .execute(
+                            "DELETE FROM wake_dispatches WHERE attempt_id=?1",
+                            [attempt.to_string()],
+                        )
+                        .unwrap();
+                }
                 if let Some(row) = &r.append_on_queue_read {
                     use std::io::Write;
                     let mut file = std::fs::OpenOptions::new()
@@ -362,4 +373,5 @@ mod native;
 mod rollout;
 mod scheduler;
 
+mod consecutive;
 mod queued;

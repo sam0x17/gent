@@ -1,10 +1,27 @@
 //! A provider failure is eligible once, after its backoff and before native input.
 use super::*;
 use gent_protocol::notifications::{Event, Failure, Notice, Scope};
+use gent_protocol::wake::VERIFIED_BLOCKED_MAX_AGE_SECS;
 use uuid::Uuid;
 
+const ROUTINE_MAX_AGE_SECS: i64 = 2 * 60 * 60;
+pub(super) enum Window {
+    Routine,
+    VerifiedBlocked,
+}
+
+impl Window {
+    fn seconds(&self) -> i64 {
+        match self {
+            Self::Routine => ROUTINE_MAX_AGE_SECS,
+            Self::VerifiedBlocked => VERIFIED_BLOCKED_MAX_AGE_SECS,
+        }
+    }
+}
+
 pub(super) fn schema(db: &Connection) -> Result<()> {
-    db.execute_batch(
+    let tx = rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS babysitter_preferences(
             agent TEXT PRIMARY KEY, enabled INTEGER NOT NULL
         );
@@ -14,12 +31,24 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
             due INTEGER NOT NULL, attempt TEXT, claimed_at INTEGER, submitted INTEGER NOT NULL DEFAULT 0
         );",
     )?;
+    if !tx
+        .prepare("SELECT 1 FROM pragma_table_info('babysitter_attempts') WHERE name='valid_until'")?
+        .exists([])?
+    {
+        // Outstanding claims from older daemons keep the routine cutoff.
+        tx.execute(
+            "ALTER TABLE babysitter_attempts ADD COLUMN valid_until INTEGER",
+            [],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 struct Previous {
     goal: String,
     turn: String,
     failed_at: i64,
+    reason: String,
     delay: i64,
     claimed_at: Option<i64>,
 }
@@ -63,6 +92,7 @@ impl StoreSession<'_> {
         turn: Uuid,
         failed: i64,
         reason: Failure,
+        window: Window,
     ) -> Result<Value> {
         let no = json!({"claim":null});
         if !self.enabled(who)? {
@@ -73,22 +103,27 @@ impl StoreSession<'_> {
             "invalid host failure identity"
         );
         let now = self.timestamp;
-        if failed < now - 7200 || failed > now + 10 {
+        if failed <= 0 || failed < now.saturating_sub(window.seconds()) || failed > now {
             return Ok(no);
         }
         let turn = turn.to_string();
+        let reason = serde_json::to_string(&reason)?;
         let previous = self.db.query_row(
-            "SELECT goal,turn,failed_at,delay,claimed_at FROM babysitter_attempts WHERE agent=?1",
+            "SELECT goal,turn,failed_at,delay,claimed_at,reason FROM babysitter_attempts WHERE agent=?1",
             [&who.id],
             |row| Ok(Previous {
                 goal:row.get(0)?, turn:row.get(1)?, failed_at:row.get(2)?,
-                delay:row.get(3)?, claimed_at:row.get(4)?,
+                delay:row.get(3)?, claimed_at:row.get(4)?, reason:row.get(5)?,
             }),
         ).optional()?;
-        if !previous
+        if let Some(p) = previous
             .as_ref()
-            .is_some_and(|p| p.goal == goal && p.turn == turn)
+            .filter(|p| p.goal == goal && p.turn == turn)
         {
+            if p.failed_at != failed || p.reason != reason {
+                return Ok(no);
+            }
+        } else {
             if previous.as_ref().is_some_and(|p| p.failed_at > failed) {
                 return Ok(no);
             }
@@ -98,19 +133,32 @@ impl StoreSession<'_> {
             self.db.execute(
                 "INSERT OR REPLACE INTO babysitter_attempts(agent,goal,turn,failed_at,reason,delay,due)
                  VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![who.id,goal,turn,failed,serde_json::to_string(&reason)?,wait,failed+wait],
+                params![who.id,goal,turn,failed,reason,wait,failed.saturating_add(wait)],
             )?;
         }
         let id = Uuid::new_v4().to_string();
         let changed = self.db.execute(
-            "UPDATE babysitter_attempts SET attempt=?2,claimed_at=?3
+            "UPDATE babysitter_attempts SET attempt=?2,claimed_at=?3,valid_until=?4
              WHERE agent=?1 AND attempt IS NULL AND submitted=0 AND due<=?3",
-            params![who.id, id, now],
+            params![who.id, id, now, failed.saturating_add(window.seconds())],
         )?;
         Ok(json!({"claim":(changed==1).then_some(id)}))
     }
     pub(super) fn babysitter_check(&self, who: &Agent, id: Uuid) -> Result<bool> {
-        Ok(self.enabled(who)? && self.db.query_row("SELECT EXISTS(SELECT 1 FROM babysitter_attempts WHERE agent=?1 AND attempt=?2 AND submitted=0 AND claimed_at>=?3)",params![who.id,id.to_string(),self.timestamp-30],|r|r.get::<_,bool>(0))?)
+        Ok(self.enabled(who)?
+            && self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM babysitter_attempts WHERE agent=?1 AND attempt=?2
+             AND submitted=0 AND claimed_at BETWEEN ?3-30 AND ?3
+             AND failed_at BETWEEN ?3-?4 AND ?3 AND ?3<=COALESCE(valid_until,failed_at+?5))",
+                params![
+                    who.id,
+                    id.to_string(),
+                    self.timestamp,
+                    VERIFIED_BLOCKED_MAX_AGE_SECS,
+                    ROUTINE_MAX_AGE_SECS
+                ],
+                |r| r.get::<_, bool>(0),
+            )?)
     }
     pub(super) fn babysitter_submitted(
         &self,

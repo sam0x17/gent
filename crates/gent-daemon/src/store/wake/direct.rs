@@ -1,11 +1,59 @@
 //! Direct native delivery and exactly one recorded response per dispatched turn.
 //! Host execution remains outside this journal; recovery only reads host results.
 use super::*;
-use gent_protocol::wake::{DirectWake, WakeDelivery};
+use gent_protocol::wake::{DirectTurnEvidence, DirectWake, WakeDelivery};
 
 const MAX_PENDING: usize = 512;
 
 impl StoreSession<'_> {
+    /// A second dispatch reporting the same native turn, at submission or
+    /// observation, makes attribution ambiguous even before it finishes.
+    pub(in crate::store) fn direct_turn_evidence(
+        &self,
+        who: &Agent,
+        thread: uuid::Uuid,
+        turn: uuid::Uuid,
+    ) -> Result<Value> {
+        ensure!(!turn.is_nil(), "invalid native turn");
+        let thread = thread.to_string();
+        let turn = turn.to_string();
+        let mut query = self.db.prepare(
+            "SELECT message_id FROM wake_dispatches WHERE agent=?1
+             AND json_extract(payload,'$.target.host')='codex'
+             AND json_extract(payload,'$.target.thread_id')=?2
+             AND json_type(payload,'$.direct')='object'
+             AND (json_extract(payload,'$.submission_id')=?3
+                  OR json_extract(payload,'$.direct.turn_id')=?3) LIMIT 2",
+        )?;
+        let mut rows = query.query(params![who.id, thread, turn])?;
+        let Some(row) = rows.next()? else {
+            return Ok(Value::Null);
+        };
+        let message: String = row.get(0)?;
+        if rows.next()?.is_some() {
+            return Ok(Value::Null);
+        }
+        let record = self.wake_record(&message)?.context(UNAVAILABLE)?;
+        let Some(direct) = record.direct else {
+            return Ok(Value::Null);
+        };
+        if record.agent != who.id
+            || record.target != (WakeTarget::Codex { thread_id: thread })
+            || direct.turn_id.as_ref() != Some(&turn)
+            || record.state != WakeState::Submitted
+            || record.submission_id.as_ref() != Some(&turn)
+            || record.inbox_seen_at.is_none()
+            || record.updated_at > self.timestamp
+            || !direct.finished
+        {
+            return Ok(Value::Null);
+        }
+        Ok(json!(DirectTurnEvidence {
+            attempt_id: record.attempt_id,
+            input_hash: direct.input_hash
+        }))
+    }
+
     fn direct_record(
         &self,
         who: &Agent,

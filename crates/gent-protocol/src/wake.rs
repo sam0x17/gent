@@ -1,6 +1,16 @@
 //! Local host-input dispatch evidence, separate from message receipts and work.
 use serde::{Deserialize, Serialize};
 
+/// Maximum age of the provider failure for a fully verified blocked Codex goal.
+pub const VERIFIED_BLOCKED_MAX_AGE_SECS: i64 = 24 * 60 * 60;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectTurnEvidence {
+    pub attempt_id: String,
+    pub input_hash: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "host", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WakeTarget {
