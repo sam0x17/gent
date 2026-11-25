@@ -1,9 +1,12 @@
 //! Manual requests wait for the existing updater; scheduled checks skip it.
-use super::install::Installation;
+use super::install::{Installation, UpdateLock};
 use anyhow::{Context, Result};
-use std::{fs::File, time::Duration};
+use std::time::Duration;
 
-pub(super) async fn acquire(installation: &Installation, automatic: bool) -> Result<Option<File>> {
+pub(super) async fn acquire(
+    installation: &Installation,
+    automatic: bool,
+) -> Result<Option<UpdateLock>> {
     if let Some(lock) = installation.try_lock()? {
         return Ok(Some(lock));
     }

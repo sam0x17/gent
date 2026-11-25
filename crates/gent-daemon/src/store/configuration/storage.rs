@@ -72,6 +72,9 @@ enum Summary {
         node_id: String,
         name: String,
     },
+    SetReleaseChannel {
+        channel: gent_protocol::ReleaseChannel,
+    },
     Renew,
     GrantRelay {
         grant_id: String,
@@ -146,6 +149,9 @@ impl From<&ConfigurationEdit> for Summary {
                 node_id: node_id.clone(),
                 name: name.clone(),
             },
+            ConfigurationEdit::SetReleaseChannel { channel } => {
+                Self::SetReleaseChannel { channel: *channel }
+            }
             ConfigurationEdit::Renew => Self::Renew,
             ConfigurationEdit::GrantRelay { grant_id, .. } => Self::GrantRelay {
                 grant_id: grant_id.clone(),
@@ -344,6 +350,7 @@ pub(super) fn describe(body: &[u8], compact: bool, status: &mut Value) -> Result
         Summary::from(&serde_json::from_slice::<ConfigurationEdit>(body)?)
     };
     match summary {
+        Summary::SetReleaseChannel { channel } => status["channel"] = json!(channel),
         Summary::RenameMember { node_id, name } => {
             status["node_id"] = node_id.into();
             status["name"] = name.into();

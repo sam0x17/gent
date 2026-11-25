@@ -30,6 +30,7 @@ mod notification_app;
 #[cfg(target_os = "macos")]
 pub(crate) mod notification_delivery;
 mod pages;
+mod release_channel;
 #[cfg(target_os = "linux")]
 pub(crate) use login::label as desktop_entry_id;
 pub(crate) use login::{installed, migrate, previously_configured, removed};
@@ -251,6 +252,7 @@ async fn supervise(
     let watch = crate::auth::notifications::desktop_loop(home, &destination);
     tokio::pin!(watch);
     let mut jobs = tokio::task::JoinSet::new();
+    let mut channel_jobs = tokio::task::JoinSet::new();
     let mut activation = [0; 16];
     loop {
         #[cfg(target_os = "macos")]
@@ -264,6 +266,7 @@ async fn supervise(
             banner = next_banner => banner,
             _=&mut watch=>anyhow::bail!("account notification watch stopped"),
             Some(result) = jobs.join_next() => result?,
+            Some(result) = channel_jobs.join_next() => result?,
             size = socket.recv(&mut activation) => match &activation[..size?] {
                 b"show" => json!({"show":true}),
                 b"quit" => json!({"quit":true}),
@@ -274,7 +277,14 @@ async fn supervise(
                 #[cfg(target_os = "macos")]
                 if deliveries.receive(&line) { continue; }
                 if line.starts_with('{') {
-                    if let Ok(admin::Request::Manage { action }) = serde_json::from_str(&line) {
+                    if let Ok(request) = serde_json::from_str::<release_channel::Request>(&line) {
+                        if channel_jobs.is_empty() {
+                            let home = home.to_owned();
+                            channel_jobs.spawn(async move { request.respond(&home).await });
+                            continue;
+                        }
+                        json!({"page":"release_channel","notice":"A channel request is in progress."})
+                    } else if let Ok(admin::Request::Manage { action }) = serde_json::from_str(&line) {
                         if jobs.is_empty() {
                             let home = home.to_owned();
                             jobs.spawn(async move { action.respond(&home).await });

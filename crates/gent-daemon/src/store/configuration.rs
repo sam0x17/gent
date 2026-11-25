@@ -129,7 +129,7 @@ fn validate(edit: &ConfigurationEdit) -> Result<()> {
             );
             config::label(name)?;
         }
-        ConfigurationEdit::Renew => {}
+        ConfigurationEdit::Renew | ConfigurationEdit::SetReleaseChannel { .. } => {}
         ConfigurationEdit::GrantRelay {
             grant_id,
             intermediary,
@@ -361,12 +361,7 @@ impl StoreSession<'_> {
         } else {
             ensure!(
                 administration::edit_identity(&edit).is_some()
-                    || self
-                        .state
-                        .state()
-                        .nodes
-                        .get(&origin)
-                        .is_some_and(|n| n.can_configure),
+                    || self.identity.has_configuration_grant(&self.state),
                 "node lacks configuration-management grant; grant it on the owner node"
             );
             let writer = self.configuration_writer()?;
@@ -570,6 +565,9 @@ impl StoreSession<'_> {
             }
             ConfigurationEdit::RenameMember { node_id, name } => {
                 self.state.rename_node(owner, node_id, name, timestamp)
+            }
+            ConfigurationEdit::SetReleaseChannel { channel } => {
+                self.state.set_release_channel(owner, *channel, timestamp)
             }
             ConfigurationEdit::Renew => self.state.renew(owner, timestamp),
             ConfigurationEdit::GrantRelay {

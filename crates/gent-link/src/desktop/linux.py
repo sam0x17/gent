@@ -155,7 +155,8 @@ class Desktop:
         for title, page in pages.items():
             self.tabs.append_page(page, Gtk.Label(label=title))
         self.replies = {title.lower(): page for title, page in pages.items()}
-        self.replies.update(cluster=self.cluster.account, nodes=self.cluster.members)
+        self.settings = pages["Settings"]
+        self.replies.update(cluster=self.cluster.account, nodes=self.cluster.members, release_channel=self.settings.channel)
         self.tabs.show_all()
         self.cluster.health.hide()
         self.cluster.members.hide()
@@ -222,6 +223,8 @@ class Desktop:
             print(action, flush=True)
 
     def tick(self):
+        if self.window.get_visible() and self.tabs.get_nth_page(self.tabs.get_current_page()) is self.settings:
+            self.settings.poll_channel()
         if self.window.get_visible() and self.tabs.get_nth_page(self.tabs.get_current_page()) is self.dashboard:
             self.dashboard.load()
         if self.window.get_visible() or time.monotonic() - self.last_read >= 60:

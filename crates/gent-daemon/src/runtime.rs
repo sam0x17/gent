@@ -112,6 +112,23 @@ impl Identity {
             file.persist_noclobber(&path).map_err(|e| e.error)?;
             fs::File::open(home)?.sync_all()?;
         }
+        let identity = Self::load(home, config)?;
+        if !initialized {
+            ensure!(
+                config.applied_revision.is_none(),
+                "saved authority is missing"
+            );
+            encrypted::initialize_authority(db, &identity.node, &identity.initial)?;
+            db.execute("INSERT INTO metadata VALUES('signed_authority','1')", [])?;
+            queue_projection(db)?;
+        }
+        identity.state(db)?;
+        Ok(identity)
+    }
+
+    /// Read and verify the immutable bootstrap without initializing a runtime.
+    pub(crate) fn load(home: &Path, config: &Config) -> Result<Self> {
+        let path = home.join(KEY_FILE);
         let metadata = fs::symlink_metadata(&path)?;
         ensure!(
             metadata.is_file()
@@ -172,25 +189,14 @@ impl Identity {
                 .is_some_and(|n| n.signing_key == node.public_key()),
             "node signing key does not match initial authority"
         );
-        if !initialized {
-            ensure!(
-                config.applied_revision.is_none(),
-                "saved authority is missing"
-            );
-            encrypted::initialize_authority(db, &node, &initial)?;
-            db.execute("INSERT INTO metadata VALUES('signed_authority','1')", [])?;
-            queue_projection(db)?;
-        }
-        let identity = Self {
+        Ok(Self {
             node,
             owner,
             initial,
             home: home.into(),
             peer_fenced,
             legacy_service_checked: true,
-        };
-        identity.state(db)?;
-        Ok(identity)
+        })
     }
 
     pub fn is_current_owner(&self, state: &VerifiedState) -> bool {
@@ -240,13 +246,17 @@ impl Identity {
         self.peer_fenced
     }
 
+    pub(crate) fn has_configuration_grant(&self, state: &VerifiedState) -> bool {
+        state
+            .state()
+            .nodes
+            .get(self.node.id())
+            .is_some_and(|n| n.can_configure && n.signing_key == self.node.public_key())
+    }
+
     pub(crate) fn can_administer(&self, state: &VerifiedState) -> bool {
         if state.state().peer.is_some() {
-            state
-                .state()
-                .nodes
-                .get(self.node.id())
-                .is_some_and(|n| n.can_configure && n.signing_key == self.node.public_key())
+            self.has_configuration_grant(state)
         } else {
             self.is_current_owner(state) && !self.peer_fenced
         }

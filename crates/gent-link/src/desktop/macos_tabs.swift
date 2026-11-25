@@ -184,11 +184,88 @@ final class DirectoryTab: NSObject, NSTableViewDataSource, NSTableViewDelegate, 
     }
 }
 
+final class ReleaseChannelRow: NSObject {
+    let choice = NSPopUpButton(frame: .zero, pullsDown: false)
+    let detail = NSTextField(wrappingLabelWithString: "")
+    private let hint = NSTextField(wrappingLabelWithString: "Switching channels requests one update per node, even when automatic updates are paused.")
+    let retry = NSButton(title: "Retry request", target: nil, action: nil)
+    private let channels = ["stable", "beta"]
+    private var current: String?
+    private var busy = false
+    private(set) var pending = false
+    private let title = "Cluster release channel"
+    lazy var view = column([NSStackView(views: [NSTextField(labelWithString: title), choice, retry, NSView()]), hint, detail])
+
+    override init() {
+        super.init()
+        view.spacing = 3
+        hint.textColor = .secondaryLabelColor
+        detail.isHidden = true
+        retry.isHidden = true
+        retry.target = self
+        retry.action = #selector(retryRequest)
+        choice.setAccessibilityLabel(title)
+        choice.addItems(withTitles: channels.map { $0.capitalized })
+        choice.select(nil)
+        choice.isEnabled = false
+        choice.target = self
+        choice.action = #selector(selectChannel)
+    }
+
+    func load() {
+        guard !busy else { return }
+        busy = true
+        choice.isEnabled = false
+        retry.isEnabled = false
+        sendPage("release_channel")
+    }
+
+    @objc private func retryRequest() {
+        guard !busy, retry.isEnabled else { return }
+        busy = true
+        retry.isEnabled = false
+        detail.stringValue = "Retrying the same request…"
+        sendPage("retry_release_channel")
+    }
+
+    private func showCurrent() {
+        if let current = current, let index = channels.firstIndex(of: current) {
+            choice.selectItem(at: index)
+        } else {
+            choice.select(nil)
+        }
+    }
+
+    @objc func selectChannel() {
+        let index = choice.indexOfSelectedItem
+        showCurrent()
+        guard !busy, choice.isEnabled, channels.indices.contains(index), channels[index] != current else { return }
+        busy = true
+        choice.isEnabled = false
+        detail.stringValue = "Requesting \(channels[index].capitalized)…"
+        detail.isHidden = false
+        sendPage("set_release_channel", ["channel": channels[index]])
+    }
+
+    func receive(_ reply: [String: Any]) {
+        busy = false
+        current = reply["current"] as? String
+        pending = reply["pending"] as? Bool == true
+        showCurrent()
+        choice.isEnabled = choice.indexOfSelectedItem >= 0 && reply["can_set"] as? Bool == true
+        retry.isHidden = reply["retry"] as? Bool != true
+        retry.isEnabled = !retry.isHidden
+        detail.stringValue = reply["notice"] as? String ?? ""
+        detail.isHidden = detail.stringValue.isEmpty
+    }
+}
+
 final class SettingsTab: NSObject {
     let view = NSView()
     let text = NSTextView()
     let status = NSTextField(wrappingLabelWithString: "")
-    private let form = NSView()
+    let channel = ReleaseChannelRow()
+    private let form = NSScrollView()
     private let editor = NSView()
     private var checks: [String: NSButton] = [:]
     private var controls: [NSButton] = []
@@ -214,6 +291,7 @@ final class SettingsTab: NSObject {
             button.isEnabled = false
             checks[key] = button
             fields.append(button)
+            if key == "updates" { fields.append(channel.view) }
             if key == "babysitter" {
                 pricing.isHidden = true
                 fields.append(pricing)
@@ -225,13 +303,16 @@ final class SettingsTab: NSObject {
         let edit = NSButton(title: "Edit full configuration…", target: self, action: #selector(openEditor))
         fields.append(NSStackView(views: [edit, NSView()]))
         let standard = column(fields)
-        form.addSubview(standard)
-        standard.translatesAutoresizingMaskIntoConstraints = false
+        let document = FlippedDocument()
+        form.documentView = document
+        form.hasVerticalScroller = true
+        form.drawsBackground = false
+        document.translatesAutoresizingMaskIntoConstraints = false
+        pin(standard, in: document)
         NSLayoutConstraint.activate([
-            standard.leadingAnchor.constraint(equalTo: form.leadingAnchor),
-            standard.trailingAnchor.constraint(equalTo: form.trailingAnchor),
-            standard.topAnchor.constraint(equalTo: form.topAnchor),
-            standard.bottomAnchor.constraint(lessThanOrEqualTo: form.bottomAnchor),
+            document.leadingAnchor.constraint(equalTo: form.contentView.leadingAnchor),
+            document.topAnchor.constraint(equalTo: form.contentView.topAnchor),
+            document.widthAnchor.constraint(equalTo: form.contentView.widthAnchor),
         ])
 
         text.isRichText = false
@@ -261,7 +342,16 @@ final class SettingsTab: NSObject {
         pin(column([area, status]), in: view, inset: 16)
     }
 
-    func load() { if editor.isHidden { request("settings") } }
+    func load() {
+        if editor.isHidden {
+            request("settings")
+            channel.load()
+        }
+    }
+
+    func pollChannel() {
+        if editor.isHidden && channel.pending { channel.load() }
+    }
 
     private func enableControls() {
         for button in controls { button.isEnabled = !busy }

@@ -1,5 +1,5 @@
 //! Installation ownership, durable publication journal and atomic replacement.
-use crate::build_info::{self, Build};
+use crate::build_info::Build;
 use anyhow::{Context, Result, ensure};
 use gent_daemon::config;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,16 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+
+pub(super) struct UpdateLock(fs::File);
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        // A child forked by another thread can hold a duplicate descriptor
+        // until exec. Release the flock when the writer is done.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct Installation {
@@ -39,6 +49,11 @@ pub(super) struct Pending {
     pub new_hash: String,
     pub starting: bool,
     #[serde(default)]
+    pub automatic: bool,
+}
+
+pub(super) struct Source {
+    pub channel: gent_protocol::ReleaseChannel,
     pub automatic: bool,
 }
 
@@ -199,7 +214,7 @@ impl Installation {
         Ok(Some(Self { binary, directory }))
     }
 
-    pub fn try_lock(&self) -> Result<Option<fs::File>> {
+    pub fn try_lock(&self) -> Result<Option<UpdateLock>> {
         match config::state_lock(&self.directory, "update.lock") {
             Err(error)
                 if error
@@ -208,18 +223,18 @@ impl Installation {
             {
                 Ok(None)
             }
-            result => result.map(Some),
+            result => result.map(|file| Some(UpdateLock(file))),
         }
     }
 
-    pub fn lock(&self) -> Result<fs::File> {
+    pub fn lock(&self) -> Result<UpdateLock> {
         self.try_lock()?
             .context("another Gent update is running; retry when it finishes")
     }
 
     pub fn read<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
         let path = self.directory.join(name);
-        if !path.exists() {
+        if !path.try_exists()? {
             return Ok(None);
         }
         let meta = owned(&path)?;
@@ -261,9 +276,13 @@ impl Installation {
         Ok(Some(pending))
     }
 
-    fn clear_pending(&self) -> Result<()> {
+    fn clear_pending(&self, home: &Path, installed_hash: &str) -> Result<()> {
         fs::remove_file(self.directory.join("pending.json"))?;
         fs::File::open(&self.directory)?.sync_all()?;
+        if let Err(error) = self.finish_channel(home, installed_hash) {
+            // The receipt still identifies the applied channel by file hash.
+            eprintln!("Gent update channel receipt cleanup pending: {error}");
+        }
         Ok(())
     }
 
@@ -274,7 +293,7 @@ impl Installation {
         new: Build,
         candidate: &Path,
         expected_old: &str,
-        automatic: bool,
+        source: Source,
     ) -> Result<()> {
         ensure!(
             self.pending()?.is_none(),
@@ -294,8 +313,9 @@ impl Installation {
             old_hash: expected_old.into(),
             new_hash: new_hash.clone(),
             starting: false,
-            automatic,
+            automatic: source.automatic,
         };
+        self.prepare_channel(home, source.channel, &new_hash)?;
         self.write("pending.json", &pending)?;
         // The durable journal precedes publication, so either old or new bytes
         // after a crash can be reconciled without truncating the executable.
@@ -322,7 +342,7 @@ impl Installation {
         status.error = Some(reason.into());
         status.failed_commit = Some(pending.new.commit.clone());
         self.write("status.json", &status)?;
-        self.clear_pending()
+        self.clear_pending(&pending.home, &pending.old_hash)
     }
 
     pub fn interrupted_publication(&self, pending: &Pending) -> Result<()> {
@@ -334,7 +354,7 @@ impl Installation {
         status.phase = "interrupted".into();
         status.error = Some("publication interrupted; the next check will retry".into());
         self.write("status.json", &status)?;
-        self.clear_pending()
+        self.clear_pending(&pending.home, &pending.old_hash)
     }
 
     pub fn begin_startup(&self, home: &Path, current: &Build) -> Result<bool> {
@@ -401,22 +421,37 @@ impl Installation {
         status.error = None;
         status.failed_commit = None;
         self.write("status.json", &status)?;
-        self.clear_pending()?;
+        self.clear_pending(&pending.home, &pending.new_hash)?;
         Ok(pending.automatic.then_some(pending.new))
     }
 
     pub fn needs_restart(&self, home: &Path) -> Result<bool> {
+        if !self.directory.join("pending.json").try_exists()? {
+            return Ok(false);
+        }
+        let Some(_lock) = self.try_lock()? else {
+            return Ok(false);
+        };
         let Some(pending) = self.pending()? else {
             return Ok(false);
         };
-        // Publication writes its final status while holding this lock. Defer
-        // activation until the publisher is entirely finished.
-        let Ok(_lock) = self.lock() else {
-            return Ok(false);
-        };
+        // A channel switch can reinstall the running revision after a manual
+        // disk replacement. The new executable still needs to acknowledge it.
         Ok(pending.home == fs::canonicalize(home)?
             && !pending.starting
-            && pending.new != build_info::current()
             && hash(&self.binary)? == pending.new_hash)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn finishing_a_writer_unlocks_even_with_an_inherited_descriptor() {
+    let home = tempfile::tempdir().unwrap();
+    let file = config::state_lock(home.path(), "update.lock").unwrap();
+    let inherited = file.try_clone().unwrap();
+    let lock = UpdateLock(file);
+    assert!(config::state_lock(home.path(), "update.lock").is_err());
+    drop(lock);
+    assert!(config::state_lock(home.path(), "update.lock").is_ok());
+    drop(inherited);
 }

@@ -416,3 +416,92 @@ async fn a_new_node_drains_directory_backlog_and_reports_transport_progress() {
     nodes[1].restart();
     assert_eq!(agents(&nodes[1]), expected);
 }
+
+#[tokio::test]
+async fn release_channel_edit_reaches_connected_and_returning_nodes() {
+    use gent_daemon::release_channel::{ReleaseChannel, current};
+    use gent_protocol::ConfigurationEdit;
+
+    let relay = relay::RelayServer::start().await;
+    let mut nodes = cluster(&relay).await;
+    let reader_id = config::load(nodes[2].home.path()).unwrap().node.id;
+    nodes[0].owner(OwnerOp::DelegateConfiguration {
+        node_id: reader_id,
+        allow: false,
+    });
+    for node in &mut nodes {
+        node.start();
+    }
+    wait(|| linked(&nodes) && nodes[2].owner(OwnerOp::Status)["can_set_release_channel"] == false)
+        .await;
+    let set = |channel| OwnerOp::Configure {
+        request_id: Uuid::new_v4().to_string(),
+        edit: ConfigurationEdit::SetReleaseChannel { channel },
+    };
+    let beta = set(ReleaseChannel::Beta);
+    let select = |node: &Node, op: OwnerOp| {
+        node.store.lock().unwrap().handle(Request::Owner {
+            credential: node.owner.clone(),
+            action: op,
+        })
+    };
+    assert!(matches!(
+        select(&nodes[2], beta.clone()),
+        Response::Error(_)
+    ));
+    assert_eq!(
+        nodes[1].owner(OwnerOp::Status)["can_set_release_channel"],
+        true
+    );
+    nodes[2].task.take();
+    for node in &nodes {
+        assert_eq!(current(node.home.path()).unwrap(), ReleaseChannel::Stable);
+    }
+
+    // Queue from an enrolled administrator while the signing owner is offline.
+    nodes[0].task.take();
+    let queued = nodes[1].owner(beta.clone());
+    assert_eq!(queued["state"], "queued");
+    assert_eq!(queued["channel"], "beta");
+    nodes[1].restart();
+    assert_eq!(nodes[1].owner(beta.clone())["state"], "queued");
+    assert_eq!(
+        current(nodes[1].home.path()).unwrap(),
+        ReleaseChannel::Stable
+    );
+    nodes[0].restart();
+    wait(|| nodes[1].owner(beta.clone())["state"] == "applied").await;
+    let applied = nodes[1].owner(beta.clone());
+    let reused = OwnerOp::Configure {
+        request_id: applied["request_id"].as_str().unwrap().into(),
+        edit: ConfigurationEdit::SetReleaseChannel {
+            channel: ReleaseChannel::Stable,
+        },
+    };
+    assert!(matches!(select(&nodes[1], reused), Response::Error(_)));
+    assert_eq!(current(nodes[0].home.path()).unwrap(), ReleaseChannel::Beta);
+    assert_eq!(
+        current(nodes[2].home.path()).unwrap(),
+        ReleaseChannel::Stable
+    );
+    nodes[2].restart();
+    wait(|| current(nodes[2].home.path()).unwrap() == ReleaseChannel::Beta).await;
+    assert_eq!(nodes[2].owner(OwnerOp::Status)["release_channel"], "beta");
+    let late = join(&nodes[0]).await;
+    assert_eq!(current(late.home.path()).unwrap(), ReleaseChannel::Beta);
+
+    // Returning to stable supersedes the edit on every active node. Retrying
+    // the older request still returns its original revision and cannot undo it.
+    nodes[0].owner(set(ReleaseChannel::Stable));
+    wait(|| {
+        nodes
+            .iter()
+            .all(|n| current(n.home.path()).unwrap() == ReleaseChannel::Stable)
+    })
+    .await;
+    assert_eq!(nodes[1].owner(beta)["revision"], applied["revision"]);
+    assert_eq!(
+        current(nodes[1].home.path()).unwrap(),
+        ReleaseChannel::Stable
+    );
+}

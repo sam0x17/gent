@@ -13,6 +13,7 @@ pub mod messages;
 pub mod pairing;
 mod receive;
 pub mod recovery;
+pub mod release_channel;
 pub mod replica;
 mod runtime;
 pub mod shutdown;

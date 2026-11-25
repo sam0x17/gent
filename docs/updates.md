@@ -1,6 +1,8 @@
 # Updates and CLI output
 
-A running Gent daemon checks the `stable` tag in `sam0x17/gent` every five minutes. The tag resolves to a full commit SHA, including annotated tags. Gent compares that SHA with the installed executable's embedded build metadata and runs Cargo only when they differ. There is no update Worker.
+With automatic updates enabled, a running Gent daemon checks its cluster’s selected release every five minutes in `sam0x17/gent`. Existing clusters default to stable. Stable resolves `refs/tags/stable` and peels annotated tags. Beta resolves the branch `refs/heads/beta`. Both channels resolve their refs directly through Git. A clean installed executable whose embedded commit matches the selected SHA skips the build.
+
+Use `gent cluster channel get --json` to inspect the selection. Run `gent cluster channel set beta` to follow beta or `gent cluster channel set stable` to return to stable. Channel-aware nodes follow the selected commit even when it is older than their installed build. Upgrade each node to a channel-aware stable build before the cluster’s first switch to beta. Earlier daemons only follow the stable tag and cannot read the signed beta selection.
 
 Install the first updater-capable release once on each machine:
 
@@ -14,13 +16,15 @@ Git, Cargo, a native compiler and noninteractive access to the GitHub repository
 ```sh
 gent version                 # exact build revision
 gent update status           # local state and build-log path
-gent update check            # check stable without installing
+gent update check            # check the selected channel without installing
 gent update                  # check and install now
-gent update disable          # stop automatic checks on this node
-gent update enable           # resume automatic checks
+gent update disable          # pause routine updates on this node
+gent update enable           # resume following new commits on the selected channel
 ```
 
 If an update is already running, `gent update` waits for it with a progress indicator, then rechecks the installed release. Ctrl-C during the wait leaves the existing updater running. Scheduled checks skip an update that is already in progress. `gent update status` reports whether an updater currently holds the lock, alongside the saved phase and build-log path; JSON includes `update_in_progress`. A leftover lock file alone does not mean an update is running. The lock is released when its owning process exits; do not delete it to bypass a running updater.
+
+`gent update check --json` resolves the ref live and returns its `channel`, `release_ref` and `blessed_commit`. `gent update status` reads local state. Its top-level channel and ref describe the current selection, while `update.blessed_commit` and `update.phase` describe the last updater run. After a channel switch the saved revision can still belong to the prior channel. On managed installations, `applied_channel` is the last channel the node activated or verified at the same installed SHA. Existing installations start with stable as their applied channel.
 
 Update status distinguishes the calling CLI (`cli`), executable on disk (`installed`), and authenticated daemon's loaded build (`running`). Older daemons that do not report build metadata leave `running` null; their version is never inferred from the CLI. `daemon.reachable` reports whether the status probe succeeded. Pending activation also reports `activation_home` and `activation_starting`.
 
@@ -33,15 +37,19 @@ Automatic updates default to enabled. These commands edit the node-local setting
 enabled = false
 ```
 
-Direct TOML edits also take effect without `gent config apply`. This setting is preserved when shared cluster configuration arrives. Disabling updates during compilation prevents that build from being installed; it does not cancel an installation already published. Explicit `gent update` still works while automatic checks are disabled.
+Direct TOML edits also take effect without `gent config apply`. This setting is preserved when shared cluster configuration arrives. Disabling routine updates during compilation prevents that routine build from being installed. An installation already published proceeds through activation. Explicit `gent update` still works while paused.
+
+A signed cluster channel switch applies once on each managed node, including nodes with routine updates paused. The daemon checks its local channel on startup and every ten seconds. After an offline node reconnects, it compares the latest signed selection with its last applied channel. A paused node that missed intermediate switches stays pinned if those channels already match. If both refs point to the installed SHA, the node records the switch without running Cargo. After activation, a paused node stays on that commit until another channel switch, a manual update or `gent update enable`.
+
+If a switch fails, the node keeps its previous applied channel and retries on its regular five-minute schedule. A failed startup restores the previous executable and suppresses automatic retries of that SHA. The channel receipt is private to the Gent home and Cargo installation. Older releases can still read the activation journal.
 
 ## Installation and restart
 
 The updater operates on the standard `CARGO_HOME/bin/gent` installation (`~/.cargo/bin/gent` by default). Automatic updates skip binaries built from modified source and executables launched from a development checkout. `gent update status` explains unsupported installations.
 
-Cargo builds each exact revision using a persistent dependency cache and a separate staging installation while the existing daemon continues handling messages. The cache lives at `CARGO_HOME/.gent-updates/target/shared/`; the first update using it adopts the installed revision's old cache when available. Gent invalidates its own workspace crates before each build to prevent stale path dependencies across Git checkouts. Cargo reuses compatible third-party artifacts and rebuilds them when dependency versions, compiler versions, targets or flags change. No cache configuration or additional tool is required. The older updater still performs a full build to install the release that introduces this cache; subsequent updates can reuse it.
+Cargo builds each exact revision using a dependency cache shared by both channels and a separate staging installation while the existing daemon continues handling messages. The cache lives at `CARGO_HOME/.gent-updates/target/shared/`; the first update using it adopts the installed revision's old cache when available. Gent invalidates its own workspace crates before each build to prevent stale path dependencies across Git checkouts. Cargo reuses compatible third-party artifacts and rebuilds them when dependency versions, compiler versions, targets or flags change. No cache configuration or additional tool is required. The older updater still performs a full build to install the release that introduces this cache; subsequent updates can reuse it.
 
-Gent validates the candidate's package, commit, target and update protocol, then rechecks the stable tag and the existing executable. A changed tag, a changed installation or an invalid candidate cancels publication.
+Gent validates the candidate's package, commit, target and update protocol, then resolves the same ref again and rechecks the selected channel and the existing executable. If channel lookup fails, the ref disappears or moves to another commit, the selection changes during the build, or validation fails, the updater leaves the installed executable in place. A missing beta branch produces an error even when the stable tag is available.
 
 Builds use a lower CPU priority through the system `nice` utility when available. Linux also requests idle I/O through `ionice`, and macOS uses `taskpolicy` background scheduling, when those system utilities are present. These priorities apply to Cargo and its children, not the daemon. They reduce competition with messaging and other foreground work, but cannot eliminate delays caused by unrelated disk load. The default remains two build jobs unless `CARGO_BUILD_JOBS` is set.
 
@@ -53,7 +61,7 @@ After the new daemon reports authenticated readiness, it refreshes installed Gen
 
 Existing chat hosts and MCP processes stay open. Claude's native module can reload through its file watcher; captured replies survive a module-generation change using their existing session, attempt and native-turn bindings. Already-running Codex MCP processes keep their loaded code until the host reconnects them. Updating configuration does not prove that a live MCP process has reloaded. Gent does not force a host restart or submit a model turn.
 
-A failed startup before authenticated readiness restores the previous binary. Gent also recovers interrupted publication and startup records. A rolled-back revision is suppressed until the stable tag changes or `gent update install` explicitly retries it. Future releases must preserve backward compatibility of stored state for this binary rollback to remain usable.
+A failed startup before authenticated readiness restores the previous binary. Gent also recovers interrupted publication and startup records. Automatic checks suppress the failed commit on either channel until a check resolves a different commit. Use `gent update install` to retry the selected revision explicitly. Future releases must preserve backward compatibility of stored state for this binary rollback to remain usable.
 
 Update state, the saved binary, compilation cache and bounded build log live in `CARGO_HOME/.gent-updates/`. After a successful build, cache cleanup keeps the shared dependency cache and removes obsolete caches left by older updater versions. The executable's embedded metadata is authoritative. Cargo's installation inventory can continue to show the original manually installed revision after an automatic replacement; use `gent version` for the running command and `gent update status` for activation state.
 

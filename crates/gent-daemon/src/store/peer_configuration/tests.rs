@@ -622,3 +622,50 @@ fn loss_of_pro_invalidates_cached_hosting_proposal_and_allows_removal() {
             .contains(&member)
     );
 }
+
+#[test]
+fn release_channel_peer_log_replays_decisions_in_order() {
+    use crate::release_channel::{ReleaseChannel, current};
+
+    let mut f = Fixture::new();
+    let old = f.store.identity.state(&f.store.db).unwrap();
+    // Legacy signed states must verify with the original bytes and digest.
+    assert!(
+        json!(old.signed())["state"]
+            .get("release_channel")
+            .is_none()
+    );
+    let (peer_home, mut peer) = connected_home(&f.peer, &old, None);
+    f.activate();
+    let migration = f
+        .store
+        .configuration_record(old.checkpoint().revision + 1)
+        .unwrap()
+        .unwrap();
+    peer.accept_configuration_commit(&migration).unwrap();
+    let beta = configure(
+        &mut peer,
+        ConfigurationEdit::SetReleaseChannel {
+            channel: ReleaseChannel::Beta,
+        },
+    );
+    let stable = configure(
+        &mut peer,
+        ConfigurationEdit::SetReleaseChannel {
+            channel: ReleaseChannel::Stable,
+        },
+    );
+    f = f.restart();
+    assert!(f.store.accept_configuration_commit(&stable).is_err());
+    assert_eq!(current(f.home.path()).unwrap(), ReleaseChannel::Stable);
+    f.store.accept_configuration_commit(&beta).unwrap();
+    assert_eq!(current(f.home.path()).unwrap(), ReleaseChannel::Beta);
+    f.store.accept_configuration_commit(&stable).unwrap();
+    f.store.accept_configuration_commit(&beta).unwrap();
+    assert_eq!(current(f.home.path()).unwrap(), ReleaseChannel::Stable);
+    assert_eq!(current(peer_home.path()).unwrap(), ReleaseChannel::Stable);
+    assert_eq!(
+        f.store.configuration_log_head().unwrap(),
+        peer.configuration_log_head().unwrap()
+    );
+}

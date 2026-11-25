@@ -11,6 +11,7 @@ pub mod hosted_mcp;
 pub mod notifications;
 pub mod owner_transfer;
 pub mod permissions;
+mod release_channel;
 pub mod service;
 pub mod transport_batch;
 pub mod transport_exchange;
@@ -20,6 +21,7 @@ pub mod transport_wss;
 pub mod wake;
 pub mod web_failover;
 pub mod work;
+pub use release_channel::ReleaseChannel;
 
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -601,6 +603,9 @@ pub enum ConfigurationEdit {
     RenameMember {
         node_id: String,
         name: String,
+    },
+    SetReleaseChannel {
+        channel: ReleaseChannel,
     },
     Renew,
     GrantRelay {

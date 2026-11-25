@@ -68,6 +68,48 @@ func actionButton(_ bar: ActionBar, _ title: String) -> NSButton {
     return button
 }
 
+func checkReleaseChannel(_ desktop: Desktop) {
+    let settings = desktop.settings
+    let row = settings.channel
+    require(descendants(row.view, of: NSTextField.self).contains { $0.stringValue.contains("one update per node") },
+            "channel change explains one-time updates on paused nodes")
+    let reads = requests { desktop.showSettings() }
+    require(reads.contains(.json(["op": "release_channel"])) && reads.contains(.json(["op": "settings"])),
+            "Settings independently loads local preferences and the signed channel")
+    desktop.receive(["page": "settings", "values": ["updates": false, "discovery": true]])
+    func receive(_ fields: [String: Any]) {
+        var reply = fields
+        reply["page"] = "release_channel"
+        desktop.receive(reply)
+    }
+    receive(["current": "stable", "can_set": true])
+    require(row.choice.isEnabled && row.choice.titleOfSelectedItem == "Stable", "last accepted channel selected")
+    row.choice.selectItem(withTitle: "Beta")
+    require(requests { _ = NSApp.sendAction(row.choice.action!, to: row.choice.target, from: row.choice) }
+            == [.json(["op": "set_release_channel", "channel": "beta"])], "choose Beta through the popup")
+    require(!row.choice.isEnabled && row.choice.titleOfSelectedItem == "Stable" && row.detail.stringValue.contains("Beta"),
+            "requesting Beta preserves verified Stable")
+    receive(["current": "stable", "pending": true, "notice": "Beta queued"])
+    require(requests { settings.pollChannel() } == [.json(["op": "release_channel"])], "queued edit polls by reading")
+    receive(["current": "stable", "pending": true, "retry": true, "notice": "Unconfirmed"])
+    require(!row.retry.isHidden && requests { row.retry.performClick(nil) } == [.json(["op": "retry_release_channel"])],
+            "explicit retry uses the supervisor's saved intent")
+    settings.openEditor()
+    desktop.receive(["page": "settings", "document": "draft"])
+    receive(["current": "beta", "can_set": true, "notice": "Cluster accepted beta"])
+    require(settings.text.string == "draft" && !settings.text.isHiddenOrHasHiddenAncestor && row.choice.titleOfSelectedItem == "Beta",
+            "channel reply preserves an open draft")
+    settings.discard()
+    desktop.receive(["page": "settings"])
+    let checks = descendants(settings.view, of: NSButton.self)
+    require(checks.first { $0.title == "Automatically update Gent" }?.state == .off &&
+            checks.first { $0.title == "Discover and publish native chats" }?.state == .on, "node preferences survive channel replies")
+    receive(["current": "beta", "can_set": false])
+    require(!row.choice.isEnabled && row.choice.titleOfSelectedItem == "Beta", "member can see the signed channel")
+    receive(["notice": "Unavailable"])
+    require(!row.choice.isEnabled && row.choice.indexOfSelectedItem == -1, "unknown channel remains unselected")
+}
+
 func checkCluster(_ desktop: Desktop, open: () -> Void) {
     require(desktop.tabs.tabViewItems.map { $0.label } == ["Status", "Dashboard", "Chats", "Settings", "Permissions", "About"]
             && desktop.tabs.selectedTabViewItem?.label == "Status", "Status is the first and selected tab")
@@ -1102,6 +1144,12 @@ func checkDashboard(_ desktop: Desktop) {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
+if CommandLine.arguments.dropFirst(2).contains("--settings") {
+    desktop.makeWindow()
+    checkReleaseChannel(desktop)
+    print("PASS: native release channel settings")
+    exit(0)
+}
 if CommandLine.arguments.dropFirst(2).contains(where: { ["--cluster", "--nodes"].contains($0) }) {
     desktop.makeWindow()
     checkCluster(desktop) { desktop.show() }
@@ -1162,7 +1210,7 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     desktop.receive(["page": "chats", "rows": Array(ranked.reversed())])
     require(cell(chats.table, "id", row: 0) == "a" && chats.table.selectedRow == 0,
             "selected chat follows its ID after recent-message order changes")
-    desktop.tabs.selectTabViewItem(withIdentifier: "Settings")
+    checkReleaseChannel(desktop)
     desktop.receive(["page":"settings","values":["updates":true, "discovery":false]])
     desktop.settings.openEditor()
     desktop.receive(["page":"settings","document":"fixture = true"])
