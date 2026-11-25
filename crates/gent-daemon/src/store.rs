@@ -24,6 +24,7 @@ mod babysitter;
 mod configuration;
 mod message_dates;
 mod notifications;
+mod ordinary_babysitter;
 mod wire;
 pub(crate) use configuration::pending::schema as pending_configuration_schema;
 pub(crate) use configuration::routing::schema as configuration_routing_schema;
@@ -174,6 +175,7 @@ impl Store {
         wire::schema(&db)?;
         dashboards::schema(&db)?;
         babysitter::schema(&db)?;
+        ordinary_babysitter::schema(&db)?;
         notifications::schema(&db)?;
         hosted::schema(&db)?;
         directory_sync::schema(&db)?;
@@ -355,6 +357,10 @@ impl Store {
             &request,
             Request::Agent {
                 action: AgentOp::BabysitterClaim { .. }
+                    | AgentOp::BabysitterChatProbe { .. }
+                    | AgentOp::BabysitterChatClaim { .. }
+                    | AgentOp::BabysitterChatCheck { .. }
+                    | AgentOp::BabysitterChatSubmitted { .. }
                     | AgentOp::BabysitterCheck { .. }
                     | AgentOp::BabysitterSubmitted { .. },
                 ..
@@ -377,8 +383,14 @@ impl Store {
                     | OwnerOp::WakePendingAgents { .. },
                 ..
             }
-        ) || matches!(&request, Request::HostedStatus { .. }))
-            && !projection_pending;
+        ) || matches!(
+            &request,
+            Request::HostedStatus { .. }
+                | Request::Agent {
+                    action: AgentOp::BabysitterChatProbe { .. },
+                    ..
+                }
+        )) && !projection_pending;
         let tx = self.db.transaction_with_behavior(if read_only {
             TransactionBehavior::Deferred
         } else {
@@ -1170,6 +1182,10 @@ impl StoreSession<'_> {
         if !matches!(
             &action,
             AgentOp::BabysitterClaim { .. }
+                | AgentOp::BabysitterChatProbe { .. }
+                | AgentOp::BabysitterChatClaim { .. }
+                | AgentOp::BabysitterChatCheck { .. }
+                | AgentOp::BabysitterChatSubmitted { .. }
                 | AgentOp::BabysitterCheck { .. }
                 | AgentOp::BabysitterSubmitted { .. }
                 | AgentOp::WakePending
@@ -1208,6 +1224,23 @@ impl StoreSession<'_> {
             }
             AgentOp::BabysitterSubmitted { attempt, scope } => {
                 self.babysitter_submitted(&who, attempt, scope)
+            }
+            AgentOp::BabysitterChatProbe {
+                turn,
+                operator,
+                failed_at,
+            } => {
+                Ok(json!({"inspect":self.babysitter_chat_probe(&who, turn, operator, failed_at)?}))
+            }
+            AgentOp::BabysitterChatClaim {
+                turn,
+                failed_at,
+                reason,
+                origin,
+            } => self.babysitter_chat_claim(&who, turn, failed_at, reason, origin),
+            AgentOp::BabysitterChatCheck { attempt } => self.babysitter_chat_check(&who, attempt),
+            AgentOp::BabysitterChatSubmitted { attempt } => {
+                self.babysitter_chat_submitted(&who, attempt)
             }
             AgentOp::DashboardGet => self.dashboard_get(&who),
             op @ (AgentOp::DashboardDefine { .. }

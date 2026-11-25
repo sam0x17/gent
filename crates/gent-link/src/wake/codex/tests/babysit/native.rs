@@ -182,3 +182,5 @@ async fn installed_codex_resumes_a_usage_limited_and_an_already_active_goal() ->
 
 mod blocked;
 mod queue;
+
+mod ordinary;

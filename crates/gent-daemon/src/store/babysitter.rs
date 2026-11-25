@@ -33,8 +33,10 @@ fn delay(previous: i64, last: Option<i64>, failed: i64) -> i64 {
 }
 impl StoreSession<'_> {
     fn enabled(&self, who: &Agent) -> Result<bool> {
+        Ok(!self.home.join("babysitter-disabled").try_exists()? && self.babysitter_allowed(who)?)
+    }
+    pub(super) fn babysitter_allowed(&self, who: &Agent) -> Result<bool> {
         Ok(crate::entitlements::paid(self.home, &self.config)
-            && !self.home.join("babysitter-disabled").try_exists()?
             && self.db.query_row(
                 "SELECT COALESCE((SELECT enabled FROM babysitter_preferences WHERE agent=?1),1)",
                 [&who.id],
@@ -48,6 +50,10 @@ impl StoreSession<'_> {
         if let Some(on) = setting {
             self.db.execute("INSERT INTO babysitter_preferences VALUES(?1,?2) ON CONFLICT(agent) DO UPDATE SET enabled=excluded.enabled",params![who.id,on])?;
             if !on {
+                self.db.execute(
+                    "UPDATE babysitter_chat_attempts SET cancelled=1 WHERE agent=?1",
+                    [&who.id],
+                )?;
                 self.db.execute(
                     "UPDATE babysitter_attempts SET submitted=1 WHERE agent=?1",
                     [&who.id],
@@ -65,7 +71,7 @@ impl StoreSession<'_> {
         reason: Failure,
     ) -> Result<Value> {
         let no = json!({"claim":null});
-        if !self.enabled(who)? {
+        if !self.enabled(who)? || self.chat_claimed_turn(who, turn)? {
             return Ok(no);
         }
         ensure!(

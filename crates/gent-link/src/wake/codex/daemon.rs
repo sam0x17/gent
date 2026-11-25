@@ -9,7 +9,7 @@ pub(crate) async fn maintain_babysitter(home: &Path) {
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         timer.tick().await;
-        if !matches!(home.join("babysitter-disabled").try_exists(), Ok(false)) {
+        if !matches!(super::babysitter_running(home), Ok(true)) {
             runners.clear();
             continue;
         }

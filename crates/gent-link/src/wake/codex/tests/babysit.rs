@@ -359,6 +359,7 @@ async fn an_existing_human_stop_or_newer_goal_never_reaches_the_claim_recheck() 
 }
 
 mod native;
+mod ordinary;
 mod rollout;
 mod scheduler;
 
