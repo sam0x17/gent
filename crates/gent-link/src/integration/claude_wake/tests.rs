@@ -38,7 +38,7 @@ async fn retained_guard_passes_human_input_without_state_but_rejects_broken_noti
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("missing-home");
     let directory = root.path().join("missing-host");
-    let mut event = json!({"hook_event_name":"UserPromptSubmit", "prompt":"Please continue."});
+    let mut event = json!({"hook_event_name":"UserPromptSubmit", "prompt":"please continue"});
     assert_eq!(
         guard_event(&home, &directory, &event).await.unwrap(),
         json!({"continue":true})
@@ -428,6 +428,7 @@ async fn babysitter_installed_plugin_and_native_transcript() {
         home.path(),
         &gent_daemon::config::load(home.path()).unwrap(),
     );
+    config::set_ordinary_babysitter_enabled(home.path(), true).unwrap();
     let directory = home.path().join("claude");
     install::change(
         home.path(),

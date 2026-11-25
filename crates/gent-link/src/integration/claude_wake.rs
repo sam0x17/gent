@@ -335,6 +335,9 @@ async fn run(home: &Path, directory: &Path, input: Input) -> Result<Value> {
             if let Some(reason) = reason
                 && !home.join("babysitter-disabled").try_exists()?
             {
+                // Claude 2.1.325's retained guard cannot identify the sender of a
+                // bare "please continue". Only a goal supplies an admissible action.
+                // See scripts/prove_claude_chat_admission.py for the native probe.
                 let failure =
                     babysit::capture(directory, &input.session_id, &path, started_ms, observed_ms)?
                         .map(|source| babysit::Record {

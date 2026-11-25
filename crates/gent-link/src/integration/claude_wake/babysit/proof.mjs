@@ -270,5 +270,32 @@ await unflushed();
 await human();
 await timers.shift()();
 assert.equal(store.size,0);
+// The native sender cannot bind a bare "please continue" to a retained guard.
+// A paid node with ordinary chat recovery enabled must still leave this lane idle.
+await reload();
+writeFileSync(transcript,'');
+const priorPrompts = prompts.length;
+const priorActions = actions.length;
+const prompt_id = randomUUID();
+await emit('prompt.submit',{text:'please continue',wait:false,origin:{kind:'composer'}});
+await emit('classic.UserPromptSubmit',{session_id:session,prompt_id,prompt:'please continue'});
+row({type:'user',promptId:prompt_id,origin:{kind:'human'},message:{role:'user',content:'please continue'}});
+const ordinaryTurn = randomUUID();
+await emit('turn.start',{turnId:ordinaryTurn,text:'please continue'});
+await failure('rate_limit',{prompt_id});
+await emit('turn.complete',{turnId:ordinaryTurn,reason:'error',isAborted:false});
+while (timers.length) await timers.shift()();
+await reload();
+await tick();
+assert.equal(store.size,0);
+assert.equal(prompts.length,priorPrompts);
+assert.ok(actions.slice(priorActions).includes('babysit_capture'));
+assert.ok(!actions.slice(priorActions).some(action =>
+  action === 'babysit_claim' || action.includes('chat_claim')));
+const humanGuard = await requestBridge({guard_event:{
+  hook_event_name:'UserPromptSubmit',session_id:session,prompt:'please continue'}});
+assert.equal(humanGuard.exitCode,0);
+assert.equal(JSON.parse(humanGuard.stdout).continue,true);
+
 responses.return(); // reading stdin must not keep the synthetic host alive
 process.stdin.unref();
