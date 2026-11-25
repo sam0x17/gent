@@ -91,40 +91,6 @@ async fn idle(host: &mut Host, thread: &str) -> Result<()> {
     Ok(())
 }
 
-async fn blocked_update(observer: &mut Host, thread: &str) -> Result<Value> {
-    while let Some(frame) = observer.socket.next().await {
-        if let Message::Text(text) = frame? {
-            let event: Value = serde_json::from_str(&text)?;
-            let params = &event["params"];
-            if event["method"] == "thread/goal/updated"
-                && params["threadId"] == thread
-                && params["goal"]["status"] == "blocked"
-            {
-                return Ok(params.clone());
-            }
-        }
-    }
-    anyhow::bail!("fixture closed before the native blocked-goal update")
-}
-
-fn rollout(path: &Path) -> Result<Vec<Value>> {
-    std::fs::read_to_string(path)?
-        .lines()
-        .map(|line| Ok(serde_json::from_str(line)?))
-        .collect()
-}
-
-fn trigger<'a>(rows: &'a [Value], turn: &Value) -> &'a Value {
-    let start = rows
-        .iter()
-        .map(|row| &row["payload"])
-        .find(|p| p["type"] == "task_started" && p["turn_id"] == turn["id"])
-        .expect("native turn start");
-    assert_eq!(start["started_at"], turn["startedAt"]);
-    assert_eq!(start["turn_attribution"]["turn_id"], turn["id"]);
-    &start["turn_attribution"]["turn_trigger"]
-}
-
 async fn user_block(host: &mut Host, observer: &mut Host, thread: &str) -> Result<Value> {
     let result = host
         .rpc(
@@ -132,7 +98,7 @@ async fn user_block(host: &mut Host, observer: &mut Host, thread: &str) -> Resul
             json!({"threadId":thread,"status":"blocked","origin":"user"}),
         )
         .await?;
-    let change = blocked_update(observer, thread).await?;
+    let change = next_block(observer, thread).await?;
     assert!(change["turnId"].is_null());
     assert_eq!(result["goal"], change["goal"]);
     Ok(change["goal"].clone())
@@ -247,7 +213,7 @@ async fn trial(node: &Node, socket: &Path, provider: &Provider, decision: Decisi
     provider.finish_initial_goal_turn.notify_one();
     provider.wait_for_calls(3).await;
     let blocked = host.rpc("thread/goal/get", params.clone()).await?["goal"].clone();
-    let blocked_event = blocked_update(&mut observer, thread).await?;
+    let blocked_event = next_block(&mut observer, thread).await?;
     assert_eq!(blocked_event["goal"], blocked);
     if decision == Decision::UserBlockDuringQueue {
         assert_eq!(

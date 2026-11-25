@@ -1,10 +1,52 @@
 use anyhow::Result;
 use clap::Subcommand;
-use gent_protocol::OwnerOp;
+use gent_protocol::{OwnerOp, notifications::Failure, wake::DirectTurnEvidence};
 use serde_json::Value;
 use std::path::Path;
+use uuid::Uuid;
 
 pub(crate) mod codex;
+
+pub(crate) async fn direct_turn_evidence(
+    home: &Path,
+    credential: &str,
+    thread: &str,
+    turn: Uuid,
+) -> Result<Option<DirectTurnEvidence>> {
+    let result = crate::owner(
+        home,
+        OwnerOp::WakeDirectTurnEvidence {
+            agent_credential: credential.into(),
+            thread_id: Uuid::parse_str(thread)?,
+            turn,
+        },
+    )
+    .await?;
+    Ok(serde_json::from_value(result)?)
+}
+
+pub(crate) async fn verified_blocked_claim(
+    home: &Path,
+    credential: &str,
+    thread: &str,
+    goal: String,
+    turn: Uuid,
+    failed_at: i64,
+    reason: Failure,
+) -> Result<Value> {
+    crate::owner(
+        home,
+        OwnerOp::BabysitterVerifiedBlockedClaim {
+            agent_credential: credential.into(),
+            thread_id: Uuid::parse_str(thread)?,
+            goal,
+            turn,
+            failed_at,
+            reason,
+        },
+    )
+    .await
+}
 
 #[derive(Subcommand)]
 pub enum Command {

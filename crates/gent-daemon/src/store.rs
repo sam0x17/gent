@@ -359,7 +359,9 @@ impl Store {
                     | AgentOp::BabysitterSubmitted { .. },
                 ..
             } | Request::Owner {
-                action: OwnerOp::NotificationPut { .. } | OwnerOp::NotificationSent { .. },
+                action: OwnerOp::NotificationPut { .. }
+                    | OwnerOp::NotificationSent { .. }
+                    | OwnerOp::BabysitterVerifiedBlockedClaim { .. },
                 ..
             }
         );
@@ -374,7 +376,8 @@ impl Store {
                     | OwnerOp::WebCheckpoint { .. }
                     | OwnerOp::WebDeliveryDemand { .. }
                     | OwnerOp::NodeRemovals { .. }
-                    | OwnerOp::WakePendingAgents { .. },
+                    | OwnerOp::WakePendingAgents { .. }
+                    | OwnerOp::WakeDirectTurnEvidence { .. },
                 ..
             }
         ) || matches!(&request, Request::HostedStatus { .. }))
@@ -1045,6 +1048,32 @@ impl StoreSession<'_> {
             OwnerOp::WakeList { after_message_id } => self.wake_list(after_message_id.as_deref()),
             OwnerOp::WakeStatus => wake::retention::status(self.db, self.timestamp),
             OwnerOp::WakePendingAgents { after } => self.wake_pending_agents(after.as_deref()),
+            OwnerOp::WakeDirectTurnEvidence {
+                agent_credential,
+                thread_id,
+                turn,
+            } => {
+                let who = self.native_supervisor_agent(&agent_credential, thread_id)?;
+                self.direct_turn_evidence(&who, thread_id, turn)
+            }
+            OwnerOp::BabysitterVerifiedBlockedClaim {
+                agent_credential,
+                thread_id,
+                goal,
+                turn,
+                failed_at,
+                reason,
+            } => {
+                let who = self.native_supervisor_agent(&agent_credential, thread_id)?;
+                self.babysitter_claim(
+                    &who,
+                    &goal,
+                    turn,
+                    failed_at,
+                    reason,
+                    babysitter::Window::VerifiedBlocked,
+                )
+            }
             OwnerOp::WakeClean { dry_run } => {
                 wake::retention::clean(self.db, self.timestamp, dry_run)
             }
@@ -1134,6 +1163,31 @@ impl StoreSession<'_> {
         }
     }
 
+    fn native_supervisor_agent(&self, credential: &str, thread: uuid::Uuid) -> Result<Agent> {
+        ensure!(!thread.is_nil(), "invalid native thread");
+        let node = self.identity.node.id();
+        self.state.authorize_node(
+            node,
+            &self.identity.node.public_key(),
+            self.timestamp as u64,
+        )?;
+        self.registered_agent(node, &hash(credential))
+    }
+
+    fn registered_agent(&self, node: &str, digest: &str) -> Result<Agent> {
+        let who = self.db.query_row(
+            "SELECT id,node_id,name,provider,last_seen,revoked FROM agents WHERE credential_hash=?1",
+            [digest],
+            Self::decode_agent,
+        ).optional()?.context("register this connection first")?;
+        ensure!(!who.revoked, "registration revoked");
+        ensure!(
+            who.node_id == node && self.local_node(node),
+            "credential belongs to another node"
+        );
+        Ok(who)
+    }
+
     fn agent(
         &mut self,
         node: &str,
@@ -1161,12 +1215,7 @@ impl StoreSession<'_> {
                 self.announce(&agent)?;
             }
         }
-        let who=self.db.query_row("SELECT id,node_id,name,provider,last_seen,revoked FROM agents WHERE credential_hash=?1",[&digest],Self::decode_agent).optional()?.context("register this connection first")?;
-        ensure!(!who.revoked, "registration revoked");
-        ensure!(
-            who.node_id == node && self.local_node(node),
-            "credential belongs to another node"
-        );
+        let who = self.registered_agent(node, &digest)?;
         if !matches!(
             &action,
             AgentOp::BabysitterClaim { .. }
@@ -1202,7 +1251,14 @@ impl StoreSession<'_> {
                 turn,
                 failed_at,
                 reason,
-            } => self.babysitter_claim(&who, &goal, turn, failed_at, reason),
+            } => self.babysitter_claim(
+                &who,
+                &goal,
+                turn,
+                failed_at,
+                reason,
+                babysitter::Window::Routine,
+            ),
             AgentOp::BabysitterCheck { attempt } => {
                 Ok(json!({"eligible":self.babysitter_check(&who,attempt)?}))
             }

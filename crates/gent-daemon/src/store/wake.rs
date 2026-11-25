@@ -45,6 +45,10 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
             INSERT INTO metadata(key,value) VALUES('wake_journal_version','1');",
         )?;
     }
+    tx.execute(
+        "CREATE INDEX IF NOT EXISTS wake_dispatch_agent ON wake_dispatches(agent)",
+        [],
+    )?;
     tx.commit()?;
     Ok(())
 }
