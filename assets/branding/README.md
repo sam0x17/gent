@@ -15,7 +15,7 @@ hosting or metadata.
 
 ## Rights
 
-Copyright © 2026 PrivacyTools LLC. The Gent logos and their artwork are reserved. See the [branding and third-party notices](../../NOTICE.md) for use with the client, in screenshots and in independent products. The build script is BSD-3-Clause software.
+Copyright © 2026 DuroSoft LLC. The Gent logos and their artwork are reserved. See the [branding and third-party notices](../../NOTICE.md) for use with the client, in screenshots and in independent products. The build script is BSD-3-Clause software.
 
 ## Colors and padding
 

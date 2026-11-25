@@ -121,6 +121,6 @@ A Steam-style game overlay is also planned as an optional desktop app feature fo
 
 ## License
 
-Copyright © 2026 PrivacyTools LLC. Gent's client software is available under the [BSD 3-Clause License](LICENSE), including for commercial use and redistribution. Keep the copyright, license conditions and disclaimer with distributions as the license requires.
+Copyright © 2026 DuroSoft LLC. Gent's client software is available under the [BSD 3-Clause License](LICENSE), including for commercial use and redistribution. Keep the copyright, license conditions and disclaimer with distributions as the license requires.
 
-Third-party components retain their own licenses. PrivacyTools LLC reserves the Gent name, logos and artwork. See the [notices](NOTICE.md) for third-party attribution and permitted use of the branding. The [hosted-service terms](https://gent.link/terms) apply when you use Gent's hosted services.
+Third-party components retain their own licenses. DuroSoft LLC reserves the Gent name, logos and artwork. See the [notices](NOTICE.md) for third-party attribution and permitted use of the branding. The [hosted-service terms](https://gent.link/terms) apply when you use Gent's hosted services.
