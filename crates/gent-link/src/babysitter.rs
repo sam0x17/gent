@@ -108,7 +108,8 @@ fn validation_failure(code: Option<&str>, message: &str, param: Option<&str>) ->
 
 fn classify_details(text: &str) -> Option<Failure> {
     match () {
-        _ if text.contains("at capacity")
+        _ if text.trim() == "incomplete response returned, reason: max_output_tokens"
+            || text.contains("at capacity")
             || text.contains("model is overloaded")
             || text.contains("model is currently overloaded") =>
         {
@@ -153,6 +154,21 @@ fn classify_details(text: &str) -> Option<Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn output_capacity_requires_the_terminal_provider_reason() {
+        let message = "Incomplete response returned, reason: max_output_tokens";
+        assert_eq!(classify("other", message), Some(Failure::Capacity));
+        assert_eq!(classify("contextWindowExceeded", message), None);
+        for other in [
+            "Incomplete response returned, reason: content_filter",
+            "Incomplete response returned, reason: max_output_tokens_other",
+            "Provider rejected max_output_tokens",
+            "Tool output: Incomplete response returned, reason: max_output_tokens",
+        ] {
+            assert_eq!(classify("other", other), None);
+        }
+    }
+
     #[test]
     fn provider_validation_accepts_any_parameter_location() {
         for (code, message, param, expected) in [
