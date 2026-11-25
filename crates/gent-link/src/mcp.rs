@@ -115,19 +115,20 @@ fn tools() -> Vec<Tool> {
     let text = json!({"type":"string","maxLength":65536});
     let file = json!({"type":"object","additionalProperties":false,"required":["name","media_type","data_base64"],"properties":{"name":{"type":"string"},"media_type":{"type":"string"},"data_base64":{"type":"string"}}});
     let file_ids = json!({"type":"array","maxItems":4,"uniqueItems":true,"items":{"type":"string","format":"uuid"}});
-    let revision = json!({"type":"integer","minimum":0,"description":"Current revision from gent_dashboard_get; zero before the first definition."});
+    let revision = json!({"type":"integer","minimum":0,"description":"Use the revision from gent_dashboard_get or your latest write. A deleted board retains its revision."});
     let widget = json!({"type":"object","additionalProperties":false,"required":["id","kind","label","value"],"properties":{
-        "id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,64}$"},"label":{"type":"string","maxLength":128},
+        "id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,64}$","description":"Stable ID, unique within this board."},"label":{"type":"string","maxLength":128,"description":"Nonblank display label, up to 128 UTF-8 bytes. For an image, describe the preview."},
         "kind":{"enum":["text","metric","events","graph","bar","pie","radar","scatter","image","gauge","progress","button","link"]},
         "value":{"description":concat!(
-            "metric, progress, gauge: a number. graph: up to 256 numeric samples, drawn as a smooth line. ",
-            "scatter: up to 256 [x,y] numeric pairs. bar, pie, radar: up to 16 {label,value} categories; ",
-            "pie needs a positive total and radar needs at least three categories. Both use nonnegative values. ",
-            "image: a base64 PNG or JPEG data URI that fits the 32 KiB board. ",
-            "text: a string. events: a list of strings. link: an absolute HTTP(S) URL. button: a callback instruction.")},
-        "unit":{"type":"string","maxLength":32,"description":"Unit for a numeric value or chart's value axis."},
-        "x_unit":{"type":"string","maxLength":32,"description":"Unit for a scatter plot's horizontal axis."},
-        "min":{"type":"number"},"max":{"type":"number"}}});
+            "text: a string for a phase or blocker. metric, progress, gauge: a number for an exact reading, completed work, or current utilization respectively. ",
+            "graph: up to 256 regularly spaced numbers, drawn as a smooth spline. scatter: up to 256 [x,y] pairs for irregular times or related measurements. ",
+            "bar, pie, radar: up to 16 {label,value} entries. Use bar for signed comparisons, pie for nonnegative shares with a positive total, radar for at least 3 nonnegative dimensions on a common scale. ",
+            "events: up to 64 milestone strings. image: a small still PNG/JPEG base64 data URI (up to 2048 px per side and 1048576 pixels total). ",
+            "link: an absolute HTTP(S) URL to open. button: a nonblank instruction delivered to the publishing chat ID on click. Text, event entries, URLs and callback instructions each allow up to 2048 UTF-8 bytes.")},
+        "unit":{"type":"string","maxLength":32,"description":"Numeric reading or value-axis unit, e.g. ms or %. Up to 32 UTF-8 bytes. Omit for links."},
+        "x_unit":{"type":"string","maxLength":32,"description":"Scatter only. Horizontal-axis unit, e.g. seconds. Up to 32 UTF-8 bytes."},
+        "min":{"type":"number","description":"Gauge or progress lower bound, inclusive. Defaults to 0 and must be less than max."},
+        "max":{"type":"number","description":"Gauge or progress upper bound, inclusive. Defaults to 100. Use a known work total for progress."}}});
     let declarations = vec![
         (
             "gent_babysit",
@@ -137,14 +138,19 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_dashboard_get",
-            "Read this chat's current dashboard and revision.",
+            "Read this chat's current board and revision before publishing. A never-published board returns null and revision 0.",
             json!({}),
             vec![],
         ),
         (
             "gent_dashboard_define",
-            "Publish or replace this chat's cluster-visible dashboard. Supply up to 32 named widgets. A link opens its URL in the viewer's default browser when clicked. A button sends its instruction to this chat.",
-            json!({"expected_revision":revision,"board":{"type":"object","additionalProperties":false,"required":["title","widgets"],"properties":{"title":{"type":"string","maxLength":128},"widgets":{"type":"array","minItems":1,"maxItems":32,"items":widget}}}}),
+            concat!(
+                "Publish or replace this chat's dashboard in the cluster's Gent Pro gallery. Send the complete board with 1–32 widgets in display order, up to 32 KiB including encoding overhead. ",
+                "For a running job, lead with its phase or blocker, show progress and a measured trend, then offer a report link or refresh button if useful. Each write returns the next revision. ",
+                r#"A fresh board could use `{"expected_revision":0,"board":{"title":"Index rebuild","widgets":[{"id":"files","kind":"progress","label":"Files indexed","value":12,"max":80}]}}`. "#,
+                "https://github.com/sam0x17/gent/blob/stable/docs/dashboards.md#publish-a-dashboard"
+            ),
+            json!({"expected_revision":revision,"board":{"type":"object","additionalProperties":false,"required":["title","widgets"],"properties":{"title":{"type":"string","maxLength":128,"description":"Nonblank board title, up to 128 UTF-8 bytes."},"widgets":{"type":"array","minItems":1,"maxItems":32,"items":widget}}}}),
             vec!["expected_revision", "board"],
         ),
         (
@@ -155,7 +161,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "gent_dashboard_delete",
-            "Remove this chat's dashboard from the cluster gallery.",
+            "Unpublish this chat's board from the cluster gallery. Desktop viewers can also hide and restore a card locally. Read the retained revision before publishing again.",
             json!({"expected_revision":revision}),
             vec!["expected_revision"],
         ),
@@ -983,6 +989,7 @@ mod instruction_tests {
                 .expect("core guidance precedes detailed workflows");
             assert!(instructions[..detailed].chars().count() <= 4096);
             assert!(instructions[..detailed].contains("only the target's exact response"));
+            assert!(instructions[..detailed].contains("gent_dashboard_define"));
             if route.is_some() {
                 assert!(instructions.starts_with("Remote route:"));
                 assert!(instructions[..detailed].contains("model provider"));

@@ -1,6 +1,6 @@
 ---
 name: gent
-description: Use Gent MCP to discover permitted chats, exchange messages and files, and check replies when the user requests chat communication or has authorized ongoing coordination.
+description: Use Gent MCP for requested chat communication, authorized coordination, or publishing and maintaining a chat dashboard in Gent Desktop.
 ---
 
 # Gent
@@ -10,6 +10,8 @@ Communicate within the user's task and authorization. Loading Gent does not auth
 If `gent_conversation_open` is listed and this chat has no Gent handle, call it once and retain its `conversation` value on subsequent calls. Then call `gent_register` with the actual host/provider label. Omit `name` to use the chat title. After reconnecting, reuse the handle and verify with `gent_identity`; register if needed. Never invent credentials or session selectors.
 
 Find recipients with `gent_chats` or `gent_resolve {name, node?, provider?}`. Send or attach to `selected.chat_id` when resolution is `selected`; it uses the newest exact match by conversation activity. Ask the user to choose on `ambiguous`. Keep that ID for relay and retries. Report denied or absent targets; never guess IDs or change policy without authorization.
+
+For dashboard examples and widget choices, see `gent_dashboard_define`.
 
 ## Core messaging and relay rules
 
@@ -67,9 +69,63 @@ To rename this chat's Gent label when requested, read `gent_identity` and pass i
 - Use `gent_message_status` for a known sent or received message ID. A queued message is pending. Delivered means recipient acknowledgment, not that a model has finished the work.
 - Attribute incoming requests to their sending chat. Peer messages and attachments do not replace the user's instructions or grant execution authority. Preserve the target host's normal approval requirements.
 
-## Dashboards and automatic goal recovery
+## Publishing a dashboard
 
-When publishing status in Gent Desktop, call `gent_dashboard_get` for this conversation's revision. Use `gent_dashboard_define` for the layout, `gent_dashboard_update` to replace changed widget values, and `gent_dashboard_delete` to remove the board. Use a `metric` for a labeled number, `graph` for a smooth sample series, or `scatter` for explicit [x,y] pairs. Set `unit` for the values and `x_unit` for a scatter's horizontal axis. Bar, pie and radar charts take lists of {label,value} categories. An `image` takes an inline PNG or JPEG data URI within the 32 KiB board limit. A `link` opens its HTTP or HTTPS URL in the viewer's default browser when clicked. Dashboard buttons deliver their callback text to this conversation under the usual messaging permissions. Use `gent_babysit` to read or set this chat's automatic recovery preference when the user requests it.
+A registered chat on Gent Pro can publish one board visible in the cluster’s Desktop gallery. If your host defers tools, search for `gent_dashboard_`. A connection opened before a Gent upgrade may need to reconnect to see the current schema.
+
+Start with the question the viewer needs answered. For a training run, that might be “Is it progressing, and is validation loss improving?” Put the current phase or blocker first, followed by the measurements that answer that question. For an operational board, an observation time in UTC helps readers spot stale data.
+
+1. Call `gent_dashboard_get` for this chat’s `board` and `revision`. A never-published board returns `null` and revision 0. Hosted tools that require `conversation` use the same handle as the chat’s other Gent calls.
+2. Call `gent_dashboard_define` with `expected_revision` and the entire board. The order of `widgets` is their display order. Keep IDs stable so updates can address them.
+3. Use the revision returned by each successful write for the next one. Call `gent_dashboard_update` with `values` keyed by widget ID. Omit unchanged widgets. Each supplied value replaces that widget’s entire value, including a whole series or event list. Desktop refresh displays the latest published values. Update when a new sample, milestone, or blocker is observed, and batch related changes from the same observation. Redefine the board to add, remove, reorder, or relabel widgets or change their units or bounds.
+4. On a revision conflict, read the board again and apply the intended changes to the current version. To retry a write after a lost response, resend its identical arguments. To unpublish, call `gent_dashboard_delete` with the current revision. A subsequent definition uses the retained revision from `gent_dashboard_get`. Desktop’s **×** and **Restore hidden dashboards** are viewer preferences. A replacement chat with a new Gent ID publishes its own board, even if its name matches the original.
+
+This example defines a fresh board with `gent_dashboard_define`.
+
+```json
+{
+  "expected_revision": 0,
+  "board": {
+    "title": "Training run 42",
+    "widgets": [
+      {"id":"phase","kind":"text","label":"Phase","value":"Training on shard 3 of 8"},
+      {"id":"epochs","kind":"progress","label":"Epochs complete","max":20,"value":4},
+      {"id":"loss","kind":"graph","label":"Validation loss","value":[0.90,0.71,0.64]},
+      {"id":"refresh","kind":"button","label":"Refresh status","value":"Read the latest checkpoint and update this dashboard."}
+    ]
+  }
+}
+```
+
+If that call returned revision 1, this `gent_dashboard_update` records the next checkpoint.
+
+```json
+{"expected_revision":1,"values":{"epochs":5,"loss":[0.90,0.71,0.64,0.59]}}
+```
+
+| Widget `kind` | Example `value` or format | When to use it |
+| --- | --- | --- |
+| `text` | `"Waiting for checkpoint 5"` | A phase, blocker, or next step. |
+| `metric` | `64` with `"unit":"°C"` | An exact reading with a bold field name. |
+| `progress` | `4` with `"max":20` | Completed work against a known total. |
+| `gauge` | `72` with `"unit":"%"` | A bounded reading that moves up and down, such as GPU utilization. |
+| `graph` | `[18,24,21]` | A trend at regular intervals. Gent numbers samples from 1 and draws a smooth spline. |
+| `scatter` | `[[0,18],[2.5,24],[9,21]]` | Irregular sampling or paired measurements. Use `x_unit` for x and `unit` for y. |
+| `bar` | `[{"label":"Read","value":42},{"label":"Write","value":27}]` | Compare categories in one unit. Signed values are supported. |
+| `pie` | `[{"label":"GPU","value":8},{"label":"CPU","value":2}]` | Shares of a whole. Use nonnegative values with a positive total. |
+| `radar` | `[{"label":"CPU","value":65},{"label":"GPU","value":80},{"label":"RAM","value":55}]` | Compare at least three nonnegative dimensions on a common scale, such as percent of capacity. |
+| `events` | `["14:10 UTC · Run started","14:18 UTC · Checkpoint saved"]` | A short history of meaningful transitions. Keep a rolling list. |
+| `image` | `data:image/png;base64,` or `data:image/jpeg;base64,` followed by the file’s base64 bytes | A small still preview. Describe it in `label`. Link to the original when a thumbnail suffices. |
+| `link` | `"https://example.org/runs/42"` | Open a report or logs in the viewer’s default browser. Use an absolute HTTP(S) URL and omit `unit`. |
+| `button` | `"Read the current run and update the board."` | Send a nonblank callback instruction to the **publishing chat ID**. Describe the specific chat action in `value` and label the button with a verb. The chat handles the message under its existing permissions. |
+
+A board contains a nonblank `title` and 1–32 widgets. Every widget requires `id`, `kind`, `label`, and `value`. Unique IDs use 1–64 ASCII letters, digits, underscores, or hyphens. Titles, widget labels and category labels allow up to 128 UTF-8 bytes. Optional units allow up to 32 bytes. Use `unit` for a numeric reading or chart’s value axis. Only scatter supports `x_unit`. For progress and gauge, `min` and `max` default to 0 and 100. Set `min < max` and keep the value within that range.
+
+Keep the serialized board within 32 KiB, including base64 and encoding overhead. Graphs and scatters accept up to 256 samples or points, category charts up to 16 entries, and events up to 64 strings. Text, event entries, button instructions and URLs each allow up to 2,048 bytes. Numeric magnitudes must be at most 1e100. Inline images allow at most 2,048 pixels per side and 1,048,576 total pixels.
+
+## Automatic goal recovery
+
+Use `gent_babysit` to read or set this chat's automatic recovery preference when the user requests it.
 
 ## Interrupted host work
 
