@@ -19,6 +19,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     var prepareNotifications: (() -> Void)?
     var deliverNotification: (([String: Any]) -> Void)?
     let openAtLaunch: Bool
+    let setupAtLaunch: Bool
     var statusItem: NSStatusItem!
     let trayState = NSMenuItem(title: "Checking daemon…", action: nil, keyEquivalent: "")
     var lastRead = Date.distantPast
@@ -41,11 +42,12 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     var pending = false
     private var refreshAfterPending = false
 
-    init(iconPath: String, openAtLaunch: Bool) {
+    init(iconPath: String, openAtLaunch: Bool, setupAtLaunch: Bool = false) {
         self.icon = NSImage(contentsOfFile: iconPath)
         self.trayIcon = NSImage(contentsOf: URL(fileURLWithPath: iconPath)
             .deletingLastPathComponent().appendingPathComponent("inkling-tray-128.png"))
         self.openAtLaunch = openAtLaunch
+        self.setupAtLaunch = setupAtLaunch
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -81,7 +83,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         }
         NSApp.mainMenu = main
         makeWindow()
-        if openAtLaunch { show() } else { request("refresh") }
+        if openAtLaunch { present(destination: setupAtLaunch ? "Status" : nil) } else { request("refresh") }
         prepareNotifications?()
 
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
@@ -103,10 +105,18 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         if window.isVisible || Date().timeIntervalSince(lastRead) >= 60 { request("refresh") }
     }
 
-    @objc func show() {
+    @objc func show() { present(destination: nil) }
+
+    func present(destination: String?) {
+        let target = destination ?? (window.isVisible && !NSApp.isHidden ? nil : "Dashboard")
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        loadTab(tabs.selectedTabViewItem)
+        if let target = target, tabs.selectedTabViewItem?.label != target {
+            tabs.selectTabViewItem(withIdentifier: target)
+        } else {
+            loadTab(tabs.selectedTabViewItem)
+        }
+        request("refresh")
     }
 
     func loadTab(_ item: NSTabViewItem?) {
@@ -126,8 +136,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     }
 
     @objc func showSettings() {
-        tabs.selectTabViewItem(withIdentifier: "Settings")
-        show()
+        present(destination: "Settings")
     }
 
     @objc func quit() { NSApp.terminate(nil) }
@@ -158,7 +167,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         window.delegate = self
         window.center()
         let content = NSScrollView()
-        for (title, child) in [("Status", content), ("Dashboard", dashboard.view), ("Chats", chats.view), ("Settings", settings.view), ("Permissions", permissions.view), ("About", about.view)] {
+        for (title, child) in [("Dashboard", dashboard.view), ("Status", content), ("Chats", chats.view), ("Settings", settings.view), ("Permissions", permissions.view), ("About", about.view)] {
             let tab = NSTabViewItem(identifier: title)
             tab.label = title
             tab.view = child

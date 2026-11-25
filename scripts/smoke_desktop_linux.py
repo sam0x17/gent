@@ -17,7 +17,7 @@ import uuid
 from gi.repository import Gio, GLib
 from desktop_fixture_browser import install_fixture_browser
 from desktop_tabs_linux import (
-    exercise_enrolled_without_daemon, exercise_ordinary_recovery, exercise_setup,
+    assert_selected_tab, exercise_enrolled_without_daemon, exercise_ordinary_recovery, exercise_setup,
     exercise_tabs, exercise_unconfigured_recovery, tab, wait_for,
 )
 from mcp_client import Client
@@ -228,11 +228,13 @@ def main():
         assert 'name = "desktop-published"' in (home / "config.toml").read_text()
         cli("desktop")
         assert visible() == first, "second launch duplicated the window"
+        assert_selected_tab("Status")
         subprocess.run(["xdotool","windowactivate","--sync",first,"key","alt+F4"], check=True)
         wait_for(lambda: not visible(), "window hidden")
         # Launch the generated .desktop file with the freedesktop Exec parser.
         subprocess.run(["gio", "launch", str(app)], check=True, timeout=8)
         assert wait_for(visible, "launcher reopened window") == first
+        assert_selected_tab("Dashboard")
         click("Quit Gent Desktop")
         wait_for(lambda: not visible(), "tray quit")
         assert daemon.poll() is None and json.loads(cli("daemon", "status", "--json").stdout)["daemon"]["running"]
