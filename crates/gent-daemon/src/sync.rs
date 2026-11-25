@@ -83,7 +83,34 @@ struct Stored {
 
 impl Relay {
     pub(crate) fn open(settings: &config::RelayConfig, home: &std::path::Path) -> Result<Self> {
-        let origin = settings.validate()?;
+        let route = Self::backend_route(settings, home)?;
+        Self::open_at(settings, home, route.destination()?)
+    }
+
+    fn backend_route(
+        settings: &config::RelayConfig,
+        home: &std::path::Path,
+    ) -> Result<crate::backend::TransportRoute> {
+        let pin = settings.validate()?;
+        let cfg = if crate::backend::RELAY.contains(&pin) && config::path(home).try_exists()? {
+            Some(config::load_for_runtime(home)?)
+        } else {
+            None
+        };
+        crate::backend::RELAY.transport(
+            home,
+            cfg.as_ref()
+                .and_then(|cfg| cfg.service.as_ref())
+                .map(|s| s.origin.as_str()),
+            pin,
+        )
+    }
+
+    fn open_at(
+        settings: &config::RelayConfig,
+        home: &std::path::Path,
+        origin: Url,
+    ) -> Result<Self> {
         let credential = zeroize::Zeroizing::new(config::read_relay_credential(
             &home.join(&settings.credential_file),
         )?);
@@ -102,18 +129,27 @@ impl Relay {
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(15))
             .build()?;
+        Ok(Self::connected(client, origin, value, cluster))
+    }
+
+    fn connected(
+        client: Client,
+        origin: Url,
+        authorization: header::HeaderValue,
+        cluster: Option<String>,
+    ) -> Self {
         let exchange = tokio::runtime::Handle::try_current()
             .ok()
             .map(|_| exchange::Exchange::start(client.clone(), origin.clone()));
-        Ok(Self {
+        Self {
             client,
             origin,
-            authorization: value,
+            authorization,
             batches: Arc::default(),
             states: Arc::default(),
             exchange,
             cluster,
-        })
+        }
     }
     async fn state(&self, group: &[u8]) -> Result<MailboxState> {
         if self.states.enabled() {
@@ -365,26 +401,36 @@ pub fn start(store: SharedStore) -> Result<Option<JoinHandle<()>>> {
     let Some((settings, home)) = settings else {
         return Ok(None);
     };
-    let relay = Relay::open(&settings, &home).context("encrypted relay setup failed")?;
-    let files = files::Scheduler::new(crate::file_transport::FileRelay::open(&settings, &home)?);
-    Ok(Some(tokio::spawn(run(store, relay, wakeup, files, health))))
+    let route = Relay::backend_route(&settings, &home)?;
+    let mut relay = Relay::open_at(&settings, &home, route.destination()?)
+        .context("encrypted relay setup failed")?;
+    Ok(Some(tokio::spawn(async move {
+        let direct = match direct::Direct::start(store.clone(), health.clone()).await {
+            Ok(direct) => direct,
+            Err(_) => {
+                eprintln!("Gent direct transport unavailable; encrypted relay remains active");
+                None
+            }
+        };
+        loop {
+            let next = tokio::select! {
+                () = run(store.clone(), relay.clone(), wakeup.clone(), direct.clone(), health.clone()) => return,
+                next = route.changed(&relay.origin) => next,
+            };
+            relay = Relay::connected(relay.client, next, relay.authorization, relay.cluster);
+        }
+    })))
 }
 
 async fn run(
     store: SharedStore,
     relay: Relay,
     wakeup: Arc<Notify>,
-    files: files::Scheduler,
+    direct: Option<Arc<direct::Direct>>,
     health: Arc<health::Health>,
 ) {
     health.set_exchange(relay.exchange.clone());
-    let direct = match direct::Direct::start(store.clone(), health.clone()).await {
-        Ok(direct) => direct,
-        Err(_) => {
-            eprintln!("Gent direct transport unavailable; encrypted relay remains active");
-            None
-        }
-    };
+    let files = files::Scheduler::new(crate::file_transport::FileRelay::from_relay(relay.clone()));
     let hints = Arc::new(schedule::Hints::default());
     let push = notifications::Listener::start(
         relay.clone(),

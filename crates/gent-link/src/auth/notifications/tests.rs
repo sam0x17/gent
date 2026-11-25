@@ -73,7 +73,7 @@ async fn device_cursor_survives_reconnect_and_skips_future_event_kinds() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     collect(&home, &login, &icon).await.unwrap();
     collect(&home, &login, &icon).await.unwrap();
-    let cursor = cursor_path(&home, &login).unwrap();
+    let (cursor, _) = cursor_paths(&home, &login).unwrap();
     assert_eq!(fs::read_to_string(&cursor).unwrap(), "4");
     let banners = root.join("banners");
     let first = fs::read_to_string(&banners).unwrap();
@@ -105,4 +105,41 @@ async fn device_cursor_survives_reconnect_and_skips_future_event_kinds() {
     assert!(!cursor.exists());
     assert_eq!(fs::read_to_string(banners).unwrap(), first);
     server.abort();
+}
+
+#[test]
+fn both_hosted_logins_resume_from_the_furthest_existing_cursor() -> Result<()> {
+    let scratch = tempfile::tempdir()?;
+    let home = scratch.path().join("node");
+    gent_daemon::config::initialize(&home, "notifications")?;
+    let mut login = Saved {
+        version: 1,
+        phase: Phase::Active,
+        service: ACCOUNT.beta.into(),
+        token: candidate()?,
+        session: Some(ServiceSession {
+            account_id: uuid::Uuid::new_v4().to_string(),
+            github_subject: "1".into(),
+            github_login: "fixture".into(),
+            created_at: now()?,
+            expires_at: now()? + 7200,
+        }),
+    };
+    let (stable, legacy) = cursor_paths(&home, &login)?;
+    let beta = legacy.context("missing beta cursor")?;
+    Snapshot::read(&beta)?.write("23")?;
+    Snapshot::read(&stable)?.write("12")?;
+    login.service = DEFAULT_SERVICE.into();
+    assert_eq!(
+        cursor_paths(&home, &login)?,
+        (stable.clone(), Some(beta.clone()))
+    );
+    assert_eq!(cursor_position(&stable, Some(&beta))?, 23);
+    Snapshot::read(&stable)?.write("29")?;
+    assert_eq!(cursor_position(&stable, Some(&beta))?, 29);
+    login.service = STAGING_SERVICE.into();
+    let (staging, legacy) = cursor_paths(&home, &login)?;
+    assert!(legacy.is_none());
+    assert_eq!(cursor_position(&staging, None)?, 0);
+    Ok(())
 }

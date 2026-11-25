@@ -22,7 +22,8 @@ pub(super) struct Endpoint {
     pub origin: String,
     pub host: String,
     pub base: String,
-    pub socket: String,
+    route: gent_daemon::backend::TransportRoute,
+    connect_path: String,
 }
 
 fn endpoint(home: &Path, options: &Run) -> Result<Endpoint> {
@@ -53,16 +54,16 @@ fn endpoint(home: &Path, options: &Run) -> Result<Endpoint> {
     let cfg = node_home::inspect(home)?;
     let prefix =
         protocol::node_base(&cfg.cluster.id, &cfg.node.id).context("invalid node identity")?;
-    let base = format!("{raw}{prefix}");
-    let mut socket = url::Url::parse(&format!("{base}/connect"))?;
-    socket
-        .set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
-        .map_err(|_| anyhow::anyhow!("invalid hosted scheme"))?;
+    let route = crate::web::bridge_route(home, &cfg, url)?;
+    let public = route.identity();
+    let origin = public.origin().ascii_serialization();
+    let base = format!("{origin}{prefix}");
     Ok(Endpoint {
-        origin: raw.into(),
-        host: url[url::Position::BeforeHost..url::Position::AfterPort].into(),
+        origin,
+        host: public[url::Position::BeforeHost..url::Position::AfterPort].into(),
         base,
-        socket: socket.into(),
+        route,
+        connect_path: format!("{prefix}/connect"),
     })
 }
 
@@ -111,6 +112,7 @@ async fn app(
 
 pub(super) async fn validate(home: &Path, options: &Run) -> Result<()> {
     let endpoint = endpoint(home, options)?;
+    endpoint.route.destination()?;
     credential(home)?;
     let _app = app(home, options, &endpoint, CancellationToken::new(), None).await?;
     Ok(())
@@ -230,4 +232,84 @@ pub(super) async fn run_portable(
     };
     stop.cancel();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gent_daemon::{
+        backend::{ACCOUNT, MCP, RELAY},
+        store::Store,
+    };
+    use gent_protocol::{ConfigurationEdit, OwnerOp, ReleaseChannel, Request, Response};
+
+    #[test]
+    fn portable_web_uses_carrier_channel_and_retains_its_public_issuer() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().join("parent");
+        config::initialize(&parent, "gateway")?;
+        let mut store = Store::open(&parent)?;
+        let request = Request::Owner {
+            credential: config::read_private(&parent.join("owner.key"))?,
+            action: OwnerOp::Configure {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                edit: ConfigurationEdit::SetReleaseChannel {
+                    channel: ReleaseChannel::Beta,
+                },
+            },
+        };
+        assert!(matches!(store.handle(request), Response::Ok(_)));
+        drop(store);
+
+        let mut host = config::load(&parent)?;
+        host.cluster.local_only = false;
+        host.service = Some(config::ServiceConfig {
+            origin: ACCOUNT.stable.into(),
+            account_id: uuid::Uuid::new_v4().to_string(),
+        });
+        host.relay = Some(config::RelayConfig {
+            endpoint: RELAY.stable.into(),
+            credential_file: parent.join("relay.key"),
+        });
+        config::save(&parent, &host)?;
+        let home = root.path().join("child");
+        config::private_dir(&home)?;
+        let mut child = host.clone();
+        child.service = None;
+        child.node.id = uuid::Uuid::new_v4().to_string();
+        child.set_hosted_parent(config::HostedParent {
+            home: parent.clone(),
+            node_id: host.node.id.clone(),
+        })?;
+        config::save(&home, &child)?;
+
+        let mut options = Run {
+            listen: "127.0.0.1:8787".parse()?,
+            hosted: Some(MCP.beta.into()),
+            origin: None,
+            tls_cert: None,
+            tls_key: None,
+            client_metadata: vec![],
+            file_origin: vec![],
+            file_downloads: vec![],
+        };
+        let bridge = endpoint(&home, &options)?;
+        let prefix = protocol::node_base(&host.cluster.id, &child.node.id).unwrap();
+        assert_eq!(bridge.origin, MCP.stable);
+        assert_eq!(bridge.host, "mcp.gent.link");
+        assert_eq!(bridge.base, format!("{}{prefix}", MCP.stable));
+        assert_eq!(
+            bridge.route.destination()?.origin().ascii_serialization(),
+            MCP.beta
+        );
+        assert_eq!(bridge.connect_path, format!("{prefix}/connect"));
+        options.hosted = Some("https://bridge.example".into());
+        let custom = endpoint(&home, &options)?;
+        assert_eq!(custom.host, "bridge.example");
+        assert_eq!(
+            custom.route.destination()?.host_str(),
+            Some("bridge.example")
+        );
+        Ok(())
+    }
 }

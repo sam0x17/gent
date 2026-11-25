@@ -31,7 +31,15 @@ pub(super) async fn run(
     shutdown: tokio_util::sync::CancellationToken,
     session: Option<Arc<crate::web::failover::Session>>,
 ) -> Result<()> {
-    let mut request = endpoint.socket.clone().into_client_request()?;
+    let selected = endpoint.route.destination()?;
+    let mut url = selected.join(&endpoint.connect_path)?;
+    url.set_scheme(if selected.scheme() == "https" {
+        "wss"
+    } else {
+        "ws"
+    })
+    .map_err(|_| anyhow::anyhow!("invalid hosted scheme"))?;
+    let mut request = url.as_str().into_client_request()?;
     request
         .headers_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
@@ -75,7 +83,17 @@ pub(super) async fn run(
         "unsupported hosted MCP protocol"
     );
     connected.store(true, Ordering::Release);
-    serve(socket, &endpoint.host, app, shutdown, session, passive).await
+    let stop = shutdown.child_token();
+    let serving = serve(socket, &endpoint.host, app, stop.clone(), session, passive);
+    tokio::pin!(serving);
+    tokio::select! {
+        result = &mut serving => result,
+        _ = endpoint.route.changed(&selected) => {
+            // Finish requests already accepted by the old socket before reconnecting.
+            stop.cancel();
+            serving.await
+        }
+    }
 }
 
 async fn serve(

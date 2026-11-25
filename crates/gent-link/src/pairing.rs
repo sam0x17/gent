@@ -249,7 +249,7 @@ impl Peer for Remote {
         }
         let service = self.service.as_ref().expect("login loaded");
         ensure!(
-            service.origin()? == crate::auth::origin(&relay.account.origin)?
+            service.origin()? == crate::auth::account_pin(&relay.account.origin)?
                 && service.session.account_id == relay.account.account_id,
             "sign into the owner's Gent service and account before joining"
         );

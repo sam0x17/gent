@@ -121,8 +121,13 @@ async fn wait(mut socket: Socket, monitor: impl Future<Output = ()>) -> Result<S
 }
 
 pub(super) async fn invited(client: &Client) -> Result<Socket> {
-    let socket = connect(&client.url, &client.credential()?).await?;
-    wait(socket, monitor_demand(client)).await
+    let origin = client.route.destination()?;
+    let base = origin.join(&client.prefix)?;
+    let socket = connect(base.as_str(), &client.credential()?).await?;
+    tokio::select! {
+        result = wait(socket, monitor_demand(client)) => result,
+        _ = client.route.changed(&origin) => anyhow::bail!("web standby backend changed"),
+    }
 }
 
 #[cfg(test)]

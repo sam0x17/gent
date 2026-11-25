@@ -195,7 +195,7 @@ pub async fn create(home: &Path, args: InviteArgs) -> Result<Value> {
         .as_ref()
         .context("run gent cluster connect before issuing invitations")?;
     ensure!(
-        service.origin()? == auth::origin(&account.origin)?
+        service.origin()? == auth::account_pin(&account.origin)?
             && service.session.account_id == account.account_id,
         "sign into this node's Gent service and account"
     );
@@ -330,7 +330,7 @@ pub async fn execute(home: &Path, command: Command) -> Result<Value> {
                 let account = cfg.service.context("missing service binding")?;
                 let service = auth::Service::open(home).await?;
                 ensure!(
-                    service.origin()? == auth::origin(&account.origin)?
+                    service.origin()? == auth::account_pin(&account.origin)?
                         && service.session.account_id == account.account_id,
                     "sign into this node's Gent service and account"
                 );

@@ -231,7 +231,7 @@ pub async fn connect(home: &Path, name: Option<&str>) -> Result<Value> {
     let mut setup = match read(&home)? {
         Some(setup) => {
             ensure!(
-                auth::origin(&setup.service)? == service.origin()?
+                auth::account_pin(&setup.service)? == service.origin()?
                     && setup.account_id == service.session.account_id,
                 "this node is pinned to another service or account; sign into its original account"
             );
@@ -434,7 +434,7 @@ pub(crate) async fn provision_joined(
     };
     ensure!(
         setup.account_id == service.session.account_id
-            && auth::origin(&setup.service)? == service.origin()?,
+            && auth::account_pin(&setup.service)? == service.origin()?,
         "joined account changed"
     );
     let settings = RelayConfig {

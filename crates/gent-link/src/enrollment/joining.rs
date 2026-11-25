@@ -179,7 +179,7 @@ async fn join_inner(home: &Path, mut args: crate::pairing::JoinArgs) -> Result<V
             .map_err(|_| anyhow::anyhow!("invalid saved node invitation"))?;
         ensure!(
             saved.account == service.session.account_id
-                && saved.service == service.origin()?.as_str()
+                && auth::account_pin(&saved.service)? == service.origin()?
                 && saved.name == *name
                 && saved.cluster == offer.anchor.cluster_id,
             "a join for node {} is pending; run gent cluster join to resume it; this code names a different destination or account",

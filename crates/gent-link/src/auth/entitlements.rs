@@ -22,12 +22,12 @@ async fn refresh(home: &Path) -> Result<()> {
     {
         return entitlements::clear(home);
     }
-    // Credentials stay on the service origin recorded at enrollment.
+    // Verify the original account and relay pins before using the transport credential.
     let Some(installation) = crate::cluster::installation(home)? else {
         return entitlements::clear(home);
     };
     ensure!(
-        !installation.pending && origin(&installation.service)? == origin(&pin.origin)?,
+        !installation.pending && account_pin(&installation.service)? == account_pin(&pin.origin)?,
         "account setup is pending"
     );
     let token = config::read_relay_credential(&home.join("relay.key"))?;
@@ -37,7 +37,7 @@ async fn refresh(home: &Path) -> Result<()> {
     );
     let (status, value) = response(
         client()?
-            .get(origin(&saved.service)?.join("v1/transport/entitlements")?)
+            .get(account_endpoint(home, &saved.service)?.join("v1/transport/entitlements")?)
             .bearer_auth(token),
     )
     .await?;

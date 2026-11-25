@@ -27,6 +27,10 @@ impl FileRelay {
         })
     }
 
+    pub(crate) fn from_relay(relay: Relay) -> Self {
+        Self { relay }
+    }
+
     fn route(&self, id: &str, index: Option<u32>) -> Result<Url> {
         ensure!(valid_id(id), "invalid file object ID");
         let mut route = format!("v1/objects/{id}");

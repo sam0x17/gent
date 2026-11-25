@@ -102,6 +102,8 @@ mod tests {
             "https://github.com/login/device/code",
             "https://github.com/login/oauth/access_token",
             "https://api.gent.link/v1/auth/session",
+            "https://beta-api.gent.link/v1/auth/session",
+            "https://beta.gent.link/account",
             "https://gent.link/account",
             "https://checkout.stripe.com/",
             "http://staging.gent.link/",

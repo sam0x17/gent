@@ -34,7 +34,33 @@ pub(crate) fn origin(home: &Path) -> Result<String> {
         return Ok(bridge.origin().ascii_serialization());
     }
     let _ = home;
-    Ok("https://mcp.gent.link".into())
+    Ok(gent_daemon::backend::MCP.stable.into())
+}
+
+/// Portable web identities inherit their native carrier's signed channel.
+pub(crate) fn bridge_route(
+    home: &Path,
+    cfg: &config::Config,
+    pin: reqwest::Url,
+) -> Result<gent_daemon::backend::TransportRoute> {
+    let bridge = gent_daemon::backend::MCP;
+    if bridge.contains(&pin)
+        && let Some(parent) = cfg.hosted_parent()?
+    {
+        let host = node_home::inspect(&parent.home)?;
+        ensure!(
+            host.node.id == parent.node_id
+                && host.cluster.id == cfg.cluster.id
+                && host.hosted_parent()?.is_none(),
+            "hosting daemon identity changed"
+        );
+        return bridge.transport(
+            &parent.home,
+            host.service.as_ref().map(|s| s.origin.as_str()),
+            pin,
+        );
+    }
+    bridge.transport(home, cfg.service.as_ref().map(|s| s.origin.as_str()), pin)
 }
 
 #[derive(clap::Subcommand)]
