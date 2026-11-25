@@ -4,16 +4,22 @@ use super::*;
 #[tokio::test]
 #[ignore = "requires an installed Codex app-server"]
 async fn ordinary_claim_reaches_native_input_once_without_a_goal() -> Result<()> {
-    ordinary_native_trial(false).await
+    ordinary_native_trial(false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires an installed Codex app-server"]
 async fn ordinary_user_turn_after_a_completed_native_goal_is_retried() -> Result<()> {
-    ordinary_native_trial(true).await
+    ordinary_native_trial(true, false).await
 }
 
-async fn ordinary_native_trial(completed_goal: bool) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires an installed Codex app-server"]
+async fn composer_recovers_a_failed_request_after_a_user_steer() -> Result<()> {
+    ordinary_native_trial(false, true).await
+}
+
+async fn ordinary_native_trial(completed_goal: bool, composer: bool) -> Result<()> {
     const FIXTURE_ROOT: &str = "GENT_TEST_ORDINARY_CODEX_ROOT";
     if let Some(root) = std::env::var_os(FIXTURE_ROOT) {
         let root = PathBuf::from(root);
@@ -26,12 +32,21 @@ async fn ordinary_native_trial(completed_goal: bool) -> Result<()> {
     let (mut child, socket) = start_host(node.root.path(), listener.local_addr()?).await?;
     let calls = Arc::new(AtomicUsize::new(0));
     let received = calls.clone();
+    let initial_calls = 1 + usize::from(composer);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let hold = release.clone();
     let provider = Router::new().route("/v1/responses",post(move || {
         let index = received.fetch_add(1,Ordering::SeqCst);
+        let hold = hold.clone();
         async move {
-            if index > 1 { std::future::pending().await }
-            (StatusCode::BAD_REQUEST, Json(json!({"error":{"type":"invalid_request_error",
-              "code":"unknown_parameter","message":"Unknown parameter: 'input[0].tools[0].role'.","param":"input[0].tools[0].role"}})))
+            if index > initial_calls { std::future::pending().await }
+            if composer && index == 0 { hold.notified().await; }
+            let error = if composer {
+                json!({"type":"invalid_request_error","code":"invalid_request_error","message":"Invalid request payload","param":"0"})
+            } else {
+                json!({"type":"invalid_request_error","code":"unknown_parameter","message":"Unknown parameter: 'input[0].tools[0].role'.","param":"input[0].tools[0].role"})
+            };
+            (StatusCode::BAD_REQUEST, Json(json!({"error":error})))
         }
     }));
     let trial = async {
@@ -62,11 +77,25 @@ async fn ordinary_native_trial(completed_goal: bool) -> Result<()> {
         let id = host
             .rpc(
                 "turn/start",
-                json!({"threadId":thread,"turnTrigger":"user",
+                json!({"threadId":thread,"turnTrigger":if composer {"composer"} else {"user"},
+            "clientUserMessageId":Uuid::new_v4(),
             "input":[{"type":"text","text":"please continue"}]}),
             )
             .await?["turn"]["id"]
             .clone();
+        if composer {
+            while calls.load(Ordering::SeqCst) == 0 {
+                sleep(Duration::from_millis(20)).await;
+            }
+            host.rpc(
+                "turn/steer",
+                json!({"threadId":thread, "expectedTurnId":id,
+                "clientUserMessageId":Uuid::new_v4(),
+                "input":[{"type":"text","text":"also check the second item"}]}),
+            )
+            .await?;
+            release.notify_one();
+        }
         while !last(&mut host, thread)
             .await
             .is_ok_and(|t| t["id"] == id && t["status"] == "failed")
@@ -74,7 +103,21 @@ async fn ordinary_native_trial(completed_goal: bool) -> Result<()> {
             sleep(Duration::from_millis(20)).await;
         }
         sweep(&node.home, &registry, &mut None, Sweep::WakeAndGoals).await?;
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), initial_calls);
+        if composer {
+            let items = host
+                .rpc("thread/items/list", json!({"threadId":thread,"turnId":id}))
+                .await?;
+            let inputs: Vec<_> = items["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| &entry["item"])
+                .filter(|item| item["type"] == "userMessage")
+                .collect();
+            assert_eq!(inputs.len(), 2);
+            assert_ne!(inputs[0]["clientId"], inputs[1]["clientId"]);
+        }
         // The ordinary checkbox works with goal recovery disabled.
         config::write_private(&node.home.join("babysitter-disabled"), b"")?;
         config::set_ordinary_babysitter_enabled(&node.home, true)?;
@@ -127,10 +170,10 @@ async fn ordinary_native_trial(completed_goal: bool) -> Result<()> {
             json!([{"type":"text","text":"please continue","text_elements":[]}])
         );
         sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), initial_calls + 1);
         sleep(Duration::from_secs(15)).await;
         sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
-        while calls.load(Ordering::SeqCst) < 3 {
+        while calls.load(Ordering::SeqCst) < initial_calls + 2 {
             sleep(Duration::from_millis(20)).await;
         }
         let second = last(&mut host, thread).await?;
@@ -144,7 +187,7 @@ async fn ordinary_native_trial(completed_goal: bool) -> Result<()> {
             sleep(Duration::from_millis(20)).await;
         }
         sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), initial_calls + 2);
         assert_eq!(node.notices(&registered).await?, 0);
         Ok::<_, anyhow::Error>(())
     };

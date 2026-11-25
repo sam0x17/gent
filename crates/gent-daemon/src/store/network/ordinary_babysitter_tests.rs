@@ -1,5 +1,9 @@
 use super::*;
-use gent_protocol::{babysitter::ChatOrigin, notifications::Failure};
+use gent_protocol::{
+    babysitter::{ChatOrigin, MAX_CHAT_INPUTS},
+    notifications::Failure,
+    wake::WakeTarget,
+};
 use uuid::Uuid;
 
 fn claim(turn: Uuid, failed_at: i64, origin: ChatOrigin) -> AgentOp {
@@ -11,13 +15,18 @@ fn claim(turn: Uuid, failed_at: i64, origin: ChatOrigin) -> AgentOp {
     }
 }
 fn operator(turn: Uuid, at: i64) -> AgentOp {
+    operator_inputs(turn, at, None, &[])
+}
+
+fn operator_inputs(turn: Uuid, at: i64, first: Option<&str>, additional: &[&str]) -> AgentOp {
     claim(
         turn,
         at,
         ChatOrigin::Operator {
             turn,
             started_at: at - 1,
-            client_id: None,
+            client_id: first.map(String::from),
+            additional_client_ids: additional.iter().map(|&id| String::from(id)).collect(),
         },
     )
 }
@@ -78,6 +87,139 @@ async fn ordinary_claims_survive_restarts_and_bound_each_operator_chain() -> Res
 }
 
 #[tokio::test]
+async fn operator_claim_bounds_every_input_and_preserves_legacy_single_inputs() -> Result<()> {
+    let mut p = Pair::new().await;
+    config::set_ordinary_babysitter_enabled(p.homes[0].path(), true)?;
+    let clock = now();
+    let max_bytes = "é".repeat(128);
+    let too_long = format!("{max_bytes}a");
+    let ids: Vec<String> = (1..=MAX_CHAT_INPUTS)
+        .map(|i| format!("input-{i}"))
+        .collect();
+    let additional: Vec<&str> = ids.iter().map(String::as_str).collect();
+    for (first, rest) in [
+        (None, &["second"][..]),
+        (Some(" \t"), &["second"][..]),
+        (Some("first"), &["", "third"][..]),
+        (Some("first"), &["second", " \n"][..]),
+        (Some("first"), &["second", "first"][..]),
+        (Some("first"), &["second", "second"][..]),
+        (Some(too_long.as_str()), &[][..]),
+        (Some(too_long.as_str()), &["second"][..]),
+        (Some("first"), &[too_long.as_str()][..]),
+        (Some("first"), additional.as_slice()),
+    ] {
+        let op = operator_inputs(Uuid::now_v7(), clock, first, rest);
+        assert_eq!(
+            p.agent(0, op)?,
+            json!({"claim": null}),
+            "first={first:?} rest={rest:?}"
+        );
+    }
+    for (first, rest) in [
+        (None, &[][..]),
+        (Some(""), &[][..]),
+        (Some("  "), &[][..]),
+        (Some("first"), &[max_bytes.as_str()][..]),
+        (Some(max_bytes.as_str()), &additional[..MAX_CHAT_INPUTS - 1]),
+    ] {
+        let op = operator_inputs(Uuid::now_v7(), clock, first, rest);
+        assert!(
+            p.agent(0, op)?["claim"].is_string(),
+            "first={first:?} rest={rest:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn operator_claim_rejects_own_wake_and_ordinary_attempt_in_each_position() -> Result<()> {
+    let mut p = Pair::new().await;
+    config::set_ordinary_babysitter_enabled(p.homes[1].path(), true)?;
+    let sent = p.send(vec![])?;
+    p.pump();
+    let clock = now();
+    let message: String = serde_json::from_value(sent["message_id"].clone())?;
+    let wake = Uuid::new_v4().to_string();
+    let host = WakeTarget::Codex {
+        thread_id: Uuid::now_v7().to_string(),
+    };
+    let direct = p.agent(
+        1,
+        AgentOp::WakeDirectClaim {
+            message_id: message.clone(),
+            attempt_id: wake.clone(),
+            target: host.clone(),
+        },
+    )?;
+    assert_eq!(direct["may_submit"], true);
+    let ordinary: String =
+        serde_json::from_value(p.agent(1, operator(Uuid::now_v7(), clock))?["claim"].clone())?;
+
+    let turn = Uuid::now_v7();
+    for attempt in [&wake, &ordinary] {
+        let single = operator_inputs(turn, clock, Some(attempt), &[]);
+        assert_eq!(p.agent(1, single)?, json!({"claim":null}));
+        for pos in 0..3 {
+            let mut ids = ["first", "second", "third"];
+            ids[pos] = attempt;
+            let op = operator_inputs(turn, clock, Some(ids[0]), &ids[1..]);
+            assert_eq!(p.agent(1, op)?, json!({"claim":null}), "position {pos}");
+        }
+    }
+    // Rejected claims leave the turn available for a valid proof.
+    assert!(
+        p.agent(1, operator_inputs(turn, clock, Some("first"), &["second"]))?["claim"].is_string()
+    );
+
+    // The host can acknowledge submission before recording an observed turn.
+    let submitted = Uuid::now_v7();
+    p.agent(
+        1,
+        AgentOp::WakeSubmitted {
+            message_id: message.clone(),
+            attempt_id: wake.clone(),
+            submission_id: submitted.to_string(),
+        },
+    )?;
+    assert_eq!(
+        p.agent(1, operator(submitted, clock))?,
+        json!({"claim":null})
+    );
+    let observed = Uuid::now_v7();
+    p.agent(
+        1,
+        AgentOp::WakeDirectObserve {
+            message_id: message,
+            attempt_id: wake.clone(),
+            target: host,
+            turn_id: observed.to_string(),
+        },
+    )?;
+    let clean_ids = operator_inputs(observed, clock, Some("first"), &["second"]);
+    assert_eq!(p.agent(1, clean_ids)?, json!({"claim":null}));
+
+    // A second local agent shares the database, including all three matching
+    // pieces of evidence, but owns none of them.
+    let other = config::secret();
+    p.stores[1].execute(Request::Agent {
+        credential: other.clone(),
+        action: AgentOp::Register {
+            name: "other".into(),
+            provider: "test".into(),
+        },
+    })?;
+    for turn in [submitted, observed] {
+        let result = p.stores[1].execute(Request::Agent {
+            credential: other.clone(),
+            action: operator_inputs(turn, clock, Some(&ordinary), &[&wake]),
+        })?;
+        assert!(result["claim"].is_string());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn ordinary_checks_apply_both_preferences_entitlement_and_freshness() -> Result<()> {
     let mut p = Pair::new().await;
     let h = p.homes[0].path().to_path_buf();
@@ -95,6 +237,7 @@ async fn ordinary_checks_apply_both_preferences_entitlement_and_freshness() -> R
                 turn,
                 started_at: clock + 1,
                 client_id: None,
+                additional_client_ids: vec![],
             },
         ),
         claim(
@@ -180,6 +323,7 @@ async fn ordinary_chain_expires_from_original_failure_even_when_latest_failure_i
                     turn,
                     started_at: base - 7200,
                     client_id: None,
+                    additional_client_ids: vec![],
                 },
             ),
         )?["claim"]

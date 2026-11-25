@@ -326,7 +326,7 @@ struct Record<P = Payload> {
 #[serde(deny_unknown_fields)]
 struct Receipt {
     #[serde(rename = "type")]
-    _kind: String,
+    event_kind: String,
     thread_id: String,
     turn_id: Uuid,
     item: ReceiptItem,
@@ -366,6 +366,15 @@ impl Receipt {
             ))
         .then_some(turn)
     }
+}
+
+pub(in crate::wake::codex) fn completed_command(line: &[u8], thread: &str, turn: Uuid) -> bool {
+    serde_json::from_slice::<Record<Receipt>>(line).is_ok_and(|r| {
+        r.r#type == "event_msg"
+            && r.payload.event_kind == "item_completed"
+            && r.payload.item.r#type == "CommandExecution"
+            && r.payload.background_turn(thread) == Some(turn)
+    })
 }
 
 // provider_stop has already walked back through the failed turn. Only accept

@@ -1,6 +1,38 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[test]
+fn late_command_requires_a_scoped_native_completion() {
+    use crate::wake::codex::babysit::rollout::completed_command;
+    let thread = Uuid::now_v7().to_string();
+    let turn = Uuid::now_v7();
+    let receipt = json!({"type":"event_msg","payload":{"type":"item_completed",
+        "thread_id":thread,"turn_id":turn,"started_at_ms":1000,"completed_at_ms":1200,
+        "item":{"type":"CommandExecution","id":"call","status":"completed"}}});
+    let accepts = |row: &Value| completed_command(&serde_json::to_vec(row).unwrap(), &thread, turn);
+    assert!(accepts(&receipt));
+    for (field, replacement) in [
+        ("/type", json!("response_item")),
+        ("/payload/type", json!("item_started")),
+        ("/payload/thread_id", json!(Uuid::now_v7())),
+        ("/payload/turn_id", json!(Uuid::now_v7())),
+        ("/payload/item/type", json!("UserMessage")),
+        ("/payload/item/id", json!("")),
+        ("/payload/item/status", json!("in_progress")),
+    ] {
+        let mut other = receipt.clone();
+        *other.pointer_mut(field).unwrap() = replacement;
+        assert!(!accepts(&other), "{field}");
+    }
+    let mut other = receipt.clone();
+    other["payload"]["item"]["internal_chat_message_metadata_passthrough"] =
+        json!({"turn_id":turn});
+    assert!(!accepts(&other));
+    let mut unknown = receipt;
+    unknown["payload"]["future_field"] = json!(1);
+    assert!(!accepts(&unknown));
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Change {
     LostReply,
@@ -23,6 +55,11 @@ enum Change {
     SecondInputInTurn,
     LongOperator,
     SupersededRollout,
+    ComposerCommandDuringCheck,
+    ComposerCarryOnDuringCheck,
+    ComposerAgent,
+    ComposerDuplicateItem,
+    ComposerUnidentifiedSteer,
 }
 
 #[tokio::test]
@@ -52,6 +89,11 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
         SecondInputInTurn,
         LongOperator,
         SupersededRollout,
+        ComposerCommandDuringCheck,
+        ComposerCarryOnDuringCheck,
+        ComposerAgent,
+        ComposerDuplicateItem,
+        ComposerUnidentifiedSteer,
         LostReply,
     ] {
         let thread = Uuid::now_v7();
@@ -65,19 +107,41 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
         };
         let path = node.home.join(format!("rollout-fixture-{thread}.jsonl"));
         let envelope = |p: Value| json!({"type":"event_msg","payload":p});
+        let composer = matches!(
+            change,
+            ComposerCommandDuringCheck
+                | ComposerCarryOnDuringCheck
+                | ComposerAgent
+                | ComposerDuplicateItem
+                | ComposerUnidentifiedSteer
+        );
         let input = envelope(
-            json!({"type":"item_completed","thread_id":thread,"turn_id":turn,"item":{"type":"UserMessage","client_id":null}}),
+            json!({"type":"item_completed","thread_id":thread,"turn_id":turn,"item":{"type":"UserMessage","id":"one","client_id":"first"}}),
         );
         let mut rows = vec![
             json!({"type":"session_meta","payload":{"id":thread}}),
             envelope(
                 json!({"type":"task_started","turn_id":turn,"started_at":started,
-                "turn_attribution":{"turn_id":turn,"root_turn_id":turn,"turn_trigger":if change==GoalTrigger {"goal"} else {"user"}}}),
+                "turn_attribution":{"turn_id":turn,"root_turn_id":turn,"turn_trigger":if composer {"composer"} else if change==GoalTrigger {"goal"} else {"user"}}}),
             ),
             input.clone(),
         ];
         if change == SecondInputInTurn {
             rows.push(input.clone());
+        }
+        if composer {
+            let mut steer = input.clone();
+            steer["payload"]["item"] =
+                json!({"type":"UserMessage","id":"two","client_id":"second"});
+            match change {
+                ComposerDuplicateItem => steer["payload"]["item"]["id"] = json!("one"),
+                ComposerUnidentifiedSteer => steer["payload"]["item"]["client_id"] = Value::Null,
+                ComposerAgent => {
+                    rows[1]["payload"]["turn_attribution"]["initiating_agent_path"] = json!("agent")
+                }
+                _ => {}
+            }
+            rows.push(steer);
         }
         rows.push(envelope(json!({"type":"task_complete","turn_id":turn,"started_at":started,"completed_at":ended,"error":{"message":"Model at capacity"}})));
         if change == LaterInputInRollout {
@@ -125,18 +189,45 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
                     if reread && change == SupersededRollout {
                         config::write_private(&path, b"changed\n").unwrap();
                     }
+                    if reads.load(Ordering::Relaxed) == 2 && composer {
+                        use std::io::Write;
+                        let mut file = std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&path)
+                            .unwrap();
+                        writeln!(
+                            file,
+                            "{}",
+                            json!({"type":"event_msg","payload":{
+                            "type":"item_completed","thread_id":thread,"turn_id":turn,
+                            "item":{"type":"CommandExecution","id":"late","status":"completed"}}})
+                        )
+                        .unwrap();
+                        if change == ComposerCarryOnDuringCheck {
+                            writeln!(
+                                file,
+                                "{}",
+                                json!({"type":"event_msg","payload":{
+                                "type":"thread_settings_applied","thread_id":thread}})
+                            )
+                            .unwrap();
+                        }
+                    }
                     Some(
                         json!({"data":if reread && change==Queue {json!([{"id":"pending"}])} else {json!([])},"nextCursor":null}),
                     )
                 }
                 "turn/start" => {
-                    assert!(matches!(change, LongOperator | LostReply));
+                    assert!(matches!(
+                        change,
+                        LongOperator | LostReply | ComposerCommandDuringCheck
+                    ));
                     assert_eq!(
                         r["params"]["input"],
                         json!([{"type":"text","text":"please continue"}])
                     );
                     assert_eq!(r["params"]["parentTurnId"], turn.to_string());
-                    (change == LongOperator)
+                    matches!(change, LongOperator | ComposerCommandDuringCheck)
                         .then(|| json!({"turn":{"id":Uuid::now_v7(),"rootTurnId":turn}}))
                 }
                 other => panic!("unexpected host operation {other}"),
@@ -177,7 +268,10 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
             .count();
         assert_eq!(
             starts,
-            usize::from(matches!(change, LongOperator | LostReply)),
+            usize::from(matches!(
+                change,
+                LongOperator | LostReply | ComposerCommandDuringCheck
+            )),
             "{change:?}"
         );
         assert_eq!(node.notices(&registered).await?, 0);

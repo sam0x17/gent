@@ -1,7 +1,7 @@
 //! Claims and native submission receipts stay on the registered chat's node.
 use super::*;
 use gent_protocol::{
-    babysitter::{CHAT_CHAIN_MAX_AGE, CHAT_FAILURE_MAX_AGE, ChatOrigin},
+    babysitter::{CHAT_CHAIN_MAX_AGE, CHAT_FAILURE_MAX_AGE, ChatOrigin, MAX_CHAT_INPUTS},
     notifications::Failure,
 };
 use uuid::Uuid;
@@ -90,6 +90,44 @@ impl StoreSession<'_> {
         Ok(previous.is_some_and(|previous| retry_due(previous, failed, self.timestamp)))
     }
 
+    fn chat_operator_inputs_allowed(
+        &self,
+        who: &Agent,
+        turn: &str,
+        client_id: Option<&str>,
+        additional_client_ids: &[String],
+    ) -> Result<bool> {
+        let multi_input = !additional_client_ids.is_empty();
+        if additional_client_ids.len() >= MAX_CHAT_INPUTS || (multi_input && client_id.is_none()) {
+            return Ok(false);
+        }
+        if let Some(first) = client_id {
+            let mut seen = BTreeSet::new();
+            let mut attempt = self.db.prepare(
+                "SELECT 1 FROM wake_dispatches WHERE agent=?1 AND attempt_id=?2
+                 UNION ALL SELECT 1 FROM babysitter_chat_attempts WHERE agent=?1 AND attempt=?2
+                 LIMIT 1",
+            )?;
+            for id in std::iter::once(first).chain(additional_client_ids.iter().map(String::as_str))
+            {
+                if id.len() > 256 || (multi_input && (id.trim().is_empty() || !seen.insert(id))) {
+                    return Ok(false);
+                }
+                if attempt.exists(params![who.id, id])? {
+                    return Ok(false);
+                }
+            }
+        }
+        // A direct wake can record the native turn even if the host omits or
+        // changes its client ID. Check this agent's journal once per candidate.
+        Ok(!self.db.prepare(
+            "SELECT 1 FROM wake_dispatches WHERE agent=?1
+             AND json_extract(payload,'$.target.host')='codex' AND json_type(payload,'$.direct')='object'
+             AND (json_extract(payload,'$.submission_id')=?2 OR json_extract(payload,'$.direct.turn_id')=?2)
+             LIMIT 1",
+        )?.exists(params![who.id, turn])?)
+    }
+
     pub(super) fn babysitter_chat_claim(
         &self,
         who: &Agent,
@@ -110,17 +148,14 @@ impl StoreSession<'_> {
                 turn: operator,
                 started_at,
                 client_id,
+                additional_client_ids,
             } => {
                 if operator.to_string() != turn
-                    || client_id.as_ref().is_some_and(|id| id.len() > 256)
-                {
-                    return Ok(no);
-                }
-                if let Some(client_id) = client_id
-                    && self.db.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM wake_dispatches WHERE agent=?1 AND attempt_id=?2
-                            UNION ALL SELECT 1 FROM babysitter_chat_attempts WHERE agent=?1 AND attempt=?2)",
-                        params![who.id,client_id], |r| r.get::<_, bool>(0),
+                    || !self.chat_operator_inputs_allowed(
+                        who,
+                        &turn,
+                        client_id.as_deref(),
+                        &additional_client_ids,
                     )?
                 {
                     return Ok(no);

@@ -22,6 +22,7 @@ struct Failed {
     reason: Failure,
     error: String,
     goal: Value,
+    legacy_history: bool,
 }
 
 fn uuid(value: &Value) -> Option<Uuid> {
@@ -31,7 +32,14 @@ fn uuid(value: &Value) -> Option<Uuid> {
 }
 
 impl Failed {
-    fn from_head(thread: &str, path: PathBuf, head: &Value, now: i64, goal: Value) -> Option<Self> {
+    fn from_head(
+        thread: &str,
+        path: PathBuf,
+        head: &Value,
+        now: i64,
+        goal: Value,
+        legacy_history: bool,
+    ) -> Option<Self> {
         let reason = babysit::terminal_failure(head)?;
         let started = head["startedAt"].as_i64()?;
         let ended = head["completedAt"].as_i64()?;
@@ -40,6 +48,7 @@ impl Failed {
         }
         Some(Self {
             goal,
+            legacy_history,
             thread: thread.into(),
             path,
             turn: uuid(&head["id"])?,
@@ -100,6 +109,7 @@ async fn latest(host: &mut Host, thread: &str) -> Result<Option<Failed>> {
         head,
         gent_daemon::store::now(),
         goal.clone(),
+        t["historyMode"] == "legacy",
     ) else {
         return Ok(None);
     };
@@ -135,7 +145,7 @@ pub(super) async fn inspect(
         return Ok(());
     }
     let candidate = failed.clone();
-    let Some((origin, parent, stamp)) =
+    let Some((origin, parent, mut stamp)) =
         tokio::task::spawn_blocking(move || proof::read(&candidate)).await??
     else {
         return Ok(());
@@ -147,7 +157,7 @@ pub(super) async fn inspect(
             turn: failed.turn,
             failed_at: failed.ended,
             reason: failed.reason,
-            origin,
+            origin: origin.clone(),
         },
     )
     .await?;
@@ -168,11 +178,36 @@ pub(super) async fn inspect(
     // A stalled daemon or a sequence of slow host reads must not stretch the
     // admission window to the sum of all their independent RPC timeouts.
     let ready = tokio::time::timeout(Duration::from_secs(3), async {
+        if agent(home, credential, AgentOp::BabysitterChatCheck { attempt }).await?["eligible"]
+            != true
+            || latest(&mut host, thread).await?.as_ref() != Some(&failed)
+        {
+            return Ok(false);
+        }
+        // A delayed completion can arrive while claiming. Reprove the same
+        // admissions and reread the live queue/head before using that claim.
+        let observed = proof::Stamp::current(&failed.path)?;
+        if stamp != observed {
+            if !observed.grew_from(&stamp) {
+                return Ok(false);
+            }
+            let candidate = failed.clone();
+            let Some((new_origin, new_parent, new_stamp)) =
+                tokio::task::spawn_blocking(move || proof::read(&candidate)).await??
+            else {
+                return Ok(false);
+            };
+            if new_stamp != observed
+                || new_origin != origin
+                || new_parent != parent
+                || latest(&mut host, thread).await?.as_ref() != Some(&failed)
+            {
+                return Ok(false);
+            }
+            stamp = new_stamp;
+        }
         Ok::<_, anyhow::Error>(
-            agent(home, credential, AgentOp::BabysitterChatCheck { attempt }).await?["eligible"]
-                == true
-                && latest(&mut host, thread).await?.as_ref() == Some(&failed)
-                && registry.credential(thread)?.as_deref() == Some(credential)
+            registry.credential(thread)?.as_deref() == Some(credential)
                 && gent_daemon::config::ordinary_babysitter_enabled(home)?
                 && stamp.matches(&failed.path)?,
         )
