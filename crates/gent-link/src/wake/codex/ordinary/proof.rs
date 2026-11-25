@@ -102,12 +102,12 @@ fn completion(
     Ok(None)
 }
 
-fn operator(failed: &Failed, mut inputs: Vec<Item>, composer: bool) -> Option<ChatOrigin> {
-    // A user may steer a running composer turn. Keep every distinct native
+fn operator(failed: &Failed, mut inputs: Vec<Item>, trigger: Option<&str>) -> Option<ChatOrigin> {
+    // A user may steer a running foreground turn. Keep every distinct native
     // input's client ID so the store can exclude Gent delivery at any position.
     if inputs.len() > 1 {
         let mut ids = HashSet::new();
-        if !composer
+        if !matches!(trigger, Some("user" | "composer"))
             || !inputs.iter().all(|i| {
                 i.id.as_deref()
                     .is_some_and(|id| !id.is_empty() && ids.insert(id))
@@ -230,11 +230,8 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                     None | Some("user" | "composer")
                         if a.parent_turn_id.is_none() && failed.root == failed.turn =>
                     {
-                        let Some(origin) = operator(
-                            failed,
-                            inputs,
-                            a.turn_trigger.as_deref() == Some("composer"),
-                        ) else {
+                        let Some(origin) = operator(failed, inputs, a.turn_trigger.as_deref())
+                        else {
                             return Ok(None);
                         };
                         origin

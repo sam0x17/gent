@@ -30,7 +30,7 @@ Choose **Edit full configuration…** to edit the current node's TOML, including
 
 Gent checks the latest failed turn of a loaded, input-ready chat with an empty queue. The latest provider failure must be within the past 10 minutes. A user turn can run for hours before it fails. Automatic retries stop 30 minutes after the original failure. A completed goal can stay in the chat if it finished before the user started that turn. Gent can send up to three `please continue` messages for that user turn. If an automatic continuation also fails, Gent waits at least 15 seconds before the second attempt and 60 seconds before the third. An uncertain submission consumes its attempt. After the third attempt, another user turn is required.
 
-In a managed Codex VS Code chat, you can send another instruction while a turn is running. Gent checks the recorded inputs for that turn before continuing it. A command that reports completion after the provider error can still belong to the failed turn. If you have already continued the chat yourself, Gent skips that failure.
+In managed Codex CLI and VS Code chats, you can send another instruction while a turn is running. Gent checks the recorded inputs for that turn before continuing it. A command that reports completion after the provider error can still belong to the failed turn. If you have already continued the chat yourself, Gent skips that failure.
 
 ## Permissions and About
 

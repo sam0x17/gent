@@ -32,63 +32,78 @@ pub(crate) fn classify(code: &str, details: &str) -> Option<Failure> {
         | "server_error"
         | "internalServerError"
         | "responseTooManyFailedAttempts"
-        | "httpConnectionFailed" => classify_details(&text).or_else(|| {
-            if matches!(
-                code,
-                "badRequest" | "invalid_request" | "invalid_request_error"
-            ) && text.trim() == "invalid request payload"
+        | "httpConnectionFailed" => {
+            if let Some(reason) = classify_details(&text) {
+                return Some(reason);
+            }
+            // Codex can wrap a provider JSON envelope in an HTTP diagnostic.
+            // The provider's parameter is a location hint, which may be absent.
+            if let Some(error) = text
+                .find('{')
+                .zip(text.rfind('}'))
+                .and_then(|(start, end)| text.get(start..=end))
+                .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+                && error["error"]["type"] == "invalid_request_error"
             {
-                return Some(Failure::RequestPayload);
+                let error = &error["error"];
+                return validation_failure(
+                    error["code"].as_str(),
+                    error["message"].as_str()?,
+                    error["param"].as_str(),
+                );
             }
-            // Codex can wrap the provider's JSON error in an HTTP diagnostic.
-            let body = text.get(text.find('{')?..=text.rfind('}')?)?;
-            let envelope: serde_json::Value = serde_json::from_str(body).ok()?;
-            let error = &envelope["error"];
-            if error["type"] != "invalid_request_error" {
-                return None;
+            match code {
+                "badRequest" | "invalid_request" | "invalid_request_error" | "other" => {
+                    validation_failure(None, text.trim(), None)
+                }
+                _ => None,
             }
-            if error["message"] == "invalid request payload" {
-                return Some(Failure::RequestPayload);
-            }
-            let path = error["param"].as_str()?;
-            if error["code"] == "invalid_value"
-                && error["message"] == "invalid value: ''. supported values are: 'assistant', 'system', 'developer', and 'user'."
-                && indexed(path.strip_suffix(".role").unwrap_or(path), "input")
-            {
-                // The provider can point to the entire message instead of its role field.
-                return Some(Failure::RequestPayload);
-            }
-            if error["code"] != "unknown_parameter" {
-                return None;
-            }
-            if error["message"].as_str()? != format!("unknown parameter: '{path}'.") {
-                return None;
-            }
-            unknown_input_role(path)
-        }),
+        }
         _ => None,
     }
 }
 
-fn indexed(field: &str, name: &str) -> bool {
-    field.split_once('[').is_some_and(|(key, index)| {
-        key == name
-            && index.strip_suffix(']').is_some_and(|digits| {
-                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-            })
-    })
-}
-
-fn unknown_input_role(path: &str) -> Option<Failure> {
-    let mut fields = path.strip_suffix(".role")?.split('.');
-    if !indexed(fields.next()?, "input") {
+fn validation_failure(code: Option<&str>, message: &str, param: Option<&str>) -> Option<Failure> {
+    let validation = match code {
+        Some(
+            "unknown_parameter"
+            | "unsupported_parameter"
+            | "missing_required_parameter"
+            | "invalid_parameter"
+            | "invalid_value"
+            | "unsupported_value"
+            | "invalid_type"
+            | "invalid_json"
+            | "invalid_request_payload"
+            | "invalid_json_schema"
+            | "invalid_function_parameters",
+        ) => true,
+        None | Some("invalid_request_error" | "invalid_request") => {
+            message == "invalid request payload"
+                || [
+                    "unknown parameter:",
+                    "unsupported parameter:",
+                    "missing required parameter:",
+                    "invalid value:",
+                    "unsupported value:",
+                    "invalid type for ",
+                ]
+                .iter()
+                .any(|prefix| message.starts_with(prefix))
+        }
+        _ => false,
+    };
+    if !validation || message.is_empty() {
         return None;
     }
-    let first = fields.next()?;
-    if indexed(first, "content") && fields.next().is_none() {
-        return Some(Failure::RequestPayload);
+    // Preserve the existing tool-schema diagnostic when the location identifies
+    // a tools array. Eligibility itself is independent of the location.
+    let location = param.unwrap_or(message);
+    if location.starts_with("tools[") || location.contains(".tools[") {
+        Some(Failure::ToolSchema)
+    } else {
+        Some(Failure::RequestPayload)
     }
-    (indexed(first, "tools") && fields.all(|f| indexed(f, "tools"))).then_some(Failure::ToolSchema)
 }
 
 fn classify_details(text: &str) -> Option<Failure> {
@@ -139,85 +154,88 @@ fn classify_details(text: &str) -> Option<Failure> {
 mod tests {
     use super::*;
     #[test]
-    fn recognizes_empty_message_role_in_provider_input() {
-        let message = "Invalid value: ''. Supported values are: 'assistant', 'system', 'developer', and 'user'.";
-        let details = |param: &str, code: &str| {
-            serde_json::json!({"error": {"type": "invalid_request_error", "code": code,
-                "param": param, "message": message}})
-            .to_string()
-        };
-        let role = details("input[12]", "invalid_value");
-        assert_eq!(classify("other", &role), Some(Failure::RequestPayload));
+    fn provider_validation_accepts_any_parameter_location() {
+        for (code, message, param, expected) in [
+            (
+                "invalid_request_error",
+                "Invalid request payload",
+                serde_json::json!("56959"),
+                Failure::RequestPayload,
+            ),
+            (
+                "invalid_request_error",
+                "Invalid request payload",
+                serde_json::json!(56959),
+                Failure::RequestPayload,
+            ),
+            (
+                "invalid_value",
+                "Invalid value: ''. Supported values are: 'assistant', 'system', 'developer', and 'user'.",
+                serde_json::json!("input[12]"),
+                Failure::RequestPayload,
+            ),
+            (
+                "invalid_value",
+                "Invalid value: 'new'.",
+                serde_json::json!("metadata.role"),
+                Failure::RequestPayload,
+            ),
+            (
+                "unknown_parameter",
+                "Unknown parameter: 'seed'.",
+                serde_json::Value::Null,
+                Failure::RequestPayload,
+            ),
+            (
+                "invalid_type",
+                "Expected an object",
+                serde_json::json!("response_format"),
+                Failure::RequestPayload,
+            ),
+            (
+                "unsupported_parameter",
+                "Parameter is unsupported",
+                serde_json::json!("input[3].content[2].name"),
+                Failure::RequestPayload,
+            ),
+            (
+                "unknown_parameter",
+                "Unknown parameter: 'input[0].tools[0].role'.",
+                serde_json::json!("input[0].tools[0].role"),
+                Failure::ToolSchema,
+            ),
+        ] {
+            let details = serde_json::json!({"error":{"type":"invalid_request_error","code":code,
+                "message":message,"param":param}})
+            .to_string();
+            assert_eq!(classify("other", &format!("■ {details}")), Some(expected));
+            assert_eq!(classify("authentication_failed", &details), None);
+        }
+        let omitted =
+            r#"{"error":{"type":"invalid_request_error","message":"Invalid request payload"}}"#;
+        assert_eq!(classify("other", omitted), Some(Failure::RequestPayload));
         assert_eq!(
-            classify("other", &details("input[0].role", "invalid_value")),
+            classify("other", "Invalid request payload"),
             Some(Failure::RequestPayload)
         );
-        for path in [
-            "metadata.role",
-            "input[12].content",
-            "input[0].tools[1].role",
-            "input[-1]",
-        ] {
-            assert_eq!(
-                classify("other", &details(path, "invalid_value")),
-                None,
-                "{path}"
-            );
-        }
-        for other in [
-            role.replace("assistant", "function"),
-            role.replace("''", "'bogus'"),
-            role.replace("invalid_request_error", "permission_error"),
-        ] {
-            assert_eq!(classify("other", &other), None);
-        }
-        assert_eq!(classify("other", message), None);
-        assert_eq!(
-            classify("other", &details("input[].role", "invalid_value")),
-            None
-        );
-        assert_eq!(
-            classify("other", &details("input[0].role", "unauthorized")),
-            None
-        );
-        assert_eq!(classify("authentication_failed", &role), None);
     }
 
     #[test]
-    fn matches_unknown_role_only_in_provider_input_content_or_tools() {
-        fn failure(path: &str, message_path: &str) -> String {
-            serde_json::json!({"error":{"message": format!("Unknown parameter: '{message_path}'."),
-                "type": "invalid_request_error", "code":"unknown_parameter", "param":path}})
-            .to_string()
-        }
-        for (path, expected) in [
-            ("input[0].tools[0].tools[0].role", Some(Failure::ToolSchema)),
-            ("input[12].tools[3].role", Some(Failure::ToolSchema)),
-            ("input[1].content[0].role", Some(Failure::RequestPayload)),
-            ("input[0].tools[].role", None),
-            ("input[0].content[0].tools[0].role", None),
-            ("input[x].tools[0].role", None),
-            ("input[0].metadata[0].role", None),
-            ("input[0].tools[0].name", None),
-            ("role", None),
+    fn other_provider_errors_keep_their_own_meaning() {
+        for code in [
+            "unauthorized",
+            "invalid_api_key",
+            "model_not_found",
+            "context_length_exceeded",
+            "content_policy_violation",
         ] {
-            let details = format!("■ {}", failure(path, path));
-            assert_eq!(classify("other", &details), expected, "{path}");
-            assert_eq!(classify("authentication_failed", &details), None);
+            let details = serde_json::json!({"error":{"type":"invalid_request_error",
+                "code":code,"message":"Invalid value: 'example'.","param":"input[0]"}})
+            .to_string();
+            assert_eq!(classify("other", &details), None, "{code}");
         }
-        let path = "input[0].tools[0].tools[0].role";
-        assert_eq!(classify("other", &failure(path, "other")), None);
-        assert_eq!(
-            classify(
-                "other",
-                &failure(path, path).replace("unknown_parameter", "unauthorized")
-            ),
-            None
-        );
-        assert_eq!(
-            classify("other", &format!("Unknown parameter: '{path}'.")),
-            None
-        );
+        let wrong_type = r#"{"error":{"type":"permission_error","code":"invalid_value","message":"Invalid value: 'example'."}}"#;
+        assert_eq!(classify("other", wrong_type), None);
     }
 
     #[test]
@@ -231,7 +249,7 @@ mod tests {
         );
         assert_eq!(
             classify("invalid_request", "Invalid value: input[0].content"),
-            None
+            Some(Failure::RequestPayload)
         );
         let payload = r#"{"error":{"message":"Invalid request payload","type":"invalid_request_error","code":"invalid_request_error","param":"12345"}}"#;
         assert_eq!(classify("", payload), Some(Failure::RequestPayload));
