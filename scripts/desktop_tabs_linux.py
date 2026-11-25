@@ -158,6 +158,40 @@ def exercise_setup():
     click("Cancel")
 
 
+def exercise_ordinary_recovery(cli):
+    def saved(action="status"):
+        return json.loads(cli("--json", "config", "ordinary-chat-recovery", action).stdout)["enabled"]
+    def checked(button):
+        return button.getState().contains(pyatspi.STATE_CHECKED)
+    def toggle(button):
+        wait_for(lambda: button.getState().contains(pyatspi.STATE_SENSITIVE), "writable recovery preference")
+        assert button.queryAction().doAction(0)
+    ordinary = get("Continue ordinary chats after provider errors", "check box")
+    get("Sends “please continue” in eligible Codex chats on this node.", "label")
+    goal = get("Resume goals after provider failures", "check box")
+    wait_for(lambda: checked(goal), "default goal recovery")
+    assert not saved() and not checked(ordinary)
+    toggle(ordinary)
+    wait_for(saved, "ordinary recovery persisted")
+    assert checked(goal)
+    toggle(goal)
+    wait_for(lambda: goal.getState().contains(pyatspi.STATE_SENSITIVE) and not checked(goal), "goal opt-out")
+    assert saved() and checked(ordinary)
+    assert not saved("disable")
+    click("Refresh status")
+    wait_for(lambda: not checked(ordinary), "CLI opt-out displayed")
+    assert not checked(goal)
+    assert saved("enable")
+    click("Refresh status")
+    wait_for(lambda: checked(ordinary), "CLI opt-in displayed")
+    toggle(ordinary)
+    wait_for(lambda: not saved(), "ordinary toggle disabled again")
+    assert not checked(goal)
+    toggle(goal)
+    wait_for(lambda: goal.getState().contains(pyatspi.STATE_SENSITIVE) and checked(goal), "restored goal preference")
+    assert not saved()
+
+
 def exercise_enrolled_without_daemon(node):
     click("Refresh status")
     get("desktop-test", "label")
@@ -596,3 +630,6 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     get("New node name", "label")
     click("Cancel")
     exercise_node_rename(cli, remote, hosted, parent)
+    tab("Settings")
+    exercise_ordinary_recovery(cli)
+    tab("Status")

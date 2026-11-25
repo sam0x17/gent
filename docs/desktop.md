@@ -26,6 +26,8 @@ In **Chats**, select the conversation and choose **Unregister chat…**. The con
 
 Choose **Edit full configuration…** to edit the current node's TOML, including node and cluster names, policy, relay URLs and helper address settings. **Save locally** validates and writes the file. **Save and publish…** additionally submits the shared names and policy for cluster approval. The editor preserves the draft on a validation error and detects changes made while it was open. Identity and service-managed fields use the same protections as `gent config edit`.
 
+**Continue ordinary chats after provider errors** is off by default. With Gent Pro, enabling it allows a qualifying provider error to send “please continue” in an eligible ordinary Codex chat on this node. Chats with an explicit Babysitter opt-out are excluded. **Resume goals after provider failures** controls goal recovery separately. On a console-only node, use `gent config ordinary-chat-recovery status`, `enable`, or `disable`. Each subcommand accepts `--json`.
+
 ## Permissions and About
 
 **Permissions** shows the signed communication rules. Select **Edit permission…**, choose the source, destination, permission and decision, then apply. Selectors include individual chats, nodes, groups, all chats and chats on the same node. **Inherit** removes the exact override. Other matching denies still apply.

@@ -277,7 +277,9 @@ final class SettingsTab: NSObject {
     override init() {
         super.init()
         let options = [("login", "Start Gent Desktop at graphical login"), ("updates", "Automatically update Gent"),
-                       ("babysitter", "Resume goals after provider failures"), ("discovery", "Discover and publish native chats"), ("direct", "Prefer direct connections"),
+                       ("babysitter", "Resume goals after provider failures"),
+                       ("ordinary_babysitter", "Continue ordinary chats after provider errors"),
+                       ("discovery", "Discover and publish native chats"), ("direct", "Prefer direct connections"),
                        ("udp", "Allow UDP for direct connections"), ("helper", "Offer this node as a transport helper")]
         var fields: [NSView] = []
         for (key, title) in options {
@@ -295,6 +297,11 @@ final class SettingsTab: NSObject {
             if key == "babysitter" {
                 pricing.isHidden = true
                 fields.append(pricing)
+            }
+            if key == "ordinary_babysitter" {
+                let detail = NSTextField(wrappingLabelWithString: "Sends “please continue” in eligible Codex chats on this node.")
+                detail.textColor = .secondaryLabelColor
+                fields.append(detail)
             }
         }
         let hint = NSTextField(labelWithString: "Network changes take effect when the daemon restarts.")
@@ -356,7 +363,8 @@ final class SettingsTab: NSObject {
     private func enableControls() {
         for button in controls { button.isEnabled = !busy }
         for (key, button) in checks {
-            let available = loaded[key] != nil && (key != "babysitter" || loaded["paid"] == true)
+            let needsPro = key == "babysitter" || (key == "ordinary_babysitter" && loaded[key] != true)
+            let available = loaded[key] != nil && (!needsPro || loaded["paid"] == true)
             button.state = available && loaded[key] == true ? .on : .off
             button.isEnabled = !busy && available
         }

@@ -35,6 +35,7 @@ enum Request {
 #[serde(rename_all = "snake_case")]
 enum Preference {
     Babysitter,
+    OrdinaryBabysitter,
     Login,
     Updates,
     Discovery,
@@ -46,7 +47,7 @@ enum Preference {
 fn settings(home: &Path) -> Result<Value> {
     let cfg = crate::node_home::inspect(home)?;
     let transport = cfg.transport()?;
-    Ok(json!({
+    let mut values = json!({
         "paid": gent_daemon::entitlements::paid(home, &cfg),
         "babysitter": !home.join("babysitter-disabled").try_exists()?,
         "login": login::autostarts(home)?,
@@ -55,7 +56,11 @@ fn settings(home: &Path) -> Result<Value> {
         "direct": matches!(transport.direct, Direct::Auto),
         "udp": transport.udp,
         "helper": matches!(transport.helper, Direct::Auto),
-    }))
+    });
+    if let Ok(enabled) = config::ordinary_babysitter_enabled(home) {
+        values["ordinary_babysitter"] = enabled.into();
+    }
+    Ok(values)
 }
 
 async fn set(home: &Path, key: Preference, enabled: bool) -> Result<()> {
@@ -70,6 +75,7 @@ async fn set(home: &Path, key: Preference, enabled: bool) -> Result<()> {
             update::execute(home, op).await?;
             Ok(())
         }
+        Preference::OrdinaryBabysitter => config::set_ordinary_babysitter_enabled(home, enabled),
         Preference::Babysitter => {
             let cfg = crate::node_home::inspect(home)?;
             ensure!(
@@ -239,6 +245,53 @@ impl Pages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ordinary_recovery_is_local_independent_and_requires_pro_to_enable() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("node");
+        let cfg = config::initialize(&home, "preferences").unwrap();
+        let key = Preference::OrdinaryBabysitter;
+        let goal = home.join("babysitter-disabled");
+        let marker = home.join("babysitter-ordinary-enabled");
+
+        assert_eq!(settings(&home).unwrap()["ordinary_babysitter"], false);
+        assert!(set(&home, key, true).await.is_err());
+        assert!(!marker.exists() && !goal.exists());
+        gent_daemon::entitlements::grant_test(&home, &cfg);
+        set(&home, Preference::Babysitter, false).await.unwrap();
+        let disabled_goal = Snapshot::read(&goal).unwrap();
+        let mut pages = Pages::default();
+        let reply = pages
+            .respond(
+                &home,
+                r#"{"op":"set","key":"ordinary_babysitter","enabled":true}"#,
+            )
+            .await;
+        assert_eq!(reply["values"]["ordinary_babysitter"], true);
+        assert_eq!(reply["values"]["babysitter"], false);
+        disabled_goal.verify().unwrap();
+        let ordinary = Snapshot::read(&marker).unwrap();
+        ordinary.private().unwrap();
+        config::set_ordinary_babysitter_enabled(&home, true).unwrap();
+        set(&home, Preference::Babysitter, true).await.unwrap();
+        ordinary.verify().unwrap();
+
+        std::fs::remove_file(home.join("test-entitlement")).unwrap();
+        assert_eq!(settings(&home).unwrap()["ordinary_babysitter"], true);
+        set(&home, key, false).await.unwrap();
+        assert!(!marker.exists() && !goal.exists());
+        assert_eq!(settings(&home).unwrap()["babysitter"], true);
+        std::os::unix::fs::symlink(home.join("config.toml"), &marker).unwrap();
+        assert!(config::ordinary_babysitter_enabled(&home).is_err());
+        assert!(
+            settings(&home)
+                .unwrap()
+                .get("ordinary_babysitter")
+                .is_none()
+        );
+        assert_eq!(settings(&home).unwrap()["babysitter"], true);
+    }
 
     #[tokio::test]
     async fn editor_saves_rejects_conflicts_and_retains_invalid_drafts() {
