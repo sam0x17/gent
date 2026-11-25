@@ -41,7 +41,9 @@ async fn ordinary_native_trial(completed_goal: bool, composer: bool) -> Result<(
         async move {
             if index > initial_calls { std::future::pending().await }
             if composer && index == 0 { hold.notified().await; }
-            let error = if composer {
+            let error = if composer && index == initial_calls {
+                json!({"type":"invalid_request_error","code":"invalid_value","message":"Invalid value: ''. Supported values are: 'assistant', 'system', 'developer', and 'user'.","param":"input[12]"})
+            } else if composer {
                 json!({"type":"invalid_request_error","code":"invalid_request_error","message":"Invalid request payload","param":"0"})
             } else {
                 json!({"type":"invalid_request_error","code":"unknown_parameter","message":"Unknown parameter: 'input[0].tools[0].role'.","param":"input[0].tools[0].role"})

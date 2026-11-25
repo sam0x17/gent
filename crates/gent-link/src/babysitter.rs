@@ -50,10 +50,17 @@ pub(crate) fn classify(code: &str, details: &str) -> Option<Failure> {
             if error["message"] == "invalid request payload" {
                 return Some(Failure::RequestPayload);
             }
+            let path = error["param"].as_str()?;
+            if error["code"] == "invalid_value"
+                && error["message"] == "invalid value: ''. supported values are: 'assistant', 'system', 'developer', and 'user'."
+                && indexed(path.strip_suffix(".role").unwrap_or(path), "input")
+            {
+                // The provider can point to the entire message instead of its role field.
+                return Some(Failure::RequestPayload);
+            }
             if error["code"] != "unknown_parameter" {
                 return None;
             }
-            let path = error["param"].as_str()?;
             if error["message"].as_str()? != format!("unknown parameter: '{path}'.") {
                 return None;
             }
@@ -63,15 +70,16 @@ pub(crate) fn classify(code: &str, details: &str) -> Option<Failure> {
     }
 }
 
+fn indexed(field: &str, name: &str) -> bool {
+    field.split_once('[').is_some_and(|(key, index)| {
+        key == name
+            && index.strip_suffix(']').is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            })
+    })
+}
+
 fn unknown_input_role(path: &str) -> Option<Failure> {
-    fn indexed(field: &str, name: &str) -> bool {
-        field.split_once('[').is_some_and(|(key, index)| {
-            key == name
-                && index.strip_suffix(']').is_some_and(|digits| {
-                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-                })
-        })
-    }
     let mut fields = path.strip_suffix(".role")?.split('.');
     if !indexed(fields.next()?, "input") {
         return None;
@@ -130,6 +138,51 @@ fn classify_details(text: &str) -> Option<Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recognizes_empty_message_role_in_provider_input() {
+        let message = "Invalid value: ''. Supported values are: 'assistant', 'system', 'developer', and 'user'.";
+        let details = |param: &str, code: &str| {
+            serde_json::json!({"error": {"type": "invalid_request_error", "code": code,
+                "param": param, "message": message}})
+            .to_string()
+        };
+        let role = details("input[12]", "invalid_value");
+        assert_eq!(classify("other", &role), Some(Failure::RequestPayload));
+        assert_eq!(
+            classify("other", &details("input[0].role", "invalid_value")),
+            Some(Failure::RequestPayload)
+        );
+        for path in [
+            "metadata.role",
+            "input[12].content",
+            "input[0].tools[1].role",
+            "input[-1]",
+        ] {
+            assert_eq!(
+                classify("other", &details(path, "invalid_value")),
+                None,
+                "{path}"
+            );
+        }
+        for other in [
+            role.replace("assistant", "function"),
+            role.replace("''", "'bogus'"),
+            role.replace("invalid_request_error", "permission_error"),
+        ] {
+            assert_eq!(classify("other", &other), None);
+        }
+        assert_eq!(classify("other", message), None);
+        assert_eq!(
+            classify("other", &details("input[].role", "invalid_value")),
+            None
+        );
+        assert_eq!(
+            classify("other", &details("input[0].role", "unauthorized")),
+            None
+        );
+        assert_eq!(classify("authentication_failed", &role), None);
+    }
+
     #[test]
     fn matches_unknown_role_only_in_provider_input_content_or_tools() {
         fn failure(path: &str, message_path: &str) -> String {
