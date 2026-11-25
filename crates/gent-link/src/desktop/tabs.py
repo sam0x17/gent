@@ -96,6 +96,73 @@ class DirectoryPane(Gtk.Box):
         self.status.set_text(self.error or f"{len(self.store)} of {len(self.rows or [])} {self.name}")
 
 
+class ReleaseChannelRow(Gtk.Box):
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        row = Gtk.Box(spacing=8)
+        title = "Cluster release channel"
+        row.pack_start(label(title), False, False, 0)
+        self.choice = Gtk.ComboBoxText()
+        self.choice.get_accessible().set_name(title)
+        for channel in ("stable", "beta"):
+            self.choice.append(channel, channel.capitalize())
+        row.pack_start(self.choice, False, False, 0)
+        self.retry = Gtk.Button(label="Retry request")
+        self.retry.set_no_show_all(True)
+        self.retry.connect("clicked", self.retry_request)
+        row.pack_start(self.retry, False, False, 0)
+        self.pack_start(row, False, False, 0)
+        hint = label("Switching channels requests one update per node, even when automatic updates are paused.", "quiet")
+        hint.set_line_wrap(True)
+        self.pack_start(hint, False, False, 0)
+        self.detail = notice_label()
+        self.pack_start(self.detail, False, False, 0)
+        self.current = None
+        self.busy = self.pending = False
+        self.choice.set_sensitive(False)
+        self.changed = self.choice.connect("changed", self.select)
+
+    def load(self):
+        if not self.busy:
+            self.busy = True
+            self.choice.set_sensitive(False)
+            self.retry.set_sensitive(False)
+            page_request("release_channel")
+
+    def retry_request(self, _button):
+        if not self.busy:
+            self.busy = True
+            self.retry.set_sensitive(False)
+            self.detail.set_text("Retrying the same request…")
+            page_request("retry_release_channel")
+
+    def show_current(self):
+        with self.choice.handler_block(self.changed):
+            if self.current in ("stable", "beta"):
+                self.choice.set_active_id(self.current)
+            else:
+                self.choice.set_active(-1)
+
+    def select(self, choice):
+        channel = choice.get_active_id()
+        self.show_current()
+        if not self.busy and choice.get_sensitive() and channel and channel != self.current:
+            self.busy = True
+            choice.set_sensitive(False)
+            self.detail.set_text(f"Requesting {channel.capitalize()}…")
+            page_request("set_release_channel", channel=channel)
+
+    def receive(self, reply):
+        self.busy = False
+        self.current = reply.get("current")
+        self.pending = reply.get("pending") is True
+        self.show_current()
+        self.choice.set_sensitive(self.current in ("stable", "beta") and reply.get("can_set") is True)
+        self.retry.set_visible(reply.get("retry") is True)
+        self.retry.set_sensitive(reply.get("retry") is True)
+        self.detail.set_text(reply.get("notice", ""))
+
+
 class SettingsPane(Gtk.Box):
     options = (("login", "Start Gent Desktop at graphical login"),
                ("updates", "Automatically update Gent"),
@@ -110,7 +177,11 @@ class SettingsPane(Gtk.Box):
         self.stack = Gtk.Stack()
         self.pack_start(self.stack, True, True, 0)
         form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self.stack.add_named(form, "preferences")
+        form_scroll = Gtk.ScrolledWindow()
+        form_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        form_scroll.add(form)
+        self.stack.add_named(form_scroll, "preferences")
+        self.channel = ReleaseChannelRow()
         self.checks = {}
         for key, title in self.options:
             if key in ("login", "direct"):
@@ -119,6 +190,8 @@ class SettingsPane(Gtk.Box):
             button.connect("toggled", self.toggle, key)
             form.pack_start(button, False, False, 0)
             self.checks[key] = button
+            if key == "updates":
+                form.pack_start(self.channel, False, False, 0)
             if key == "babysitter":
                 self.pricing = Gtk.LinkButton.new_with_label("https://gent.link/pricing", "Babysitter requires Gent Pro · View plans")
                 self.pricing.set_halign(Gtk.Align.START)
@@ -161,6 +234,11 @@ class SettingsPane(Gtk.Box):
     def load(self):
         if self.stack.get_visible_child_name() != "document":
             self.request("settings")
+            self.channel.load()
+
+    def poll_channel(self):
+        if self.channel.pending and self.stack.get_visible_child_name() != "document":
+            self.channel.load()
 
     def toggle(self, button, key):
         if not self.updating:

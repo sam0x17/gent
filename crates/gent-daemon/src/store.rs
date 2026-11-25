@@ -955,7 +955,10 @@ impl StoreSession<'_> {
                 anyhow::bail!("pairing must use its owner-authenticated entry point")
             }
             OwnerOp::Status => Ok(
-                json!({"process_id":std::process::id(),"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,"authority":{"mode":if self.state.state().peer.is_some(){"peers"}else{"legacy"},"sequence":self.state.checkpoint().revision,"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
+                json!({"process_id":std::process::id(),"node":self.config.node,"cluster":self.config.cluster,"transport":"local_unix_socket","remote_ready":self.remote_ready()?,
+                    "release_channel":self.state.state().release_channel,
+                    "can_set_release_channel":self.identity.is_current_owner(&self.state) || self.identity.has_configuration_grant(&self.state),
+                    "authority":{"mode":if self.state.state().peer.is_some(){"peers"}else{"legacy"},"sequence":self.state.checkpoint().revision,"revision":self.state.checkpoint().revision,"expires_at":self.state.state().expires_at,"fresh":self.state.require_fresh(self.timestamp as u64).is_ok()},"config_saved":!runtime::projection_pending(self.db)?}),
             ),
             OwnerOp::Groups { name } => match name {
                 Some(name) => Ok(

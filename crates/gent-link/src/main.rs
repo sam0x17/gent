@@ -80,7 +80,7 @@ enum Command {
     },
     /// Show the exact build revision used for update comparisons.
     Version,
-    /// Install the blessed stable release or inspect automatic updates.
+    /// Install the release from the selected channel or inspect automatic updates.
     Update {
         #[command(subcommand)]
         command: Option<update::Command>,
@@ -302,7 +302,21 @@ enum RelayCommand {
     Attachments,
 }
 #[derive(Subcommand)]
+enum ChannelCommand {
+    /// Read the last accepted cluster channel, including while offline.
+    Get,
+    /// Submit a signed cluster configuration edit.
+    Set {
+        channel: gent_protocol::ReleaseChannel,
+    },
+}
+#[derive(Subcommand)]
 enum ClusterCommand {
+    /// Read or set the release channel shared by cluster nodes.
+    Channel {
+        #[command(subcommand)]
+        command: ChannelCommand,
+    },
     /// Enable equal node administration and ordered encrypted configuration.
     Upgrade,
     /// Prepare, commit, inspect or resume a signing-owner transfer.
@@ -857,6 +871,25 @@ async fn execute(cli: Cli) -> Result<()> {
         Some(Command::Cluster {
             command: Some(ClusterCommand::Connect),
         }) => cluster::connect(&home, None).await?,
+        Some(Command::Cluster {
+            command:
+                Some(ClusterCommand::Channel {
+                    command: ChannelCommand::Get,
+                }),
+        }) => json!({"channel": gent_daemon::release_channel::current(&home)?}),
+        Some(Command::Cluster {
+            command:
+                Some(ClusterCommand::Channel {
+                    command: ChannelCommand::Set { channel },
+                }),
+        }) => {
+            configure(
+                &home,
+                &request_id,
+                ConfigurationEdit::SetReleaseChannel { channel },
+            )
+            .await?
+        }
         Some(Command::Cluster {
             command: Some(ClusterCommand::Renew),
         }) => configure(&home, &request_id, ConfigurationEdit::Renew).await?,

@@ -1,6 +1,6 @@
 import AppKit
 
-private final class ClusterDocument: NSView {
+final class FlippedDocument: NSView {
     override var isFlipped: Bool { true }
 }
 
@@ -98,6 +98,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     }
 
     func poll() {
+        if window.isVisible && tabs.selectedTabViewItem?.label == "Settings" { settings.pollChannel() }
         if window.isVisible && tabs.selectedTabViewItem?.label == "Dashboard" { dashboard.load() }
         if window.isVisible || Date().timeIntervalSince(lastRead) >= 60 { request("refresh") }
     }
@@ -153,7 +154,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         }
         tabs.delegate = self
         window.contentView = tabs
-        let document = ClusterDocument()
+        let document = FlippedDocument()
         content.hasVerticalScroller = true
         content.drawsBackground = false
         content.documentView = document
@@ -262,6 +263,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
             }
             return
         case "settings": settings.receive(m); return
+        case "release_channel": settings.channel.receive(m); return
         default: break
         }
         if m["show"] as? Bool == true { show(); return }

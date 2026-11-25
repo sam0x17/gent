@@ -93,6 +93,12 @@ pub struct ClusterState {
     pub retired_relay_grants: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub retired_admin_grants: BTreeSet<String>,
+    /// Omit stable to preserve pre-channel signatures and checkpoint digests.
+    #[serde(
+        default,
+        skip_serializing_if = "gent_protocol::ReleaseChannel::is_stable"
+    )]
+    pub release_channel: gent_protocol::ReleaseChannel,
     pub policy: Policy,
 }
 
@@ -715,6 +721,7 @@ impl OwnerKey {
         let state = ClusterState {
             version: 1,
             peer: None,
+            release_channel: Default::default(),
             cluster_id: cluster.0.into(),
             name: cluster.1.into(),
             owner_key: self.public_key(),
@@ -1245,6 +1252,18 @@ impl VerifiedState {
         now: u64,
     ) -> Result<SignedState> {
         self.revise(owner, now, |_| Ok(()))
+    }
+
+    pub fn set_release_channel(
+        &self,
+        signer: &(impl peer::ConfigurationSigner + ?Sized),
+        channel: gent_protocol::ReleaseChannel,
+        now: u64,
+    ) -> Result<SignedState> {
+        self.revise(signer, now, |state| {
+            state.release_channel = channel;
+            Ok(())
+        })
     }
 
     pub fn set_policy(

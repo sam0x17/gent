@@ -61,7 +61,7 @@ def main():
                 ["git", "-C", str(repo), *argv], stderr=subprocess.DEVNULL, text=True
             ).strip()
 
-        git("init", "-q")
+        git("init", "-q", "--initial-branch=fixture")
         for setting in ("user.name", "user.email"):
             git(
                 "config",
@@ -92,7 +92,8 @@ def main():
         git("add", ".")
         git("commit", "-qm", "Updater proof broken fixture")
         broken = git("rev-parse", "HEAD")
-        git("tag", "stable", a)
+        git("tag", "-a", "stable", a, "-m", "Annotated stable fixture")
+        git("tag", "beta", b)  # Must never satisfy the beta branch lookup.
         env = dict(
             os.environ,
             GENT_TEST_UPDATE_ROOT=str(install),
@@ -148,8 +149,35 @@ def main():
         def tag(commit):
             git("tag", "-f", "stable", commit)
 
+        def beta(commit):
+            git("update-ref", "refs/heads/beta", commit)
+
+        def channel(name):
+            cli("cluster", "channel", "set", name)
+            assert json.loads(cli("cluster", "channel", "get").stdout)["channel"] == name
+            selected = json.loads(cli("update", "status").stdout)
+            assert selected["channel"] == name
+            assert selected["release_ref"] == (
+                "refs/heads/beta" if name == "beta" else "refs/tags/stable"
+            )
+
+        def applied(name):
+            return json.loads(cli("update", "status").stdout)["applied_channel"] == name
+
+        def check_release(name, commit):
+            result = json.loads(cli("update", "check").stdout)
+            assert result["channel"] == name and result["blessed_commit"] == commit
+            assert result["source"] == (
+                "github_beta_branch" if name == "beta" else "github_stable_tag"
+            )
+            return result["update_available"]
+
         def revision():
             return json.loads(cli("version").stdout)["commit"]
+
+        def running(commit):
+            build = json.loads(cli("update", "status").stdout).get("running")
+            return build is not None and build["commit"] == commit
 
         def phase(value):
             return status().get("phase") == value
@@ -239,6 +267,20 @@ def main():
             assert not (updates / "status.json").exists(), (
                 "disabled updater performed a check"
             )
+            assert not check_release("stable", a)
+            channel("beta")
+            assert cli("update", "check", check=False).returncode != 0
+            assert cli("update", "install", check=False).returncode != 0
+            unchanged()
+            beta(a)
+            wait(lambda: applied("beta"), "same-SHA beta selection while disabled")
+            beta(b)
+            time.sleep(5)
+            assert check_release("beta", b) and applied("beta")
+            unchanged()
+            channel("stable")
+            wait(lambda: applied("stable"), "same-SHA return to stable")
+            print("PASS paused same-SHA transitions are recorded and later beta moves stay pinned", flush=True)
             cli("update", "enable")
             wait(lambda: phase("current"), "current version check")
             assert not (updates / "build.log").exists(), "current version invoked cargo"
@@ -272,6 +314,40 @@ def main():
             unchanged()
             print("PASS moved stable tag prevents stale publication", flush=True)
             wait(lambda: phase("current"), "old stable check")
+            channel("beta")
+            wait(lambda: phase("building"), "beta build B before branch move")
+            beta(a)
+            wait(
+                lambda: phase("current") and status()["blessed_commit"] == a and applied("beta"),
+                "beta moved during build",
+            )
+            unchanged()
+            # Keep both refs at B to prove the channel is checked independently
+            # of its SHA. Disable automatic checks and start a manual build.
+            cli("update", "disable")
+            # An ordinary check that already read enabled=true must finish
+            # before moving either ref. Then only the manual writer can build.
+            with (updates / "update.lock").open("r+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                assert applied("beta")
+                beta(b)
+                tag(b)
+            with subprocess.Popen(
+                base + ["--json", "update", "install"], env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            ) as manual:
+                wait(lambda: phase("building"), "manual beta build before channel switch")
+                channel("stable")
+                tag(a)
+                _, message = manual.communicate(timeout=600)
+                assert manual.returncode != 0, "manual install accepted the previous channel"
+                assert "channel changed" in message, (
+                    "unexpected manual install failure", status().get("phase"),
+                    "build failed" in message, "subprocess failed" in message,
+                )
+            wait(lambda: applied("stable"), "reconcile switch back during the build")
+            unchanged()
+            print("PASS beta branch moves and channel switches prevent stale publication", flush=True)
             for name in ("sender", "receiver"):
                 client = Client(
                     base
@@ -295,8 +371,8 @@ def main():
                 ],
             }
             sent = sender.call("gent_send_non_blocking", attempt)[0]
-            tag(b)
-            wait(lambda: phase("building"), "successful build B")
+            channel("beta")
+            wait(lambda: phase("building"), "automatic beta switch B while ordinary checks are disabled")
             during = []
             build_deadline = time.monotonic() + 600
             while phase("building"):
@@ -395,7 +471,13 @@ def main():
             assert receiver.call("gent_inbox")[0] == inbox
             print("PASS startup lock contention preserves serving and completes activation", flush=True)
 
-            tag(c)
+            assert applied("beta")
+            beta(c)
+            time.sleep(5)
+            assert revision() == b and phase("current") and check_release("beta", c)
+            assert json.loads(cli("update", "status").stdout)["enabled"] is False
+            print("PASS paused node installs beta once and stays on it across a subsequent branch move", flush=True)
+            cli("update", "enable")
             wait(lambda: phase("rolled_back"), "startup rollback")
             assert revision() == b and daemon.pid == pid
             wait(
@@ -407,7 +489,7 @@ def main():
             assert receiver.call("gent_inbox")[0] == inbox
             retry = cli("update", "install")
             assert json.loads(retry.stdout)["state"] == "updated"
-            wait(lambda: phase("rolled_back"), "manual retry rollback")
+            wait(lambda: phase("rolled_back") and running(b), "manual retry rollback and daemon readiness")
             assert revision() == b
             assert notifications() == [b], "failed updates must not notify"
             print(
@@ -427,7 +509,7 @@ def main():
             before = json.loads(cli("update", "status").stdout)
             assert before["cli"]["commit"] == before["installed"]["commit"] == a
             assert before["running"]["commit"] == b
-            tag(d)
+            beta(d)
             wait(
                 lambda: revision() == d and phase("current")
                 and not (updates / "pending.json").exists(),
@@ -437,6 +519,46 @@ def main():
             assert json.loads(cli("update", "status").stdout)["running"]["commit"] == d
             assert receiver.call("gent_inbox")[0] == inbox
             print("PASS differing CLI/daemon revisions activate and report the real running build", flush=True)
+
+            cli("update", "disable")
+            # Persist the signed change, then stop before the updater can
+            # acquire its writer lock. Startup must catch up while paused.
+            with (updates / "update.lock").open("r+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                channel("stable")
+                assert applied("beta") and check_release("stable", a)
+                assert json.loads(cli("update", "status").stdout)["update"]["blessed_commit"] == d
+                daemon.terminate()
+                daemon.wait(timeout=15)
+            with (root / "daemon.log").open("a") as log:
+                daemon = subprocess.Popen(base + ["daemon", "run"], env=env, stdout=log, stderr=log)
+            wait(
+                lambda: revision() == a and phase("current")
+                and not (updates / "pending.json").exists(),
+                "downgrade to stable",
+            )
+            assert json.loads(cli("update", "status").stdout)["running"]["commit"] == a
+            assert receiver.call("gent_inbox")[0] == inbox
+            assert not check_release("stable", a)
+            assert applied("stable")
+            tag(b)
+            time.sleep(5)
+            assert revision() == a and check_release("stable", b)
+            cli("update", "enable")
+            wait(lambda: revision() == b and phase("current")
+                 and not (updates / "pending.json").exists(), "resume stable updates")
+            print("PASS offline catch-up to older stable while paused, pin after activation, and resume", flush=True)
+
+            cli("update", "disable")
+            shutil.copy2(initial_binary, replacement)
+            replacement.replace(binary)
+            beta(a)
+            channel("beta")
+            wait(
+                lambda: applied("beta") and running(a),
+                "activate manually installed beta SHA already on disk",
+            )
+            print("PASS matching disk SHA still activates a different loaded daemon", flush=True)
         finally:
             for client in clients:
                 client.close()

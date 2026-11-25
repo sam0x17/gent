@@ -1,4 +1,5 @@
 mod cache;
+mod channel;
 mod coordination;
 mod install;
 mod integrations;
@@ -8,12 +9,13 @@ mod process;
 mod release;
 mod status;
 mod workflow;
-use workflow::apply;
+use workflow::{Trigger, apply};
 
 use crate::build_info::{self, Build};
 use anyhow::{Context, Result, ensure};
 use gent_daemon::config;
 use install::Installation;
+use release::ReleaseRef;
 use serde_json::{Value, json};
 use std::{
     path::Path,
@@ -24,15 +26,15 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(300);
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Command {
-    /// Check stable and install a different revision now, even if auto-update is disabled.
+    /// Check the selected channel and install a different revision now, even if auto-update is disabled.
     Install,
-    /// Resolve stable and compare it with the binary on disk, without installing.
+    /// Resolve the selected channel and compare it with the binary on disk, without installing.
     Check,
     /// Show local update state and the installed revision without network access.
     Status,
     /// Enable automatic checks every five minutes on this node.
     Enable,
-    /// Disable automatic checks and prevent an in-progress build from being published.
+    /// Pause routine updates on this node. Signed cluster channel switches still apply.
     Disable,
 }
 
@@ -52,24 +54,25 @@ fn eligible(build: &Build) -> bool {
         && build.test_build == cfg!(feature = "test-updates")
 }
 
-async fn check(installation: &Installation) -> Result<Value> {
-    compare_stable(install::inspect(&installation.binary).await?).await
+async fn check(home: &Path, installation: &Installation) -> Result<Value> {
+    compare_release(home, install::inspect(&installation.binary).await?).await
 }
 
-pub(crate) async fn desktop_check() -> Result<Value> {
+pub(crate) async fn desktop_check(home: &Path) -> Result<Value> {
     match Installation::discover()? {
-        Some(installation) => check(&installation).await,
-        None => compare_stable(build_info::current()).await,
+        Some(installation) => check(home, &installation).await,
+        None => compare_release(home, build_info::current()).await,
     }
 }
 
-async fn compare_stable(installed: Build) -> Result<Value> {
-    let _progress = crate::ui::Progress::start("Checking GitHub stable");
-    let blessed = release::resolve().await?;
+async fn compare_release(home: &Path, installed: Build) -> Result<Value> {
+    let channel = ReleaseRef::current(home)?;
+    let _progress = crate::ui::Progress::start(&format!("Checking GitHub {}", channel.channel));
+    let blessed = channel.resolve().await?;
     Ok(
         json!({"installed":installed,"blessed_commit":blessed.commit,
         "update_available": installed.commit != blessed.commit || installed.dirty,
-        "repository":blessed.repository,"source":"github_stable_tag"}),
+        "repository":blessed.repository,"channel":channel.channel,"release_ref":channel.reference,"source":channel.source}),
     )
 }
 
@@ -85,13 +88,14 @@ pub(crate) async fn execute(home: &Path, command: Command) -> Result<Value> {
             matches!(command, Command::Status),
             "automatic installation requires gent in CARGO_HOME/bin; install it with cargo first"
         );
-        return Ok(
+        return Ok(status::with_channel(
+            home,
             json!({"state":"unsupported_installation","cli":build_info::current(),"enabled":config::load(home)?.updates()?.enabled,"check_interval_seconds":300}),
-        );
+        ));
     };
     match command {
-        Command::Check => check(&installation).await,
-        Command::Install => apply(home, &installation, false).await,
+        Command::Check => check(home, &installation).await,
+        Command::Install => apply(home, &installation, Trigger::Manual).await,
         Command::Status => status::report(home, &installation).await,
         Command::Enable | Command::Disable => unreachable!(),
     }
@@ -154,20 +158,46 @@ async fn monitor(home: &Path, installation: &Installation) {
         .unwrap_or(interval);
     let mut checks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
     checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut channels = tokio::time::interval(interval.min(Duration::from_secs(10)));
+    channels.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut attempted = None;
     let mut activation = tokio::time::interval(Duration::from_secs(1));
     activation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = checks.tick() => {
                 integrations::refresh(home, installation).await;
-                match config::load(home).and_then(|cfg| cfg.updates()) {
-                    Ok(settings) if settings.enabled => {
-                        if let Err(error) = apply(home, installation, true).await {
-                            eprintln!("Gent automatic update pending: {error}");
+                match apply(home, installation, Trigger::Scheduled).await {
+                    Ok(result) if result["state"] == "restart_for_channel" => return,
+                    Err(error) => eprintln!("Gent automatic update pending: {error}"),
+                    _ => {}
+                }
+            }
+            _ = channels.tick() => {
+                // This authenticated local hint avoids Git and reopening the
+                // authority database each time. The writer independently reads
+                // the signed selection under its lock, including at publication.
+                if let Ok(status) = crate::owner(home, gent_protocol::OwnerOp::Status).await
+                    && let Some(channel) = status["release_channel"].as_str()
+                    && let Ok(channel) = channel.parse::<gent_protocol::ReleaseChannel>()
+                {
+                    if installation.applied_channel(home).ok() == Some(channel) {
+                        attempted = None;
+                        continue;
+                    }
+                    if attempted == Some(channel) {
+                        continue;
+                    }
+                    match apply(home, installation, Trigger::ChannelChange).await {
+                        Ok(result) if result["state"] == "restart_for_channel" => return,
+                        Ok(result) if result["state"] == "already_running" => {}
+                        result => {
+                            attempted = Some(channel);
+                            if let Err(error) = result {
+                                eprintln!("Gent release channel switch pending: {error}");
+                            }
                         }
                     }
-                    Ok(_) => {}
-                    Err(_) => eprintln!("Gent automatic updates paused: invalid local configuration"),
                 }
             }
             _ = activation.tick() => {

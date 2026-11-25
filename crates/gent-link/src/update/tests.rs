@@ -1,6 +1,13 @@
 use super::*;
 use std::{fs, os::unix::fs::PermissionsExt};
 
+fn stable(automatic: bool) -> install::Source {
+    install::Source {
+        channel: gent_protocol::ReleaseChannel::Stable,
+        automatic,
+    }
+}
+
 fn build(commit: char) -> Build {
     Build {
         commit: commit.to_string().repeat(40),
@@ -43,7 +50,7 @@ impl Fixture {
                 build('b'),
                 &self.candidate,
                 &install::hash(&self.installation.binary).unwrap(),
-                true,
+                stable(true),
             )
             .unwrap();
     }
@@ -54,23 +61,65 @@ fn stable_tag_resolution_supports_lightweight_and_annotated_tags_without_other_r
     let a = "a".repeat(40);
     let b = "b".repeat(40);
     assert_eq!(
-        release::parse(format!("{a}\trefs/tags/stable\n").as_bytes()).unwrap(),
+        release::STABLE
+            .parse(format!("{a}\trefs/tags/stable\n").as_bytes())
+            .unwrap(),
         a
     );
     assert_eq!(
-        release::parse(format!("{a}\trefs/tags/stable\n{b}\trefs/tags/stable^{{}}\n").as_bytes())
+        release::STABLE
+            .parse(format!("{a}\trefs/tags/stable\n{b}\trefs/tags/stable^{{}}\n").as_bytes())
             .unwrap(),
         b
     );
     for bytes in [
         String::new(),
         format!("{a}\trefs/heads/main\n"),
+        format!("{a}\trefs/heads/beta\n"),
         "oops\trefs/tags/stable\n".into(),
         format!("{a}\trefs/tags/stable^{{}}\n"),
         format!("{a}\trefs/tags/stable\n{b}\trefs/tags/stable\n"),
     ] {
-        assert!(release::parse(bytes.as_bytes()).is_err());
+        assert!(release::STABLE.parse(bytes.as_bytes()).is_err());
     }
+}
+
+#[test]
+fn beta_resolution_requires_one_exact_branch() {
+    let a = "a".repeat(40);
+    let b = "b".repeat(40);
+    assert_eq!(
+        release::BETA
+            .parse(format!("{a}\trefs/heads/beta\n").as_bytes())
+            .unwrap(),
+        a
+    );
+    for bytes in [
+        String::new(),
+        format!("{a}\trefs/tags/stable\n"),
+        format!("{a}\trefs/tags/beta\n"),
+        format!("{a}\trefs/heads/beta\n{b}\trefs/heads/beta^{{}}\n"),
+        format!("{a}\trefs/heads/beta\n{b}\trefs/heads/beta\n"),
+        "abcd\trefs/heads/beta\n".into(),
+    ] {
+        assert!(release::BETA.parse(bytes.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn status_reports_an_uninitialized_home_as_stable_and_preserves_errors_for_invalid_authority() {
+    let f = Fixture::new();
+    let home = f.root.path();
+    let legacy = status::with_channel(home, json!({}));
+    assert_eq!(legacy["channel"], "stable");
+    assert_eq!(legacy["release_ref"], "refs/tags/stable");
+
+    config::write_private(&home.join("state.sqlite3"), b"corrupt").unwrap();
+    assert!(ReleaseRef::current(home).is_err());
+    let status = status::with_channel(home, json!({"activation_pending": true}));
+    assert_eq!(status["activation_pending"], true);
+    assert!(status["channel"].is_null() && status["release_ref"].is_null());
+    assert!(status["channel_error"].is_string());
 }
 
 #[test]
@@ -123,7 +172,7 @@ fn cargo_hard_links_are_detached_before_verification_and_publication() {
             build('b'),
             &snapshot,
             &install::hash(&f.installation.binary).unwrap(),
-            false,
+            stable(false),
         )
         .unwrap();
     assert_eq!(fs::read(&f.installation.binary).unwrap(), b"new executable");
@@ -135,6 +184,61 @@ fn cargo_hard_links_are_detached_before_verification_and_publication() {
     fs::set_permissions(&f.candidate, fs::Permissions::from_mode(0o777)).unwrap();
     assert!(install::snapshot_artifact(&f.candidate).is_err());
     assert_eq!(install::hash(&snapshot).unwrap(), expected);
+}
+
+#[test]
+fn channel_receipt_survives_publish_recovery_and_rollback_without_changing_v1_records() {
+    use gent_protocol::ReleaseChannel::{Beta, Stable};
+    for outcome in ["healthy", "rollback", "interrupted", "legacy_ack"] {
+        let f = Fixture::new();
+        let home = f.root.path();
+        let other = tempfile::tempdir().unwrap();
+        assert_eq!(f.installation.applied_channel(home).unwrap(), Stable);
+        f.installation
+            .publish(
+                home,
+                build('a'),
+                build('b'),
+                &f.candidate,
+                &install::hash(&f.installation.binary).unwrap(),
+                install::Source {
+                    channel: Beta,
+                    automatic: true,
+                },
+            )
+            .unwrap();
+        let pending = f.installation.pending().unwrap().unwrap();
+        assert_eq!(f.installation.applied_channel(home).unwrap(), Stable);
+        match outcome {
+            "healthy" => {
+                f.installation.healthy(home, &build('b')).unwrap();
+            }
+            "rollback" => f.installation.rollback(&pending, "failed").unwrap(),
+            "interrupted" => {
+                fs::copy(
+                    f.installation.directory.join("previous"),
+                    &f.installation.binary,
+                )
+                .unwrap();
+                f.installation.interrupted_publication(&pending).unwrap();
+            }
+            _ => fs::remove_file(f.installation.directory.join("pending.json")).unwrap(),
+        }
+        let expected = if matches!(outcome, "healthy" | "legacy_ack") {
+            Beta
+        } else {
+            Stable
+        };
+        assert_eq!(
+            f.installation.applied_channel(home).unwrap(),
+            expected,
+            "{outcome}"
+        );
+        assert_eq!(
+            f.installation.applied_channel(other.path()).unwrap(),
+            Stable
+        );
+    }
 }
 
 #[test]
@@ -178,7 +282,7 @@ fn publication_and_rollback_refuse_external_replacements_and_corrupt_backups() {
                 build('b'),
                 &f.candidate,
                 &expected,
-                true,
+                stable(true),
             )
             .is_err()
     );
@@ -204,7 +308,7 @@ fn startup_journal_marks_readiness_or_restores_previous_after_an_interrupted_sta
                 build('b'),
                 &f.candidate,
                 &install::hash(&f.installation.binary).unwrap(),
-                true,
+                stable(true),
             )
             .unwrap();
         assert!(
@@ -254,6 +358,14 @@ fn activation_accepts_a_daemon_older_than_the_previously_installed_binary() {
     assert!(!f.installation.needs_restart(f.root.path()).unwrap());
     drop(lock);
     let mut pending = f.installation.pending().unwrap().unwrap();
+    // Returning to the running channel after an independent disk install must
+    // also activate the verified binary and finish the journal.
+    let running = build_info::current();
+    if build_info::valid_commit(&running.commit) {
+        pending.new = running;
+        f.installation.write("pending.json", &pending).unwrap();
+        assert!(f.installation.needs_restart(f.root.path()).unwrap());
+    }
     pending.starting = true;
     f.installation.write("pending.json", &pending).unwrap();
     assert!(!f.installation.needs_restart(f.root.path()).unwrap());
@@ -292,20 +404,7 @@ fn update_lock_and_binary_validation_reject_competing_writers_and_unsafe_paths()
     let lock = f.installation.lock().unwrap();
     assert!(f.installation.lock().is_err());
     drop(lock);
-    // A concurrently spawning child can retain the inherited descriptor until
-    // exec closes it, even after this thread drops its own descriptor.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(lock) = f.installation.lock() {
-            drop(lock);
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "lock remained held after release"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    assert!(f.installation.lock().is_ok());
     let link = f.root.path().join("link");
     symlink(&f.installation.binary, &link).unwrap();
     assert!(install::hash(&link).is_err());
@@ -339,13 +438,17 @@ async fn manual_update_waits_for_publication_while_scheduled_checks_skip_it() {
         )
         .unwrap();
     assert_eq!(
-        workflow::apply(f.root.path(), &f.installation, true)
+        workflow::apply(f.root.path(), &f.installation, Trigger::Scheduled)
             .await
             .unwrap()["state"],
         "already_running"
     );
     assert_eq!(f.installation.status().unwrap().phase, "building");
-    let mut manual = Box::pin(workflow::apply(f.root.path(), &f.installation, false));
+    let mut manual = Box::pin(workflow::apply(
+        f.root.path(),
+        &f.installation,
+        Trigger::Manual,
+    ));
     assert!(
         tokio::time::timeout(Duration::from_millis(50), &mut manual)
             .await
@@ -372,7 +475,11 @@ async fn cancelling_a_waiter_preserves_the_updater_and_invalid_locks_fail_immedi
     use std::os::unix::fs::symlink;
     let f = Fixture::new();
     let lock = f.installation.lock().unwrap();
-    let mut waiter = Box::pin(workflow::apply(f.root.path(), &f.installation, false));
+    let mut waiter = Box::pin(workflow::apply(
+        f.root.path(),
+        &f.installation,
+        Trigger::Manual,
+    ));
     assert!(
         tokio::time::timeout(Duration::from_millis(50), &mut waiter)
             .await
@@ -390,10 +497,10 @@ async fn cancelling_a_waiter_preserves_the_updater_and_invalid_locks_fail_immedi
         invalid.installation.directory.join("update.lock"),
     )
     .unwrap();
-    for automatic in [false, true] {
+    for trigger in [Trigger::Manual, Trigger::Scheduled, Trigger::ChannelChange] {
         let error = tokio::time::timeout(
             Duration::from_secs(1),
-            workflow::apply(invalid.root.path(), &invalid.installation, automatic),
+            workflow::apply(invalid.root.path(), &invalid.installation, trigger),
         )
         .await
         .unwrap()
@@ -456,8 +563,8 @@ async fn failed_build_reports_failure_and_replaces_log_symlink_without_touching_
     assert!(!fs::symlink_metadata(log).unwrap().file_type().is_symlink());
 }
 
-#[test]
-fn publication_interrupted_before_swap_retries_without_suppressing_the_revision() {
+#[tokio::test]
+async fn publication_interrupted_before_swap_retries_without_suppressing_the_revision() {
     let f = Fixture::new();
     f.publish();
     let pending = f.installation.pending().unwrap().unwrap();
@@ -466,6 +573,12 @@ fn publication_interrupted_before_swap_retries_without_suppressing_the_revision(
         &f.installation.binary,
     )
     .unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    let result = workflow::apply(foreign.path(), &f.installation, Trigger::ChannelChange)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "awaiting_activation");
+    assert!(f.installation.pending().unwrap().is_some());
     f.installation.interrupted_publication(&pending).unwrap();
     assert!(f.installation.pending().unwrap().is_none());
     assert!(f.installation.status().unwrap().failed_commit.is_none());
@@ -483,7 +596,7 @@ fn manual_activation_is_healthy_without_a_desktop_notification() {
             build('b'),
             &f.candidate,
             &install::hash(&f.installation.binary).unwrap(),
-            false,
+            stable(false),
         )
         .unwrap();
     assert!(

@@ -93,17 +93,20 @@ impl Action {
     async fn run(self, home: &Path) -> Result<Value> {
         let notice = match self {
             Self::CheckUpdate => {
-                let result = update::desktop_check().await?;
-                let stable = result["blessed_commit"]
+                let result = update::desktop_check(home).await?;
+                let channel = result["channel"]
                     .as_str()
-                    .context("missing stable revision")?;
+                    .context("missing release channel")?;
+                let commit = result["blessed_commit"]
+                    .as_str()
+                    .context("missing release revision")?;
                 if result["update_available"] == true {
                     format!(
-                        "Update available · stable {}",
-                        &stable[..stable.len().min(12)]
+                        "Update available · {channel} {}",
+                        &commit[..commit.len().min(12)]
                     )
                 } else {
-                    "You’re running the current stable release.".into()
+                    format!("You’re running the current {channel} release.")
                 }
             }
             Self::SignIn => {

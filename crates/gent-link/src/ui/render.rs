@@ -133,6 +133,14 @@ pub(super) fn response(title: &str, value: &Value) -> String {
 
 fn updates(out: &mut String, value: &Value) {
     let mut rows = Vec::new();
+    if let Some(channel) = value["channel"].as_str() {
+        rows.push(("Channel", visible(channel)));
+    }
+    if let Some(applied) = value["applied_channel"].as_str()
+        && value["channel"] != applied
+    {
+        rows.push(("Applied channel", visible(applied)));
+    }
     if let Some(enabled) = value["enabled"].as_bool() {
         rows.push((
             "Automatic",
@@ -160,11 +168,10 @@ fn updates(out: &mut String, value: &Value) {
             ));
         }
     }
-    if let Some(commit) = value["blessed_commit"]
-        .as_str()
-        .or_else(|| value["update"]["blessed_commit"].as_str())
-    {
-        rows.push(("Stable", visible(commit)));
+    if let Some(commit) = value["blessed_commit"].as_str() {
+        rows.push(("Release revision", visible(commit)));
+    } else if let Some(commit) = value["update"]["blessed_commit"].as_str() {
+        rows.push(("Last resolved", visible(commit)));
     }
     if value.get("state").is_some() || value.get("update").is_some() {
         let state = value["state"]
@@ -209,7 +216,13 @@ fn updates(out: &mut String, value: &Value) {
             super::paint(&format!("{label:<18}"), "2")
         );
     }
-    for key in ["error", "next", "activation"] {
+    for key in [
+        "error",
+        "channel_error",
+        "applied_channel_error",
+        "next",
+        "activation",
+    ] {
         if let Some(text) = value[key]
             .as_str()
             .or_else(|| value["update"][key].as_str())

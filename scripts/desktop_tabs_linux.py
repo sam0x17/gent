@@ -522,6 +522,13 @@ def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     toggle.queryAction().doAction(0)
     wait_for(lambda: json.loads(cli("update", "status", "--json").stdout)["enabled"] is False,
              "persisted auto-update opt-out")
+    channel = get("Cluster release channel", "combo box")
+    for index, expected in ((1, "beta"), (0, "stable")):
+        wait_for(lambda: channel.getState().contains(pyatspi.STATE_SENSITIVE), "writable cluster channel")
+        assert channel.querySelection().selectChild(index)
+        wait_for(lambda: json.loads(cli("--json", "cluster", "channel", "get").stdout)["channel"] == expected,
+                 "accepted cluster channel " + expected)
+        assert not json.loads(cli("--json", "update", "status").stdout)["enabled"]
     click("Edit full configuration…")
     editor = wait_for(lambda: pyatspi.findDescendant(desktop, lambda c: c.getRoleName() == "text"
                       and c.getState().contains(pyatspi.STATE_SHOWING)
