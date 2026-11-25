@@ -369,6 +369,25 @@ async fn an_existing_human_stop_or_newer_goal_never_reaches_the_claim_recheck() 
     Ok(())
 }
 
+#[test]
+fn output_limit_must_be_the_error_on_a_failed_codex_turn() {
+    use crate::wake::codex::babysit::terminal_failure;
+
+    let message = "Incomplete response returned, reason: max_output_tokens";
+    let mut turn = json!({"status":"failed","error":{"codexErrorInfo":"other","message":message}});
+    assert_eq!(
+        terminal_failure(&turn),
+        Some(gent_protocol::notifications::Failure::Capacity)
+    );
+    for status in ["completed", "interrupted", "inProgress"] {
+        turn["status"] = json!(status);
+        assert_eq!(terminal_failure(&turn), None);
+    }
+    turn = json!({"status":"failed","error":{"codexErrorInfo":"other","message":"unrelated"},
+        "items":[{"type":"agentMessage","text":message}]});
+    assert_eq!(terminal_failure(&turn), None);
+}
+
 mod native;
 mod ordinary;
 mod rollout;
