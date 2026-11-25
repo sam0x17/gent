@@ -66,11 +66,11 @@ impl Server {
             if stream.peer_cred()?.uid() != rustix::process::geteuid().as_raw() {
                 continue;
             }
-            let _ = tokio::time::timeout(
-                Duration::from_millis(200),
-                stream.write_all(&serde_json::to_vec(&status())?),
-            )
-            .await;
+            let mut value = status();
+            value["build"] = serde_json::to_value(crate::build_info::current())?;
+            let bytes = serde_json::to_vec(&value)?;
+            let _ =
+                tokio::time::timeout(Duration::from_millis(200), stream.write_all(&bytes)).await;
         }
     }
 }
@@ -87,8 +87,9 @@ pub(crate) async fn probe(home: &Path) -> Result<Value> {
     let path = home.join("gateway/control.sock");
     metadata(&path)?;
     let stream = UnixStream::connect(path).await?;
+    let peer = stream.peer_cred()?;
     ensure!(
-        stream.peer_cred()?.uid() == rustix::process::geteuid().as_raw(),
+        peer.uid() == rustix::process::geteuid().as_raw(),
         "gateway process belongs to another user"
     );
     let mut bytes = Vec::new();
@@ -99,6 +100,9 @@ pub(crate) async fn probe(home: &Path) -> Result<Value> {
     ensure!(
         value["version"] == 1
             && value["process_id"].as_u64().is_some_and(|pid| pid > 0)
+            && peer
+                .pid()
+                .is_none_or(|pid| value["process_id"].as_i64() == Some(i64::from(pid)))
             && valid_transport(&value)
             && value["origin"].as_str().is_some(),
         "invalid gateway readiness response"
@@ -142,6 +146,7 @@ mod tests {
         });
         let value = probe(root.path()).await.unwrap();
         assert_eq!(value["connected"], true);
+        assert_eq!(value["build"], json!(crate::build_info::current()));
         let mut invalid = value;
         invalid["endpoint"] = json!("https://other.example/mcp");
         assert!(!valid_transport(&invalid));

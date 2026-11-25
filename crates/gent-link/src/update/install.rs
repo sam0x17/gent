@@ -167,7 +167,7 @@ fn replace(source: &Path, destination: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn inspect(binary: &Path) -> Result<Build> {
+pub(crate) async fn inspect(binary: &Path) -> Result<Build> {
     owned(binary)?;
     let bytes = super::process::capture(
         tokio::process::Command::new(binary).args(["--json", "version"]),

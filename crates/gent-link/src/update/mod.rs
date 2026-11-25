@@ -2,6 +2,7 @@ mod cache;
 mod channel;
 mod coordination;
 mod install;
+pub(crate) use install::inspect as installed_build;
 mod integrations;
 mod notification;
 mod priority;

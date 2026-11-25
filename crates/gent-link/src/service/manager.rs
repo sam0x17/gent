@@ -24,9 +24,20 @@ pub struct State {
     #[serde(skip)]
     pub need_reload: bool,
     #[serde(skip)]
-    pub(super) launch_agent_path: Option<std::path::PathBuf>,
+    has_drop_ins: bool,
+    #[serde(skip)]
+    pub(super) definition_path: Option<std::path::PathBuf>,
 }
 impl State {
+    pub fn owned_definition(&self, path: &Path) -> bool {
+        self.available
+            && self.loaded
+            && !self.need_reload
+            && !self.has_drop_ins
+            && self.domains.len() <= 1
+            && self.definition_path.as_deref() == Some(path)
+    }
+
     /// Rebootstrap on a plain start only for a single, stopped job known to
     /// have loaded this plist in the target domain.
     pub fn stopped_launch_agent(&self, path: &Path) -> bool {
@@ -35,7 +46,7 @@ impl State {
             && self.pid.is_none()
             && self.domains.len() == 1
             && self.domain.as_ref() == self.domains.first()
-            && self.launch_agent_path.as_deref() == Some(path)
+            && self.definition_path.as_deref() == Some(path)
     }
 }
 pub async fn output(program: &str, args: &[&str], quiet: bool) -> Result<Output> {
@@ -102,7 +113,7 @@ impl Manager {
                     probe.status.success(),
                     "systemd user manager is unavailable; use a user login session or gent daemon run"
                 );
-                let result=output("/usr/bin/systemctl",&["--user","show",&self.unit(),"--no-pager","--property=LoadState,ActiveState,SubState,MainPID,UnitFileState,ExecMainStatus,NeedDaemonReload"],false).await?;
+                let result=output("/usr/bin/systemctl",&["--user","show",&self.unit(),"--no-pager","--property=LoadState,ActiveState,SubState,MainPID,UnitFileState,ExecMainStatus,NeedDaemonReload,FragmentPath,DropInPaths"],false).await?;
                 let text = String::from_utf8(result.stdout)?;
                 ensure!(
                     text.lines().any(|s| s.starts_with("LoadState=")),
@@ -132,7 +143,7 @@ impl Manager {
                     if result.status.success() {
                         let parsed = parse_launchd(&String::from_utf8(result.stdout)?);
                         state.domains.push(domain.clone());
-                        state.launch_agent_path = parsed.launch_agent_path;
+                        state.definition_path = parsed.definition_path;
                         state.loaded = true;
                         if parsed.pid.is_some() || state.pid.is_none() {
                             state.pid = parsed.pid;
@@ -258,6 +269,49 @@ impl Manager {
         }
         Ok(())
     }
+    /// Send TERM without starting a manager stop deadline. Older hosted gateways
+    /// can have an accepted request longer than their ten-second stop timeout.
+    pub async fn drain_gateway(&self, state: &State) -> Result<()> {
+        match self.platform {
+            Platform::Systemd => {
+                run(
+                    "/usr/bin/systemctl",
+                    &[
+                        "--user",
+                        "kill",
+                        "--kill-who=main",
+                        "--signal=TERM",
+                        &self.unit(),
+                    ],
+                )
+                .await
+            }
+            Platform::Launchd => {
+                let domain = state.domain.as_deref().context("missing gateway domain")?;
+                run(
+                    "/bin/launchctl",
+                    &["kill", "SIGTERM", &format!("{domain}/{}", self.label)],
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn start_loaded(&self, state: &State) -> Result<()> {
+        match self.platform {
+            Platform::Systemd => {
+                run("/usr/bin/systemctl", &["--user", "start", &self.unit()]).await
+            }
+            Platform::Launchd => {
+                let domain = state.domain.as_deref().context("missing gateway domain")?;
+                run(
+                    "/bin/launchctl",
+                    &["kickstart", &format!("{domain}/{}", self.label)],
+                )
+                .await
+            }
+        }
+    }
     pub async fn stop(&self, before: &State) -> Result<()> {
         match self.platform {
             Platform::Systemd => {
@@ -347,6 +401,8 @@ fn parse_systemd(text: &str) -> State {
     State {
         available: true,
         need_reload: value("NeedDaemonReload") == "yes",
+        has_drop_ins: !value("DropInPaths").is_empty(),
+        definition_path: values.get("FragmentPath").map(std::path::PathBuf::from),
         loaded: value("LoadState") == "loaded",
         running: value("ActiveState") == "active" && pid.is_some(),
         enabled: matches!(value("UnitFileState"), "enabled" | "enabled-runtime"),
@@ -371,7 +427,7 @@ fn parse_launchd(text: &str) -> State {
         if let Some((key, value)) = line.trim().split_once(" = ") {
             match key {
                 "state" => state.state = value.into(),
-                "path" => state.launch_agent_path = Some(value.into()),
+                "path" => state.definition_path = Some(value.into()),
                 "pid" => state.pid = value.parse().ok(),
                 "last exit code" => state.last_exit = value.parse().ok(),
                 _ => {}

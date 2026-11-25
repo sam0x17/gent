@@ -1,4 +1,5 @@
 //! Per-user service lifecycle. No account/model credentials enter service files.
+pub(crate) mod adoption;
 mod command;
 mod display;
 mod files;
