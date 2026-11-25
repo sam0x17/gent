@@ -132,6 +132,15 @@ reset when the daemon starts. Include the WebSocket and sweep bytes when
 comparing Cloudflare traffic. These process counters exclude TLS, address
 discovery and other services.
 
+To measure Stats traffic on a node, read `gent sync --json` twice and subtract
+the `wss_traffic.stats_sent_frame_bytes` and `stats_received_frame_bytes`
+values between readings. These are subsets of `sent_frame_bytes` and
+`received_frame_bytes`. They include encrypted Stats requests and receipts,
+including retries. The corresponding `stats_sent_frames` and
+`stats_received_frames` count frames. A listener restart resets these counters.
+For a cluster total, sum **sent** bytes across nodes. Adding received bytes too
+counts a delivered frame at both endpoints.
+
 Gent stages encrypted attachments in cloud storage before publishing their
 messages. A recipient with a reachable sender can fetch its missing chunks
 over a separate QUIC connection. It checks each chunk against the message's

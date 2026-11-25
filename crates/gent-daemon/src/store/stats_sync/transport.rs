@@ -24,7 +24,6 @@ pub(crate) struct StatsSend {
     pub peer: Uuid,
     pub wire: Vec<u8>,
     id: Uuid,
-    head: i64,
     poll: Option<Uuid>,
 }
 
@@ -58,7 +57,9 @@ impl Store {
             [at],
             |r| r.get(0),
         )?;
-        Ok(std::time::Duration::from_secs(seconds.min(COALESCE) as u64))
+        Ok(std::time::Duration::from_secs(
+            seconds.min(SHORT_RETRY) as u64
+        ))
     }
 
     pub(crate) fn next_stats_send(&self) -> Result<Option<StatsSend>> {
@@ -72,14 +73,14 @@ impl Store {
              LEFT JOIN wire_peers w ON w.peer=l.peer AND w.peer_key=l.peer_key
              LEFT JOIN stats_peers s ON s.peer=l.peer AND s.key=l.peer_key
              LEFT JOIN stats_deferred d ON d.peer=l.peer AND d.key=l.peer_key
-             LEFT JOIN stats_poll p ON ?6 AND p.peer=l.peer AND p.key=l.peer_key AND p.failed=0
-             WHERE (s.supported=1 OR w.version>=?5) AND (p.probe=1 OR COALESCE(s.attempt_at,0)<=?1 AND (
-               s.last_ad IS NULL OR s.last_ad<=?2 OR (s.advertised IS NOT (SELECT MAX(rev) FROM stats_history) AND s.last_ad<=?3)
-               OR s.round IS NOT NULL AND s.request_at<=?4
-               OR (d.due BETWEEN ?4 AND ?1 AND NOT EXISTS(SELECT 1 FROM stats_pending WHERE id=s.last_event))
+             LEFT JOIN stats_poll p ON ?5 AND p.peer=l.peer AND p.key=l.peer_key AND p.failed=0
+             WHERE (s.supported=1 OR w.version>=?4) AND (p.probe=1 OR COALESCE(s.attempt_at,0)<=?1 AND (
+               s.last_ad IS NULL OR s.last_ad<=?2
+               OR s.round IS NOT NULL AND s.request_at<=?3
+               OR (d.due BETWEEN ?3 AND ?1 AND NOT EXISTS(SELECT 1 FROM stats_pending WHERE id=s.last_event))
                OR EXISTS(SELECT 1 FROM stats_pending p WHERE p.peer=l.peer AND p.key=l.peer_key)))
              ORDER BY COALESCE(p.probe,0) DESC,s.failed_at IS NOT NULL, COALESCE(s.attempt_at,0),l.peer LIMIT 1",
-            params![now, now - HEARTBEAT, now - COALESCE, now - RETRY,
+            params![now, now - HEARTBEAT, now - RETRY,
                 crate::messages::wire::MESSAGE_DATES_VERSION, poll.is_some()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?;
@@ -91,7 +92,7 @@ impl Store {
         self.db.execute("INSERT OR IGNORE INTO stats_peers(peer,key) SELECT peer,peer_key FROM network_links WHERE peer=?1",[&peer])?;
         self.db.execute(
             "UPDATE stats_peers SET attempt_at=?2 WHERE peer=?1",
-            params![peer, now + COALESCE],
+            params![peer, now + SHORT_RETRY],
         )?;
         if probe {
             self.db
@@ -142,7 +143,6 @@ impl Store {
             None => (Uuid::new_v4(), Exchange::Hello),
         };
         let head = session.stats_head()?;
-        let generation = head.0;
         let wire = encrypted::stats::seal(
             &tx,
             &group,
@@ -158,7 +158,6 @@ impl Store {
             peer: Uuid::parse_str(&peer)?,
             wire,
             id,
-            head: generation,
             poll: poll.filter(|_| probe),
         }))
     }
@@ -210,14 +209,33 @@ impl Store {
         };
         // This reply advertises our head, too. An idle pair needs a single
         // round trip, regardless of which watch starts its heartbeat first.
-        tx.execute("UPDATE stats_peers SET last_ad=?2,advertised=?3,failed_at=NULL,backoff=0 WHERE peer=?1",
-            params![peer,at,ack.head.0])?;
+        tx.execute(
+            "UPDATE stats_peers SET last_ad=?2,failed_at=NULL,backoff=0 WHERE peer=?1",
+            params![peer, at],
+        )?;
         let wire = encrypted::stats::seal(&tx, &out, &serde_json::to_vec(&ack)?)?;
         self.record_stats_confirmation(&tx, &peer)?;
         tx.commit()?;
         self.check_stats_poll()?;
         self.sync_health.stats.tick.notify_one();
         Ok(wire)
+    }
+
+    /// A frame that never acquired the local socket writer can be retried
+    /// without recording a network failure or discarding its queued page.
+    pub(crate) fn defer_stats_send(&self, sent: &StatsSend) -> Result<()> {
+        let peer = sent.peer.to_string();
+        self.db.execute(
+            "UPDATE stats_peers SET attempt_at=?2 WHERE peer=?1 AND failed_at IS NULL",
+            params![peer, now()],
+        )?;
+        if let Some(poll) = sent.poll {
+            self.db.execute(
+                "UPDATE stats_poll SET probe=1 WHERE poll=?1 AND peer=?2 AND failed=0",
+                params![poll.to_string(), peer],
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn finish_stats_send(
@@ -255,8 +273,8 @@ impl Store {
             "DELETE FROM stats_pending WHERE peer=?1 AND id=?2",
             params![peer, sent.id.to_string()],
         )?;
-        tx.execute("UPDATE stats_peers SET last_ad=?2,advertised=?3,attempt_at=?2,supported=1,failed_at=NULL,backoff=0 WHERE peer=?1",
-            params![peer,at,sent.head])?;
+        tx.execute("UPDATE stats_peers SET last_ad=?2,attempt_at=?2,supported=1,failed_at=NULL,backoff=0 WHERE peer=?1",
+            params![peer,at])?;
         self.record_stats_confirmation(&tx, &peer)?;
         tx.commit()?;
         self.check_stats_poll()

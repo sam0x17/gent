@@ -10,7 +10,7 @@ pub(super) use refresh::Poll;
 mod transfer;
 mod transport;
 
-const COALESCE: i64 = 30;
+const SHORT_RETRY: i64 = 30;
 const HEARTBEAT: i64 = 3600;
 const FRESH: i64 = 2 * HEARTBEAT;
 const RETRY: i64 = 120;

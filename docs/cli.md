@@ -58,7 +58,7 @@ The **Refresh** line shows how many nodes confirmed their counters for this requ
 
 Each node shows when tracking began. On upgrade, Gent can include native sends and confirmed ordinary chat continuations that still have local records. Earlier goal resumes and earlier hosted sends have incomplete records and are excluded. Activity on an older daemon during a subsequent downgrade can also be missing.
 
-Nodes exchange encrypted counters over Gent's live relay WebSocket connection. Peers with matching counters can confirm them without sending the chat list again. After the initial sync, Gent batches background changes over 30 seconds and sends only updated totals, with up to 256 chat IDs per page. Concurrent refreshes share the same requests. Chat names, message text and filenames stay out of these reports.
+Each node counts accepted sends locally. Once peers have synced, new sends wait for the next hourly check-in or explicit refresh. Peers with matching counters can confirm them without resending the chat list. Changed totals travel over Gent's encrypted relay WebSocket connection, with up to 256 chat IDs per page. Concurrent refreshes share the same requests. Chat names, message text and filenames stay out of these reports.
 
 Idle peers check in hourly. Reports older than two hours are stale. Gent keeps the last complete figures when a peer goes offline or uses only the durable mailbox.
 

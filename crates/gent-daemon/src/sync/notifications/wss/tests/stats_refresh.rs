@@ -100,10 +100,43 @@ pub(crate) async fn exercise_stats_refresh(
     assert!(cached.get("refresh").is_none());
     assert_eq!(cached["outbound"]["messages"], 0);
 
+    // Keep an ordinary request open while the manual poll first reaches the
+    // writer. The Stats challenge must wait, then send on the same route, even
+    // if the ordinary caller abandons its receipt and no network event wakes it.
+    let route = aw.channel.lock().unwrap().clone().unwrap();
+    let (reply, ordinary) = oneshot::channel();
+    route
+        .channel
+        .try_send(Request {
+            peer: bid,
+            payload: b"ordinary fixture".to_vec(),
+            reply,
+        })
+        .unwrap();
+    let ordinary_frame = ac.next_send().await?;
+    assert_eq!(Frame::decode(&ordinary_frame)?.payload, b"ordinary fixture");
+    ac.sent(ordinary_frame.len());
+    assert_eq!(ac.route.metrics.snapshot()["stats_sent_frames"], 0);
     let workers = [
         tokio::spawn(aw.stats_worker(a.clone())),
         tokio::spawn(bw.stats_worker(b.clone())),
     ];
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while route.stats.capacity() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), ac.next_send())
+            .await
+            .is_err()
+    );
+    assert_eq!(readers.len(), READERS);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(ordinary);
+    });
     let mut pushes = [0, 0];
     let mut bytes = 0;
     let started = tokio::time::Instant::now();
@@ -111,12 +144,14 @@ pub(crate) async fn exercise_stats_refresh(
         tokio::select! {
             frame = ac.next_send() => {
                 let wire = frame?;
+                ac.sent(wire.len());
                 pushes[0] += usize::from(Frame::decode(&wire)?.kind==Kind::Push);
                 bytes += wire.len();
                 bc.received(&rewrite(&wire,aid), &b)?;
             }
             frame = bc.next_send() => {
                 let wire = frame?;
+                bc.sent(wire.len());
                 pushes[1] += usize::from(Frame::decode(&wire)?.kind==Kind::Push);
                 bytes += wire.len();
                 ac.received(&rewrite(&wire,bid), &a)?;
@@ -133,6 +168,24 @@ pub(crate) async fn exercise_stats_refresh(
         started.elapsed()
     );
     assert_eq!(pushes, [2, 3]); // Hello + Read and three pages
+    let counters = [ac.route.metrics.snapshot(), bc.route.metrics.snapshot()];
+    for field in ["stats_sent_frame_bytes", "stats_received_frame_bytes"] {
+        assert_eq!(
+            counters
+                .iter()
+                .map(|m| m[field].as_u64().unwrap())
+                .sum::<u64>(),
+            bytes as u64
+        );
+    }
+    assert_eq!(
+        counters[0]["stats_sent_frames"],
+        counters[1]["stats_received_frames"]
+    );
+    assert_eq!(
+        counters[1]["stats_sent_frames"],
+        counters[0]["stats_received_frames"]
+    );
     let reused = socket.call(refresh(owner)).await?;
     assert_eq!(reused["refresh"]["confirmed_nodes"], 2);
     assert!(a.lock().unwrap().next_stats_send()?.is_none());

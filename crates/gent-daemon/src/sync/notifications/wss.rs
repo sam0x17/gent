@@ -29,6 +29,10 @@ const _: () = assert!(session::VERSION == 2);
 pub(in crate::sync) struct Metrics {
     sent_bytes: AtomicU64,
     received_bytes: AtomicU64,
+    stats_sent_frames: AtomicU64,
+    stats_sent_bytes: AtomicU64,
+    stats_received_frames: AtomicU64,
+    stats_received_bytes: AtomicU64,
     confirmed_batches: AtomicU64,
     fallbacks: AtomicU64,
 }
@@ -37,6 +41,10 @@ impl Metrics {
         serde_json::json!({
             "sent_frame_bytes": self.sent_bytes.load(Ordering::Relaxed),
             "received_frame_bytes": self.received_bytes.load(Ordering::Relaxed),
+            "stats_sent_frames": self.stats_sent_frames.load(Ordering::Relaxed),
+            "stats_sent_frame_bytes": self.stats_sent_bytes.load(Ordering::Relaxed),
+            "stats_received_frames": self.stats_received_frames.load(Ordering::Relaxed),
+            "stats_received_frame_bytes": self.stats_received_bytes.load(Ordering::Relaxed),
             "confirmed_batches": self.confirmed_batches.load(Ordering::Relaxed),
             "fallbacks": self.fallbacks.load(Ordering::Relaxed),
         })
@@ -49,8 +57,14 @@ struct Request {
     reply: oneshot::Sender<Vec<u8>>,
 }
 
+struct StatsRequest {
+    request: Request,
+    dispatched: oneshot::Sender<()>,
+}
+
 struct Route {
     channel: mpsc::Sender<Request>,
+    stats: mpsc::Sender<StatsRequest>,
     failed: Mutex<BTreeMap<Uuid, tokio::time::Instant>>,
 }
 impl Route {
@@ -110,26 +124,41 @@ impl Wss {
                     break;
                 };
                 let (reply, result) = oneshot::channel();
-                let response = if route
-                    .channel
-                    .try_send(Request {
-                        peer: sent.peer,
-                        payload: sent.wire.clone(),
-                        reply,
+                let (dispatch, dispatched) = oneshot::channel();
+                let queued = route
+                    .stats
+                    .try_send(StatsRequest {
+                        request: Request {
+                            peer: sent.peer,
+                            payload: sent.wire.clone(),
+                            reply,
+                        },
+                        dispatched: dispatch,
                     })
-                    .is_ok()
+                    .is_ok();
+                // A busy local writer says nothing about a peer's reachability.
+                // Start the remote receipt timer only when the writer admits
+                // this frame. A cancelled admission cannot be sent later.
+                if queued
+                    && matches!(
+                        tokio::time::timeout(REPLY_TIMEOUT, dispatched).await,
+                        Ok(Ok(()))
+                    )
                 {
-                    tokio::time::timeout(REPLY_TIMEOUT, result)
+                    let response = tokio::time::timeout(REPLY_TIMEOUT, result)
                         .await
                         .ok()
-                        .and_then(Result::ok)
+                        .and_then(Result::ok);
+                    let _ = local(store.clone(), move |s| {
+                        s.finish_stats_send(&sent, response.as_deref())
+                    })
+                    .await;
                 } else {
-                    None
-                };
-                let _ = local(store.clone(), move |s| {
-                    s.finish_stats_send(&sent, response.as_deref())
-                })
-                .await;
+                    drop(result);
+                    let _ = local(store.clone(), move |s| s.defer_stats_send(&sent)).await;
+                    delay = Duration::from_millis(100);
+                    break;
+                }
                 if batch == 15 {
                     tick.notify_one();
                 }
@@ -206,7 +235,12 @@ impl Wss {
     }
 }
 
-type Pending = BTreeMap<Uuid, (Uuid, oneshot::Sender<Vec<u8>>)>;
+struct PendingRequest {
+    peer: Uuid,
+    reply: oneshot::Sender<Vec<u8>>,
+    stats: bool,
+}
+type Pending = BTreeMap<Uuid, PendingRequest>;
 struct Reply {
     peer: Uuid,
     id: Uuid,
@@ -231,7 +265,9 @@ impl Reply {
 pub(super) struct Connection {
     route: Wss,
     incoming: mpsc::Receiver<Request>,
+    stats_incoming: mpsc::Receiver<StatsRequest>,
     pending: Pending,
+    outgoing_stats: bool,
     receivers: JoinSet<Reply>,
     stats_receivers: JoinSet<Reply>,
 }
@@ -239,8 +275,10 @@ pub(super) struct Connection {
 impl Connection {
     pub(super) fn open(route: &Wss) -> Self {
         let (tx, incoming) = mpsc::channel(CONCURRENT);
+        let (stats, stats_incoming) = mpsc::channel(1);
         *route.channel.lock().expect("peer watch lock poisoned") = Some(Arc::new(Route {
             channel: tx,
+            stats,
             failed: Mutex::default(),
         }));
         route.stats.routes.send_modify(|n| *n += 1);
@@ -248,7 +286,9 @@ impl Connection {
         Self {
             route: route.clone(),
             incoming,
+            stats_incoming,
             pending: Pending::new(),
+            outgoing_stats: false,
             receivers: JoinSet::new(),
             stats_receivers: JoinSet::new(),
         }
@@ -258,32 +298,78 @@ impl Connection {
     // available slot, including while unrelated peers are pushing new batches.
     pub(super) async fn next_send(&mut self) -> Result<Vec<u8>> {
         loop {
-            tokio::select! {
+            self.pending.retain(|_, request| !request.reply.is_closed());
+            let (request, stats) = tokio::select! {
                 biased;
                 reply = self.receivers.join_next(), if !self.receivers.is_empty() => {
+                    self.outgoing_stats = false;
                     return reply.context("peer receiver stopped")??.encode();
                 }
                 reply = self.stats_receivers.join_next(), if !self.stats_receivers.is_empty() => {
+                    self.outgoing_stats = true;
                     return reply.context("stats receiver stopped")??.encode();
                 }
                 request = self.incoming.recv() => {
                     let request = request.context("peer watch closed")?;
-                    self.pending.retain(|_, (_, reply)| !reply.is_closed());
-                    if request.reply.is_closed() || self.pending.len() >= CONCURRENT ||
-                        (request.payload.starts_with(crate::encrypted::stats::MAGIC) && !self.pending.is_empty()) {
+                    if request.reply.is_closed() || self.pending.len() >= CONCURRENT {
                         continue;
                     }
-                    let id = Uuid::new_v4();
-                    let frame = Frame { kind: Kind::Push, peer: request.peer, id, payload: &request.payload }.encode()?;
-                    self.pending.insert(id, (request.peer, request.reply));
-                    return Ok(frame);
+                    (request, false)
                 }
+                request = self.stats_incoming.recv(), if self.pending.is_empty() => {
+                    let stats = request.context("statistics watch closed")?;
+                    if stats.dispatched.send(()).is_err() {
+                        continue;
+                    }
+                    (stats.request, true)
+                }
+                // A caller may abandon an outstanding ordinary transfer without
+                // a receipt. Recheck the queue as soon as that slot is released.
+                _ = async {
+                    futures_util::future::select_all(self.pending.values_mut().map(|request| Box::pin(request.reply.closed()))).await;
+                }, if !self.pending.is_empty() => continue,
+            };
+            let id = Uuid::new_v4();
+            let frame = Frame {
+                kind: Kind::Push,
+                peer: request.peer,
+                id,
+                payload: &request.payload,
             }
+            .encode()?;
+            self.pending.insert(
+                id,
+                PendingRequest {
+                    peer: request.peer,
+                    reply: request.reply,
+                    stats,
+                },
+            );
+            self.outgoing_stats = stats;
+            return Ok(frame);
         }
     }
 
     pub(super) fn received(&mut self, bytes: &[u8], store: &SharedStore) -> Result<()> {
         let frame = Frame::decode(bytes)?;
+        // Unavailable responses have no payload. Attribute those by request ID
+        // and authenticated route, including responses generated by the relay.
+        let stats = frame.payload.starts_with(crate::encrypted::stats::MAGIC)
+            || (frame.kind == Kind::Unavailable
+                && self
+                    .pending
+                    .get(&frame.id)
+                    .is_some_and(|r| r.stats && r.peer == frame.peer));
+        if stats {
+            self.route
+                .metrics
+                .stats_received_frames
+                .fetch_add(1, Ordering::Relaxed);
+            self.route
+                .metrics
+                .stats_received_bytes
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        }
         self.route
             .metrics
             .received_bytes
@@ -327,13 +413,13 @@ impl Connection {
                 if self
                     .pending
                     .get(&frame.id)
-                    .is_some_and(|(peer, _)| *peer == frame.peer)
-                    && let Some((_, reply)) = self.pending.remove(&frame.id)
+                    .is_some_and(|r| r.peer == frame.peer)
+                    && let Some(request) = self.pending.remove(&frame.id)
                     && frame.kind == Kind::Receipt
                 {
                     // The session layer verifies the signed stream, reader,
                     // history and sequence before it can retire any ciphertext.
-                    let _ = reply.send(frame.payload.to_vec());
+                    let _ = request.reply.send(frame.payload.to_vec());
                 }
             }
         }
@@ -341,6 +427,16 @@ impl Connection {
     }
 
     pub(super) fn sent(&self, bytes: usize) {
+        if self.outgoing_stats {
+            self.route
+                .metrics
+                .stats_sent_frames
+                .fetch_add(1, Ordering::Relaxed);
+            self.route
+                .metrics
+                .stats_sent_bytes
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+        }
         self.route
             .metrics
             .sent_bytes

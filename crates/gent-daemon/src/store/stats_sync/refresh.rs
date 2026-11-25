@@ -76,7 +76,7 @@ impl Store {
                         insert.execute(params![
                             id,
                             member.signing_key.as_slice(),
-                            at - COALESCE,
+                            at - SHORT_RETRY,
                             crate::messages::wire::MESSAGE_DATES_VERSION,
                             at,
                             round

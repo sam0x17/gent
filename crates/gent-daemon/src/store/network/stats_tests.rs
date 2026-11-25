@@ -6,6 +6,18 @@ fn read(pair: &mut Pair, node: usize) -> Result<Stats> {
     Ok(serde_json::from_value(pair.owner(node, OwnerOp::Stats)?)?)
 }
 
+// Age the previous successful exchange, leaving heads, rows, clocks and
+// authorization intact. Both peers normally learn each other's head in one RTT.
+fn age_advertisements(pair: &Pair, seconds: i64) -> Result<()> {
+    for store in &pair.stores {
+        store.db.execute(
+            "UPDATE stats_peers SET last_ad=?1,last_read=?1",
+            [now() - seconds],
+        )?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 struct Traffic {
     frames: usize,
@@ -119,20 +131,10 @@ async fn physical_carriers_merge_before_ranking_and_only_send_changed_rows() -> 
         )?;
     }
     tx.commit()?;
-    // Changes immediately following a successful advertisement coalesce.
-    for store in &pair.stores {
-        store
-            .db
-            .execute("UPDATE stats_peers SET last_ad=?1", [now()])?;
-    }
+    age_advertisements(&pair, 3500)?;
     assert_eq!(drain(&mut pair)?.frames, 0);
+    age_advertisements(&pair, 3601)?;
     let begin = Instant::now();
-    for store in &pair.stores {
-        store.db.execute(
-            "UPDATE stats_peers SET last_ad=last_ad-46,last_read=last_read-46",
-            [],
-        )?;
-    }
     let sparse = drain(&mut pair)?;
     eprintln!("sparse {sparse:?} in {:?}", begin.elapsed());
     assert_eq!((sparse.pages, sparse.rows), (1, 1));
@@ -151,17 +153,9 @@ async fn physical_carriers_merge_before_ranking_and_only_send_changed_rows() -> 
         begin.elapsed()
     );
     assert_eq!((steady.frames, steady.wire_bytes), (0, 0));
-    for store in &pair.stores {
-        store
-            .db
-            .execute("UPDATE stats_peers SET last_ad=?1", [now() - 3500])?;
-    }
+    age_advertisements(&pair, 3500)?;
     assert_eq!(drain(&mut pair)?.frames, 0);
-    for store in &pair.stores {
-        store
-            .db
-            .execute("UPDATE stats_peers SET last_ad=?1", [now() - 3601])?;
-    }
+    age_advertisements(&pair, 3601)?;
     let begin = Instant::now();
     let heartbeat = drain(&mut pair)?;
     eprintln!("idle interval {heartbeat:?} in {:?}", begin.elapsed());
@@ -293,4 +287,43 @@ async fn stats_refresh_socket_waiters_share_the_wss_round_and_leave_chat_capacit
         .stores
         .map(|store| Arc::new(std::sync::Mutex::new(store)));
     crate::sync::exercise_stats_refresh(stores, owner, pair.keys[0].clone()).await
+}
+
+#[tokio::test]
+async fn local_chat_sends_stay_off_stats_wire_until_requested_or_hourly() -> Result<()> {
+    let mut pair = Pair::new().await;
+    super::directory_push_tests::negotiate(&mut pair);
+    drain(&mut pair)?;
+    let mut sent = 0;
+    for (age, count) in [
+        (45, 1),
+        (600, 2),
+        (1200, 2),
+        (1800, 2),
+        (2700, 2),
+        (3590, 2),
+    ] {
+        for _ in 0..count {
+            pair.send(vec![])?;
+            sent += 1;
+        }
+        pair.pump();
+        age_advertisements(&pair, age)?;
+        assert_eq!(read(&mut pair, 0)?.outbound.messages, sent);
+        assert_eq!(read(&mut pair, 1)?.outbound.messages, 0);
+        let traffic = drain(&mut pair)?;
+        assert_eq!((traffic.frames, traffic.wire_bytes), (0, 0));
+    }
+    // The joined member explicitly asks while the timer is still quiet.
+    let owner = config::read_private(&pair.homes[1].path().join("owner.key"))?;
+    pair.stores[1].sync_health.stats.routes.send_replace(1);
+    let wait = pair.stores[1].begin_stats_refresh(&owner)?;
+    let traffic = drain(&mut pair)?;
+    assert_eq!((traffic.pages, traffic.rows, traffic.frames), (1, 1, 6));
+    let id = wait.wait(tokio::time::Instant::now()).await;
+    let updated = pair.stores[1].stats_snapshot(Some(id))?;
+    assert_eq!(updated["outbound"]["messages"], sent);
+    assert_eq!(updated["refresh"]["confirmed_nodes"], 2);
+    eprintln!("{sent} real sends, 0 scheduled Stats bytes before hour; manual {traffic:?}");
+    Ok(())
 }
