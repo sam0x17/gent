@@ -184,6 +184,17 @@ The [user-controlled gateway](gateway.md) uses authenticated host credentials an
 
 The hosted account service at `https://api.gent.link` accepts GitHub sign-in. `gent auth login --headless` uses GitHub device authorization, and SSH sessions select it automatically. With `--no-browser`, Gent prints the authorization URL and waits for a local loopback callback. Use `--service ORIGIN` to select a different account service. [Account login tests](local-proof.md#account-login)
 
+To keep a staging login alongside your production login, sign in to Cloudflare Access and give the staging account its own Gent home.
+
+```sh
+cloudflared access login --quiet https://staging.gent.link
+export GENT_STAGING_CF_ACCESS_JWT="$(cloudflared access token --app https://staging.gent.link)"
+gent --home "$HOME/.gent-staging" auth login --service https://staging.gent.link
+gent --home "$HOME/.gent-staging" auth billing
+```
+
+Staging QA can use a service token by setting both `GENT_STAGING_CF_ACCESS_CLIENT_ID` and `GENT_STAGING_CF_ACCESS_CLIENT_SECRET` with the JWT variable unset. The billing link opens the staging account page. The browser uses its own Cloudflare Access session.
+
 Status checks the service without changing local state and never reports an offline cached identity as authenticated. Status exits 3 when signed out or unavailable. Logout disables the local credential before contacting the service; an offline attempt reports `revocation_pending`, exits 3 and can be retried. Interrupted login can also leave revocation pending until its session commits or the candidate's 15-minute creation window closes. Successful mutations exit 0; malformed state and other failures exit 1. `--json` supports these results without exposing credentials.
 
 Service login establishes an account session. Cluster enrollment establishes permission to receive cluster keys and participate as a trusted endpoint. Account login, recovery, or a changed SQL membership record alone cannot grant access to encrypted data. Service sessions initially last 30 days; the daemon renews active sessions near expiry. Logout revokes dependent node credentials in the service-backed relay prototype; the shared-token development relay remains independent. Guided owner/invitation setup, service-backed SSH joining, automatic session renewal and manual reconnection through `gent cluster connect` are implemented. Private-file invitation enrollment passes local Worker proofs in both Linux/Mac directions, including actual-expiry continuation. Those proofs use synthetic login and SSH forwarding for local Workers. GitHub device consent was also verified against the hosted service. Code enrollment and encrypted messages/files pass between physical Linux and Mac endpoints through the deployed services. The live proof reuses one real account session; the local fixture separately checks independent sessions. Hosted chat enrollment remains unfinished.

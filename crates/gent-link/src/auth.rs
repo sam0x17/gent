@@ -4,6 +4,7 @@ pub(crate) mod notifications;
 mod pairing;
 pub mod renewal;
 pub(crate) mod source;
+mod staging_access;
 use crate::managed_file::{self, Snapshot};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -28,6 +29,7 @@ use tokio::{
 };
 
 const DEFAULT_SERVICE: &str = "https://api.gent.link";
+const STAGING_SERVICE: &str = "https://staging.gent.link";
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -155,8 +157,11 @@ async fn response_limit(
     request: reqwest::RequestBuilder,
     limit: usize,
 ) -> Result<(StatusCode, Value)> {
-    let mut response = request
-        .send()
+    let (client, request) = request.build_split();
+    let mut request = request.map_err(|_| anyhow::anyhow!("invalid authentication request"))?;
+    staging_access::authorize(&mut request, std::env::var_os)?;
+    let mut response = client
+        .execute(request)
         .await
         .map_err(|_| anyhow::anyhow!("could not reach the authentication service"))?;
     let status = response.status();
@@ -534,12 +539,32 @@ pub(crate) async fn desktop_login(home: &Path) -> Result<Value> {
     .await
 }
 
+fn billing_page(service: &Url) -> Result<Url> {
+    match service.origin().ascii_serialization().as_str() {
+        DEFAULT_SERVICE => Ok(Url::parse("https://gent.link/account")?),
+        STAGING_SERVICE => Ok(service.join("/account")?),
+        _ => bail!("hosted billing requires a gent.link account"),
+    }
+}
+
+fn browser_command() -> std::process::Command {
+    let mut command = std::process::Command::new(if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    });
+    for name in staging_access::ENV_VARS {
+        command.env_remove(name);
+    }
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
 async fn billing(home: &Path, no_browser: bool) -> Result<Value> {
     let service = Service::open(home).await?;
-    ensure!(
-        service.origin()? == origin(DEFAULT_SERVICE)?,
-        "hosted billing requires a gent.link account"
-    );
+    let mut url = billing_page(&service.origin()?)?;
     let (status, value) = response(
         service
             .request(Method::POST, "v1/billing/browser/grant")?
@@ -555,20 +580,15 @@ async fn billing(home: &Path, no_browser: bool) -> Result<Value> {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
         .context("invalid account handoff")?;
-    let url = format!("https://gent.link/account#{grant}");
+    url.set_fragment(Some(grant));
     if no_browser {
-        return Ok(json!({"status":"billing_link","url":url,"expires_at":value["expires_at"]}));
+        return Ok(
+            json!({"status":"billing_link","url":url.as_str(),"expires_at":value["expires_at"]}),
+        );
     }
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let status = tokio::process::Command::new(opener)
-        .arg(&url)
+    let status = tokio::process::Command::from(browser_command())
+        .arg(url.as_str())
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
         .status()
         .await
         .context("could not open billing; run gent auth billing --no-browser")?;
@@ -949,16 +969,7 @@ async fn browser_login(
         eprintln!("Open this URL to sign in:\n{url}");
     }
     if !no_browser {
-        let program = if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        let opened = std::process::Command::new(program)
-            .arg(url.as_str())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let opened = browser_command().arg(url.as_str()).spawn();
         if desktop {
             opened.context("could not open the sign-in browser")?;
         }
@@ -1102,6 +1113,47 @@ pub fn print(value: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn billing_uses_the_signed_in_hosted_account() -> Result<()> {
+        for (service, expected) in [
+            (DEFAULT_SERVICE, "https://gent.link/account"),
+            (STAGING_SERVICE, "https://staging.gent.link/account"),
+        ] {
+            let mut page = billing_page(&origin(service)?)?;
+            page.set_fragment(Some("grant"));
+            assert_eq!(page.as_str(), format!("{expected}#grant"));
+        }
+        for unsupported in [
+            "https://gent.link",
+            "https://staging.gent.link:8443",
+            "https://staging.gent.link.example",
+            "http://127.0.0.1:8000",
+        ] {
+            assert!(billing_page(&origin(unsupported)?).is_err());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_http_client_returns_cross_origin_redirects_without_following() -> Result<()> {
+        use axum::{Router, response::Redirect, routing::get};
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let redirect = format!("http://localhost:{}/target", address.port());
+        let app = Router::new()
+            .route(
+                "/",
+                get(move || async move { Redirect::temporary(&redirect) }),
+            )
+            .route("/target", get(|| async { StatusCode::OK }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let (status, _) = response(client()?.get(format!("http://{address}/"))).await?;
+        server.abort();
+        assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn diagnostic_account_checks_are_optional_pinned_and_do_not_mutate_credentials() {
         use std::{
