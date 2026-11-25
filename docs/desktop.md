@@ -1,10 +1,10 @@
 # Gent Desktop
 
-Run `gent desktop` from your graphical session to open the local daemon window. On macOS, use the Gent icon in the menu bar to reopen it. On Linux, use the tray menu or the **Gent Desktop** application launcher. Opening it twice brings the same window forward.
+Run `gent desktop` from your graphical session to open the local daemon window. On macOS, use the Gent icon in the menu bar to reopen it. On Linux, use the tray menu or the **Gent Desktop** application launcher. Opening or reopening the window selects **Dashboard**. Raising an already visible window preserves the selected tab. First-run setup opens **Status**.
 
 ## Status
 
-**Status** opens first. On an enrolled machine it shows the cluster and local node names, daemon and sync status, queued records, known chats, notification connection, and retrying streams. **Start daemon**, **Stop daemon**, and **Restart** control the per-user service. A foreground daemon can be viewed here and is controlled by its process owner.
+On an enrolled machine, **Status** shows the cluster and local node names, daemon and sync status, queued records, known chats, notification connection, and retrying streams. **Start daemon**, **Stop daemon**, and **Restart** control the per-user service. A foreground daemon can be viewed here and is controlled by its process owner.
 
 The **Nodes** table lists the local node first. Each row shows the node’s role and last known connection status. Hover over the status for its evidence, such as a recent encrypted round trip or a timed-out presence check. For native peers, the directory column shows whether their chat directories agree, and the transport column shows the last observed route. For hosted members such as `claude-web`, **Hosted by** identifies the current carrier. A dash means there is no observation for that field. Filtering or refreshing the table uses the local daemon’s data.
 

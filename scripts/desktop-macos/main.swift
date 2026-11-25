@@ -111,9 +111,14 @@ func checkReleaseChannel(_ desktop: Desktop) {
 }
 
 func checkCluster(_ desktop: Desktop, open: () -> Void) {
-    require(desktop.tabs.tabViewItems.map { $0.label } == ["Status", "Dashboard", "Chats", "Settings", "Permissions", "About"]
-            && desktop.tabs.selectedTabViewItem?.label == "Status", "Status is the first and selected tab")
-    require(requests(during: open) == [snapshotRead, accountRead], "opening Status reads snapshot and account once")
+    require(desktop.tabs.tabViewItems.map { $0.label } == ["Dashboard", "Status", "Chats", "Settings", "Permissions", "About"]
+            && desktop.tabs.selectedTabViewItem?.label == "Dashboard", "Dashboard is the first and selected tab")
+    let opened = requests(during: open)
+    require(opened.filter { if case .json(let page) = $0 { return page["op"] as? String == "dashboard" }; return false }.count == 1,
+            "opening the window loads Dashboard once")
+    desktop.receive(["state": "Unavailable", "enrolled": false])
+    require(requests { desktop.tabs.selectTabViewItem(withIdentifier: "Status") } == [snapshotRead, accountRead],
+            "selecting Status reads snapshot and account once")
     let stopped: [String: Any] = ["enrolled": true, "node": "Studio", "cluster": "Local fixture", "state": "Stopped",
                                   "can_start": true, "nodes": ["rows": [], "actions": []]]
     checkSetup(desktop, stopped: stopped)
@@ -1153,6 +1158,14 @@ if CommandLine.arguments.dropFirst(2).contains("--settings") {
 if CommandLine.arguments.dropFirst(2).contains(where: { ["--cluster", "--nodes"].contains($0) }) {
     desktop.makeWindow()
     checkCluster(desktop) { desktop.show() }
+    desktop.window.performClose(nil)
+    desktop.present(destination: "Status")
+    require(desktop.tabs.selectedTabViewItem?.label == "Status", "explicit setup destination")
+    desktop.show()
+    require(desktop.tabs.selectedTabViewItem?.label == "Status", "raising setup preserves its tab")
+    desktop.window.performClose(nil)
+    desktop.show()
+    require(desktop.tabs.selectedTabViewItem?.label == "Dashboard", "reopening selects Dashboard")
     print("PASS: native Status tab, setup, node search, guarded actions, rename dialogs and refresh requests")
     exit(0)
 }
@@ -1172,7 +1185,7 @@ if dashboardOnly {
 // cannot service the dashboard's coalesced refresh on that same serial queue.
 Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     if dashboardOnly {
-        desktop.window.orderFront(nil)
+        desktop.show()
         checkDashboard(desktop)
         print("PASS: native Dashboard layout, scrolling, hide and restore, web links, button dispatch, SVG charts, metrics, inline images, negotiated widths, appearance palettes and cached redraws")
         exit(0)
@@ -1245,9 +1258,15 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     require(!check.isEnabled, "one update check in flight")
     desktop.receive(["page":"about","operation":true,"notice":"Current"])
     require(desktop.about.actions.notice.stringValue == "Current", "update check result displayed")
+    desktop.show()
+    require(desktop.tabs.selectedTabViewItem?.label == "About", "raising the visible window preserves About")
     desktop.window.performClose(nil)
     require(!desktop.window.isVisible && desktop.statusItem.isVisible, "closes to tray")
-    require(app.sendAction(action, to: open.target, from: open) && desktop.window.isVisible, "menu reopens window")
+    require(app.sendAction(action, to: open.target, from: open) && desktop.window.isVisible
+            && desktop.tabs.selectedTabViewItem?.label == "Dashboard", "menu reopens on Dashboard")
+    desktop.window.performClose(nil)
+    desktop.showSettings()
+    require(desktop.tabs.selectedTabViewItem?.label == "Settings", "explicit Settings opens from tray")
     guard let quit = menu.item(withTitle: "Quit Gent Desktop"), let stop = quit.action else {
         require(false, "Quit menu item")
         return

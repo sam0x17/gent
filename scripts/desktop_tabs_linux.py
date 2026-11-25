@@ -140,14 +140,14 @@ def check_node_action_row(node_id):
         resize(window.width)
 
 
-def assert_default_cluster():
-    item = get("Status", "page tab")
-    assert [page.name for page in item.parent] == ["Status", "Dashboard", "Chats", "Settings", "Permissions", "About"]
-    assert item.getState().contains(pyatspi.STATE_SELECTED)
+def assert_selected_tab(title):
+    item = get(title, "page tab")
+    assert [page.name for page in item.parent] == ["Dashboard", "Status", "Chats", "Settings", "Permissions", "About"]
+    wait_for(lambda: item.getState().contains(pyatspi.STATE_SELECTED), title + " selected")
 
 
 def exercise_setup():
-    assert_default_cluster()
+    assert_selected_tab("Status")
     get("Set up this node")
     get("Gent account: Signed out", "label")
     for title in ("Sign in with GitHub", "Create cluster…", "Join with invitation…"):
@@ -480,7 +480,8 @@ def exercise_node_rename(cli, remote, hosted, parent):
 def exercise_tabs(cli, fixture, agent, remote, hosted, parent):
     desktop = pyatspi.Registry.getDesktop(0)
 
-    assert_default_cluster()
+    assert_selected_tab("Dashboard")
+    tab("Status")
     get("desktop-test", "label")
     get("Daemon running", "label")
     get("Stop daemon")

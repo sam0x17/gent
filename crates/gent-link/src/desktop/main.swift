@@ -30,7 +30,7 @@ final class Presentation: NSObject, UNUserNotificationCenterDelegate {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-let desktop = Desktop(iconPath: args[1], openAtLaunch: args[2] != "tray")
+let desktop = Desktop(iconPath: args[1], openAtLaunch: args[2] != "tray", setupAtLaunch: args[2] == "setup")
 let presentation = Presentation()
 // A Launch Services launch has already registered this exact app. Keep direct
 // registration for the comparison fixture.

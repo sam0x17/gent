@@ -149,7 +149,7 @@ class Desktop:
         self.cluster = ClusterPane(self.send, self.refresh_after_operation)
         self.dashboard = DashboardPane()
         pages = {
-            "Status": self.cluster, "Dashboard": self.dashboard, "Chats": DirectoryPane("chats"),
+            "Dashboard": self.dashboard, "Status": self.cluster, "Chats": DirectoryPane("chats"),
             "Settings": SettingsPane(), "Permissions": ManagementPane("permissions"), "About": ManagementPane("about"),
         }
         for title, page in pages.items():
@@ -167,7 +167,7 @@ class Desktop:
         GLib.io_add_watch(0, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.receive)
         GLib.timeout_add_seconds(15, self.tick)
         if MODE in ("window", "setup"):
-            self.show()
+            self.show(self.cluster if MODE == "setup" else None)
         else:
             self.send("refresh")
 
@@ -202,9 +202,15 @@ class Desktop:
         self.tray.connect("popup-menu", lambda icon, button, ts: menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, ts))
         self.tray.set_visible(True)
 
-    def show(self):
+    def show(self, destination=None):
+        if destination is None and not self.window.get_visible():
+            destination = self.dashboard
         self.window.present()
-        self.refresh_tab()
+        if destination is not None and self.tabs.get_current_page() != self.tabs.page_num(destination):
+            self.tabs.set_current_page(self.tabs.page_num(destination))
+        else:
+            self.refresh_tab()
+        self.send("refresh")
 
     def refresh_tab(self):
         self.tabs.get_nth_page(self.tabs.get_current_page()).load()
