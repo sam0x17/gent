@@ -380,3 +380,116 @@ fn manual_inbox_intake_stops_native_history_scans_without_reauthorizing_submissi
     assert_eq!(ok(f.agent(1, d.claim()))["may_submit"], false);
     assert!(f.show(&d.message)["direct"]["turn_id"].is_null());
 }
+
+#[test]
+fn retrospective_receipt_requires_one_finished_dispatch_to_the_bound_codex_turn() {
+    let mut f = Fixture::new();
+    let d = relay(&mut f, vec![]);
+    let WakeTarget::Codex { thread_id } = &d.target else {
+        unreachable!()
+    };
+    let thread = Uuid::parse_str(thread_id).unwrap();
+    let turn = Uuid::parse_str(&d.turn).unwrap();
+    let lookup = |credential: &str, thread_id, turn| OwnerOp::WakeDirectTurnEvidence {
+        agent_credential: credential.into(),
+        thread_id,
+        turn,
+    };
+    let op = lookup(&f.keys[1], thread, turn);
+    let first = ok(f.agent(1, d.claim()));
+    assert!(ok(f.owner(op.clone())).is_null());
+    ok(f.agent(
+        1,
+        AgentOp::WakeSubmitted {
+            message_id: d.message.clone(),
+            attempt_id: d.attempt.clone(),
+            submission_id: d.turn.clone(),
+        },
+    ));
+    ok(f.agent(1, d.observe()));
+    assert!(
+        ok(f.owner(op.clone())).is_null(),
+        "relay has no final receipt"
+    );
+    ok(f.agent(1, d.complete("private native reply")));
+    f.store = Store::open(f.home.path()).unwrap();
+    let expected = serde_json::json!({
+        "attempt_id": d.attempt, "input_hash": first["record"]["direct"]["input_hash"],
+    });
+    assert_eq!(ok(f.owner(op.clone())), expected);
+    for wrong in [
+        lookup(&f.keys[0], thread, turn),
+        lookup(&f.keys[1], Uuid::new_v4(), turn),
+        lookup(&f.keys[1], thread, Uuid::new_v4()),
+    ] {
+        assert!(ok(f.owner(wrong)).is_null());
+    }
+    let bad_owner = f.store.handle(Request::Owner {
+        credential: f.keys[1].clone(),
+        action: op.clone(),
+    });
+    assert!(error(bad_owner).contains("unauthorized"));
+    assert!(serde_json::from_value::<AgentOp>(serde_json::to_value(&op).unwrap()).is_err());
+
+    // Even a retained final receipt cannot reconcile conflicting host IDs,
+    // another adapter, or a missing observation.
+    let original = f.show(&d.message);
+    for (field, value) in [
+        ("submission_id", serde_json::json!(Uuid::new_v4())),
+        (
+            "target",
+            serde_json::json!({"host":"claude_code", "session_id": thread}),
+        ),
+        ("inbox_seen_at", Value::Null),
+        ("updated_at", serde_json::json!(i64::MAX)),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = value;
+        f.db()
+            .execute(
+                "UPDATE wake_dispatches SET payload=?1 WHERE message_id=?2",
+                params![changed.to_string(), d.message],
+            )
+            .unwrap();
+        assert!(ok(f.owner(op.clone())).is_null(), "{field}");
+    }
+    f.db()
+        .execute(
+            "UPDATE wake_dispatches SET payload=?1 WHERE message_id=?2",
+            params![original.to_string(), d.message],
+        )
+        .unwrap();
+
+    // A second observed input makes this native turn ambiguous, even if only
+    // the first relay has finished. Removing a receipt never synthesizes proof.
+    f.advance(6);
+    let mut other = relay(&mut f, vec![]);
+    other.target = d.target.clone();
+    other.turn.clone_from(&d.turn);
+    ok(f.agent(1, other.claim()));
+    ok(f.agent(
+        1,
+        AgentOp::WakeSubmitted {
+            message_id: other.message.clone(),
+            attempt_id: other.attempt.clone(),
+            submission_id: other.turn.clone(),
+        },
+    ));
+    assert!(ok(f.owner(op.clone())).is_null());
+    ok(f.agent(1, other.observe()));
+    assert!(ok(f.owner(op.clone())).is_null());
+    f.db()
+        .execute(
+            "DELETE FROM wake_dispatches WHERE message_id=?1",
+            [&other.message],
+        )
+        .unwrap();
+    assert_eq!(ok(f.owner(op.clone())), expected);
+    f.db()
+        .execute(
+            "DELETE FROM wake_dispatches WHERE message_id=?1",
+            [&d.message],
+        )
+        .unwrap();
+    assert!(ok(f.owner(op)).is_null());
+}

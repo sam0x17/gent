@@ -20,7 +20,7 @@ impl History {
         let failed = state.turn.clone();
         let mut rows = vec![json!({"type":"session_meta","payload":{"id":thread}})];
         rows.push(event(json!({"type":"task_started","turn_id":failed["id"],"started_at":start,"turn_attribution":{"turn_id":failed["id"],"turn_trigger":"queue"}})));
-        rows.push(event(json!({"type":"task_complete","turn_id":failed["id"],"started_at":start,"completed_at":end,"error":{"message":failed["error"]["message"]}})));
+        rows.push(event(json!({"type":"task_complete","turn_id":failed["id"],"started_at":start,"completed_at":end,"error":{"message":failed["error"]["message"],"codex_error_info":{"http_connection_failed":{"http_status_code":503}}}})));
         for i in 0..count as i64 {
             let id = Uuid::now_v7().to_string();
             let when = end + i;
@@ -115,6 +115,9 @@ async fn queue_masked_provider_failures_require_the_entire_suffix() -> Result<()
         "complete inventory",
         "async user tool",
         "command declined",
+        "failed MCP receipt",
+        "injected thread result",
+        "incremental tools message",
         "unattributed",
         "foreign receipt",
         "duplicate client",
@@ -133,6 +136,19 @@ async fn queue_masked_provider_failures_require_the_entire_suffix() -> Result<()
         let mut h = History::new(37);
         let failed = h.state.older_turns.last_mut().unwrap();
         match case {
+            "failed MCP receipt" => {
+                h.rows.insert(6, event(json!({"type":"item_completed","thread_id":h.state.meta["id"],"turn_id":h.rows[3]["payload"]["turn_id"],
+                    "item":{"type":"McpToolCall","tool":"lookup","id":"mcp","status":"failed"}})));
+            }
+            "injected thread result" => {
+                h.rows.insert(6, json!({"type":"response_item","payload":{"type":"function_call_output","namespace":"codex_tui","name":"send_message_to_thread"}}));
+                h.rows.insert(7, event(json!({"type":"item_completed","thread_id":h.state.meta["id"],"turn_id":h.rows[3]["payload"]["turn_id"],
+                    "item":{"type":"FunctionCallOutput","id":"out","namespace":"codex_tui","name":"send_message_to_thread"}})));
+            }
+            "incremental tools message" => {
+                h.rows.insert(6, json!({"type":"response_item","payload":{"type":"message","role":"developer",
+                    "internal_chat_message_metadata_passthrough":{"content_item_kinds":["tools.incremental_update"]}}}));
+            }
             "new input" => {
                 let mut m = h.rows[4].clone();
                 m["payload"]["internal_chat_message_metadata_passthrough"]["content_item_kinds"] = json!(["user.goal"]);
@@ -154,7 +170,7 @@ async fn queue_masked_provider_failures_require_the_entire_suffix() -> Result<()
             "manual user turn" => h.rows[3]["payload"]["turn_attribution"]["turn_trigger"] = json!("user"),
             "same second preexisting block" => h.state.goal["updatedAt"] = failed["startedAt"].clone(),
             "old failure" => {
-                let stale = json!(gent_daemon::store::now() - 7201);
+                let stale = json!(gent_daemon::store::now() - gent_protocol::wake::VERIFIED_BLOCKED_MAX_AGE_SECS - 1);
                 failed["startedAt"] = stale.clone();
                 failed["completedAt"] = stale.clone();
                 h.state.goal["createdAt"] = stale.clone();
@@ -205,7 +221,9 @@ async fn healthy_and_conclusively_stale_heads_do_not_query_queue_or_older_pages(
         let mut h = History::new(37);
         h.state.goal["status"] = json!(status);
         if status == "blocked" {
-            let old = gent_daemon::store::now() - 10000;
+            let old = gent_daemon::store::now()
+                - gent_protocol::wake::VERIFIED_BLOCKED_MAX_AGE_SECS
+                - 1000;
             h.state.goal["createdAt"] = json!(old);
             h.state.goal["updatedAt"] = json!(old);
             // The latest long completed turn started before the freshness cutoff.

@@ -815,6 +815,21 @@ pub enum OwnerOp {
     WakePendingAgents {
         after: Option<String>,
     },
+    /// Local supervisor lookup for one retained Codex dispatch. Metadata only.
+    WakeDirectTurnEvidence {
+        agent_credential: String,
+        thread_id: uuid::Uuid,
+        turn: uuid::Uuid,
+    },
+    /// The bound supervisor has corroborated the blocked goal and native history.
+    BabysitterVerifiedBlockedClaim {
+        agent_credential: String,
+        thread_id: uuid::Uuid,
+        goal: String,
+        turn: uuid::Uuid,
+        failed_at: i64,
+        reason: notifications::Failure,
+    },
     WakeClean {
         dry_run: bool,
     },
