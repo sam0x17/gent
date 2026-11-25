@@ -182,8 +182,8 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         document.translatesAutoresizingMaskIntoConstraints = false
         let clip = content.contentView
         let viewportHeight = document.heightAnchor.constraint(equalTo: clip.heightAnchor)
-        // Fit the viewport when enrolled, allowing the controls and table minimum to take precedence.
-        viewportHeight.priority = NSLayoutConstraint.Priority(500)
+        // Let the window keep its requested size before stretching the member table.
+        viewportHeight.priority = NSLayoutConstraint.Priority(490)
         enrolledViewportHeight = viewportHeight
         NSLayoutConstraint.activate([
             document.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
