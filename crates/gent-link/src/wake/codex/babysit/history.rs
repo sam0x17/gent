@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 const PAGE_SIZE: usize = 32;
 const MAX_TURNS: usize = 4096;
+const MAX_FAILURES: usize = 32;
 
 #[derive(Clone, PartialEq)]
 pub(super) struct Completed {
@@ -26,19 +27,53 @@ impl Completed {
     }
 }
 
-pub(super) async fn candidate(
-    host: &mut Host,
-    goal: &Goal,
-) -> Result<Option<(Value, Vec<Completed>, Failure)>> {
+#[derive(Clone, PartialEq)]
+pub(super) struct Failed {
+    pub(super) turn: Value,
+    pub(super) reason: Failure,
+}
+
+#[derive(Clone, PartialEq)]
+pub(super) struct Candidate {
+    // The failure in which the goal last changed. For a blocked goal the
+    // rollout must still prove that this turn caused the block.
+    pub(super) anchor: Failed,
+    pub(super) later: Vec<Later>, // newest first, without gaps
+}
+
+#[derive(Clone, PartialEq)]
+pub(super) struct Later {
+    pub(super) times: Completed,
+    pub(super) failure: Option<Failed>,
+}
+
+impl Candidate {
+    pub(super) fn latest(&self) -> &Failed {
+        self.later
+            .iter()
+            .find_map(|t| t.failure.as_ref())
+            .unwrap_or(&self.anchor)
+    }
+}
+
+pub(super) async fn candidate(host: &mut Host, goal: &Goal) -> Result<Option<Candidate>> {
     let blocked = goal.status == "blocked";
     let limit = if blocked { PAGE_SIZE } else { 1 };
     let mut params = json!({"threadId":goal.thread_id,"limit":limit,"sortDirection":"desc","itemsView":"notLoaded"});
     let mut cursors = HashSet::new();
     let mut ids = HashSet::new();
-    let mut queued: Vec<Completed> = Vec::new();
-    // The daemon only admits failures from the last two hours. Its durable claim
-    // still makes the final freshness and backoff decision.
-    let oldest = gent_daemon::store::now() - 7200;
+    let mut failures = 0;
+    let mut later = Vec::new();
+    let mut newer_start = None;
+    // The longer window is available only to the blocked-goal claim after
+    // a complete native proof. Older provenance can never supply a fresher
+    // timestamp. It is bounded by the turn, page, byte and RPC limits.
+    let age = if blocked {
+        gent_protocol::wake::VERIFIED_BLOCKED_MAX_AGE_SECS
+    } else {
+        7200
+    };
+    let oldest = gent_daemon::store::now() - age;
     let deadline = tokio::time::Instant::now() + RPC_TIMEOUT;
     let mut queue_checked = false;
     loop {
@@ -52,30 +87,33 @@ pub(super) async fn candidate(
             let Some(times) = Completed::read(turn) else {
                 return Ok(None);
             };
-            if times.ended < oldest
+            if (failures == 0 && times.ended < oldest)
                 || times.ended < goal.updated_at
-                || queued
-                    .last()
-                    .is_some_and(|newer| times.ended > newer.started)
+                || newer_start.is_some_and(|start| times.ended > start)
                 || ids.len() >= MAX_TURNS
                 || !ids.insert(times.id.clone())
             {
                 return Ok(None);
             }
-            let reason = terminal_failure(turn);
-            if reason.is_none()
-                && (!blocked
-                    || turn["status"] != "completed"
-                    || turn.get("error") != Some(&Value::Null)
-                    || times.started < goal.updated_at.max(oldest))
-            {
-                // All earlier turns ended by this start. A failed turn itself
-                // may have started hours earlier and still have finished recently.
-                return Ok(None);
-            }
-            if let Some(reason) = reason {
+            newer_start = Some(times.started);
+            if let Some(reason) = terminal_failure(turn) {
+                let failure = Failed {
+                    turn: turn.clone(),
+                    reason,
+                };
+                if blocked && times.started > goal.updated_at {
+                    failures += 1;
+                    if failures >= MAX_FAILURES {
+                        return Ok(None);
+                    }
+                    later.push(Later {
+                        times,
+                        failure: Some(failure),
+                    });
+                    continue;
+                }
                 let eligible = match goal.status.as_str() {
-                    "blocked" => times.started <= goal.updated_at,
+                    "blocked" => true,
                     "active" => times.started >= goal.created_at,
                     "usageLimited" => {
                         times.started >= goal.created_at && reason == Failure::RateLimit
@@ -87,9 +125,23 @@ pub(super) async fn candidate(
                 {
                     return Ok(None);
                 }
-                return Ok(Some((turn.clone(), queued, reason)));
+                return Ok(Some(Candidate {
+                    anchor: failure,
+                    later,
+                }));
             }
-            queued.push(times);
+            if !blocked
+                || turn["status"] != "completed"
+                || turn.get("error") != Some(&Value::Null)
+                || times.started < goal.updated_at
+                || (failures == 0 && times.started < oldest)
+            {
+                return Ok(None);
+            }
+            later.push(Later {
+                times,
+                failure: None,
+            });
         }
         let Some(next) = page["nextCursor"].as_str() else {
             return Ok(None);

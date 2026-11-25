@@ -9,6 +9,9 @@ use uuid::Uuid;
 #[path = "wake/direct.rs"]
 mod direct;
 
+#[path = "wake/blocked_claim.rs"]
+mod blocked_claim;
+
 #[path = "wake/retention.rs"]
 mod retention;
 

@@ -1,4 +1,4 @@
-//! Prove one completed queue admission between the failed turn and the current head.
+//! Bind a native user admission to the records between its start and completion.
 use super::*;
 
 #[derive(Default, Deserialize)]
@@ -14,6 +14,7 @@ struct Event {
     namespace: Option<String>,
     name: Option<String>,
     call_id: Option<String>,
+    id: Option<String>,
     item: Option<Item>,
     internal_chat_message_metadata_passthrough: Option<ItemMeta>,
 }
@@ -27,6 +28,9 @@ struct Item {
     source: Option<String>,
     status: Option<String>,
     questions: Option<serde::de::IgnoredAny>,
+    name: Option<String>,
+    namespace: Option<String>,
+    internal_chat_message_metadata_passthrough: Option<ItemMeta>,
 }
 
 impl Event {
@@ -39,11 +43,11 @@ impl Event {
                 .is_none_or(|m| m.turn_id.as_deref().is_none_or(|id| id == turn))
     }
 
-    fn starts(&self, turn: &Completed, trigger: &str) -> bool {
+    fn starts(&self, turn: &Completed, trigger: Option<&str>) -> bool {
         self.turn_id.as_deref() == Some(&turn.id)
             && self.started_at == Some(turn.started)
             && self.turn_attribution.as_ref().is_some_and(|a| {
-                a.turn_id.as_deref() == Some(&turn.id) && a.turn_trigger.as_deref() == Some(trigger)
+                a.turn_id.as_deref() == Some(&turn.id) && a.turn_trigger.as_deref() == trigger
             })
     }
 }
@@ -74,9 +78,36 @@ fn decision(name: &str) -> bool {
     )
 }
 
+pub(super) enum Source<'a> {
+    Queue(&'a mut HashSet<String>),
+    Foreground,                       // terminal recognized failure
+    Direct(&'a mut Vec<DirectInput>), // completed, needs a matching journal entry
+}
+
+fn has_decision(meta: &ItemMeta) -> bool {
+    meta.content_item_kinds
+        .iter()
+        .flatten()
+        .any(|k| k == "user.goal")
+        || meta
+            .executed_tool_calls
+            .iter()
+            .flatten()
+            .any(|t| decision(&t.name))
+}
+
+fn thread_message_result(namespace: Option<&str>, name: Option<&str>) -> bool {
+    namespace == Some("codex_tui") && name == Some("send_message_to_thread")
+}
+
 #[derive(Default)]
 struct Admission {
+    // A host-delivered thread result has no in-turn invocation. Bind its
+    // response item to the same named native receipt before accepting it.
+    thread_result: Option<Option<String>>,
+    thread_result_receipt: Option<String>,
     user_message: bool,
+    user_receipt: bool,
     client_id: Option<String>,
     // Outputs occur first when walking backwards. Every call must consume its
     // own output. An incomplete wrapper inventory needs independent evidence
@@ -86,16 +117,21 @@ struct Admission {
 }
 
 impl Admission {
-    fn item(&mut self, item: Item) -> bool {
-        if item.questions.is_some() {
+    fn item(&mut self, item: Item, foreground: bool, turn: &str) -> bool {
+        if item.questions.is_some()
+            || item
+                .internal_chat_message_metadata_passthrough
+                .as_ref()
+                .is_some_and(|m| {
+                    has_decision(m) || m.turn_id.as_deref().is_some_and(|id| id != turn)
+                })
+        {
             return false;
         }
         match item.r#type.as_str() {
             "UserMessage" => {
-                let Some(id) = item.client_id.filter(|id| !id.is_empty()) else {
-                    return false;
-                };
-                self.client_id.replace(id).is_none() && !self.user_message
+                self.client_id = item.client_id.filter(|id| !id.is_empty());
+                !std::mem::replace(&mut self.user_receipt, true) && !self.user_message
             }
             "AgentMessage" | "Reasoning" | "Plan" | "WebSearch" => true,
             "CommandExecution" => {
@@ -107,9 +143,18 @@ impl Admission {
                         Some("agent" | "unified_exec_startup" | "unified_exec_interaction")
                     )
             }
+            "FunctionCallOutput"
+                if foreground
+                    && thread_message_result(item.namespace.as_deref(), item.name.as_deref()) =>
+            {
+                item.id
+                    .filter(|id| !id.is_empty())
+                    .is_some_and(|id| self.thread_result_receipt.replace(id).is_none())
+            }
             "McpToolCall" => {
                 self.needs_later_start = true;
-                item.status.as_deref() == Some("completed")
+                (item.status.as_deref() == Some("completed")
+                    || foreground && item.status.as_deref() == Some("failed"))
                     && item.id.is_some_and(|id| !id.is_empty())
                     && item
                         .tool
@@ -119,7 +164,7 @@ impl Admission {
         }
     }
 
-    fn response(&mut self, p: Event, id: &str) -> bool {
+    fn response(&mut self, p: Event, id: &str, foreground: bool) -> bool {
         let meta = p.internal_chat_message_metadata_passthrough.as_ref();
         match p.r#type.as_str() {
             "message" if p.role.as_deref() == Some("user") => {
@@ -136,7 +181,7 @@ impl Admission {
                         "user.text" | "user.image" | "user.audio" | "user.file"
                     )
                 }) {
-                    self.client_id.is_some() && !std::mem::replace(&mut self.user_message, true)
+                    self.user_receipt && !std::mem::replace(&mut self.user_message, true)
                 } else {
                     kinds
                         .iter()
@@ -170,6 +215,12 @@ impl Admission {
                     passive_tool(name)
                 }
             }
+            "function_call_output"
+                if foreground
+                    && thread_message_result(p.namespace.as_deref(), p.name.as_deref()) =>
+            {
+                self.thread_result.replace(p.id).is_none()
+            }
             "function_call_output" | "custom_tool_call_output" => {
                 let Some(call_id) = p.call_id.filter(|id| !id.is_empty()) else {
                     return false;
@@ -188,42 +239,191 @@ impl Admission {
     }
 }
 
+// Only the native user text needed for an independent journal comparison
+// is decoded. Neither its contents nor tool output leave the host.
+fn input_hash(line: &[u8], receipt: bool) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Part {
+        r#type: String,
+        text: String,
+    }
+    #[derive(Deserialize)]
+    struct Content {
+        content: Vec<Part>,
+    }
+    #[derive(Deserialize)]
+    struct ItemEvent {
+        item: Content,
+    }
+    let content = if receipt {
+        serde_json::from_slice::<Record<ItemEvent>>(line)
+            .ok()?
+            .payload
+            .item
+    } else {
+        serde_json::from_slice::<Record<Content>>(line)
+            .ok()?
+            .payload
+    };
+    let [part] = content.content.as_slice() else {
+        return None;
+    };
+    let kind = if receipt { "text" } else { "input_text" };
+    use sha2::{Digest, Sha256};
+    (part.r#type == kind).then(|| format!("{:x}", Sha256::digest(part.text.as_bytes())))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Declaration {
+    #[serde(rename = "type")]
+    _kind: String,
+    role: String,
+    id: String,
+    tools: Vec<serde::de::IgnoredAny>,
+}
+
+fn developer_kind(p: &Event, turn: &str, kind: &str) -> bool {
+    p.r#type == "message"
+        && p.role.as_deref() == Some("developer")
+        && p.internal_chat_message_metadata_passthrough
+            .as_ref()
+            .is_some_and(|m| {
+                m.turn_id.as_deref() == Some(turn)
+                    && m.content_item_kinds
+                        .as_ref()
+                        .is_some_and(|kinds| kinds.as_slice() == [kind])
+            })
+}
+
 pub(super) fn confirm(
     rows: &mut ReverseLines<'_>,
     line: &mut Vec<u8>,
     thread: &str,
     turn: &Completed,
-    admissions: &mut HashSet<String>,
+    source: Source<'_>,
     updated_at: Option<i64>,
+    older: &HashSet<&str>,
 ) -> Result<bool> {
     let mut admission = Admission::default();
+    let foreground = !matches!(source, Source::Queue(_));
+    let direct = matches!(source, Source::Direct(_));
+    let mut receipt_hash = None;
+    let mut message_hash = None;
+    let mut needs_declaration = false;
+    let mut needs_tool_update = false;
     while rows.previous(line)? {
         let row: Record<Event> = serde_json::from_slice(line)?;
         let p = row.payload;
+        // Background completions may arrive during a subsequent turn. Their
+        // owner must appear strictly earlier in this very replay, where its
+        // independent terminal record will be checked before accepting it.
+        if row.r#type == "event_msg"
+            && p.r#type == "item_completed"
+            && p.turn_id.as_deref().is_some_and(|id| older.contains(id))
+            && serde_json::from_slice::<Record<Receipt>>(line)
+                .ok()
+                .is_some_and(|r| r.payload.background_turn(thread).is_some())
+        {
+            continue;
+        }
         if !p.belongs_to(thread, &turn.id)
             || p.internal_chat_message_metadata_passthrough
                 .as_ref()
-                .is_some_and(|m| {
-                    m.content_item_kinds
-                        .iter()
-                        .flatten()
-                        .any(|k| k == "user.goal")
-                        || m.executed_tool_calls
-                            .iter()
-                            .flatten()
-                            .any(|t| decision(&t.name))
-                })
+                .is_some_and(has_decision)
         {
             return Ok(false);
         }
+        // These adjacent native records describe tool availability, never an
+        // execution. Reject lone declarations and unbound developer messages.
+        if needs_tool_update {
+            if row.r#type != "response_item"
+                || !developer_kind(&p, &turn.id, "tools.incremental_update")
+            {
+                return Ok(false);
+            }
+            needs_tool_update = false;
+            continue;
+        }
+        if needs_declaration && !(row.r#type == "response_item" && p.r#type == "additional_tools") {
+            return Ok(false);
+        }
+        if row.r#type == "response_item"
+            && developer_kind(&p, &turn.id, "tools.deferred_namespaces")
+        {
+            needs_declaration = true;
+            continue;
+        }
+        if row.r#type == "response_item" && p.r#type == "additional_tools" {
+            let Ok(declaration) = serde_json::from_slice::<Record<Declaration>>(line) else {
+                return Ok(false);
+            };
+            let d = declaration.payload;
+            if d.role != "developer" || d.id.is_empty() || d.tools.is_empty() {
+                return Ok(false);
+            }
+            needs_declaration = false;
+            needs_tool_update = true;
+            continue;
+        }
+        if direct {
+            if row.r#type == "event_msg"
+                && p.r#type == "item_completed"
+                && p.item.as_ref().is_some_and(|i| i.r#type == "UserMessage")
+            {
+                receipt_hash = input_hash(line, true);
+            }
+            if row.r#type == "response_item"
+                && p.r#type == "message"
+                && p.role.as_deref() == Some("user")
+                && p.internal_chat_message_metadata_passthrough
+                    .as_ref()
+                    .is_some_and(|m| {
+                        m.content_item_kinds
+                            .as_ref()
+                            .is_some_and(|kinds| kinds.as_slice() == ["user.text"])
+                    })
+            {
+                message_hash = input_hash(line, false);
+            }
+        }
         let valid = match (row.r#type.as_str(), p.r#type.as_str()) {
             ("event_msg", "task_started") => {
-                return Ok(p.starts(turn, "queue")
+                let admitted = match source {
+                    Source::Queue(ids) => {
+                        p.starts(turn, Some("queue"))
+                            && admission.client_id.is_some_and(|id| ids.insert(id))
+                    }
+                    Source::Foreground => p.starts(turn, Some("user")) || p.starts(turn, None),
+                    Source::Direct(inputs) => {
+                        let (Some(client), Some(hash)) = (admission.client_id, receipt_hash) else {
+                            return Ok(false);
+                        };
+                        if message_hash.as_ref() != Some(&hash)
+                            || !(p.starts(turn, Some("user")) || p.starts(turn, None))
+                        {
+                            return Ok(false);
+                        }
+                        inputs.push(DirectInput {
+                            turn: Uuid::parse_str(&turn.id)?,
+                            client,
+                            hash,
+                        });
+                        true
+                    }
+                };
+                let receipt_matches =
+                    match (admission.thread_result, admission.thread_result_receipt) {
+                        (None, None) => true,
+                        (Some(id), Some(receipt)) => id.is_none_or(|id| id == receipt),
+                        _ => false,
+                    };
+                return Ok(admitted
+                    && receipt_matches
                     && (!admission.needs_later_start
                         || updated_at.is_some_and(|t| turn.started > t))
                     && admission.user_message
-                    && admission.outputs.is_empty()
-                    && admission.client_id.is_some_and(|id| admissions.insert(id)));
+                    && admission.outputs.is_empty());
             }
             ("event_msg", "item_completed") => {
                 p.thread_id.as_deref() == Some(thread)
@@ -239,7 +439,7 @@ pub(super) fn confirm(
                         {
                             admission.needs_later_start = false;
                         }
-                        admission.item(item)
+                        admission.item(item, foreground, &turn.id)
                     })
             }
             ("event_msg", "token_count") | ("world_state", "") => true,
@@ -247,7 +447,28 @@ pub(super) fn confirm(
                 p.thread_id.as_deref() == Some(thread) && p.turn_id.as_ref() == Some(&turn.id)
             }
             ("turn_context", "") => p.turn_id.as_ref() == Some(&turn.id),
-            ("response_item", _) => admission.response(p, &turn.id),
+            ("event_msg", "thread_settings_applied") if foreground => {
+                p.thread_id.as_deref() == Some(thread)
+            }
+            ("response_item", "message")
+                if foreground && p.role.as_deref() == Some("developer") =>
+            {
+                p.internal_chat_message_metadata_passthrough
+                    .is_some_and(|m| {
+                        m.content_item_kinds.is_some_and(|kinds| {
+                            !kinds.is_empty()
+                                && kinds.iter().all(|k| {
+                                    matches!(
+                                        k.as_str(),
+                                        "host_skills.instructions"
+                                            | "permissions.instructions"
+                                            | "tools.incremental_update"
+                                    )
+                                })
+                        })
+                    })
+            }
+            ("response_item", _) => admission.response(p, &turn.id, foreground),
             _ => false,
         };
         if !valid {
@@ -299,7 +520,7 @@ pub(super) fn preceding_active_turn(
         }
         let valid = match (row.r#type.as_str(), p.r#type.as_str()) {
             ("event_msg", "task_started") => {
-                if !agent_message || !p.starts(&prior, "goal") || !rows.previous(line)? {
+                if !agent_message || !p.starts(&prior, Some("goal")) || !rows.previous(line)? {
                     return Ok(false);
                 }
                 let setter: Record = serde_json::from_slice(line)?;

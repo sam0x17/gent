@@ -14,22 +14,6 @@ const BLOCK_WITH_TOOL: &str = concat!(
     "\n\n"
 );
 
-async fn next_block(observer: &mut Host, thread: &str) -> Result<Value> {
-    while let Some(frame) = observer.socket.next().await {
-        if let Message::Text(text) = frame? {
-            let event: Value = serde_json::from_str(&text)?;
-            let params = &event["params"];
-            if event["method"] == "thread/goal/updated"
-                && params["threadId"] == thread
-                && params["goal"]["status"] == "blocked"
-            {
-                return Ok(params.clone());
-            }
-        }
-    }
-    anyhow::bail!("fixture host closed before blocked goal update")
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum Outcome {
     Resume,
