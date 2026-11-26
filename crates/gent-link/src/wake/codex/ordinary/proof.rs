@@ -1,5 +1,5 @@
 //! Bind the failed turn to native admission metadata without reading prompt text.
-use super::super::babysit::rollout::{ReverseLines, completed_command};
+use super::super::babysit::rollout::{ReverseLines, terminal_command};
 use super::*;
 mod handoff;
 #[cfg(test)]
@@ -81,8 +81,8 @@ struct Item {
     client_id: Option<String>,
 }
 
-// Only a completed command from this exact turn may arrive after its terminal
-// record. A new user input, control event, or different turn ends the proof.
+// A command can finish after its owning turn. Cross only terminal command
+// receipts for that turn while looking for the matching task_complete.
 fn completion(
     rows: &mut ReverseLines<'_>,
     line: &mut Vec<u8>,
@@ -98,7 +98,7 @@ fn completion(
                 && p.thread_id.as_deref().is_none_or(|id| id == thread))
             .then_some(p));
         }
-        if !completed_command(line, thread, turn) {
+        if !terminal_command(line, thread, turn) {
             break;
         }
     }

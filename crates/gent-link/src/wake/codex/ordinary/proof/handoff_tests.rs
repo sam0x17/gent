@@ -71,6 +71,12 @@ fn named_pair_requires_the_first_admission_and_uninterrupted_work() -> Result<()
             started_at: 2
         })
     );
+    let mut tail = f.rows.clone();
+    tail.push(json!({"type":"event_msg","payload":{"type":"item_completed","turn_id":f.failed.turn,
+        "thread_id":f.failed.thread,"item":{"type":"CommandExecution","id":"cmd","status":"failed","source":"unified_exec_startup"}}}));
+    assert_eq!(f.origin(&tail)?, f.origin(&f.rows)?);
+    tail.last_mut().unwrap()["payload"]["item"]["source"] = json!("user_shell");
+    assert_eq!(f.origin(&tail)?, None);
     for (i, pointer, v) in [
         (1, "/payload/turn_attribution/turn_trigger", json!("goal")),
         (2, "/payload/turn_id", json!(Uuid::now_v7())),

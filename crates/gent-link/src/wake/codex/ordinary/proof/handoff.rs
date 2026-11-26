@@ -79,7 +79,7 @@ impl Row {
     }
 
     // Later native input, controls, decisions and unfamiliar activity close this path.
-    fn work(&self, thread: &str, turn: &str) -> bool {
+    fn work(&self, thread: &str, turn: &str, after_terminal: bool) -> bool {
         let p = &self.payload;
         let scoped = p.thread_id.as_deref() == Some(thread) && p.turn_id.as_deref() == Some(turn);
         p.within(thread, turn)
@@ -94,7 +94,9 @@ impl Row {
                                     Some("AgentMessage" | "Reasoning") => true,
                                     Some("FileChange") => i.status.as_deref() == Some("completed"),
                                     Some("CommandExecution") => {
-                                        i.status.as_deref() == Some("completed")
+                                        (i.status.as_deref() == Some("completed")
+                                            || (after_terminal
+                                                && i.status.as_deref() == Some("failed")))
                                             && matches!(
                                                 i.source.as_deref(),
                                                 Some(
@@ -149,8 +151,8 @@ pub(super) fn read(
         if row.r#type == "event_msg" && row.payload.r#type.as_deref() == Some("task_complete") {
             break;
         }
-        if !completed_command(&line, &failed.thread, failed.turn)
-            || !row.work(&failed.thread, &turn)
+        if !terminal_command(&line, &failed.thread, failed.turn)
+            || !row.work(&failed.thread, &turn, true)
         {
             return Ok(None);
         }
@@ -159,7 +161,7 @@ pub(super) fn read(
         let Some(row) = Row::next(&mut rows, &mut line)? else {
             break;
         };
-        if row.work(&failed.thread, &turn) {
+        if row.work(&failed.thread, &turn, false) {
             continue;
         }
         let p = row.payload;

@@ -363,13 +363,19 @@ struct ReceiptItem {
 }
 
 impl Receipt {
+    fn scoped(&self, thread: &str) -> bool {
+        self.thread_id == thread
+            && !self.turn_id.is_nil()
+            && !self.item.id.is_empty()
+            && self
+                .item
+                .internal_chat_message_metadata_passthrough
+                .is_none()
+    }
+
     fn background_turn(&self, thread: &str) -> Option<Uuid> {
-        let turn = self.turn_id;
         let item = &self.item;
-        (self.thread_id == thread
-            && !turn.is_nil()
-            && !item.id.is_empty()
-            && item.internal_chat_message_metadata_passthrough.is_none()
+        (self.scoped(thread)
             && matches!(
                 (
                     item.r#type.as_str(),
@@ -379,16 +385,20 @@ impl Receipt {
                 ("SubAgentActivity", Some("completed"), None)
                     | ("CommandExecution", None, Some("completed"))
             ))
-        .then_some(turn)
+        .then_some(self.turn_id)
     }
 }
 
-pub(in crate::wake::codex) fn completed_command(line: &[u8], thread: &str, turn: Uuid) -> bool {
+pub(in crate::wake::codex) fn terminal_command(line: &[u8], thread: &str, turn: Uuid) -> bool {
     serde_json::from_slice::<Record<Receipt>>(line).is_ok_and(|r| {
+        let p = &r.payload;
         r.r#type == "event_msg"
-            && r.payload.event_kind == "item_completed"
-            && r.payload.item.r#type == "CommandExecution"
-            && r.payload.background_turn(thread) == Some(turn)
+            && p.event_kind == "item_completed"
+            && p.scoped(thread)
+            && p.turn_id == turn
+            && p.item.r#type == "CommandExecution"
+            && p.item.kind.is_none()
+            && matches!(p.item.status.as_deref(), Some("completed" | "failed"))
     })
 }
 

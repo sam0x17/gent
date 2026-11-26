@@ -70,6 +70,17 @@ fn automatic_steers_require_all_scoped_sources_and_the_immediate_parent() -> Res
             additional_client_ids: vec!["fresh".into()]
         })
     );
+    let mut with_parent_receipt = rows.clone();
+    with_parent_receipt.insert(
+        2,
+        event(
+            json!({"type":"item_completed","thread_id":thread,"turn_id":root,
+        "item":{"type":"CommandExecution","id":"late-parent","status":"failed"}}),
+        ),
+    );
+    assert_eq!(observe(&with_parent_receipt)?, observe(&rows)?);
+    with_parent_receipt[2]["payload"]["turn_id"] = json!(turn);
+    assert!(observe(&with_parent_receipt)?.is_none());
     for (i, path, value) in [
         (1, "/turn_id", json!(turn)),
         (1, "/error", Value::Null),

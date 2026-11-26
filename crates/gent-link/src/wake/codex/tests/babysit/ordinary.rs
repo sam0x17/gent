@@ -3,14 +3,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
 fn late_command_requires_a_scoped_native_completion() {
-    use crate::wake::codex::babysit::rollout::completed_command;
+    use crate::wake::codex::babysit::rollout::terminal_command;
     let thread = Uuid::now_v7().to_string();
     let turn = Uuid::now_v7();
     let receipt = json!({"type":"event_msg","payload":{"type":"item_completed",
         "thread_id":thread,"turn_id":turn,"started_at_ms":1000,"completed_at_ms":1200,
         "item":{"type":"CommandExecution","id":"call","status":"completed"}}});
-    let accepts = |row: &Value| completed_command(&serde_json::to_vec(row).unwrap(), &thread, turn);
+    let accepts = |row: &Value| terminal_command(&serde_json::to_vec(row).unwrap(), &thread, turn);
     assert!(accepts(&receipt));
+    let mut failed = receipt.clone();
+    failed["payload"]["item"]["status"] = json!("failed");
+    assert!(accepts(&failed));
     for (field, replacement) in [
         ("/type", json!("response_item")),
         ("/payload/type", json!("item_started")),
@@ -19,12 +22,16 @@ fn late_command_requires_a_scoped_native_completion() {
         ("/payload/item/type", json!("UserMessage")),
         ("/payload/item/id", json!("")),
         ("/payload/item/status", json!("in_progress")),
+        ("/payload/item/status", json!("interrupted")),
+        ("/payload/item/status", json!("declined")),
+        ("/payload/item/status", json!("unknown")),
+        ("/payload/item/status", Value::Null),
     ] {
-        let mut other = receipt.clone();
+        let mut other = failed.clone();
         *other.pointer_mut(field).unwrap() = replacement;
         assert!(!accepts(&other), "{field}");
     }
-    let mut other = receipt.clone();
+    let mut other = failed.clone();
     other["payload"]["item"]["internal_chat_message_metadata_passthrough"] =
         json!({"turn_id":turn});
     assert!(!accepts(&other));
@@ -152,10 +159,14 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
         }
         rows.push(envelope(json!({"type":"task_complete","turn_id":turn,"started_at":started,"completed_at":ended,"error":{"message":"Model at capacity"}})));
         if change == UserSteer {
-            for id in ["one-command", "two-command", "three-command"] {
+            for (id, status) in [
+                ("one-command", "completed"),
+                ("two-command", "failed"),
+                ("three-command", "failed"),
+            ] {
                 rows.push(envelope(
                     json!({"type":"item_completed","thread_id":thread,"turn_id":turn,
-                    "item":{"type":"CommandExecution","id":id,"status":"completed"}}),
+                    "item":{"type":"CommandExecution","id":id,"status":status}}),
                 ));
             }
         }
@@ -210,14 +221,13 @@ async fn ordinary_sweeps_refuse_changed_or_unproven_input_and_burn_ambiguous_cla
                             .append(true)
                             .open(&path)
                             .unwrap();
-                        writeln!(
-                            file,
-                            "{}",
-                            json!({"type":"event_msg","payload":{
-                            "type":"item_completed","thread_id":thread,"turn_id":turn,
-                            "item":{"type":"CommandExecution","id":"late","status":"completed"}}})
-                        )
-                        .unwrap();
+                        for status in ["completed", "failed"] {
+                            let receipt = json!({"type":"event_msg","payload":{
+                                "type":"item_completed","thread_id":thread,"turn_id":turn,
+                                "item":{"type":"CommandExecution","id":format!("late-{status}"),"status":status}
+                            }});
+                            writeln!(file, "{receipt}").unwrap();
+                        }
                         if change == ComposerCarryOnDuringCheck {
                             writeln!(
                                 file,
