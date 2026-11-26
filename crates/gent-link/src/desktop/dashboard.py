@@ -307,6 +307,7 @@ class DashboardPane(Gtk.Box):
         self.connect("destroy", lambda *_: Gtk.StyleContext.remove_provider_for_screen(screen, provider))
         # The first request needs the same style nodes before a publisher has supplied a card.
         self.empty_card = DashboardCard("", "")
+        self.example = None
         self.rows = None
         self.hidden = []
         self.grid_width = None
@@ -388,14 +389,22 @@ class DashboardPane(Gtk.Box):
             self.restore.set_popup(menu)
         self.restore.set_visible(bool(hidden))
 
+    def displayed_rows(self):
+        if self.example and not self.showing_feedback:
+            return [self.example]
+        return self.rows or []
+
     def receive(self, reply):
-        rows = reply.get("rows", self.rows)
-        if reply.get("pro_required"):
-            rows = []
+        previous = self.displayed_rows()
+        locked = reply.get("pro_required", False)
+        if locked or "rows" in reply:
+            self.rows = [] if locked else reply["rows"]
+            self.example = reply.get("example") if not self.rows else None
+        if locked:
             self.set_hidden([])
             self.showing_feedback = False
             self.notice.set_markup('Dashboards require an active Gent Pro plan for this cluster. '
-                                 '<a href="https://gent.link/pricing">View plans</a>')
+                                   '<a href="https://gent.link/pricing">View plans</a>')
         else:
             if "hidden" in reply:
                 self.set_hidden(reply["hidden"])
@@ -405,13 +414,13 @@ class DashboardPane(Gtk.Box):
                 self.notice.set_text(feedback)
             elif not (reply.get("layout_only") and self.showing_feedback):
                 self.showing_feedback = False
-                empty = "All dashboards are hidden." if self.hidden else "No chats have published a dashboard."
-                self.notice.set_text("" if rows else empty)
-        if self.rows != rows:
-            self.rows = rows
+                empty = "All dashboards are hidden." if self.hidden and not self.example else "No chats have published a dashboard."
+                self.notice.set_text(empty if self.rows == [] else "")
+        displayed = self.displayed_rows()
+        if previous != displayed:
             for card in self.grid.get_children():
                 self.grid.remove(card)
-            for row in rows:
+            for row in displayed:
                 self.grid.put(self.card(row), 0, 0)
             self.grid.show_all()
             cards = self.grid.get_children()
@@ -423,9 +432,11 @@ class DashboardPane(Gtk.Box):
 
     def card(self, row):
         board = row["board"]
-        frame = DashboardCard(board["title"], row["chat"], row["agent"])
+        frame = DashboardCard(board["title"], row["chat"], row.get("agent"))
         for w in board["widgets"]:
             v, kind = w["value"], w["kind"]
+            if kind in ("button", "link") and not row.get("agent"):
+                continue
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             frame.body.add(box)
             if kind == "link":
@@ -477,6 +488,7 @@ class DashboardPane(Gtk.Box):
                 low, high = w.get("min", 0), w.get("max", 100)
                 fraction = (v - low) / (high - low)
                 bar = Gtk.ProgressBar(fraction=fraction) if kind == "progress" else Gtk.LevelBar(value=fraction)
+                bar.get_accessible().set_name(w["label"])
                 box.add(bar)
                 continue
             shown = "\n".join(v) if kind == "events" else v

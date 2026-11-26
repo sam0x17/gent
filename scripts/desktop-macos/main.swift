@@ -1039,10 +1039,62 @@ func checkDashboardVisibility(_ desktop: Desktop) {
     func shows(_ message: String) -> Bool {
         descendants(view, of: NSTextField.self).contains { $0.stringValue == message && !$0.isHiddenOrHasHiddenAncestor }
     }
+    let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent()
+    let spec = repo.appendingPathComponent("crates/gent-link/src/desktop/dashboard-example.json")
+    let example = try! JSONSerialization.jsonObject(with: Data(contentsOf: spec)) as! [String: Any]
+    let empty: [String: Any] = ["rows": [], "hidden": [], "example": example]
+    let free = empty.merging(["pro_required": true]) { _, new in new }
+    resizeDesktop(desktop, width: 510, height: 400)
+    reply(free)
+    let sample = cards().first!
+    require(cards().count == 1 && shows("Test run") && shows("Example dashboard") && shows("18 of 24")
+            && descendants(sample, of: NSButton.self).isEmpty, "Free displays one labeled, read-only example")
+    require(shows("Each registered chat on a Pro cluster can publish one dashboard. When the chat posts new results, Gent Desktop shows them across the cluster."), "example explains who publishes results and where updates appear")
+    let progress = descendants(sample, of: NSProgressIndicator.self).first!
+    require(progress.accessibilityLabel() == "Tests passed" && progress.doubleValue == 18 && progress.maxValue == 24,
+            "example progress identifies the completed tests")
+    let pricing = descendants(view, of: NSButton.self).first { $0.title == "View Gent plans" }!
+    require(!pricing.isHiddenOrHasHiddenAncestor && shows("Dashboards require an active Gent Pro plan for this cluster."),
+            "Free keeps the upgrade link and plan notice")
+    let pasteboard = NSPasteboard.withUniqueName()
+    defer { pasteboard.releaseGlobally() }
+    let hasPasteboard = pasteboard.setString("fixture", forType: .string)
+    require(desktop.window.screen == nil || hasPasteboard, "pasteboard available for windowed copy test")
+    for prompt in ["Make a Gent dashboard for this test run. Show how many tests have passed and list any failures.",
+                   "Update my dashboard after each test batch."] {
+        let field = descendants(sample, of: NSTextField.self).first { $0.stringValue == prompt }!
+        field.scrollToVisible(field.bounds)
+        let clip = field.enclosingScrollView!.contentView
+        let fitting = field.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: field.bounds.width, height: 1000))
+        require(field.isSelectable && !field.isEditable && field.bounds.height >= fitting.height - 1
+                && clip.bounds.insetBy(dx: -1, dy: -1).contains(field.convert(field.bounds, to: clip)),
+                "prompt wraps and scrolls into view at minimum window width")
+        field.selectText(nil)
+        guard let editor = field.currentEditor() as? NSTextView else { fatalError("Missing prompt selection") }
+        editor.selectAll(nil)
+        let selected = (editor.string as NSString).substring(with: editor.selectedRange())
+        require(selected == prompt, "field editor selects the entire prompt")
+        if hasPasteboard {
+            pasteboard.declareTypes([.string], owner: nil)
+            require(editor.writeSelection(to: pasteboard, type: .string) && pasteboard.string(forType: .string) == prompt,
+                    "selected prompt copies as plain text")
+        }
+        reply(free)
+        require(cards().first === sample && field.currentEditor() === editor, "Free refresh preserves selection")
+    }
+    reply(empty)
+    require(pricing.isHidden && cards().first === sample && shows("No chats have published a dashboard."),
+            "empty Pro shows the same example without upgrade controls")
+    reply(["error": "Daemon offline", "hidden": []])
+    reply(["layout_only": true, "unchanged": true])
+    require(cards().isEmpty && shows("Daemon offline"), "offline error survives resize and clears the example")
+    reply(empty)
+    require(cards().count == 1 && shows("Test run"), "a successful empty refresh restores the example")
     reply(["rows": [row(review)], "hidden": []])
     // Negotiate the current viewport before performClick services queued resize work.
     _ = requests { desktop.dashboard.load() }
-    require(cards().count == 1 && restoreLink() == nil, "no restore link when every dashboard is visible")
+    require(cards().count == 1 && !shows("Test run") && restoreLink() == nil, "published board replaces example")
     let card = cards()[0]
     guard let title = descendants(card, of: NSTextField.self).first(where: { $0.stringValue == "Build" }),
           let hide = descendants(card, of: NSButton.self).first(where: { $0.title == "×" }) else {

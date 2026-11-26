@@ -201,7 +201,23 @@ def exercise_ordinary_recovery(cli):
     assert not saved()
 
 
+def check_dashboard_example():
+    get("Test run", "label")
+    get("Example dashboard", "label")
+    get("Each registered chat on a Pro cluster can publish one dashboard. When the chat posts new results, Gent Desktop shows them across the cluster.", "label")
+    get("18 of 24", "label")
+    assert get("Tests passed", "progress bar").queryValue().currentValue == .75
+    for prompt in ("Make a Gent dashboard for this test run. Show how many tests have passed and list any failures.",
+                   "Update my dashboard after each test batch."):
+        assert get(prompt, "label").queryText().getText(0, -1) == prompt
+    assert not find("Hide dashboard")
+
+
 def exercise_enrolled_without_daemon(node):
+    tab("Dashboard")
+    check_dashboard_example()
+    get("Dashboards require an active Gent Pro plan for this cluster. View plans", "label")
+    tab("Status")
     click("Refresh status")
     get("desktop-test", "label")
     get("Local node · " + node["name"], "label")
@@ -392,15 +408,17 @@ def exercise_dashboard(fixture, agent, cli, xid):
 
     empty = "No chats have published a dashboard."
     get(empty, "label")
+    check_dashboard_example()
     assert call("get") == {"revision": 0, "board": None}
     assert call("define", expected_revision=0, board=board)["revision"] == 1
     # Dashboard stays selected throughout. Allow two of the GTK timer's 15 s ticks.
     get(board["title"], "label", timeout=35)
     get(agent["name"], "label")
     restore = "Restore hidden dashboards"
-    assert not find(restore)
+    assert not find(restore) and not find("Example dashboard", "label")
     click("Hide dashboard")
     get("All dashboards are hidden.", "label")
+    assert not find("Example dashboard", "label")
     assert not find(board["title"], "label") and not find("Inspect job")
     assert call("get") == {"revision": 1, "board": board}
     tab("Chats")
@@ -463,6 +481,7 @@ def exercise_dashboard(fixture, agent, cli, xid):
 
     assert call("delete", expected_revision=2)["revision"] == 3
     get(empty, "label", timeout=35)
+    check_dashboard_example()
     assert not find(board["title"]) and not find("Inspect job")
     assert call("get") == {"revision": 3, "board": None}
     assert fixture.call("gent_inbox")[0] == []

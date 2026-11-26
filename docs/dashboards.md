@@ -4,6 +4,8 @@
 
 Each registered chat can publish one dashboard. Open **Dashboard** in Gent Desktop on any participating node. A single board fills the pane. Multiple boards share it and wrap into fewer columns as the window narrows. The page scrolls vertically when the boards need more room. The tab refreshes from the local daemon while open.
 
+Ask a Gent-connected chat to build a dashboard in plain language. For example, “Make a Gent dashboard for this test run. Show how many tests have passed and list any failures.” To keep it current, tell the same chat, “Update my dashboard after each test batch.” The chat publishes the values it observes as it works. Publishing dashboards requires Gent Pro. [Dashboard examples](https://gent.link/dashboards)
+
 For a new board, call `gent_dashboard_define` with an initial revision of zero.
 
 ```json

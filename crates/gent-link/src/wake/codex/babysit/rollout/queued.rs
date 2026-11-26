@@ -314,40 +314,6 @@ impl Admission {
     }
 }
 
-// Only the native user text needed for an independent journal comparison
-// is decoded. Neither its contents nor tool output leave the host.
-fn input_hash(line: &[u8], receipt: bool) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Part {
-        r#type: String,
-        text: String,
-    }
-    #[derive(Deserialize)]
-    struct Content {
-        content: Vec<Part>,
-    }
-    #[derive(Deserialize)]
-    struct ItemEvent {
-        item: Content,
-    }
-    let content = if receipt {
-        serde_json::from_slice::<Record<ItemEvent>>(line)
-            .ok()?
-            .payload
-            .item
-    } else {
-        serde_json::from_slice::<Record<Content>>(line)
-            .ok()?
-            .payload
-    };
-    let [part] = content.content.as_slice() else {
-        return None;
-    };
-    let kind = if receipt { "text" } else { "input_text" };
-    use sha2::{Digest, Sha256};
-    (part.r#type == kind).then(|| format!("{:x}", Sha256::digest(part.text.as_bytes())))
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Declaration {

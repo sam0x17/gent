@@ -164,6 +164,11 @@ fn active_file(home: &Path) -> Option<PathBuf> {
     gent_daemon::entitlements::paid(home, &cfg).then(|| preferences::path(home, &cfg))
 }
 
+fn example() -> Value {
+    serde_json::from_str(include_str!("../dashboard-example.json"))
+        .expect("bundled dashboard example")
+}
+
 impl Page {
     pub(super) async fn respond(&mut self, home: &Path, request: Request) -> Value {
         let Some(file) = active_file(home) else {
@@ -214,13 +219,20 @@ impl Page {
                 reply["hidden"] = json!([]);
             }
         }
+        if self.fresh
+            && self.view.as_ref().is_some_and(|v| v.rows.is_empty())
+            && reply.get("rows").is_some()
+            && reply.get("error").is_none()
+        {
+            reply["example"] = example();
+        }
         reply
     }
 
     fn clear(&mut self, locked: bool) -> Value {
         *self = Self::default();
         if locked {
-            json!({"pro_required":true,"rows":[],"hidden":[]})
+            json!({"pro_required":true,"rows":[],"hidden":[],"example":example()})
         } else {
             json!({"rows":[],"hidden":[],"error":"Active cluster changed. Refresh the dashboard."})
         }
@@ -239,7 +251,10 @@ impl Page {
         let next = View::new(file, layout, rows)?;
         let unchanged = self.fresh
             && self.view.as_ref().is_some_and(|v| {
-                v.layout == next.layout && v.hidden == next.hidden && v.visible().eq(next.visible())
+                v.layout == next.layout
+                    && v.hidden == next.hidden
+                    && v.rows.is_empty() == next.rows.is_empty()
+                    && v.visible().eq(next.visible())
             });
         let reply = if unchanged {
             json!({"unchanged":true})

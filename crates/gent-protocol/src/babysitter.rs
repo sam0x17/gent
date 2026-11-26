@@ -17,6 +17,8 @@ pub enum ChatOrigin {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_client_ids: Vec<String>,
     },
+    /// Ordered, source-paired admissions on a native user-started root.
+    ForegroundInputs(ForegroundInputs),
     ThreadHandoff {
         item: Uuid,
         started_at: i64,
@@ -34,6 +36,23 @@ pub enum ChatOrigin {
         started_at: i64,
         additional_client_ids: Vec<String>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForegroundInputs {
+    pub thread: Uuid,
+    pub turn: Uuid,
+    pub started_at: i64,
+    pub inputs: Vec<ForegroundInput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForegroundInput {
+    pub client: Uuid,
+    pub sha256: String,
+    pub received_at_ms: i64,
 }
 
 #[cfg(test)]

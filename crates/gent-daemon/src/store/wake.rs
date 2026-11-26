@@ -75,7 +75,7 @@ fn limits() -> Value {
         "minimum_agent_interval_seconds":MIN_INTERVAL})
 }
 
-fn record(db: &Connection, message_id: &str) -> Result<Option<WakeRecord>> {
+pub(super) fn record(db: &Connection, message_id: &str) -> Result<Option<WakeRecord>> {
     id(message_id)?;
     let row: Option<(String, String, i64, String)> = db
         .query_row(

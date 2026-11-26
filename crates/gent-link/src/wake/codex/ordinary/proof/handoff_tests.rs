@@ -159,3 +159,83 @@ fn proven_human_inputs_take_precedence_with_complete_or_inconclusive_named_items
     }
     Ok(())
 }
+
+#[test]
+fn declared_tools_and_delayed_commands_preserve_a_named_handoff() -> Result<()> {
+    let f = Fixture::new()?;
+    let prior = Uuid::now_v7();
+    let command = |owner, start, end| {
+        json!({"type":"event_msg","payload":{
+            "type":"item_completed","thread_id":f.failed.thread,"turn_id":owner,
+            "started_at_ms":start,"completed_at_ms":end,
+            "item":{"type":"CommandExecution","status":"failed","id":"command","source":"unified_exec_startup"}
+        }})
+    };
+    let mut rows = vec![
+        f.rows[0].clone(),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":prior,"started_at":0,"completed_at":1}}),
+        command(prior, 50, 1750),
+        f.rows[1].clone(),
+        json!({"type":"response_item","payload":{"type":"message","role":"developer","id":"msg_fixture",
+            "internal_chat_message_metadata_passthrough":{"turn_id":f.failed.turn,"content_item_kinds":["tools.incremental_update"]}}}),
+        json!({"type":"response_item","payload":{"type":"additional_tools","id":"at_fixture",
+            "role":"developer","tools":[{"type":"namespace","name":"functions","tools":[{"name":"exec","type":"custom"}]}]}}),
+        json!({"type":"world_state","payload":{"full":false,"state":{"top_level_tools":{"functions.exec":"a".repeat(40)}}}}),
+        f.rows[2].clone(),
+        f.rows[3].clone(),
+        f.rows[4].clone(),
+        command(f.failed.turn, 2500, 2750),
+        f.rows[5].clone(),
+    ];
+    let origin = f.origin(&f.rows)?;
+    assert_eq!(f.origin(&rows)?, origin);
+    rows.push(command(prior, 500, 6000));
+    rows.push(command(f.failed.turn, 3000, 7000));
+    assert_eq!(f.origin(&rows)?, origin);
+
+    for (index, pointer, value) in [
+        (1, "/payload/turn_id", json!(Uuid::now_v7())),
+        (2, "/payload/item/source", json!("user_shell")),
+        (2, "/payload/started_at_ms", json!(2100)),
+        (
+            4,
+            "/payload/internal_chat_message_metadata_passthrough/turn_id",
+            json!(prior),
+        ),
+        (
+            4,
+            "/payload/internal_chat_message_metadata_passthrough/content_item_kinds",
+            json!(["user.goal"]),
+        ),
+        (5, "/payload/role", json!("user")),
+        (5, "/payload/tools/0/tools/0/type", json!("function_call")),
+        (5, "/payload/tools/0/tools/0/name", json!("another")),
+        (6, "/payload/full", json!(true)),
+        (10, "/payload/item/source", json!("user_shell")),
+        (12, "/payload/started_at_ms", json!(2500)),
+        (12, "/payload/turn_id", json!(Uuid::now_v7())),
+        (12, "/payload/thread_id", json!(Uuid::now_v7())),
+        (12, "/payload/item/source", json!("user_shell")),
+    ] {
+        let mut changed = rows.clone();
+        *changed[index].pointer_mut(pointer).unwrap() = value;
+        assert_eq!(f.origin(&changed)?, None, "row {index} {pointer}");
+    }
+    for i in [4, 5, 6] {
+        let mut incomplete = rows.clone();
+        incomplete.remove(i);
+        assert_eq!(f.origin(&incomplete)?, None, "incomplete tool list");
+    }
+    let mut manual = rows.clone();
+    manual.push(json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":f.failed.thread}}));
+    assert_eq!(f.origin(&manual)?, None);
+    let mut operator = rows;
+    operator.insert(10,json!({"type":"event_msg","payload":{"type":"item_completed",
+        "thread_id":f.failed.thread,"turn_id":f.failed.turn,"item":{"type":"UserMessage","id":"user","client_id":"client"}}}));
+    assert_eq!(
+        f.origin(&operator)?,
+        None,
+        "a foreign tail requires the named handoff proof"
+    );
+    Ok(())
+}

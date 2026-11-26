@@ -1,4 +1,5 @@
 """Exercise the GTK dashboard in a private Xvfb display (no daemon required)."""
+import json
 import os
 from pathlib import Path
 import runpy
@@ -484,6 +485,39 @@ def exercise(root):
     inspect, = [b for b in buttons if b.get_label() == "Inspect"]
     inspect.clicked()
     assert requests == [("dashboard_click", {"agent": "agent-0", "revision": 1, "widget": "inspect"})]
+    example = json.loads((desktop / "dashboard-example.json").read_text())
+    empty = {"rows": [], "hidden": [], "example": example}
+    free = dict(empty, pro_required=True)
+    pane.receive(free)
+    window.resize(284, 424)
+    settle()
+    card, = pane.grid.get_children()
+    assert card.get_accessible().get_name() == "Test run" and card.publisher.get_text() == "Example dashboard"
+    assert not widgets(card, Gtk.Button) and "https://gent.link/pricing" in pane.notice.get_label()
+    bar, = widgets(card, Gtk.ProgressBar)
+    assert bar.get_fraction() == .75 and bar.get_accessible().get_name() == "Tests passed"
+    assert h.get_page_size() == h.get_upper() and viewport.get_allocated_width() <= 260
+    labels = {label.get_text(): label for label in widgets(card, Gtk.Label)}
+    assert "Each registered chat on a Pro cluster can publish one dashboard. When the chat posts new results, Gent Desktop shows them across the cluster." in labels
+    assert "18 of 24" in labels
+    clipboard = Gtk.Clipboard.get(ui["Gdk"].SELECTION_CLIPBOARD)
+    for prompt in ("Make a Gent dashboard for this test run. Show how many tests have passed and list any failures.",
+                   "Update my dashboard after each test batch."):
+        field = labels[prompt]
+        assert field.get_selectable() and field.get_layout().get_pixel_size()[1] <= field.get_allocated_height()
+        field.grab_focus()
+        field.select_region(0, -1)
+        pane.receive(free)
+        assert pane.grid.get_children() == [card] and field.get_selection_bounds() == (True, 0, len(prompt))
+        field.emit("copy-clipboard")
+        assert clipboard.wait_for_text() == prompt
+    pane.receive(empty)
+    assert pane.grid.get_children() == [card] and pane.notice.get_text() == "No chats have published a dashboard."
+    pane.receive({"error": "Daemon offline", "hidden": []})
+    pane.receive({"layout_only": True, "unchanged": True})
+    assert not pane.grid.get_children() and pane.notice.get_text() == "Daemon offline"
+    pane.receive(empty)
+    assert len(pane.grid.get_children()) == 1
     exercise_visibility(pane, Gtk, widgets, requests, boards)
     pane.receive({"rows": []})
     assert not widgets(pane, Gtk.Frame) and pane.notice.get_visible()
