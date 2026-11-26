@@ -1,6 +1,7 @@
 //! A first, named host input may open its own root. The receipt identifies
 //! the receiving item, without making a claim about the sender.
 use super::*;
+mod direct;
 mod preamble;
 mod previous;
 use crate::wake::codex::babysit::rollout::decision;
@@ -20,6 +21,7 @@ struct Fields {
     namespace: Option<String>,
     name: Option<String>,
     call_id: Option<String>,
+    client_id: Option<String>,
     role: Option<String>,
     source: Option<String>,
     status: Option<String>,
@@ -136,14 +138,72 @@ impl Row {
     }
 }
 
+pub(super) fn named_marker(line: &[u8]) -> bool {
+    serde_json::from_slice::<Row>(line).is_ok_and(|row| {
+        row.payload.named() || row.payload.item.as_ref().is_some_and(|item| item.named())
+    })
+}
+
+fn named_pair(
+    row: Row,
+    rows: &mut ReverseLines<'_>,
+    line: &mut Vec<u8>,
+    failed: &Failed,
+) -> Result<Option<Uuid>> {
+    let turn = failed.turn.to_string();
+    let p = row.payload;
+    if row.r#type != "event_msg"
+        || p.r#type.as_deref() != Some("item_completed")
+        || p.thread_id.as_deref() != Some(&failed.thread)
+        || p.turn_id.as_ref() != Some(&turn)
+        || !p.within(&failed.thread, &turn)
+    {
+        return Ok(None);
+    }
+    let Some(item) = p.item.filter(|i| {
+        i.r#type.as_deref() == Some("FunctionCallOutput")
+            && i.named()
+            && i.within(&failed.thread, &turn)
+    }) else {
+        return Ok(None);
+    };
+    let Some(id) = item
+        .id
+        .as_deref()
+        .and_then(|s| s.strip_prefix("fco_"))
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .filter(|id| !id.is_nil())
+    else {
+        return Ok(None);
+    };
+    let Some(response) = Row::next(rows, line)? else {
+        return Ok(None);
+    };
+    let r = response.payload;
+    if response.r#type != "response_item"
+        || r.r#type.as_deref() != Some("function_call_output")
+        || !r.named()
+        || !r.within(&failed.thread, &turn)
+        || r.id != item.id
+        || r.id != Some(format!("fco_{id}"))
+        || !r
+            .internal_chat_message_metadata_passthrough
+            .is_some_and(|m| m.turn_id.as_ref() == Some(&turn))
+    {
+        return Ok(None);
+    }
+    Ok(Some(id))
+}
+
 // This replay only runs after the ordinary reader reached the same proven
-// task_started without finding user input. It shares that reader's time budget.
+// task_started. Verified notification receipts are supplied in reverse order.
 pub(super) fn read(
     file: &File,
     stamp: &Stamp,
     failed: &Failed,
     deadline: Instant,
     previous: Option<Previous>,
+    mut inputs: &[ForegroundInput],
 ) -> Result<Option<Uuid>> {
     let mut rows = ReverseLines::new(file, stamp.len, true)?;
     let mut line = Vec::new();
@@ -173,53 +233,28 @@ pub(super) fn read(
             return Ok(None);
         }
     }
+    let dispatched = !inputs.is_empty();
+    let mut named = HashSet::new();
     while Instant::now() < deadline {
         let Some(row) = Row::next(&mut rows, &mut line)? else {
             break;
         };
-        if row.work(&failed.thread, &turn) {
+        let work = if dispatched {
+            direct::work(&row, &mut rows, &mut line, failed, &turn, &mut inputs)?
+        } else {
+            row.work(&failed.thread, &turn)
+        };
+        if work {
             continue;
         }
-        let p = row.payload;
-        if row.r#type != "event_msg"
-            || p.r#type.as_deref() != Some("item_completed")
-            || p.thread_id.as_deref() != Some(&failed.thread)
-            || p.turn_id.as_ref() != Some(&turn)
-            || !p.within(&failed.thread, &turn)
-        {
+        let Some(id) = named_pair(row, &mut rows, &mut line, failed)? else {
+            break;
+        };
+        if !named.insert(id) {
             break;
         }
-        let Some(item) = p.item.filter(|i| {
-            i.r#type.as_deref() == Some("FunctionCallOutput")
-                && i.named()
-                && i.within(&failed.thread, &turn)
-        }) else {
-            break;
-        };
-        let Some(id) = item
-            .id
-            .as_deref()
-            .and_then(|s| s.strip_prefix("fco_"))
-            .and_then(|s| Uuid::parse_str(s).ok())
-            .filter(|id| !id.is_nil())
-        else {
-            break;
-        };
-        let Some(response) = Row::next(&mut rows, &mut line)? else {
-            break;
-        };
-        let r = response.payload;
-        if response.r#type != "response_item"
-            || r.r#type.as_deref() != Some("function_call_output")
-            || !r.named()
-            || !r.within(&failed.thread, &turn)
-            || r.id != item.id
-            || r.id != Some(format!("fco_{id}"))
-            || !r
-                .internal_chat_message_metadata_passthrough
-                .is_some_and(|m| m.turn_id.as_ref() == Some(&turn))
-        {
-            break;
+        if !inputs.is_empty() {
+            continue;
         }
         let Some(context) = Row::next(&mut rows, &mut line)? else {
             break;

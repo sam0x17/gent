@@ -58,7 +58,7 @@ fn automatic_steers_require_all_scoped_sources_and_the_immediate_parent() -> Res
         for row in rows {
             writeln!(file, "{row}")?;
         }
-        Ok(read(&f)?.map(|(origin, _, _)| origin))
+        Ok(read(&f, false)?.map(|(origin, _, _)| origin))
     };
     assert_eq!(
         observe(&rows)?,
@@ -176,7 +176,7 @@ fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -
         for row in rows {
             writeln!(f, "{row}")?;
         }
-        Ok(read(&failed)?.map(|(origin, _, _)| origin))
+        Ok(read(&failed, false)?.map(|(origin, _, _)| origin))
     };
     let Some(ChatOrigin::ForegroundInputs(proof)) = observe(&rows)? else {
         panic!("missing scoped proof")

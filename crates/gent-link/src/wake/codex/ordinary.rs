@@ -190,12 +190,14 @@ pub(super) async fn inspect(
         operator: failed.root,
         failed_at: failed.ended,
     };
-    if agent(home, credential, probe).await?["inspect"] != true {
+    let probe = agent(home, credential, probe).await?;
+    if probe["inspect"] != true {
         return Ok(());
     }
+    let direct_handoff = probe["direct_handoff"] == true;
     let candidate = failed.clone();
     let Some((origin, parent, mut evidence)) =
-        tokio::task::spawn_blocking(move || proof::read(&candidate)).await??
+        tokio::task::spawn_blocking(move || proof::read(&candidate, direct_handoff)).await??
     else {
         return Ok(());
     };
@@ -230,8 +232,16 @@ pub(super) async fn inspect(
     // A stalled daemon or a sequence of slow host reads must not stretch the
     // admission window to the sum of all their independent RPC timeouts.
     let ready = tokio::time::timeout(Duration::from_secs(3), async {
-        if agent(home, credential, AgentOp::BabysitterChatCheck { attempt }).await?["eligible"]
-            != true
+        // Keep the notification journal and reply check after the last host reads.
+        let check_last = matches!(origin, ChatOrigin::DirectHandoff { .. });
+        let check = || async {
+            let r = agent(home, credential, AgentOp::BabysitterChatCheck { attempt }).await?;
+            // A daemon downgraded after the claim cannot attest to this recheck.
+            Ok::<_, anyhow::Error>(
+                r["eligible"] == true && (!check_last || r["direct_handoff"] == true),
+            )
+        };
+        if (!check_last && !check().await?)
             || latest(&mut host, thread).await?.as_ref() != Some(&failed)
         {
             return Ok(false);
@@ -245,7 +255,8 @@ pub(super) async fn inspect(
             }
             let candidate = failed.clone();
             let Some((new_origin, new_parent, new_evidence)) =
-                tokio::task::spawn_blocking(move || proof::read(&candidate)).await??
+                tokio::task::spawn_blocking(move || proof::read(&candidate, direct_handoff))
+                    .await??
             else {
                 return Ok(false);
             };
@@ -263,6 +274,7 @@ pub(super) async fn inspect(
             registry.credential(thread)?.as_deref() == Some(credential)
                 && gent_daemon::config::ordinary_babysitter_enabled(home)?
                 && babysit::confirmed_inputs(home, credential, thread, &evidence.direct).await?
+                && (!check_last || check().await?)
                 && evidence.stamp.matches(&failed.path)?,
         )
     })
