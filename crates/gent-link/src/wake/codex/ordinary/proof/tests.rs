@@ -130,3 +130,98 @@ fn automatic_steers_require_all_scoped_sources_and_the_immediate_parent() -> Res
     assert_eq!(observe(&old)?, Some(ChatOrigin::Continuation { attempt }));
     Ok(())
 }
+
+#[test]
+fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let thread = Uuid::now_v7().to_string();
+    let turn = Uuid::now_v7();
+    let failed = Failed {
+        path: dir.path().join(format!("rollout-fixture-{thread}.jsonl")),
+        thread: thread.clone(),
+        root: turn,
+        turn,
+        started: 100,
+        ended: 110,
+        reason: Failure::ToolSchema,
+        error: "fixture".into(),
+        goal: Value::Null,
+        legacy_history: false,
+        handoff_parent: true,
+    };
+    let clients = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let mut rows = vec![
+        json!({"type":"session_meta","payload":{"id":thread,"history_mode":"paginated"}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","started_at":100,"turn_id":turn,
+            "root_turn_id":turn,"turn_attribution":{"turn_id":turn,"root_turn_id":turn,"turn_trigger":"user"}}}),
+        json!({"type":"turn_context","payload":{"turn_id":turn,"root_turn_id":turn}}),
+    ];
+    for (i, client) in clients.iter().enumerate() {
+        rows.push(json!({"type":"response_item","payload":{"type":"message","role":"user","id":format!("message-{i}"),
+            "content":[{"type":"input_text","text":format!("input {i}")}],
+            "internal_chat_message_metadata_passthrough":{"turn_id":turn,"content_item_kinds":["user.text"],
+            "content_item_metadata":[{"provenance":{"type":"user"}}]}}}));
+        rows.push(json!({"type":"event_msg","timestamp":format!("1970-01-01T00:01:4{i}.012Z"),"payload":{
+            "type":"item_completed","thread_id":thread,"turn_id":turn,"item":{"type":"UserMessage","id":format!("receipt-{i}"),
+            "client_id":client,"content":[{"type":"text","text":format!("input {i}")}]}}}));
+    }
+    rows.push(
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn,
+        "started_at":100,"completed_at":110,"error":{"message":"fixture"}}}),
+    );
+    let observe = |rows: &[Value]| -> Result<Option<ChatOrigin>> {
+        let mut f = File::create(&failed.path)?;
+        for row in rows {
+            writeln!(f, "{row}")?;
+        }
+        Ok(read(&failed)?.map(|(origin, _, _)| origin))
+    };
+    let Some(ChatOrigin::ForegroundInputs(proof)) = observe(&rows)? else {
+        panic!("missing scoped proof")
+    };
+    assert_eq!(
+        proof.inputs.iter().map(|i| i.client).collect::<Vec<_>>(),
+        clients
+    );
+    assert_eq!(proof.inputs[1].received_at_ms, 101012);
+    for (i, field, val) in [
+        (1, "/payload/turn_attribution/turn_trigger", json!(TRIGGER)),
+        (2, "/payload/root_turn_id", json!(Uuid::new_v4())),
+        (
+            3,
+            "/payload/internal_chat_message_metadata_passthrough/turn_id",
+            json!(Uuid::new_v4()),
+        ),
+        (
+            5,
+            "/payload/internal_chat_message_metadata_passthrough/content_item_metadata/0/provenance/type",
+            json!("harness"),
+        ),
+        (6, "/payload/item/content/0/text", json!("changed")),
+        (7, "/payload/id", json!("message-1")),
+        (8, "/payload/thread_id", json!(Uuid::new_v4())),
+        (8, "/timestamp", json!("invalid")),
+    ] {
+        let mut changed = rows.clone();
+        *changed[i].pointer_mut(field).unwrap() = val;
+        assert!(
+            !matches!(observe(&changed)?, Some(ChatOrigin::ForegroundInputs(_))),
+            "{field}"
+        );
+    }
+    for at in [2, 4, 5, rows.len()] {
+        let mut changed = rows.clone();
+        changed.insert(at, rows[3].clone());
+        assert!(
+            !matches!(observe(&changed)?, Some(ChatOrigin::ForegroundInputs(_))),
+            "unpaired input at {at}"
+        );
+    }
+    let mut stopped = rows.clone();
+    stopped.insert(
+        7,
+        json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":turn}}),
+    );
+    assert!(observe(&stopped)?.is_none());
+    Ok(())
+}

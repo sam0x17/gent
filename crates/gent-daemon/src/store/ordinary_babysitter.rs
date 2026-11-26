@@ -1,5 +1,6 @@
 //! Claims and native submission receipts stay on the registered chat's node.
 use super::*;
+mod foreground;
 use gent_protocol::{
     babysitter::{CHAT_CHAIN_MAX_AGE, CHAT_FAILURE_MAX_AGE, ChatOrigin, MAX_CHAT_INPUTS},
     notifications::Failure,
@@ -19,6 +20,10 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
             PRIMARY KEY(agent,turn), UNIQUE(agent,operator,ordinal)
         );
         CREATE INDEX IF NOT EXISTS babysitter_chat_retention ON babysitter_chat_attempts(claimed_at);
+        CREATE TABLE IF NOT EXISTS babysitter_chat_mixed_inputs(
+            attempt TEXT PRIMARY KEY REFERENCES babysitter_chat_attempts(attempt) ON DELETE CASCADE,
+            agent TEXT NOT NULL, opener TEXT NOT NULL, UNIQUE(agent,opener)
+        );
         CREATE TABLE IF NOT EXISTS babysitter_chat_handoffs(
             attempt TEXT PRIMARY KEY REFERENCES babysitter_chat_attempts(attempt) ON DELETE CASCADE,
             agent TEXT NOT NULL, item TEXT NOT NULL, UNIQUE(agent,item)
@@ -103,6 +108,25 @@ impl StoreSession<'_> {
         client_id: Option<&str>,
         additional_client_ids: &[String],
     ) -> Result<bool> {
+        if !self.chat_client_ids_allowed(who, client_id, additional_client_ids)? {
+            return Ok(false);
+        }
+        // A direct wake can record the native turn even if the host omits or
+        // changes its client ID. Check this agent's journal once per candidate.
+        Ok(!self.db.prepare(
+            "SELECT 1 FROM wake_dispatches WHERE agent=?1
+             AND json_extract(payload,'$.target.host')='codex' AND json_type(payload,'$.direct')='object'
+             AND (json_extract(payload,'$.submission_id')=?2 OR json_extract(payload,'$.direct.turn_id')=?2)
+             LIMIT 1",
+        )?.exists(params![who.id, turn])?)
+    }
+
+    fn chat_client_ids_allowed(
+        &self,
+        who: &Agent,
+        client_id: Option<&str>,
+        additional_client_ids: &[String],
+    ) -> Result<bool> {
         let multi_input = !additional_client_ids.is_empty();
         if additional_client_ids.len() >= MAX_CHAT_INPUTS || (multi_input && client_id.is_none()) {
             return Ok(false);
@@ -125,14 +149,7 @@ impl StoreSession<'_> {
                 }
             }
         }
-        // A direct wake can record the native turn even if the host omits or
-        // changes its client ID. Check this agent's journal once per candidate.
-        Ok(!self.db.prepare(
-            "SELECT 1 FROM wake_dispatches WHERE agent=?1
-             AND json_extract(payload,'$.target.host')='codex' AND json_type(payload,'$.direct')='object'
-             AND (json_extract(payload,'$.submission_id')=?2 OR json_extract(payload,'$.direct.turn_id')=?2)
-             LIMIT 1",
-        )?.exists(params![who.id, turn])?)
+        Ok(true)
     }
 
     pub(super) fn babysitter_chat_claim(
@@ -151,6 +168,7 @@ impl StoreSession<'_> {
         let turn = turn.to_string();
 
         let mut handoff = None;
+        let mut mixed = None;
         let (operator, operator_at, ordinal, parent) = match origin {
             ChatOrigin::Operator {
                 turn: operator,
@@ -169,6 +187,18 @@ impl StoreSession<'_> {
                     return Ok(no);
                 }
                 (operator.to_string(), started_at, 1, None)
+            }
+            ChatOrigin::ForegroundInputs(proof) => {
+                if proof.turn.to_string() != turn {
+                    return Ok(no);
+                }
+                let Some(ordinal) = self.foreground_ordinal(who, &proof, failed)? else {
+                    return Ok(no);
+                };
+                if ordinal == 0 {
+                    mixed = Some(proof.inputs[0].client.to_string());
+                }
+                (turn.clone(), proof.started_at, ordinal, None)
             }
             ChatOrigin::ThreadHandoff { item, started_at } => {
                 if item.is_nil()
@@ -270,6 +300,12 @@ impl StoreSession<'_> {
         )?;
         if inserted == 0 {
             return Ok(no);
+        }
+        if let Some(opener) = mixed {
+            self.db.execute(
+                "INSERT INTO babysitter_chat_mixed_inputs(attempt,agent,opener) VALUES(?1,?2,?3)",
+                params![id.to_string(), who.id, opener],
+            )?;
         }
         if let Some(item) = handoff {
             self.db.execute(

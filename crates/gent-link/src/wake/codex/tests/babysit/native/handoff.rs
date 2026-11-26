@@ -1,31 +1,6 @@
 use super::*;
 use std::sync::atomic::AtomicBool;
 
-async fn stopped(host: &mut Host, thread: &str, id: &Value, path: &Path) -> Result<()> {
-    loop {
-        if last(host, thread)
-            .await
-            .is_ok_and(|t| t["id"] == *id && t["status"] == "failed")
-            && matches!(
-                host.rpc(
-                    "thread/read",
-                    json!({"threadId":thread,"includeTurns":false}),
-                )
-                .await?["thread"]["status"]["type"]
-                    .as_str(),
-                Some("idle" | "systemError")
-            )
-            && std::fs::read_to_string(path)?
-                .lines()
-                .last()
-                .is_some_and(|l| l.contains("\"task_complete\""))
-        {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(20)).await;
-    }
-}
-
 async fn handoff(host: &mut Host, thread: &str, name: &str, path: &Path) -> Result<Value> {
     let id = host
         .rpc(

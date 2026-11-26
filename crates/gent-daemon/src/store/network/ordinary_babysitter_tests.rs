@@ -573,3 +573,6 @@ async fn handoff_receipts_and_retry_pause_belong_to_the_authenticated_registrati
     );
     Ok(())
 }
+
+#[path = "ordinary_babysitter_tests/foreground.rs"]
+mod foreground;

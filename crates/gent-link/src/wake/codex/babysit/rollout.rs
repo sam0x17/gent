@@ -428,6 +428,40 @@ impl Receipt {
     }
 }
 
+// Only the native user text needed for an independent journal comparison
+// is decoded. Neither its contents nor tool output leave the host.
+pub(in crate::wake::codex) fn input_hash(line: &[u8], receipt: bool) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Part {
+        r#type: String,
+        text: String,
+    }
+    #[derive(Deserialize)]
+    struct Content {
+        content: Vec<Part>,
+    }
+    #[derive(Deserialize)]
+    struct ItemEvent {
+        item: Content,
+    }
+    let content = if receipt {
+        serde_json::from_slice::<Record<ItemEvent>>(line)
+            .ok()?
+            .payload
+            .item
+    } else {
+        serde_json::from_slice::<Record<Content>>(line)
+            .ok()?
+            .payload
+    };
+    let [part] = content.content.as_slice() else {
+        return None;
+    };
+    let kind = if receipt { "text" } else { "input_text" };
+    use sha2::{Digest, Sha256};
+    (part.r#type == kind).then(|| format!("{:x}", Sha256::digest(part.text.as_bytes())))
+}
+
 pub(in crate::wake::codex) fn terminal_command(line: &[u8], thread: &str, turn: Uuid) -> bool {
     serde_json::from_slice::<Record<Receipt>>(line).is_ok_and(|r| {
         let p = &r.payload;

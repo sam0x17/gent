@@ -5,7 +5,8 @@ mod handoff;
 #[cfg(test)]
 mod handoff_tests;
 mod legacy;
-use gent_protocol::babysitter::MAX_CHAT_INPUTS;
+use super::super::babysit::rollout::input_hash;
+use gent_protocol::babysitter::{ForegroundInput, ForegroundInputs, MAX_CHAT_INPUTS};
 use rustix::fs::{Mode, OFlags};
 use serde::Deserialize;
 use std::{
@@ -55,6 +56,7 @@ struct Payload {
     r#type: Option<String>,
     thread_id: Option<String>,
     turn_id: Option<String>,
+    root_turn_id: Option<String>,
     started_at: Option<i64>,
     completed_at: Option<i64>,
     error: Option<Error>,
@@ -103,6 +105,27 @@ fn completion(
         }
     }
     Ok(None)
+}
+
+fn foreground_receipt(line: &[u8], item: &Item) -> Option<ForegroundInput> {
+    #[derive(Deserialize)]
+    struct Time<'a> {
+        timestamp: &'a str,
+    }
+    let time: Time<'_> = serde_json::from_slice(line).ok()?;
+    Some(ForegroundInput {
+        client: canonical_uuid(item.client_id.as_deref()?)?,
+        sha256: input_hash(line, true)?,
+        received_at_ms: chrono::DateTime::parse_from_rfc3339(time.timestamp)
+            .ok()?
+            .timestamp_millis(),
+    })
+}
+
+fn canonical_uuid(raw: &str) -> Option<Uuid> {
+    Uuid::parse_str(raw)
+        .ok()
+        .filter(|id| !id.is_nil() && id.to_string() == raw)
 }
 
 fn operator(failed: &Failed, mut inputs: Vec<Item>, trigger: Option<&str>) -> Option<ChatOrigin> {
@@ -237,12 +260,20 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
     // Earlier single-input hosts do not always supply response provenance.
     // Accumulate ambiguity here and require a complete pairing on multi-input descendants.
     let mut ambiguous = false;
+    // Walk backwards across the first user receipt, its message and the root context.
+    // If anything intervenes before task_started, the mixed-input exception stays closed.
+    let mut proven = Vec::new();
+    let mut pending_input = None::<ForegroundInput>;
+    let mut paired_message = false;
+    let mut opening_context = false;
     while Instant::now() < deadline && rows.previous(&mut line)? {
         let record: Record = serde_json::from_slice(&line)?;
         let receipt = pending_receipt.take();
+        let input = pending_input.take();
+        let next_is_message = std::mem::take(&mut paired_message);
+        let next_is_context = std::mem::take(&mut opening_context);
         if record.r#type != "event_msg" {
-            if descendant
-                && !legacy
+            if !legacy
                 && record.r#type == "response_item"
                 && record.payload.r#type.as_deref() == Some("message")
                 && legacy::unpaired_user(&line).unwrap_or(true)
@@ -252,7 +283,21 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                     .and_then(|client| {
                         legacy::user_source(&line, &failed.thread, failed.turn, client)
                     });
+                paired_message = source.is_some();
+                if paired_message
+                    && let Some(input) = input
+                    && input_hash(&line, false).as_ref() == Some(&input.sha256)
+                {
+                    proven.push(input);
+                }
                 ambiguous |= source.is_none_or(|id| !sources.insert(id));
+            }
+            if record.r#type == "turn_context" {
+                let p = &record.payload;
+                opening_context = next_is_message
+                    && p.turn_id.as_ref() == Some(&turn)
+                    && p.root_turn_id.as_ref() == Some(&turn)
+                    && p.thread_id.as_ref().is_none_or(|id| id == &failed.thread);
             }
             if legacy && record.r#type == "response_item" && legacy::unpaired_user(&line)? {
                 return Ok(None);
@@ -271,7 +316,7 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                 }
                 inputs.push(item);
             }
-            Some("user_message") if descendant => ambiguous = true,
+            Some("user_message") => ambiguous = true,
             Some(
                 "turn_aborted"
                 | "task_complete"
@@ -291,6 +336,9 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                     return Ok(None);
                 }
                 pending_receipt = Some(inputs.len());
+                if !descendant && failed.handoff_parent {
+                    pending_input = foreground_receipt(&line, &item);
+                }
                 inputs.push(item);
             }
             Some("task_started") => {
@@ -361,6 +409,32 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                         origin
                     }
                     _ => return Ok(None),
+                };
+                let origin = if let ChatOrigin::Operator {
+                    additional_client_ids,
+                    ..
+                } = &origin
+                    && !additional_client_ids.is_empty()
+                    && failed.handoff_parent
+                    && a.turn_trigger.as_deref() == Some("user")
+                    && header.payload.history_mode.as_deref() == Some("paginated")
+                    && next_is_context
+                    && !ambiguous
+                    && sources.len() == additional_client_ids.len() + 1
+                    && proven.len() == sources.len()
+                    && p.thread_id.as_ref().is_none_or(|id| id == &failed.thread)
+                    && p.root_turn_id.as_ref() == Some(&turn)
+                    && let Some(thread) = canonical_uuid(&failed.thread)
+                {
+                    proven.reverse();
+                    ChatOrigin::ForegroundInputs(ForegroundInputs {
+                        thread,
+                        turn: failed.turn,
+                        started_at: failed.started,
+                        inputs: proven,
+                    })
+                } else {
+                    origin
                 };
                 return Ok(Some((origin, a.parent_turn_id, stamp)));
             }
