@@ -8,6 +8,7 @@ struct Event {
     thread_id: Option<String>,
     turn_id: Option<String>,
     started_at: Option<i64>,
+    started_at_ms: Option<i64>,
     completed_at_ms: Option<i64>,
     turn_attribution: Option<Attribution>,
     role: Option<String>,
@@ -23,6 +24,9 @@ struct Event {
 struct Item {
     r#type: String,
     client_id: Option<String>,
+    kind: Option<String>,
+    #[serde(rename = "durationMs")]
+    duration_ms: Option<u64>,
     id: Option<String>,
     tool: Option<String>,
     source: Option<String>,
@@ -64,7 +68,7 @@ fn passive_tool(name: &str) -> bool {
 }
 
 pub(super) enum Source<'a> {
-    Queue(&'a mut HashSet<String>),
+    Queue(&'a mut queued_exec::Queue, Option<&'a str>),
     Foreground,                       // terminal recognized failure
     Direct(&'a mut Vec<DirectInput>), // completed, needs a matching journal entry
 }
@@ -98,11 +102,33 @@ struct Admission {
     // own output. An incomplete wrapper inventory needs independent evidence
     // that execution began after the live goal's last mutation second.
     needs_later_start: bool,
-    outputs: std::collections::HashMap<String, bool>,
+    outputs: std::collections::HashMap<String, Output>,
+    exec: queued_exec::Turn,
+    sleeps: HashSet<String>,
+    earliest_work_ms: Option<i64>,
+}
+
+struct Output {
+    complete: bool,
+    scoped_exec: bool,
+    scoped_function: bool,
 }
 
 impl Admission {
-    fn item(&mut self, item: Item, foreground: bool, turn: &str) -> bool {
+    fn work(&mut self, start_ms: Option<i64>) {
+        self.needs_later_start = true;
+        // Without an execution timestamp only the ordinary admission or an
+        // earlier in-turn reasoning/user receipt can establish the ordering.
+        let start = start_ms.unwrap_or(i64::MIN);
+        self.earliest_work_ms = Some(self.earliest_work_ms.map_or(start, |ms| ms.min(start)));
+    }
+
+    fn timed_receipt(&mut self) {
+        self.needs_later_start = false;
+        self.earliest_work_ms = None;
+    }
+
+    fn item(&mut self, item: Item, foreground: bool, turn: &str, started_ms: Option<i64>) -> bool {
         if item.questions.is_some()
             || item
                 .internal_chat_message_metadata_passthrough
@@ -120,13 +146,26 @@ impl Admission {
             }
             "AgentMessage" | "Reasoning" | "Plan" | "WebSearch" => true,
             "CommandExecution" => {
-                self.needs_later_start = true;
-                item.status.as_deref() == Some("completed")
+                self.work(started_ms);
+                (item.status.as_deref() == Some("completed")
+                    || !foreground && item.status.as_deref() == Some("failed"))
                     && item.id.is_some_and(|id| !id.is_empty())
                     && matches!(
                         item.source.as_deref(),
                         Some("agent" | "unified_exec_startup" | "unified_exec_interaction")
                     )
+            }
+            "FileChange" if !foreground => {
+                self.work(started_ms);
+                item.status.as_deref() == Some("completed")
+                    && item.id.is_some_and(|id| !id.is_empty())
+            }
+            "Extension" if !foreground && item.kind.as_deref() == Some("clock.sleep") => {
+                item.duration_ms.is_some()
+                    && item.id.is_some_and(|id| {
+                        self.outputs.get(&id).is_some_and(|o| o.scoped_function)
+                            && self.sleeps.insert(id)
+                    })
             }
             "FunctionCallOutput"
                 if foreground
@@ -137,7 +176,7 @@ impl Admission {
                     .is_some_and(|id| self.thread_result_receipt.replace(id).is_none())
             }
             "McpToolCall" => {
-                self.needs_later_start = true;
+                self.work(started_ms);
                 (item.status.as_deref() == Some("completed")
                     || foreground && item.status.as_deref() == Some("failed"))
                     && item.id.is_some_and(|id| !id.is_empty())
@@ -179,9 +218,29 @@ impl Admission {
                 let Some(name) = p.name.as_deref() else {
                     return false;
                 };
-                let Some(complete) = p.call_id.and_then(|id| self.outputs.remove(&id)) else {
+                let Some(call) = p.call_id.filter(|id| !id.is_empty()) else {
                     return false;
                 };
+                let Some(output) = self.outputs.remove(&call) else {
+                    return false;
+                };
+                let scoped = meta.is_some_and(|m| m.turn_id.as_deref() == Some(id));
+                let paired_exec = p.r#type == "custom_tool_call"
+                    && name == "exec"
+                    && p.namespace.is_none()
+                    && scoped
+                    && output.scoped_exec;
+                if !foreground && !self.exec.call(&call, paired_exec) {
+                    return false;
+                }
+                if self.sleeps.remove(&call) {
+                    return !foreground
+                        && scoped
+                        && output.scoped_function
+                        && p.r#type == "function_call"
+                        && p.namespace.as_deref() == Some("clock")
+                        && name == "sleep";
+                }
                 if p.namespace.as_deref().is_some_and(|ns| ns != "functions") {
                     return false;
                 }
@@ -194,7 +253,14 @@ impl Admission {
                         | "functions__exec"
                         | "functions__wait"
                 ) {
-                    self.needs_later_start |= !complete;
+                    if !output.complete {
+                        self.work(
+                            meta.filter(|_| scoped)
+                                .and_then(|m| m.create_time)
+                                .filter(|time| time.is_finite() && *time >= 0.0)
+                                .map(|time| (time * 1000.0) as i64),
+                        );
+                    }
                     true
                 } else {
                     passive_tool(name)
@@ -217,7 +283,32 @@ impl Admission {
                             .as_ref()
                             .is_some_and(|calls| calls.iter().all(|t| passive_tool(&t.name)))
                 });
-                self.outputs.insert(call_id, complete).is_none()
+                let scoped =
+                    p.namespace.is_none() && meta.is_some_and(|m| m.turn_id.as_deref() == Some(id));
+                if !foreground
+                    && p.r#type == "custom_tool_call_output"
+                    && p.id
+                        .as_deref()
+                        .is_some_and(|item| !self.exec.output_id(item, &call_id))
+                {
+                    return false;
+                }
+                if !foreground && p.name.is_some() {
+                    return scoped
+                        && p.name.as_deref() == Some("exec")
+                        && p.r#type == "custom_tool_call_output"
+                        && p.id.is_some()
+                        && !self.outputs.contains_key(&call_id)
+                        && self.exec.supplement(call_id);
+                }
+                let output = Output {
+                    complete,
+                    scoped_exec: scoped && p.r#type == "custom_tool_call_output" && p.id.is_some(),
+                    scoped_function: scoped
+                        && p.r#type == "function_call_output"
+                        && p.name.is_none(),
+                };
+                self.outputs.insert(call_id, output).is_none()
             }
             _ => false,
         }
@@ -291,8 +382,12 @@ pub(super) fn confirm(
     older: &HashSet<&str>,
 ) -> Result<bool> {
     let mut admission = Admission::default();
-    let foreground = !matches!(source, Source::Queue(_));
+    let foreground = !matches!(source, Source::Queue(..));
     let direct = matches!(source, Source::Direct(_));
+    let witness = match &source {
+        Source::Queue(_, prior) => *prior,
+        _ => None,
+    };
     let mut receipt_hash = None;
     let mut message_hash = None;
     let mut needs_declaration = false;
@@ -306,10 +401,34 @@ pub(super) fn confirm(
         if row.r#type == "event_msg"
             && p.r#type == "item_completed"
             && p.turn_id.as_deref().is_some_and(|id| older.contains(id))
-            && serde_json::from_slice::<Record<Receipt>>(line)
-                .ok()
-                .is_some_and(|r| r.payload.background_turn(thread).is_some())
+            && let Ok(receipt) = serde_json::from_slice::<Record<Receipt>>(line)
+            && (receipt.payload.background_turn(thread).is_some()
+                || (!foreground
+                    && receipt.payload.scoped(thread)
+                    && receipt.payload.item.r#type == "CommandExecution"
+                    && receipt.payload.item.kind.is_none()
+                    && receipt.payload.item.status.as_deref() == Some("failed")
+                    && p.item.as_ref().is_some_and(|i| {
+                        matches!(
+                            i.source.as_deref(),
+                            Some("agent" | "unified_exec_startup" | "unified_exec_interaction")
+                        )
+                    })))
         {
+            // A command belonging to the proved earlier turn may finish after
+            // this queue starts. Its host clock and the scoped start times of
+            // all later opaque work must agree before using it as a witness.
+            if witness.is_some()
+                && p.turn_id.as_deref() == witness
+                && updated_at == Some(turn.started)
+                && receipt.payload.item.r#type == "CommandExecution"
+                && let (Some(done), Some(work)) = (p.completed_at_ms, admission.earliest_work_ms)
+                && done.div_euclid(1000) > turn.started
+                && work >= done
+                && work.div_euclid(1000) <= turn.ended
+            {
+                admission.timed_receipt();
+            }
             continue;
         }
         if !p.belongs_to(thread, &turn.id)
@@ -374,10 +493,20 @@ pub(super) fn confirm(
         }
         let valid = match (row.r#type.as_str(), p.r#type.as_str()) {
             ("event_msg", "task_started") => {
+                if !admission.user_message
+                    || !admission.outputs.is_empty()
+                    || !admission.sleeps.is_empty()
+                    || (admission.needs_later_start
+                        && !updated_at.is_some_and(|t| turn.started > t))
+                {
+                    return Ok(false);
+                }
                 let admitted = match source {
-                    Source::Queue(ids) => {
+                    Source::Queue(queue, _) => {
                         p.starts(turn, Some("queue"))
-                            && admission.client_id.is_some_and(|id| ids.insert(id))
+                            && admission
+                                .client_id
+                                .is_some_and(|id| queue.admit(id, admission.exec))
                     }
                     Source::Foreground => p.starts(turn, Some("user")) || p.starts(turn, None),
                     Source::Direct(inputs) => {
@@ -403,12 +532,7 @@ pub(super) fn confirm(
                         (Some(id), Some(receipt)) => id.is_none_or(|id| id == receipt),
                         _ => false,
                     };
-                return Ok(admitted
-                    && receipt_matches
-                    && (!admission.needs_later_start
-                        || updated_at.is_some_and(|t| turn.started > t))
-                    && admission.user_message
-                    && admission.outputs.is_empty());
+                return Ok(admitted && receipt_matches);
             }
             ("event_msg", "item_completed") => {
                 p.thread_id.as_deref() == Some(thread)
@@ -422,9 +546,9 @@ pub(super) fn confirm(
                             && (turn.started..=turn.ended).contains(&ms.div_euclid(1000))
                             && ms.div_euclid(1000) > updated
                         {
-                            admission.needs_later_start = false;
+                            admission.timed_receipt();
                         }
-                        admission.item(item, foreground, &turn.id)
+                        admission.item(item, foreground, &turn.id, p.started_at_ms)
                     })
             }
             ("event_msg", "token_count") | ("world_state", "") => true,

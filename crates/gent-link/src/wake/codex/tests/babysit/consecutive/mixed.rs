@@ -285,3 +285,5 @@ async fn newest_failed_queue_is_claimed_only_through_a_verified_mixed_suffix() -
     }
     Ok(())
 }
+
+mod queued_goal;

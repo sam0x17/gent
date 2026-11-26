@@ -38,6 +38,9 @@ pub(super) struct Candidate {
     // The failure in which the goal last changed. For a blocked goal the
     // rollout must still prove that this turn caused the block.
     pub(super) anchor: Failed,
+    // A queue can start in the same second the preceding goal failed. Only
+    // the rollout can distinguish that admission from the actual goal turn.
+    pub(super) preceding: Option<Failed>,
     pub(super) later: Vec<Later>, // newest first, without gaps
 }
 
@@ -83,7 +86,7 @@ pub(super) async fn candidate(host: &mut Host, goal: &Goal) -> Result<Option<Can
         if turns.is_empty() || turns.len() > limit {
             return Ok(None);
         }
-        for turn in turns {
+        for (index, turn) in turns.iter().enumerate() {
             let Some(times) = Completed::read(turn) else {
                 return Ok(None);
             };
@@ -125,8 +128,46 @@ pub(super) async fn candidate(host: &mut Host, goal: &Goal) -> Result<Option<Can
                 {
                     return Ok(None);
                 }
+                let preceding =
+                    if blocked && times.started == goal.updated_at && ids.len() < MAX_TURNS {
+                        let next_page;
+                        let prior = if let Some(prior) = turns.get(index + 1) {
+                            Some(prior)
+                        } else if let Some(cursor) = page["nextCursor"]
+                            .as_str()
+                            .filter(|s| !s.is_empty() && s.len() <= 512 && !cursors.contains(*s))
+                        {
+                            params["cursor"] = json!(cursor);
+                            next_page = tokio::time::timeout_at(
+                                deadline,
+                                host.rpc("thread/turns/list", params.clone()),
+                            )
+                            .await??;
+                            next_page["data"]
+                                .as_array()
+                                .filter(|data| data.len() <= limit)
+                                .and_then(|data| data.first())
+                        } else {
+                            None
+                        };
+                        prior.and_then(|prior| {
+                            let t = Completed::read(prior)?;
+                            (t.started < times.started
+                                && t.ended == times.started
+                                && t.started >= goal.created_at
+                                && !ids.contains(&t.id))
+                            .then_some(())?;
+                            Some(Failed {
+                                reason: terminal_failure(prior)?,
+                                turn: prior.clone(),
+                            })
+                        })
+                    } else {
+                        None
+                    };
                 return Ok(Some(Candidate {
                     anchor: failure,
+                    preceding,
                     later,
                 }));
             }

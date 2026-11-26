@@ -3,6 +3,7 @@ use super::*;
 use history::{Candidate, Completed, Failed};
 
 mod queued;
+mod queued_exec;
 use rustix::fs::{Mode, OFlags};
 use std::{collections::HashSet, fs::File, io::BufReader, os::unix::fs::FileExt};
 
@@ -83,7 +84,7 @@ impl Evidence {
             let mut rows = ReverseLines::new(&file, before.size, !candidate.later.is_empty())?;
             let mut line = Vec::new();
             let mut receipt_turns = HashSet::new();
-            let mut admissions = HashSet::new();
+            let mut admissions = queued_exec::Queue::default();
             let mut older: HashSet<&str> = candidate
                 .later
                 .iter()
@@ -93,6 +94,11 @@ impl Evidence {
                 .as_str()
                 .context("missing anchor ID")?;
             older.insert(anchor_id);
+            let prior_id = candidate
+                .preceding
+                .as_ref()
+                .and_then(|p| p.turn["id"].as_str());
+
             for later in candidate
                 .later
                 .iter()
@@ -150,10 +156,13 @@ impl Evidence {
                         &mut line,
                         thread,
                         &t.times,
-                        queued::Source::Queue(&mut admissions),
+                        queued::Source::Queue(&mut admissions, None),
                         Some(goal.updated_at),
                         &older,
                     )? {
+                        if !admissions.bound() {
+                            return Ok(None);
+                        }
                         let source = if t.failure.is_some() {
                             queued::Source::Foreground
                         } else {
@@ -171,9 +180,9 @@ impl Evidence {
                             return Ok(None);
                         }
                         if t.failure.is_none()
-                            && !direct
-                                .last()
-                                .is_some_and(|input| admissions.insert(input.client.clone()))
+                            && !direct.last().is_some_and(|input| {
+                                admissions.clients.insert(input.client.clone())
+                            })
                         {
                             return Ok(None);
                         }
@@ -186,35 +195,60 @@ impl Evidence {
                 // Native goal timestamps have second precision. If the failed
                 // queue admission shares that second, keep its terminal position
                 // for a strict replay through the preceding active setter.
-                let fallback = (!candidate.later.is_empty()
+                let fallback = ((!candidate.later.is_empty() || prior_id.is_some())
                     && anchor["startedAt"] == goal.updated_at)
                     .then(|| rows.clone());
-                if !provider_stop(
-                    &mut rows,
-                    &mut line,
-                    &goal,
-                    anchor,
-                    has_later_failure || !direct.is_empty(),
-                )? {
+                if !admissions.bound()
+                    || !provider_stop(
+                        &mut rows,
+                        &mut line,
+                        &goal,
+                        anchor,
+                        has_later_failure || !direct.is_empty(),
+                        false,
+                    )?
+                {
                     let Some(mut retry) = fallback else {
                         return Ok(None);
                     };
                     let failed = Completed::read(anchor).context("invalid failed turn")?;
+                    older.remove(anchor_id);
+                    older.extend(prior_id);
                     if !queued::confirm(
                         &mut retry,
                         &mut line,
                         thread,
                         &failed,
-                        queued::Source::Queue(&mut admissions),
-                        None,
-                        &HashSet::new(),
-                    )? {
+                        queued::Source::Queue(&mut admissions, prior_id),
+                        prior_id.map(|_| goal.updated_at),
+                        &older,
+                    )? || !admissions.bound()
+                    {
                         return Ok(None);
                     }
-                    // Historical background receipt IDs must still be checked
-                    // against completions preceding the failed admission.
                     rows = retry.clone();
-                    if !queued::preceding_active_turn(&mut retry, &mut line, &goal, &failed)? {
+                    if let Some(prior) = &candidate.preceding {
+                        // Both API rows and both rollout boundaries must agree.
+                        // Only a goal-triggered failure can establish this block.
+                        if !retry.previous(&mut line)?
+                            || !serde_json::from_slice::<Record>(&line)?
+                                .matches_failure(thread, prior)
+                            || !provider_stop(
+                                &mut retry,
+                                &mut line,
+                                &goal,
+                                &prior.turn,
+                                true,
+                                true,
+                            )?
+                        {
+                            return Ok(None);
+                        }
+                        receipt_turns
+                            .remove(&Uuid::parse_str(prior_id.context("missing prior ID")?)?);
+                        rows = retry;
+                    } else if !queued::preceding_active_turn(&mut retry, &mut line, &goal, &failed)?
+                    {
                         return Ok(None);
                     }
                 }
@@ -468,6 +502,7 @@ struct Attribution {
 #[derive(Deserialize)]
 struct ItemMeta {
     turn_id: Option<String>,
+    create_time: Option<f64>,
     tool_calls_complete: Option<bool>,
     content_item_kinds: Option<Vec<String>>,
     executed_tool_calls: Option<Vec<Tool>>,
@@ -573,6 +608,7 @@ fn provider_stop(
     goal: &Goal,
     last: &Value,
     consecutive: bool,
+    require_goal_turn: bool,
 ) -> Result<bool> {
     let id = last["id"].as_str();
     let mut active_snapshot = false;
@@ -582,6 +618,13 @@ fn provider_stop(
         match (row.r#type.as_str(), p.r#type.as_str()) {
             ("event_msg", "task_started") => {
                 if p.turn_id.as_deref() != id || p.started_at != last["startedAt"].as_i64() {
+                    return Ok(false);
+                }
+                if require_goal_turn
+                    && !p.turn_attribution.as_ref().is_some_and(|a| {
+                        a.turn_trigger.as_deref() == Some("goal") && a.turn_id.as_deref() == id
+                    })
+                {
                     return Ok(false);
                 }
                 if consecutive
