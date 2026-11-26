@@ -37,16 +37,14 @@ impl StoreSession<'_> {
         if self.chat_operator_inputs_allowed(who, &turn, Some(&opener), &additional)? {
             return Ok(Some(1));
         }
-        if !self.chat_client_ids_allowed(who, Some(&opener), &[])?
-            || !proof.inputs.iter().all(|i| {
-                i.sha256.len() == 64
-                    && i.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-                    && (proof.started_at..=failed).contains(&i.received_at_ms.div_euclid(1000))
-            })
-            || !proof
-                .inputs
-                .windows(2)
-                .all(|p| p[0].received_at_ms <= p[1].received_at_ms)
+        if !proof.inputs.iter().all(|i| {
+            i.sha256.len() == 64
+                && i.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                && (proof.started_at..=failed).contains(&i.received_at_ms.div_euclid(1000))
+        }) || !proof
+            .inputs
+            .windows(2)
+            .all(|p| p[0].received_at_ms <= p[1].received_at_ms)
         {
             return Ok(None);
         }
@@ -57,7 +55,21 @@ impl StoreSession<'_> {
             "SELECT message_id FROM wake_dispatches WHERE agent=?1 AND
              (json_extract(payload,'$.submission_id')=?2 OR json_extract(payload,'$.direct.turn_id')=?2)
              ORDER BY claimed_at LIMIT ?3")?;
-        let mut messages = query.query(params![who.id, turn, MAX_CHAT_INPUTS])?;
+        let messages = query
+            .query_map(params![who.id, turn, MAX_CHAT_INPUTS], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // Only a contiguous suffix may be Gent deliveries. The native proof pairs
+        // every input with its receipt. Exclude all known automatic client IDs in
+        // the foreground prefix, including dispatches attributed to different turns.
+        if messages.is_empty() || messages.len() >= proof.inputs.len() {
+            return Ok(None);
+        }
+        let (foreground, deliveries) = proof.inputs.split_at(proof.inputs.len() - messages.len());
+        if !self.chat_client_ids_allowed(who, Some(&opener), &additional[..foreground.len() - 1])? {
+            return Ok(None);
+        }
         let target = WakeTarget::Codex {
             thread_id: proof.thread.to_string(),
         };
@@ -65,20 +77,19 @@ impl StoreSession<'_> {
             "SELECT 1 FROM babysitter_chat_attempts WHERE agent=?1 AND attempt=?2
              UNION ALL SELECT 1 FROM babysitter_attempts WHERE agent=?1 AND attempt=?2",
         )?;
-        let mut previous_claim = first.received_at_ms.div_euclid(1000);
-        for (input, id) in later.iter().zip(&additional) {
-            let Some(message) = messages.next()? else {
-                return Ok(None);
-            };
-            let Some(record) = super::super::wake::record(self.db, &message.get::<_, String>(0)?)?
-            else {
+        let mut previous_claim = foreground[foreground.len() - 1]
+            .received_at_ms
+            .div_euclid(1000);
+        for (input, message) in deliveries.iter().zip(messages) {
+            let id = input.client.to_string();
+            let Some(record) = super::super::wake::record(self.db, &message)? else {
                 return Ok(None);
             };
             let Some(direct) = record.direct else {
                 return Ok(None);
             };
             let received = input.received_at_ms.div_euclid(1000);
-            if &record.attempt_id != id
+            if record.attempt_id != id
                 || record.agent != who.id
                 || record.target != target
                 || record.state != WakeState::Submitted
@@ -86,7 +97,9 @@ impl StoreSession<'_> {
                 || direct.turn_id.as_ref() != Some(&turn)
                 || !direct.finished
                 || direct.input_hash != input.sha256
-                || direct.input_hash == first.sha256
+                || foreground
+                    .iter()
+                    .any(|input| input.sha256 == direct.input_hash)
                 || record.claimed_at <= previous_claim
                 || record.claimed_at > received
                 || record
@@ -98,9 +111,6 @@ impl StoreSession<'_> {
                 return Ok(None);
             }
             previous_claim = record.claimed_at;
-        }
-        if messages.next()?.is_some() {
-            return Ok(None);
         }
         // Zero admits this failed root once and cannot authorize a child retry.
         Ok(Some(0))

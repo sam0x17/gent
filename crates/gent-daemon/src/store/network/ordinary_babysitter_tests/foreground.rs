@@ -160,3 +160,58 @@ async fn mixed_foreground_honors_bound_and_chat_opt_out_at_admission() -> Result
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn foreground_steers_before_a_finished_delivery_get_only_one_retry() -> Result<()> {
+    let mut p = Pair::new().await;
+    config::set_ordinary_babysitter_enabled(p.homes[0].path(), true)?;
+    let now = now();
+    // One user opener, four foreground steers, then one finished Gent delivery.
+    let proof = root(6, now);
+    record(&p, &proof, 5)?;
+    let direct = &proof.inputs[5];
+    let mut same_payload = proof.clone();
+    same_payload.inputs[2].sha256.clone_from(&direct.sha256);
+    assert!(p.agent(0, request(&same_payload, now))?["claim"].is_null());
+    let mut ambiguous_clock = proof.clone();
+    ambiguous_clock.inputs[4].received_at_ms = direct.received_at_ms;
+    assert!(p.agent(0, request(&ambiguous_clock, now))?["claim"].is_null());
+
+    // A prefix ID used by any other Gent dispatch cannot be counted as foreground.
+    let mut other = root(2, now);
+    other.inputs[1].client = proof.inputs[2].client;
+    record(&p, &other, 1)?;
+    assert!(p.agent(0, request(&proof, now))?["claim"].is_null());
+    p.stores[0].db.execute(
+        "DELETE FROM wake_dispatches WHERE attempt_id=?1",
+        [other.inputs[1].client.to_string()],
+    )?;
+
+    let response = p.agent(0, request(&proof, now))?;
+    assert!(
+        response["claim"].is_string(),
+        "mixed foreground claim rejected"
+    );
+    let attempt: Uuid = serde_json::from_value(response["claim"].clone())?;
+    assert_eq!(
+        p.agent(0, AgentOp::BabysitterChatCheck { attempt })?["eligible"],
+        true
+    );
+    p.reopen(0);
+    assert!(p.agent(0, request(&proof, now))?["claim"].is_null());
+    p.stores[0]
+        .db
+        .execute("UPDATE request_clock SET floor=?1", [now + 61])?;
+    assert!(
+        p.agent(
+            0,
+            claim(
+                Uuid::now_v7(),
+                now + 61,
+                ChatOrigin::Continuation { attempt }
+            )
+        )?["claim"]
+            .is_null()
+    );
+    Ok(())
+}
