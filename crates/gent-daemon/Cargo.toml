@@ -5,14 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Local daemon, storage and synchronization for Gent chat clusters."
+include = ["/src/**", "/LICENSE", "/NOTICE.md", "/tests/**", "/examples/**"]
 
 [features]
 # Used only in disposable native integration-test builds.
 test-entitlements = []
 
 [dependencies]
-gent-crypto = { path = "../gent-crypto", features = ["mls", "invitation"] }
-gent-protocol = { path = "../gent-protocol" }
+gent-crypto = { workspace = true, features = ["mls", "invitation"] }
+gent-protocol = { workspace = true }
 anyhow.workspace = true
 ed25519-dalek.workspace = true
 base64.workspace = true
@@ -51,7 +55,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 x509-parser = "0.18"
 
 [dev-dependencies]
-# External integration tests use the same Store entry points as the installed daemon.
+# Workspace integration tests enable the fixture feature on this crate. Cargo
+# omits this path-only self dependency when preparing the registry package.
 gent-daemon = { path = ".", features = ["test-entitlements"] }
 tokio = { workspace = true, features = ["test-util"] }
 

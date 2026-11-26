@@ -126,7 +126,7 @@ fn build_app(out: &Path, target: &str, sources: &[&str]) {
         ("256x256@2x", 512),
         ("512x512", 512),
     ] {
-        let png = format!("../../assets/branding/inkling-{pixels}.png");
+        let png = format!("branding/inkling-{pixels}.png");
         println!("cargo:rerun-if-changed={png}");
         fs::copy(png, iconset.join(format!("icon_{name}.png"))).unwrap();
     }
@@ -146,44 +146,87 @@ fn build_app(out: &Path, target: &str, sources: &[&str]) {
     assert!(ok.success(), "could not sign Gent Desktop");
 }
 
-fn main() {
-    build_desktop();
-    let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
-    let root = root.canonicalize().unwrap();
-    let commit = git(&root, &["rev-parse", "HEAD"])
-        .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()));
-    let dirty = git(
-        &root,
-        &["status", "--porcelain", "--untracked-files=normal"],
-    )
-    .is_none_or(|status| {
-        // Cargo writes this checkout marker after fetching a Git dependency.
-        status.lines().any(|line| line != "?? .cargo-ok")
-    });
+// Git installations keep the workspace layout, including its own .git entry.
+fn checkout_build(root: &Path) -> (Option<String>, bool) {
+    let commit = git(root, &["rev-parse", "HEAD"]).filter(|s| valid_sha(s));
+    let dirty =
+        git(root, &["status", "--porcelain", "--untracked-files=normal"]).is_none_or(|status| {
+            // Cargo writes this checkout marker after fetching a Git dependency.
+            status.lines().any(|line| line != "?? .cargo-ok")
+        });
     // Track source files as well as Git refs: a commit after a local build must
     // refresh provenance even when Rust source bytes have not changed.
-    if let Some(files) = git(&root, &["ls-files"]) {
+    if let Some(files) = git(root, &["ls-files"]) {
         for path in files.lines() {
             println!("cargo:rerun-if-changed={}", root.join(path).display());
         }
     }
     for entry in ["HEAD", "index", "packed-refs"] {
-        if let Some(path) = git(&root, &["rev-parse", "--git-path", entry]) {
+        if let Some(path) = git(root, &["rev-parse", "--git-path", entry]) {
             println!("cargo:rerun-if-changed={}", root.join(path).display());
         }
     }
-    if let Some(reference) = git(&root, &["symbolic-ref", "-q", "HEAD"])
-        && let Some(path) = git(&root, &["rev-parse", "--git-path", &reference])
+    if let Some(reference) = git(root, &["symbolic-ref", "-q", "HEAD"])
+        && let Some(path) = git(root, &["rev-parse", "--git-path", &reference])
     {
         println!("cargo:rerun-if-changed={}", root.join(path).display());
     }
+    (commit, dirty)
+}
+
+fn valid_sha(sha: &str) -> bool {
+    sha.len() == 40
+        && sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+// Cargo writes this file when packaging, and verifies the archive checksum
+// against the registry index before extracting the sources for installation.
+fn registry_build(manifest: &Path) -> Option<(String, bool)> {
+    let cargo = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|p| PathBuf::from(p).join(".cargo")))?;
+    let sources = cargo.join("registry/src").canonicalize().ok()?;
+    let expected = format!("gent-link-{}", env!("CARGO_PKG_VERSION"));
+    if manifest.file_name()?.to_str()? != expected
+        || manifest.parent()?.parent()? != sources
+        || !manifest.join(".cargo-ok").is_file()
+    {
+        return None;
+    }
+    let file = manifest.join(".cargo_vcs_info.json");
+    println!("cargo:rerun-if-changed={}", file.display());
+    let vcs: serde_json::Value = serde_json::from_slice(&fs::read(file).ok()?).ok()?;
+    if vcs["path_in_vcs"].as_str()? != "crates/gent-link" {
+        return None;
+    }
+    let sha = vcs["git"]["sha1"].as_str()?;
+    let dirty = match vcs["git"].get("dirty") {
+        Some(value) => value.as_bool()?,
+        None => false,
+    };
+    valid_sha(sha).then(|| (sha.to_owned(), dirty))
+}
+
+fn main() {
+    build_desktop();
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .canonicalize()
+        .unwrap();
+    let root = manifest.ancestors().nth(2).unwrap_or(&manifest);
+    let (commit, dirty) = if manifest.ends_with("crates/gent-link") && root.join(".git").exists() {
+        checkout_build(root)
+    } else {
+        registry_build(&manifest).map_or((None, true), |(sha, dirty)| (Some(sha), dirty))
+    };
     println!(
         "cargo:rustc-env=GENT_COMMIT={}",
         commit.as_deref().unwrap_or("unknown")
     );
     println!(
         "cargo:rustc-env=GENT_BOOTSTRAP_COMMIT={}",
-        bootstrap_commit(&root, commit.as_deref()).unwrap_or_default()
+        bootstrap_commit(root, commit.as_deref()).unwrap_or_default()
     );
     println!("cargo:rustc-env=GENT_DIRTY={dirty}");
     println!(

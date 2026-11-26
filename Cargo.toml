@@ -6,10 +6,15 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
-publish = false
+publish = ["crates-io"]
+repository = "https://github.com/sam0x17/gent"
+homepage = "https://gent.link"
 license = "BSD-3-Clause"
 
 [workspace.dependencies]
+gent-protocol = { path = "crates/gent-protocol", version = "=0.1.0" }
+gent-crypto = { path = "crates/gent-crypto", version = "=0.1.0" }
+gent-daemon = { path = "crates/gent-daemon", version = "=0.1.0" }
 anyhow = "1"
 base64 = "0.22"
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }

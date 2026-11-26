@@ -30,11 +30,7 @@ async fn device_cursor_survives_reconnect_and_skips_future_event_kinds() {
     let root = Path::new(&root);
     let home = root.join("node");
     let icon = root.join("Gent Desktop icon.png");
-    fs::write(
-        &icon,
-        include_bytes!("../../../../../assets/branding/inkling-512.png"),
-    )
-    .unwrap();
+    fs::write(&icon, include_bytes!("../../../branding/inkling-512.png")).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let login = Saved {

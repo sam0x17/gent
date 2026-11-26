@@ -148,11 +148,11 @@ fn install_icon(home: &Path) -> Result<std::path::PathBuf> {
     for (path, image) in [
         (
             &icon,
-            include_bytes!("../../../assets/branding/inkling-512.png").as_slice(),
+            include_bytes!("../branding/inkling-512.png").as_slice(),
         ),
         (
             &tray,
-            include_bytes!("../../../assets/branding/inkling-tray-128.png").as_slice(),
+            include_bytes!("../branding/inkling-tray-128.png").as_slice(),
         ),
         (
             &about,

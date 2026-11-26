@@ -133,7 +133,7 @@ fn native_notification_center_fixture() {
     let result = std::process::Command::new(fixture)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .arg(app)
-        .arg("../../assets/branding/inkling-512.png")
+        .arg("branding/inkling-512.png")
         .status()
         .unwrap();
     assert!(result.success());
