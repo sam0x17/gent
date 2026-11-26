@@ -94,6 +94,7 @@ async fn trial(goal: bool) -> Result<()> {
         assert!(turn["error"]["misalignment"].is_null());
         if goal {
             assert_eq!(goal_state["status"], "blocked");
+            assert_eq!(goal_state["objective"], "Count one fixture.");
         } else {
             assert!(goal_state.is_null());
         }
@@ -121,7 +122,9 @@ async fn trial(goal: bool) -> Result<()> {
                     json!({"threadId":thread,"turnId":resumed["id"]}),
                 )
                 .await?;
-            let input = &items["data"][0]["item"];
+            let items = items["data"].as_array().context("missing turn items")?;
+            assert_eq!(items.len(), 1);
+            let input = &items[0]["item"];
             assert_eq!(input["type"], "userMessage");
             assert_eq!(
                 input["content"],
