@@ -1061,12 +1061,13 @@ impl StoreSession<'_> {
             OwnerOp::WakeStatus => wake::retention::status(self.db, self.timestamp),
             OwnerOp::WakePendingAgents { after } => self.wake_pending_agents(after.as_deref()),
             OwnerOp::WakeDirectTurnEvidence {
+                completed_relay,
                 agent_credential,
                 thread_id,
                 turn,
             } => {
                 let who = self.native_supervisor_agent(&agent_credential, thread_id)?;
-                self.direct_turn_evidence(&who, thread_id, turn)
+                self.direct_turn_evidence(&who, thread_id, turn, completed_relay)
             }
             OwnerOp::BabysitterVerifiedBlockedClaim {
                 agent_credential,

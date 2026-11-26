@@ -147,7 +147,12 @@ impl MessageMetadata {
 
 // A scoped item receipt and its response message use different native item
 // IDs. Check the message against its own retained source and the receipt's turn.
-pub(super) fn user_source(line: &[u8], thread: &str, turn: Uuid, client: &str) -> Option<String> {
+pub(in crate::wake::codex) fn user_source(
+    line: &[u8],
+    thread: &str,
+    turn: Uuid,
+    client: &str,
+) -> Option<String> {
     let message = serde_json::from_slice::<Row>(line).ok()?;
     message.user_message_id(&Turn { thread, id: turn }, client)?;
     message.payload.id

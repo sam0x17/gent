@@ -12,10 +12,12 @@ pub(crate) async fn direct_turn_evidence(
     credential: &str,
     thread: &str,
     turn: Uuid,
+    completed_relay: bool,
 ) -> Result<Option<DirectTurnEvidence>> {
     let result = crate::owner(
         home,
         OwnerOp::WakeDirectTurnEvidence {
+            completed_relay,
             agent_credential: credential.into(),
             thread_id: Uuid::parse_str(thread)?,
             turn,

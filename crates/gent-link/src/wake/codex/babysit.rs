@@ -216,8 +216,14 @@ async fn confirmed_inputs(
     inputs: &[rollout::DirectInput],
 ) -> Result<bool> {
     for input in inputs {
-        let evidence =
-            crate::wake::direct_turn_evidence(home, credential, thread, input.turn).await?;
+        let evidence = crate::wake::direct_turn_evidence(
+            home,
+            credential,
+            thread,
+            input.turn,
+            input.completed_relay,
+        )
+        .await?;
         if !evidence.is_some_and(|e| e.attempt_id == input.client && e.input_hash == input.hash) {
             return Ok(false);
         }

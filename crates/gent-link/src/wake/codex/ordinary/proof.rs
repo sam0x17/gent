@@ -7,6 +7,7 @@ mod handoff_tests;
 mod legacy;
 use super::super::babysit::rollout::input_hash;
 use gent_protocol::babysitter::{ForegroundInput, ForegroundInputs, MAX_CHAT_INPUTS};
+pub(in crate::wake::codex) use legacy::user_source;
 use rustix::fs::{Mode, OFlags};
 use serde::Deserialize;
 use std::{

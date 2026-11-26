@@ -391,6 +391,7 @@ fn retrospective_receipt_requires_one_finished_dispatch_to_the_bound_codex_turn(
     let thread = Uuid::parse_str(thread_id).unwrap();
     let turn = Uuid::parse_str(&d.turn).unwrap();
     let lookup = |credential: &str, thread_id, turn| OwnerOp::WakeDirectTurnEvidence {
+        completed_relay: false,
         agent_credential: credential.into(),
         thread_id,
         turn,

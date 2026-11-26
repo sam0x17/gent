@@ -7,6 +7,7 @@ use gent_protocol::{
 use uuid::Uuid;
 
 mod proof;
+pub(super) use proof::user_source;
 
 const PROMPT: &str = "please continue";
 const TRIGGER: &str = "gent_babysitter";
