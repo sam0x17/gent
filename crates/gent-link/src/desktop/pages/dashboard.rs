@@ -164,15 +164,28 @@ fn active_file(home: &Path) -> Option<PathBuf> {
     gent_daemon::entitlements::paid(home, &cfg).then(|| preferences::path(home, &cfg))
 }
 
-fn example() -> Value {
-    serde_json::from_str(include_str!("../dashboard-example.json"))
-        .expect("bundled dashboard example")
+fn example(layout: &Layout) -> Value {
+    let mut sample: Value = serde_json::from_str(include_str!("../dashboard-example.json"))
+        .expect("bundled dashboard example");
+    // The example occupies a row of its own, even on a multi-column display.
+    let width = layout.chart_widths.first().copied().unwrap_or(260);
+    for widget in sample["board"]["widgets"]
+        .as_array_mut()
+        .expect("example widgets")
+    {
+        charts::decorate(widget, &layout.palette, width.into());
+    }
+    sample
 }
 
 impl Page {
     pub(super) async fn respond(&mut self, home: &Path, request: Request) -> Value {
         let Some(file) = active_file(home) else {
-            return self.clear(true);
+            let layout = match &request {
+                Request::Dashboard(layout) | Request::DashboardLayout(layout) => layout,
+                _ => &Layout::default(),
+            };
+            return self.clear(true, layout);
         };
         let switched = self.view.as_ref().is_some_and(|v| v.file != file);
         if switched {
@@ -182,7 +195,7 @@ impl Page {
         let result = match request {
             Request::Dashboard(layout) => {
                 let rows = fetch(home).await;
-                if let Some(reply) = self.check_after_rpc(home, &file) {
+                if let Some(reply) = self.check_after_rpc(home, &file, &layout) {
                     return reply;
                 }
                 match rows {
@@ -205,7 +218,7 @@ impl Page {
                 widget,
             } => {
                 let sent = self.click(home, &agent, revision, widget).await;
-                if let Some(reply) = self.check_after_rpc(home, &file) {
+                if let Some(reply) = self.check_after_rpc(home, &file, &Layout::default()) {
                     return reply;
                 }
                 sent
@@ -220,27 +233,30 @@ impl Page {
             }
         }
         if self.fresh
-            && self.view.as_ref().is_some_and(|v| v.rows.is_empty())
-            && reply.get("rows").is_some()
+            && reply["rows"].as_array().is_some_and(Vec::is_empty)
             && reply.get("error").is_none()
+            && let Some(view) = &self.view
         {
-            reply["example"] = example();
+            reply["example"] = example(&view.layout);
+            reply["all_hidden"] = json!(!view.rows.is_empty());
+        } else if !self.fresh && reply.get("rows").is_some() {
+            reply["stale"] = true.into();
         }
         reply
     }
 
-    fn clear(&mut self, locked: bool) -> Value {
+    fn clear(&mut self, locked: bool, layout: &Layout) -> Value {
         *self = Self::default();
         if locked {
-            json!({"pro_required":true,"rows":[],"hidden":[],"example":example()})
+            json!({"pro_required":true,"rows":[],"hidden":[],"example":example(layout)})
         } else {
             json!({"rows":[],"hidden":[],"error":"Active cluster changed. Refresh the dashboard."})
         }
     }
 
-    fn check_after_rpc(&mut self, home: &Path, file: &Path) -> Option<Value> {
+    fn check_after_rpc(&mut self, home: &Path, file: &Path, layout: &Layout) -> Option<Value> {
         let current = active_file(home);
-        (current.as_deref() != Some(file)).then(|| self.clear(current.is_none()))
+        (current.as_deref() != Some(file)).then(|| self.clear(current.is_none(), layout))
     }
 
     fn view_mut(&mut self) -> Result<&mut View> {

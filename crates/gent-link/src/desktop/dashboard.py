@@ -308,6 +308,7 @@ class DashboardPane(Gtk.Box):
         # The first request needs the same style nodes before a publisher has supplied a card.
         self.empty_card = DashboardCard("", "")
         self.example = None
+        self.all_hidden = False
         self.rows = None
         self.hidden = []
         self.grid_width = None
@@ -327,6 +328,7 @@ class DashboardPane(Gtk.Box):
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.add(self.grid)
+        self.vadjustment = scroll.get_vadjustment()
         self.pack_start(scroll, True, True, 0)
         self.pack_start(self.notice, False, False, 0)
 
@@ -396,8 +398,10 @@ class DashboardPane(Gtk.Box):
 
     def receive(self, reply):
         previous = self.displayed_rows()
+        was_example = self.example is not None and not self.showing_feedback
         locked = reply.get("pro_required", False)
         if locked or "rows" in reply:
+            self.all_hidden = reply.get("all_hidden", False)
             self.rows = [] if locked else reply["rows"]
             self.example = reply.get("example") if not self.rows else None
         if locked:
@@ -412,9 +416,9 @@ class DashboardPane(Gtk.Box):
             if feedback:
                 self.showing_feedback = True
                 self.notice.set_text(feedback)
-            elif not (reply.get("layout_only") and self.showing_feedback):
+            elif not (self.showing_feedback and (reply.get("layout_only") or reply.get("stale"))):
                 self.showing_feedback = False
-                empty = "All dashboards are hidden." if self.hidden and not self.example else "No chats have published a dashboard."
+                empty = "All dashboards are hidden." if self.all_hidden else "No chats have published a dashboard."
                 self.notice.set_text(empty if self.rows == [] else "")
         displayed = self.displayed_rows()
         if previous != displayed:
@@ -423,6 +427,8 @@ class DashboardPane(Gtk.Box):
             for row in displayed:
                 self.grid.put(self.card(row), 0, 0)
             self.grid.show_all()
+            if self.example and not was_example and not self.showing_feedback:
+                self.vadjustment.set_value(self.vadjustment.get_lower())
             cards = self.grid.get_children()
             if cards:
                 first = cards[0]
