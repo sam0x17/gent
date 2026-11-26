@@ -81,14 +81,14 @@ struct Item {
     client_id: Option<String>,
 }
 
-// A command can finish after its owning turn. Cross only terminal command
-// receipts for that turn while looking for the matching task_complete.
+// Each caller supplies the command receipts it can attribute across this boundary.
 fn completion(
     rows: &mut ReverseLines<'_>,
     line: &mut Vec<u8>,
     thread: &str,
     turn: Uuid,
     deadline: Instant,
+    mut receipt: impl FnMut(&[u8]) -> bool,
 ) -> Result<Option<Payload>> {
     while Instant::now() < deadline && rows.previous(line)? {
         let record: Record = serde_json::from_slice(line)?;
@@ -98,7 +98,7 @@ fn completion(
                 && p.thread_id.as_deref().is_none_or(|id| id == thread))
             .then_some(p));
         }
-        if !terminal_command(line, thread, turn) {
+        if !receipt(line) {
             break;
         }
     }
@@ -206,7 +206,21 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
     let mut rows = ReverseLines::new(&file, stamp.len, true)?;
     let mut line = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(2);
-    let Some(p) = completion(&mut rows, &mut line, &failed.thread, failed.turn, deadline)? else {
+    let mut previous = None;
+    let Some(p) = completion(
+        &mut rows,
+        &mut line,
+        &failed.thread,
+        failed.turn,
+        deadline,
+        |line| {
+            terminal_command(line, &failed.thread, failed.turn)
+                || (failed.handoff_parent
+                    && failed.turn == failed.root
+                    && handoff::previous_receipt(&mut previous, line, failed))
+        },
+    )?
+    else {
         return Ok(None);
     };
     let turn = failed.turn.to_string();
@@ -299,7 +313,8 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                         && a.parent_turn_id.is_none()
                         && failed.root == failed.turn =>
                     {
-                        let Some(item) = handoff::read(&file, &stamp, failed, deadline)? else {
+                        let Some(item) = handoff::read(&file, &stamp, failed, deadline, previous)?
+                        else {
                             return Ok(None);
                         };
                         ChatOrigin::ThreadHandoff {
@@ -308,7 +323,9 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                         }
                     }
                     None | Some("user" | "composer")
-                        if a.parent_turn_id.is_none() && failed.root == failed.turn =>
+                        if previous.is_none()
+                            && a.parent_turn_id.is_none()
+                            && failed.root == failed.turn =>
                     {
                         let Some(origin) = operator(failed, inputs, a.turn_trigger.as_deref())
                         else {
@@ -323,8 +340,14 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                         else {
                             return Ok(None);
                         };
-                        let Some(terminal) =
-                            completion(&mut rows, &mut line, &failed.thread, parent, deadline)?
+                        let Some(terminal) = completion(
+                            &mut rows,
+                            &mut line,
+                            &failed.thread,
+                            parent,
+                            deadline,
+                            |line| terminal_command(line, &failed.thread, parent),
+                        )?
                         else {
                             return Ok(None);
                         };

@@ -1,7 +1,11 @@
 //! A first, named host input may open its own root. The receipt identifies
 //! the receiving item, without making a claim about the sender.
 use super::*;
+mod preamble;
+mod previous;
 use crate::wake::codex::babysit::rollout::decision;
+use previous::Previous;
+pub(super) use previous::observe as previous_receipt;
 
 #[derive(Deserialize)]
 struct Row {
@@ -19,6 +23,8 @@ struct Fields {
     role: Option<String>,
     source: Option<String>,
     status: Option<String>,
+    started_at_ms: Option<i64>,
+    completed_at_ms: Option<i64>,
     thread_id: Option<String>,
     turn_id: Option<String>,
     root_turn_id: Option<String>,
@@ -79,7 +85,7 @@ impl Row {
     }
 
     // Later native input, controls, decisions and unfamiliar activity close this path.
-    fn work(&self, thread: &str, turn: &str, after_terminal: bool) -> bool {
+    fn work(&self, thread: &str, turn: &str) -> bool {
         let p = &self.payload;
         let scoped = p.thread_id.as_deref() == Some(thread) && p.turn_id.as_deref() == Some(turn);
         p.within(thread, turn)
@@ -95,8 +101,10 @@ impl Row {
                                     Some("FileChange") => i.status.as_deref() == Some("completed"),
                                     Some("CommandExecution") => {
                                         (i.status.as_deref() == Some("completed")
-                                            || (after_terminal
-                                                && i.status.as_deref() == Some("failed")))
+                                            || (i.status.as_deref() == Some("failed")
+                                                && i.id
+                                                    .as_deref()
+                                                    .is_some_and(|id| !id.is_empty())))
                                             && matches!(
                                                 i.source.as_deref(),
                                                 Some(
@@ -135,6 +143,7 @@ pub(super) fn read(
     stamp: &Stamp,
     failed: &Failed,
     deadline: Instant,
+    previous: Option<Previous>,
 ) -> Result<Option<Uuid>> {
     let mut rows = ReverseLines::new(file, stamp.len, true)?;
     let mut line = Vec::new();
@@ -151,9 +160,16 @@ pub(super) fn read(
         if row.r#type == "event_msg" && row.payload.r#type.as_deref() == Some("task_complete") {
             break;
         }
-        if !terminal_command(&line, &failed.thread, failed.turn)
-            || !row.work(&failed.thread, &turn, true)
-        {
+        let owner = row
+            .payload
+            .turn_id
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok());
+        if !owner.is_some_and(|id| {
+            (id == failed.turn || previous.as_ref().is_some_and(|p| p.turn == id))
+                && terminal_command(&line, &failed.thread, id)
+                && row.work(&failed.thread, &id.to_string())
+        }) {
             return Ok(None);
         }
     }
@@ -161,7 +177,7 @@ pub(super) fn read(
         let Some(row) = Row::next(&mut rows, &mut line)? else {
             break;
         };
-        if row.work(&failed.thread, &turn, false) {
+        if row.work(&failed.thread, &turn) {
             continue;
         }
         let p = row.payload;
@@ -215,13 +231,17 @@ pub(super) fn read(
         {
             break;
         }
-        let Some(start) = Row::next(&mut rows, &mut line)? else {
+        let Some(start) = preamble::start(&mut rows, &mut line, &failed.thread, &turn)? else {
             break;
         };
         if start.r#type == "event_msg"
             && start.payload.r#type.as_deref() == Some("task_started")
             && start.payload.within(&failed.thread, &turn)
             && start.payload.turn_id.as_ref() == Some(&turn)
+            && match previous {
+                Some(previous) => previous.confirm(&mut rows, &mut line, failed, deadline)?,
+                None => true,
+            }
             && Instant::now() < deadline
             && stamp.matches(&failed.path)?
         {
