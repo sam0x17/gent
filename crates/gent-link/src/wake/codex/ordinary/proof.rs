@@ -274,9 +274,7 @@ fn prove_turn(
         deadline,
         |line| {
             terminal_command(line, &failed.thread, failed.turn)
-                || (failed.handoff_parent
-                    && failed.turn == failed.root
-                    && handoff::previous_receipt(&mut previous, line, failed))
+                || (failed.handoff_parent && handoff::previous_receipt(&mut previous, line, failed))
         },
     )?
     else {
@@ -446,6 +444,14 @@ fn prove_turn(
                             || parent.turn != parent_id
                             || parent_id == failed.turn
                             || parent.root != failed.root
+                            || previous.as_ref().is_some_and(|command| {
+                                !command.belongs_to(
+                                    parent_id,
+                                    parent.started,
+                                    parent.ended,
+                                    failed.started,
+                                )
+                            })
                             || p.root_turn_id.as_ref() != Some(&failed.root.to_string())
                         {
                             return Ok(None);
@@ -573,6 +579,18 @@ fn prove_turn(
                         else {
                             return Ok(None);
                         };
+                        // A parent command can finish even after the retry has
+                        // failed. Bind the receipt to its native parent and
+                        // the period in which that parent was running.
+                        if previous.as_ref().is_some_and(|command| {
+                            terminal.started_at.zip(terminal.completed_at).is_none_or(
+                                |(start, end)| {
+                                    !command.belongs_to(parent, start, end, failed.started)
+                                },
+                            )
+                        }) {
+                            return Ok(None);
+                        }
                         let proven_sources =
                             !ambiguous && (legacy || sources.len() == inputs.len());
                         let Some(origin) =

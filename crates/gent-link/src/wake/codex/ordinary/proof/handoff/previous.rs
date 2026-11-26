@@ -47,6 +47,19 @@ impl Previous {
         true
     }
 
+    pub(in crate::wake::codex::ordinary::proof) fn belongs_to(
+        &self,
+        turn: Uuid,
+        started: i64,
+        ended: i64,
+        child_started: i64,
+    ) -> bool {
+        self.turn == turn
+            && started <= self.first_start.div_euclid(1000)
+            && self.last_start.div_euclid(1000) <= ended
+            && ended <= child_started
+    }
+
     pub(super) fn confirm(
         mut self,
         rows: &mut ReverseLines<'_>,
@@ -65,10 +78,6 @@ impl Previous {
         };
         Ok(p.started_at
             .zip(p.completed_at)
-            .is_some_and(|(start, end)| {
-                start <= self.first_start.div_euclid(1000)
-                    && self.last_start.div_euclid(1000) <= end
-                    && end <= failed.started
-            }))
+            .is_some_and(|(start, end)| self.belongs_to(self.turn, start, end, failed.started)))
     }
 }
