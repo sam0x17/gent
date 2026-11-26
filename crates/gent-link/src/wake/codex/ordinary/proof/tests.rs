@@ -19,6 +19,7 @@ fn automatic_steers_require_all_scoped_sources_and_the_immediate_parent() -> Res
         reason: Failure::RequestPayload,
         goal: Value::Null,
         legacy_history: false,
+        handoff_parent: true,
     };
     let event = |p: Value| json!({"type":"event_msg","payload":p});
     let source = |id: &str| {
