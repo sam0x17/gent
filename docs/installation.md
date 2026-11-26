@@ -1,14 +1,13 @@
-# Install Gent from source
+# Install Gent
 
 Gent runs on macOS and Linux. Install Git, Rust 1.98 or newer with Cargo, and native build tools. On macOS, install the Xcode command-line tools. On Linux, install your distribution’s C compiler and linker. Cargo fetches the dependencies pinned in `Cargo.lock`.
 
 ## Install the stable release
 
-Cargo builds `gent-link` from the public GitHub `stable` tag and installs the `gent` executable, normally in `~/.cargo/bin`. Include that directory in your `PATH`, then run these commands in a terminal.
+The `gent-link` crate installs the `gent` executable, normally in `~/.cargo/bin`. Include that directory in your `PATH`, then install Gent from crates.io and start the setup wizard.
 
 ```sh
-cargo install --git https://github.com/sam0x17/gent.git --tag stable --locked gent-link
-gent setup
+cargo install --locked gent-link && gent setup
 ```
 
 On your first machine, choose **Create a cluster** and sign in with GitHub when prompted. Anyone with a GitHub account can sign up for Free. Free includes one person and one active node per cluster. A Codex chat and a Claude Code chat on the same laptop can exchange messages and files using that single node. After setup, reload the hosts you selected and run `gent doctor` to check the installation.
@@ -42,6 +41,12 @@ gent doctor
 For a separate install prefix, add `--root /absolute/install/prefix` to `cargo install`, then use its `bin/gent`. The daemon records the installed executable's absolute path. Keep that executable available while its service or connector entries are installed. Use `--home /absolute/state/path` to isolate Gent state for a trial. The hidden `--cluster` option only asserts that the selected node belongs to that cluster; it never selects a profile.
 
 ## Build from a checkout or source archive
+
+Cargo can also build the public GitHub `stable` tag directly.
+
+```sh
+cargo install --git https://github.com/sam0x17/gent.git --tag stable --locked gent-link && gent setup
+```
 
 From the root of a client checkout, run `cargo install --locked --path crates/gent-link`. A prepared source archive contains one committed client version, including `Cargo.lock`, the embedded Gent skill, tests and documentation. Verify the archive against its independently supplied digest, enter its `gent-VERSION` directory and use the same command. The archive includes the [client license](../LICENSE) and [notices](../NOTICE.md).
 
