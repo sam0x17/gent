@@ -3,7 +3,7 @@ members = ["crates/gent-protocol", "crates/gent-crypto", "crates/gent-daemon", "
 resolver = "2"
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.98"
 publish = ["crates-io"]
@@ -12,9 +12,9 @@ homepage = "https://gent.link"
 license = "BSD-3-Clause"
 
 [workspace.dependencies]
-gent-protocol = { path = "crates/gent-protocol", version = "=0.1.3" }
-gent-crypto = { path = "crates/gent-crypto", version = "=0.1.3" }
-gent-daemon = { path = "crates/gent-daemon", version = "=0.1.3" }
+gent-protocol = { path = "crates/gent-protocol", version = "=0.1.4" }
+gent-crypto = { path = "crates/gent-crypto", version = "=0.1.4" }
+gent-daemon = { path = "crates/gent-daemon", version = "=0.1.4" }
 anyhow = "1"
 base64 = "0.22"
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
