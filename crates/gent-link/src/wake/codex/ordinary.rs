@@ -11,6 +11,10 @@ pub(super) use proof::user_source;
 
 const PROMPT: &str = "please continue";
 const TRIGGER: &str = "gent_babysitter";
+// Reserve descriptors for the goal failure and the original operator, plus
+// both descendants that can still be eligible for a retry.
+const PRIOR_QUEUES: usize = 6;
+const RETRY_PARENTS: usize = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Failed {
@@ -23,6 +27,7 @@ struct Failed {
     reason: Failure,
     error: String,
     goal: Value,
+    previous_turns: Vec<Value>,
     legacy_history: bool,
     handoff_parent: bool,
 }
@@ -38,24 +43,22 @@ impl Failed {
         thread: &str,
         path: PathBuf,
         head: &Value,
-        now: i64,
+        completed: std::ops::RangeInclusive<i64>,
         goal: Value,
-        metadata: &Value,
+        legacy_history: bool,
+        handoff_parent: bool,
     ) -> Option<Self> {
         let reason = babysit::terminal_failure(head)?;
         let started = head["startedAt"].as_i64()?;
         let ended = head["completedAt"].as_i64()?;
-        if started > ended || !(now - CHAT_FAILURE_MAX_AGE..=now).contains(&ended) {
+        if started > ended || !completed.contains(&ended) {
             return None;
         }
         Some(Self {
             goal,
-            legacy_history: metadata["historyMode"] == "legacy",
-            handoff_parent: metadata["historyMode"] == "paginated"
-                && metadata["threadSource"] == "user"
-                && metadata.get("parentThreadId") == Some(&Value::Null)
-                && metadata.get("attachedToThreadId") == Some(&Value::Null)
-                && matches!(metadata["source"].as_str(), Some("vscode" | "cli")),
+            previous_turns: Vec::new(),
+            legacy_history,
+            handoff_parent,
             thread: thread.into(),
             path,
             turn: uuid(&head["id"])?,
@@ -91,7 +94,7 @@ async fn latest(host: &mut Host, thread: &str) -> Result<Option<Failed>> {
         return Ok(None);
     };
     if !goal.is_null()
-        && (goal["status"] != "complete"
+        && (!matches!(goal["status"].as_str(), Some("complete" | "blocked"))
             || goal["threadId"] != thread
             || goal["objective"].as_str().is_none_or(str::is_empty)
             || goal["createdAt"]
@@ -101,22 +104,40 @@ async fn latest(host: &mut Host, thread: &str) -> Result<Option<Failed>> {
     {
         return Ok(None);
     }
+    let blocked = goal["status"] == "blocked";
+    let limit = if blocked {
+        2 + PRIOR_QUEUES + RETRY_PARENTS
+    } else {
+        1
+    };
     let page = host
         .rpc(
             "thread/turns/list",
-            json!({"threadId":thread,"itemsView":"notLoaded","sortDirection":"desc","limit":1}),
+            json!({"threadId":thread,"itemsView":"notLoaded","sortDirection":"desc","limit":limit}),
         )
         .await?;
-    let Some([head]) = page["data"].as_array().map(Vec::as_slice) else {
+    let Some((head, previous)) = page["data"]
+        .as_array()
+        .and_then(|turns| turns.split_first())
+    else {
         return Ok(None);
     };
-    let Some(failed) = Failed::from_head(
+    if previous.len() >= limit {
+        return Ok(None);
+    }
+    let now = gent_daemon::store::now();
+    let Some(mut failed) = Failed::from_head(
         thread,
         path.into(),
         head,
-        gent_daemon::store::now(),
+        now - CHAT_FAILURE_MAX_AGE..=now,
         goal.clone(),
-        t,
+        t["historyMode"] == "legacy",
+        t["historyMode"] == "paginated"
+            && t["threadSource"] == "user"
+            && t.get("parentThreadId") == Some(&Value::Null)
+            && t.get("attachedToThreadId") == Some(&Value::Null)
+            && matches!(t["source"].as_str(), Some("vscode" | "cli")),
     ) else {
         return Ok(None);
     };
@@ -125,6 +146,27 @@ async fn latest(host: &mut Host, thread: &str) -> Result<Option<Failed>> {
         .is_some_and(|at| at >= failed.started)
     {
         return Ok(None);
+    }
+    if blocked {
+        if !failed.handoff_parent {
+            return Ok(None);
+        }
+        let updated = goal["updatedAt"].as_i64();
+        let Some(index) = previous.iter().position(|turn| {
+            turn["completedAt"].as_i64() == updated && babysit::terminal_failure(turn).is_some()
+        }) else {
+            return Ok(None);
+        };
+        let Some(depth) = std::iter::once(head)
+            .chain(&previous[..index])
+            .position(|turn| uuid(&turn["id"]) == Some(failed.root))
+        else {
+            return Ok(None);
+        };
+        if depth > RETRY_PARENTS || index - depth > PRIOR_QUEUES {
+            return Ok(None);
+        }
+        failed.previous_turns.extend_from_slice(&previous[..=index]);
     }
     let queue = host.rpc("thread/queue/list", id).await?;
     Ok(
@@ -152,11 +194,14 @@ pub(super) async fn inspect(
         return Ok(());
     }
     let candidate = failed.clone();
-    let Some((origin, parent, mut stamp)) =
+    let Some((origin, parent, mut evidence)) =
         tokio::task::spawn_blocking(move || proof::read(&candidate)).await??
     else {
         return Ok(());
     };
+    if !babysit::confirmed_inputs(home, credential, thread, &evidence.direct).await? {
+        return Ok(());
+    }
     let response = agent(
         home,
         credential,
@@ -194,29 +239,31 @@ pub(super) async fn inspect(
         // A delayed completion can arrive while claiming. Reprove the same
         // admissions and reread the live queue/head before using that claim.
         let observed = proof::Stamp::current(&failed.path)?;
-        if stamp != observed {
-            if !observed.grew_from(&stamp) {
+        if evidence.stamp != observed {
+            if !observed.grew_from(&evidence.stamp) {
                 return Ok(false);
             }
             let candidate = failed.clone();
-            let Some((new_origin, new_parent, new_stamp)) =
+            let Some((new_origin, new_parent, new_evidence)) =
                 tokio::task::spawn_blocking(move || proof::read(&candidate)).await??
             else {
                 return Ok(false);
             };
-            if new_stamp != observed
+            if new_evidence.stamp != observed
+                || new_evidence.direct != evidence.direct
                 || new_origin != origin
                 || new_parent != parent
                 || latest(&mut host, thread).await?.as_ref() != Some(&failed)
             {
                 return Ok(false);
             }
-            stamp = new_stamp;
+            evidence = new_evidence;
         }
         Ok::<_, anyhow::Error>(
             registry.credential(thread)?.as_deref() == Some(credential)
                 && gent_daemon::config::ordinary_babysitter_enabled(home)?
-                && stamp.matches(&failed.path)?,
+                && babysit::confirmed_inputs(home, credential, thread, &evidence.direct).await?
+                && evidence.stamp.matches(&failed.path)?,
         )
     })
     .await??;

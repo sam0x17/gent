@@ -2,7 +2,9 @@
 use super::*;
 use history::{Candidate, Completed, Failed};
 
+pub(in crate::wake::codex) mod prior_block;
 mod queued;
+pub(in crate::wake::codex) use queued::ordinary_work;
 mod queued_exec;
 use rustix::fs::{Mode, OFlags};
 use std::{collections::HashSet, fs::File, io::BufReader, os::unix::fs::FileExt};
@@ -298,7 +300,8 @@ impl Evidence {
     }
 }
 
-pub(super) struct DirectInput {
+#[derive(PartialEq)]
+pub(in crate::wake::codex) struct DirectInput {
     pub(super) completed_relay: bool,
     pub(super) turn: Uuid,
     pub(super) client: String,

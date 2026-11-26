@@ -1,4 +1,4 @@
-//! Bind the failed turn to native admission metadata without reading prompt text.
+//! Bind the failed turn to native admission metadata and paired input receipts.
 use super::super::babysit::rollout::{ReverseLines, terminal_command};
 use super::*;
 mod handoff;
@@ -198,7 +198,12 @@ fn continuation(
     })
 }
 
-pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, Stamp)>> {
+pub(super) struct Evidence {
+    pub(super) stamp: Stamp,
+    pub(super) direct: Vec<babysit::rollout::DirectInput>,
+}
+
+pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, Evidence)>> {
     let path = &failed.path;
     if !path.is_absolute()
         || !path
@@ -226,10 +231,25 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
     if header.r#type != "session_meta" || header.payload.id.as_deref() != Some(&failed.thread) {
         return Ok(None);
     }
-    let legacy = failed.legacy_history && header.payload.history_mode.as_deref() == Some("legacy");
-    let mut rows = ReverseLines::new(&file, stamp.len, true)?;
-    let mut line = Vec::new();
+    let rows = ReverseLines::new(&file, stamp.len, true)?;
     let deadline = Instant::now() + Duration::from_secs(2);
+    let mut direct = Vec::new();
+    let found = prove_turn(failed, &file, &stamp, &header, rows, deadline, &mut direct)?;
+    Ok(found.map(|(origin, parent)| (origin, parent, Evidence { stamp, direct })))
+}
+
+fn prove_turn(
+    failed: &Failed,
+    file: &File,
+    stamp: &Stamp,
+    header: &Record,
+    mut rows: ReverseLines<'_>,
+    deadline: Instant,
+    direct: &mut Vec<babysit::rollout::DirectInput>,
+) -> Result<Option<(ChatOrigin, Option<Uuid>)>> {
+    let path = &failed.path;
+    let legacy = failed.legacy_history && header.payload.history_mode.as_deref() == Some("legacy");
+    let mut line = Vec::new();
     let mut previous = None;
     let Some(p) = completion(
         &mut rows,
@@ -256,6 +276,7 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
     }
     let mut inputs: Vec<Item> = Vec::new();
     let descendant = failed.root != failed.turn;
+    let blocked = failed.goal["status"] == "blocked";
     let mut pending_receipt: Option<usize> = None;
     let mut sources = HashSet::new();
     // Earlier single-input hosts do not always supply response provenance.
@@ -268,6 +289,9 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
     let mut paired_message = false;
     let mut opening_context = false;
     while Instant::now() < deadline && rows.previous(&mut line)? {
+        if blocked && !babysit::rollout::ordinary_work(&line, &failed.thread, &turn)? {
+            return Ok(None);
+        }
         let record: Record = serde_json::from_slice(&line)?;
         let receipt = pending_receipt.take();
         let input = pending_input.take();
@@ -337,7 +361,7 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                     return Ok(None);
                 }
                 pending_receipt = Some(inputs.len());
-                if !descendant && failed.handoff_parent {
+                if failed.handoff_parent && (!descendant || blocked) {
                     pending_input = foreground_receipt(&line, &item);
                 }
                 inputs.push(item);
@@ -355,6 +379,87 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                 {
                     return Ok(None);
                 }
+                if blocked {
+                    if inputs.len() != 1
+                        || ambiguous
+                        || sources.len() != 1
+                        || header.payload.history_mode.as_deref() != Some("paginated")
+                    {
+                        return Ok(None);
+                    }
+                    if descendant {
+                        use sha2::{Digest, Sha256};
+                        let [input] = proven.as_slice() else {
+                            return Ok(None);
+                        };
+                        if input.sha256 != format!("{:x}", Sha256::digest(PROMPT)) {
+                            return Ok(None);
+                        }
+                        let Some(parent_id) = a.parent_turn_id else {
+                            return Ok(None);
+                        };
+                        let Some((head, rest)) = failed.previous_turns.split_first() else {
+                            return Ok(None);
+                        };
+                        let Some(mut parent) = Failed::from_head(
+                            &failed.thread,
+                            failed.path.clone(),
+                            head,
+                            failed.ended - gent_protocol::babysitter::CHAT_CHAIN_MAX_AGE
+                                ..=failed.started,
+                            failed.goal.clone(),
+                            failed.legacy_history,
+                            failed.handoff_parent,
+                        ) else {
+                            return Ok(None);
+                        };
+                        if a.turn_trigger.as_deref() != Some(TRIGGER)
+                            || parent.turn != parent_id
+                            || parent_id == failed.turn
+                            || parent.root != failed.root
+                            || p.root_turn_id.as_ref() != Some(&failed.root.to_string())
+                        {
+                            return Ok(None);
+                        }
+                        let Some(attempt) = inputs[0].client_id.as_deref().and_then(canonical_uuid)
+                        else {
+                            return Ok(None);
+                        };
+                        parent.previous_turns = rest.to_vec();
+                        // Replay the adjacent genuine parent back to its original
+                        // operator admission and provider block on the same file
+                        // and deadline. The store separately binds the native
+                        // client UUID to its latest admitted parent and budget.
+                        if prove_turn(&parent, file, stamp, header, rows, deadline, direct)?
+                            .is_none()
+                        {
+                            return Ok(None);
+                        }
+                        return Ok(Some((
+                            ChatOrigin::Continuation { attempt },
+                            Some(parent_id),
+                        )));
+                    }
+                    if a.turn_trigger.as_deref() != Some("user")
+                        || a.parent_turn_id.is_some()
+                        || p.root_turn_id.as_ref() != Some(&turn)
+                        || proven.len() != 1
+                        || failed.goal["updatedAt"]
+                            .as_i64()
+                            .is_none_or(|updated| updated >= failed.started)
+                        || !babysit::rollout::prior_block::confirm(
+                            &mut rows,
+                            &mut line,
+                            &failed.goal,
+                            &failed.previous_turns,
+                            failed.started,
+                            deadline,
+                            direct,
+                        )?
+                    {
+                        return Ok(None);
+                    }
+                }
                 let origin = match a.turn_trigger.as_deref() {
                     None if inputs.is_empty()
                         && failed.handoff_parent
@@ -362,7 +467,7 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                         && a.parent_turn_id.is_none()
                         && failed.root == failed.turn =>
                     {
-                        let Some(item) = handoff::read(&file, &stamp, failed, deadline, previous)?
+                        let Some(item) = handoff::read(file, stamp, failed, deadline, previous)?
                         else {
                             return Ok(None);
                         };
@@ -437,7 +542,7 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                 } else {
                     origin
                 };
-                return Ok(Some((origin, a.parent_turn_id, stamp)));
+                return Ok(Some((origin, a.parent_turn_id)));
             }
             _ => {}
         }

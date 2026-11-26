@@ -88,6 +88,31 @@ fn has_decision(meta: &ItemMeta) -> bool {
             .any(|t| decision(&t.name))
 }
 
+// A foreground failure with a retained goal must not supersede an explicit
+// decision, a foreign turn, or a host-delivered thread message.
+pub(in crate::wake::codex) fn ordinary_work(line: &[u8], thread: &str, turn: &str) -> Result<bool> {
+    let row: Record<Event> = serde_json::from_slice(line)?;
+    let p = &row.payload;
+    Ok(p.belongs_to(thread, turn)
+        && !p.name.as_deref().is_some_and(decision)
+        && !p
+            .internal_chat_message_metadata_passthrough
+            .as_ref()
+            .is_some_and(has_decision)
+        && !(p.call_id.is_none()
+            && thread_message_result(p.namespace.as_deref(), p.name.as_deref()))
+        && p.item.as_ref().is_none_or(|item| {
+            item.questions.is_none()
+                && !item.tool.as_deref().is_some_and(decision)
+                && !item.name.as_deref().is_some_and(decision)
+                && !thread_message_result(item.namespace.as_deref(), item.name.as_deref())
+                && !item
+                    .internal_chat_message_metadata_passthrough
+                    .as_ref()
+                    .is_some_and(has_decision)
+        }))
+}
+
 fn thread_message_result(namespace: Option<&str>, name: Option<&str>) -> bool {
     namespace == Some("codex_tui") && name == Some("send_message_to_thread")
 }

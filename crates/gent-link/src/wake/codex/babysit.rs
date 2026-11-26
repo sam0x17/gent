@@ -209,7 +209,7 @@ pub(super) async fn inspect(
     Ok(())
 }
 
-async fn confirmed_inputs(
+pub(super) async fn confirmed_inputs(
     home: &Path,
     credential: &str,
     thread: &str,
