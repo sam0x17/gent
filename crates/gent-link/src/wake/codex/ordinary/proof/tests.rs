@@ -151,13 +151,11 @@ fn automatic_steers_require_all_scoped_sources_and_the_immediate_parent() -> Res
     Ok(())
 }
 
-#[test]
-fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -> Result<()> {
-    let dir = tempfile::tempdir()?;
+fn mixed_foreground(dir: &Path, clients: &[Uuid]) -> (Failed, Vec<Value>) {
     let thread = Uuid::now_v7().to_string();
     let turn = Uuid::now_v7();
     let failed = Failed {
-        path: dir.path().join(format!("rollout-fixture-{thread}.jsonl")),
+        path: dir.join(format!("rollout-fixture-{thread}.jsonl")),
         thread: thread.clone(),
         root: turn,
         turn,
@@ -170,7 +168,6 @@ fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -
         legacy_history: false,
         handoff_parent: true,
     };
-    let clients = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
     let mut rows = vec![
         json!({"type":"session_meta","payload":{"id":thread,"history_mode":"paginated"}}),
         json!({"type":"event_msg","payload":{"type":"task_started","started_at":100,"turn_id":turn,
@@ -190,13 +187,24 @@ fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -
         json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn,
         "started_at":100,"completed_at":110,"error":{"message":"fixture"}}}),
     );
-    let observe = |rows: &[Value]| -> Result<Option<ChatOrigin>> {
-        let mut f = File::create(&failed.path)?;
-        for row in rows {
-            writeln!(f, "{row}")?;
-        }
-        Ok(read(&failed, false)?.map(|(origin, _, _)| origin))
-    };
+    (failed, rows)
+}
+
+fn mixed_origin(failed: &Failed, rows: &[Value]) -> Result<Option<ChatOrigin>> {
+    let mut f = File::create(&failed.path)?;
+    for row in rows {
+        writeln!(f, "{row}")?;
+    }
+    Ok(read(failed, false)?.map(|(origin, _, _)| origin))
+}
+
+#[test]
+fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let clients = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let (failed, rows) = mixed_foreground(dir.path(), &clients);
+    let turn = failed.turn;
+    let observe = |rows: &[Value]| mixed_origin(&failed, rows);
     let Some(ChatOrigin::ForegroundInputs(proof)) = observe(&rows)? else {
         panic!("missing scoped proof")
     };
@@ -244,6 +252,87 @@ fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -
         json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":turn}}),
     );
     assert!(observe(&stopped)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn mixed_foreground_accepts_only_a_complete_scoped_tools_preamble() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let clients: [Uuid; 5] = std::array::from_fn(|_| Uuid::new_v4());
+    let (mut failed, mut rows) = mixed_foreground(dir.path(), &clients);
+    let expected = mixed_origin(&failed, &rows)?;
+    assert!(matches!(expected, Some(ChatOrigin::ForegroundInputs(_))));
+    let operator = Some(ChatOrigin::Operator {
+        turn: failed.turn,
+        started_at: failed.started,
+        client_id: Some(clients[0].to_string()),
+        additional_client_ids: clients[1..].iter().map(ToString::to_string).collect(),
+    });
+    rows.splice(2..2, [
+        json!({"type":"response_item","payload":{"type":"message","role":"developer","id":"update",
+            "internal_chat_message_metadata_passthrough":{"turn_id":failed.turn,"content_item_kinds":["tools.incremental_update"]}}}),
+        json!({"type":"response_item","payload":{"type":"additional_tools","role":"developer","id":"declaration",
+            "tools":[{"type":"namespace","name":"tools","tools":[{"type":"function","name":"inspect"},{"type":"custom","name":"run"}]}]}}),
+        json!({"type":"world_state","payload":{"full":false,"state":{"top_level_tools":{
+            "tools.inspect":"a".repeat(40),"tools.run":"b".repeat(40)}}}}),
+    ]);
+    assert_eq!(mixed_origin(&failed, &rows)?, expected);
+
+    for (index, field, value) in [
+        (2, "/payload/role", json!("assistant")),
+        (
+            2,
+            "/payload/internal_chat_message_metadata_passthrough/turn_id",
+            json!(Uuid::new_v4()),
+        ),
+        (
+            2,
+            "/payload/internal_chat_message_metadata_passthrough/content_item_kinds",
+            json!(["user.goal"]),
+        ),
+        (3, "/payload/tools/0/tools/1/name", json!("inspect")),
+        (4, "/payload/full", json!(true)),
+        (
+            4,
+            "/payload/state/top_level_tools/tools.run",
+            json!("bad hash"),
+        ),
+    ] {
+        let mut bad = rows.clone();
+        *bad[index].pointer_mut(field).unwrap() = value;
+        assert_eq!(mixed_origin(&failed, &bad)?, operator, "{field}");
+    }
+    for index in 2..=4 {
+        let mut bad = rows.clone();
+        bad.remove(index);
+        assert_eq!(
+            mixed_origin(&failed, &bad)?,
+            operator,
+            "missing row {index}"
+        );
+    }
+    // Every boundary from task_started to the first input receipt is contiguous.
+    for index in 2..=7 {
+        let mut bad = rows.clone();
+        bad.insert(
+            index,
+            json!({"type":"event_msg","payload":{"type":"token_count"}}),
+        );
+        assert_eq!(
+            mixed_origin(&failed, &bad)?,
+            operator,
+            "extra row at {index}"
+        );
+    }
+    let mut bad = rows.clone();
+    bad[2]["payload"]["internal_chat_message_metadata_passthrough"]["executed_tool_calls"] =
+        json!(false);
+    assert_eq!(mixed_origin(&failed, &bad)?, operator);
+    bad[2] = json!({"type":"event_msg","payload":{"type":"turn_aborted"}});
+    assert_eq!(mixed_origin(&failed, &bad)?, None);
+
+    failed.goal = json!({"status":"blocked"});
+    assert_eq!(mixed_origin(&failed, &rows)?, None);
     Ok(())
 }
 
