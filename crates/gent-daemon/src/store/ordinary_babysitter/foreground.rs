@@ -81,7 +81,8 @@ impl StoreSession<'_> {
              UNION ALL SELECT 1 FROM babysitter_attempts WHERE agent=?1 AND attempt=?2",
         )?;
         let mut deliveries = deliveries.into_iter().peekable();
-        let mut previous_claim = first.received_at_ms.div_euclid(1000);
+        let mut last_human = first.received_at_ms.div_euclid(1000);
+        let mut previous_claim = None;
         let mut previous_finished = None;
         let mut human_ids = Vec::new();
         let mut human_hashes = BTreeSet::from([first.sha256.as_str()]);
@@ -92,7 +93,7 @@ impl StoreSession<'_> {
                 if previous_finished.is_some_and(|at| at >= received) {
                     return Ok(None);
                 }
-                previous_claim = received;
+                last_human = received;
                 human_ids.push(id.clone());
                 human_hashes.insert(input.sha256.as_str());
                 continue;
@@ -108,7 +109,11 @@ impl StoreSession<'_> {
                 || direct.turn_id.as_ref() != Some(&turn)
                 || !direct.finished
                 || direct.input_hash != input.sha256
-                || record.claimed_at <= previous_claim
+                || previous_claim.is_some_and(|at| record.claimed_at <= at)
+                || record.claimed_at < last_human
+                // Claims use seconds. If the opener shares the claim's second,
+                // the later host receipt must put delivery in a separate second.
+                || received <= last_human
                 || record.claimed_at > received
                 || record
                     .inbox_seen_at
@@ -118,7 +123,7 @@ impl StoreSession<'_> {
             {
                 return Ok(None);
             }
-            previous_claim = record.claimed_at;
+            previous_claim = Some(record.claimed_at);
             previous_finished = Some(record.updated_at);
             delivery_hashes.insert(input.sha256.as_str());
         }

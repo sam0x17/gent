@@ -249,3 +249,41 @@ async fn steers_between_confirmed_deliveries_keep_one_ordinary_retry() -> Result
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn first_wake_claim_can_share_the_user_openers_second() -> Result<()> {
+    let mut p = Pair::new().await;
+    config::set_ordinary_babysitter_enabled(p.homes[0].path(), true)?;
+    let at = now();
+    let mut proof = root(5, at);
+    for (input, offset) in proof.inputs.iter_mut().zip([633, 4065, 9524, 14271, 20000]) {
+        input.received_at_ms = (at - 40) * 1000 + offset;
+    }
+    for i in 1..proof.inputs.len() {
+        record(&p, &proof, i)?;
+    }
+    let opener = proof.inputs[0].received_at_ms.div_euclid(1000);
+    let first = proof.inputs[1].client.to_string();
+    let set_claim = |p: &Pair, when: i64| {
+        p.stores[0].db.execute(
+            "UPDATE wake_dispatches SET claimed_at=?1, payload=json_set(payload,'$.claimed_at',?1)
+         WHERE attempt_id=?2",
+            params![when, first],
+        )
+    };
+    set_claim(&p, opener - 1)?;
+    assert!(p.agent(0, request(&proof, at))?["claim"].is_null());
+    set_claim(&p, opener)?;
+    let mut same_second = proof.clone();
+    same_second.inputs[1].received_at_ms = opener * 1000 + 990;
+    assert!(p.agent(0, request(&same_second, at))?["claim"].is_null());
+
+    let attempt = serde_json::from_value(p.agent(0, request(&proof, at))?["claim"].clone())?;
+    assert_eq!(
+        p.agent(0, AgentOp::BabysitterChatCheck { attempt })?["eligible"],
+        true
+    );
+    p.reopen(0);
+    assert!(p.agent(0, request(&proof, at))?["claim"].is_null());
+    Ok(())
+}
