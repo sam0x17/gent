@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared wire types, identities and permissions for Gent."
+include = ["/src/**", "/LICENSE", "/NOTICE.md"]
 
 [dependencies]
 base64.workspace = true

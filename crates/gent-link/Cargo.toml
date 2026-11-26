@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "Connect Codex and Claude Code chats across machines with the Gent CLI and desktop companion."
+include = ["/src/**", "/LICENSE", "/NOTICE.md", "/skills/**", "/build.rs", "/channel-v1-bootstrap.pin", "/branding/**", "/README.md"]
 
 [[bin]]
 name = "gent"
@@ -22,9 +27,9 @@ test-updates = []
 
 [dependencies]
 toml.workspace = true
-gent-protocol = { path = "../gent-protocol" }
-gent-daemon = { path = "../gent-daemon" }
-gent-crypto = { path = "../gent-crypto", features = ["invitation"] }
+gent-protocol = { workspace = true }
+gent-daemon = { workspace = true }
+gent-crypto = { workspace = true, features = ["invitation"] }
 anyhow.workspace = true
 # 0.12's unused ML-KEM backend conflicts with the MLS stack's stable kem API.
 # The standard age X25519 stream format used for backups is unchanged.
@@ -66,8 +71,11 @@ rustix = { version = "1", features = ["fs", "process"] }
 reqwest.workspace = true
 getrandom.workspace = true
 
+[build-dependencies]
+serde_json.workspace = true
+
 [dev-dependencies]
-gent-daemon = { path = "../gent-daemon", features = ["test-entitlements"] }
+gent-daemon = { workspace = true, features = ["test-entitlements"] }
 rcgen = "0.14"
 
 [lints]
