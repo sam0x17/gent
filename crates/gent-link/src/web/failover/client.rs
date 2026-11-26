@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 pub(in crate::web) struct Client {
     pub parent: PathBuf,
     pub node: String,
-    pub(super) url: String,
+    pub(super) route: gent_daemon::backend::TransportRoute,
+    pub(super) prefix: String,
     http: reqwest::Client,
 }
 
@@ -21,7 +22,8 @@ impl Client {
         Ok(Self {
             parent: parent.into(),
             node: node.into(),
-            url: format!("{origin}{base}"),
+            route: crate::web::bridge_route(parent, &cfg, crate::auth::origin(&origin)?)?,
+            prefix: base,
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(12))
@@ -95,7 +97,11 @@ impl Client {
         )?;
         let mut request = self
             .http
-            .post(format!("{}/{route}", self.url))
+            .post(
+                self.route
+                    .destination()?
+                    .join(&format!("{}/{route}", self.prefix))?,
+            )
             .timeout(Duration::from_secs(if route == "manage" { 40 } else { 12 }))
             .bearer_auth(self.credential()?)
             .header(

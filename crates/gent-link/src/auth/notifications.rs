@@ -1,5 +1,5 @@
 //! Account inbox publisher and passive desktop watch. Only the pinned login
-//! origin sees its bearer. Local device cursors are independent per account.
+//! authority sees its bearer. Local device cursors are independent per account.
 use super::*;
 #[cfg(target_os = "macos")]
 use crate::desktop::notification_delivery::Destination;
@@ -121,7 +121,7 @@ async fn publish(home: &Path) -> Result<()> {
     if pending.is_empty() {
         return Ok(());
     }
-    let url = origin(&login.service)?.join("v1/notifications")?;
+    let url = account_endpoint(home, &login.service)?.join("v1/notifications")?;
     let client = client()?;
     for notice in pending {
         if !still_signed_in(home, &login)? {
@@ -157,16 +157,40 @@ pub(crate) async fn publish_loop(home: &Path) {
     }
 }
 
-fn cursor_path(home: &Path, saved: &Saved) -> Result<PathBuf> {
+fn cursor_file(directory: &Path, origin: &Url, account: &str) -> PathBuf {
+    directory.join(format!(
+        "notification-cursor-{}",
+        crate::babysitter::fingerprint(&[origin.as_str(), account])
+    ))
+}
+
+fn cursor_paths(home: &Path, saved: &Saved) -> Result<(PathBuf, Option<PathBuf>)> {
     let account = &saved
         .session
         .as_ref()
         .context("missing session")?
         .account_id;
-    Ok(source::directory(home)?.join(format!(
-        "notification-cursor-{}",
-        crate::babysitter::fingerprint(&[origin(&saved.service)?.as_str(), account])
-    )))
+    let directory = source::directory(home)?;
+    let pin = account_pin(&saved.service)?;
+    let current = cursor_file(&directory, &pin, account);
+    // Older clients allowed an explicit beta login and keyed its cursor to that URL.
+    let beta = if ACCOUNT.contains(&pin) {
+        Some(cursor_file(&directory, &origin(ACCOUNT.beta)?, account))
+    } else {
+        None
+    };
+    Ok((current, beta))
+}
+
+fn read_cursor(path: &Path) -> Result<u64> {
+    let snapshot = Snapshot::read(path)?;
+    snapshot.private()?;
+    Ok(snapshot
+        .text
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("0")
+        .parse()?)
 }
 fn still_signed_in(home: &Path, login: &Saved) -> Result<bool> {
     Ok(active(home)?.is_some_and(|s| s.token == login.token && s.service == login.service))
@@ -187,22 +211,20 @@ fn supported(value: &Value) -> Result<Option<Notice>> {
         _ => Ok(None),
     }
 }
+fn cursor_position(path: &Path, legacy: Option<&Path>) -> Result<u64> {
+    let old = legacy.map(read_cursor).transpose()?.unwrap_or(0);
+    Ok(old.max(read_cursor(path)?))
+}
+
 async fn collect(home: &Path, login: &Saved, destination: &Destination) -> Result<()> {
-    let path = cursor_path(home, login)?;
-    let url = origin(&login.service)?.join("v1/notifications")?;
+    let (path, legacy) = cursor_paths(home, login)?;
+    let url = account_endpoint(home, &login.service)?.join("v1/notifications")?;
     let client = client()?;
     loop {
         if !still_signed_in(home, login)? {
             return Ok(());
         }
-        let snapshot = Snapshot::read(&path)?;
-        snapshot.private()?;
-        let mut after = snapshot
-            .text
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("0")
-            .parse::<u64>()?;
+        let mut after = cursor_position(&path, legacy.as_deref())?;
         let (status, value) = response(
             client
                 .get(url.clone())
@@ -234,7 +256,8 @@ async fn collect(home: &Path, login: &Saved, destination: &Destination) -> Resul
 }
 
 async fn watch(home: &Path, login: &Saved, destination: &Destination) -> Result<()> {
-    let mut url = origin(&login.service)?.join("v1/notifications/watch")?;
+    let endpoint = account_endpoint(home, &login.service)?;
+    let mut url = endpoint.join("v1/notifications/watch")?;
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
         .map_err(|_| anyhow::anyhow!("invalid watch URL"))?;
     let mut request = url.as_str().into_client_request()?;
@@ -258,7 +281,7 @@ async fn watch(home: &Path, login: &Saved, destination: &Destination) -> Result<
                 Message::Ping(_) | Message::Pong(_)=>{},
                 _=>anyhow::bail!("account watch ended"),
             },
-            _=auth_tick.tick()=>if !still_signed_in(home,login)?{return Ok(())},
+            _=auth_tick.tick()=>if !still_signed_in(home,login)? || account_endpoint(home, &login.service)? != endpoint {return Ok(())},
         }
     }
 }

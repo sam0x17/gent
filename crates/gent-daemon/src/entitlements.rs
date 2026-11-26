@@ -56,11 +56,9 @@ pub fn clear(home: &Path) -> Result<()> {
 
 pub fn paid(home: &Path, cfg: &Config) -> bool {
     #[cfg(any(test, feature = "test-entitlements"))]
-    if cfg
-        .service
-        .as_ref()
-        .is_none_or(|s| s.origin.trim_end_matches('/') != "https://api.gent.link")
-        && fs::read_to_string(home.join("test-entitlement")).is_ok_and(|id| id == cfg.node.id)
+    if cfg.service.as_ref().is_none_or(|s| {
+        reqwest::Url::parse(&s.origin).is_ok_and(|url| !crate::backend::ACCOUNT.contains(&url))
+    }) && fs::read_to_string(home.join("test-entitlement")).is_ok_and(|id| id == cfg.node.id)
     {
         return true;
     }

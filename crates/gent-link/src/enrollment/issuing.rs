@@ -88,7 +88,7 @@ pub async fn add(home: &Path, args: AddArgs) -> Result<Value> {
         .context("this node needs a service cluster")?;
     ensure!(
         service.session.account_id == account.account_id
-            && service.origin()? == auth::origin(&account.origin)?,
+            && service.origin()? == auth::account_pin(&account.origin)?,
         "sign into this node's original account and service"
     );
     let saved: Option<Saved> = snapshot

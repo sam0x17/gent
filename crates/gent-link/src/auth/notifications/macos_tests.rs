@@ -44,7 +44,7 @@ async fn macos_notification_cursor_requires_native_acceptance() {
         }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, api).await.unwrap() });
-    let cursor = cursor_path(&home, &login).unwrap();
+    let (cursor, _) = cursor_paths(&home, &login).unwrap();
     Snapshot::read(&cursor).unwrap().write("41").unwrap();
     let (gui, mut deliveries) = channel();
     let (_, disconnected) = tokio::join!(

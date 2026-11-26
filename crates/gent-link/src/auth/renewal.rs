@@ -32,7 +32,8 @@ pub(super) fn check_pin(saved: &Saved, pin: Option<&ServiceConfig>) -> Result<()
     let session = saved.session.as_ref().context("saved account is missing")?;
     if let Some(pin) = pin {
         ensure!(
-            origin(&saved.service)? == origin(&pin.origin)? && session.account_id == pin.account_id,
+            account_pin(&saved.service)? == account_pin(&pin.origin)?
+                && session.account_id == pin.account_id,
             "daemon account renewal is pinned to the node's original account service"
         );
     }
@@ -54,7 +55,8 @@ pub async fn renew(home: &Path, pin: Option<&ServiceConfig>) -> Result<Value> {
     check_pin(&saved, pin)?;
     let previous = saved.session.as_ref().expect("account checked");
     let client = client()?;
-    let current = service_session(&client, &saved)
+    let endpoint = account_endpoint(home, &saved.service)?;
+    let current = service_session(&client, &endpoint, &saved)
         .await?
         .context("session is expired or revoked; run gent auth login")?;
     validate(previous, &current, now()?)?;
@@ -62,7 +64,7 @@ pub async fn renew(home: &Path, pin: Option<&ServiceConfig>) -> Result<Value> {
     let renewed = if was_due {
         let (status, value) = response(
             client
-                .post(origin(&saved.service)?.join("v1/auth/session/renew")?)
+                .post(endpoint.join("v1/auth/session/renew")?)
                 .bearer_auth(&saved.token)
                 .json(&SessionRenewal {
                     expected_expires_at: current.expires_at,

@@ -1,5 +1,6 @@
 //! Native daemon with local agent RPC and encrypted configuration/message sync.
 mod access;
+pub mod backend;
 pub mod config;
 pub mod configuration_log;
 mod connection;

@@ -180,7 +180,7 @@ fn plan(
     if let Some(pinned) = pinned_service {
         if let Some(requested) = &options.service {
             ensure!(
-                auth::origin(requested)? == auth::origin(pinned)?,
+                auth::account_pin(requested)? == auth::account_pin(pinned)?,
                 "this node is pinned to another service; rerun without --service"
             );
         }
@@ -392,7 +392,7 @@ pub async fn install(
             )?;
             if let Some(origin) = &options.service {
                 ensure!(
-                    login.origin()? == auth::origin(origin)?,
+                    login.origin()? == auth::account_pin(origin)?,
                     "sign into the selected Gent service first"
                 );
             }

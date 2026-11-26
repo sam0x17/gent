@@ -8,6 +8,7 @@ use crate::managed_file::{self, Snapshot};
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::Subcommand;
+use gent_daemon::backend::{ACCOUNT, RELAY};
 use gent_protocol::service::{
     AuthConfig, CALLBACK_PATH, CodeExchange, ServiceCluster, ServiceSession, TokenExchange,
     TransportConfig, TransportEnrollment, TransportSession,
@@ -27,7 +28,9 @@ use tokio::{
     time::{Instant, timeout},
 };
 
-const DEFAULT_SERVICE: &str = "https://api.gent.link";
+const DEFAULT_SERVICE: &str = ACCOUNT.stable;
+#[cfg(test)]
+const STAGING_SERVICE: &str = "https://staging.gent.link";
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -191,10 +194,22 @@ fn success(status: StatusCode, value: Value) -> Result<Value> {
     );
     Ok(value)
 }
-async fn service_session(client: &Client, saved: &Saved) -> Result<Option<ServiceSession>> {
+pub(crate) fn account_pin(raw: &str) -> Result<Url> {
+    Ok(ACCOUNT.identity(origin(raw)?))
+}
+
+fn account_endpoint(home: &Path, raw: &str) -> Result<Url> {
+    ACCOUNT.destination(home, origin(raw)?)
+}
+
+async fn service_session(
+    client: &Client,
+    endpoint: &Url,
+    saved: &Saved,
+) -> Result<Option<ServiceSession>> {
     let (status, value) = response(
         client
-            .get(origin(&saved.service)?.join("v1/auth/session")?)
+            .get(endpoint.join("v1/auth/session")?)
             .bearer_auth(&saved.token),
     )
     .await?;
@@ -208,11 +223,12 @@ async fn service_session(client: &Client, saved: &Saved) -> Result<Option<Servic
 }
 
 /// Holds the login mutation lock through setup. Account credentials are only
-/// sent to the saved login origin, never to the discovered relay.
+/// sent to the selected account backend, never to the discovered relay.
 pub(crate) struct Service {
     _lock: std::fs::File,
     saved: Saved,
     client: Client,
+    endpoint: Url,
     pub session: ServiceSession,
 }
 impl Service {
@@ -236,7 +252,7 @@ impl Service {
         );
         if let Some(pin) = pin {
             ensure!(
-                origin(&saved.service)? == origin(&pin.origin)?
+                account_pin(&saved.service)? == account_pin(&pin.origin)?
                     && saved
                         .session
                         .as_ref()
@@ -245,7 +261,8 @@ impl Service {
             );
         }
         let client = client()?;
-        let session = service_session(&client, &saved)
+        let endpoint = account_endpoint(home, &saved.service)?;
+        let session = service_session(&client, &endpoint, &saved)
             .await?
             .context("session is no longer active; run gent auth login")?;
         ensure!(
@@ -259,12 +276,13 @@ impl Service {
             _lock: lock,
             saved,
             client,
+            endpoint,
             session,
         })
     }
 
     pub fn origin(&self) -> Result<Url> {
-        origin(&self.saved.service)
+        account_pin(&self.saved.service)
     }
     pub fn session_hash(&self) -> String {
         format!("{:x}", Sha256::digest(self.saved.token.as_bytes()))
@@ -292,7 +310,7 @@ impl Service {
         Ok(())
     }
     fn request(&self, method: Method, path: &str) -> Result<reqwest::RequestBuilder> {
-        Ok(self.client.request(method, self.origin()?.join(path)?))
+        Ok(self.client.request(method, self.endpoint.join(path)?))
     }
     pub async fn relay_endpoint(&self) -> Result<String> {
         let (status, value) = response(
@@ -307,7 +325,12 @@ impl Service {
             relay.scheme() == "https" || loopback(&self.origin()?),
             "an HTTPS account service cannot select an insecure relay"
         );
-        Ok(relay.into())
+        Ok(if ACCOUNT.contains(&self.endpoint) {
+            RELAY.identity(relay)
+        } else {
+            relay
+        }
+        .into())
     }
     pub async fn initialize_configuration(
         &self,
@@ -399,7 +422,7 @@ impl Service {
     ) -> Result<()> {
         binding.validate()?;
         ensure!(
-            self.origin()? == origin(&binding.account_origin)?
+            self.origin()? == account_pin(&binding.account_origin)?
                 && self.session.account_id == binding.account_id,
             "sign into the invitation's Gent service and account before continuing"
         );
@@ -534,12 +557,17 @@ pub(crate) async fn desktop_login(home: &Path) -> Result<Value> {
     .await
 }
 
+fn billing_page(service: &Url) -> Result<Url> {
+    match service.origin().ascii_serialization().as_str() {
+        DEFAULT_SERVICE => Ok(Url::parse("https://gent.link/account")?),
+        authority if authority == ACCOUNT.beta => Ok(Url::parse("https://beta.gent.link/account")?),
+        _ => bail!("hosted billing requires a gent.link account"),
+    }
+}
+
 async fn billing(home: &Path, no_browser: bool) -> Result<Value> {
     let service = Service::open(home).await?;
-    ensure!(
-        service.origin()? == origin(DEFAULT_SERVICE)?,
-        "hosted billing requires a gent.link account"
-    );
+    let mut url = billing_page(&service.endpoint)?;
     let (status, value) = response(
         service
             .request(Method::POST, "v1/billing/browser/grant")?
@@ -555,7 +583,8 @@ async fn billing(home: &Path, no_browser: bool) -> Result<Value> {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
         .context("invalid account handoff")?;
-    let url = format!("https://gent.link/account#{grant}");
+    url.set_fragment(Some(grant));
+    let url = url.as_str();
     if no_browser {
         return Ok(json!({"status":"billing_link","url":url,"expires_at":value["expires_at"]}));
     }
@@ -565,7 +594,7 @@ async fn billing(home: &Path, no_browser: bool) -> Result<Value> {
         "xdg-open"
     };
     let status = tokio::process::Command::new(opener)
-        .arg(&url)
+        .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -604,7 +633,7 @@ pub(crate) async fn diagnose(
     let check = |session: &ServiceSession| -> Result<()> {
         if let Some(pin) = pin {
             ensure!(
-                origin(&saved.service)? == origin(&pin.origin)?
+                account_pin(&saved.service)? == account_pin(&pin.origin)?
                     && session.account_id == pin.account_id,
                 "account state does not match this cluster"
             );
@@ -613,7 +642,7 @@ pub(crate) async fn diagnose(
     };
     if let Some(pin) = pin {
         ensure!(
-            origin(&saved.service)? == origin(&pin.origin)?,
+            account_pin(&saved.service)? == account_pin(&pin.origin)?,
             "service pin mismatch"
         );
     }
@@ -635,7 +664,13 @@ pub(crate) async fn diagnose(
             "source":"local","expires_at":cached.expires_at}),
         );
     }
-    match timeout(Duration::from_secs(5), service_session(&client()?, &saved)).await {
+    let endpoint = account_endpoint(home, &saved.service)?;
+    match timeout(
+        Duration::from_secs(5),
+        service_session(&client()?, &endpoint, &saved),
+    )
+    .await
+    {
         Ok(Ok(Some(session))) => {
             check(&session)?;
             Ok(
@@ -649,6 +684,7 @@ pub(crate) async fn diagnose(
 }
 
 async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result<Value> {
+    let home = directory.parent().context("missing account home")?;
     let path = directory.join("session.json");
     let client = client()?;
     if matches!(command, Command::Status) {
@@ -658,7 +694,8 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
         if saved.phase == Phase::Revoking {
             return Ok(json!({"status":"revocation_pending","service":saved.service}));
         }
-        return match service_session(&client, &saved).await {
+        let endpoint = account_endpoint(home, &saved.service)?;
+        return match service_session(&client, &endpoint, &saved).await {
             Ok(Some(session)) => {
                 Ok(json!({"status":"active","service":saved.service,"account":session}))
             }
@@ -670,7 +707,6 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
     }
     managed_file::directory(directory)?;
     let _lock = managed_file::lock(&directory.join("session.lock"))?;
-    let home = directory.parent().context("missing account home")?;
     let mut saved = read(&path)?;
     if matches!(command, Command::Logout) {
         gent_daemon::entitlements::clear(home)?;
@@ -679,12 +715,10 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
         };
         saved.phase = Phase::Revoking;
         save(&path, Some(saved))?;
+        let endpoint = account_endpoint(home, &saved.service)?;
         let outcome = response(
             client
-                .request(
-                    Method::DELETE,
-                    origin(&saved.service)?.join("v1/auth/session")?,
-                )
+                .request(Method::DELETE, endpoint.join("v1/auth/session")?)
                 .bearer_auth(&saved.token),
         )
         .await;
@@ -702,22 +736,30 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
     else {
         unreachable!()
     };
-    let base = origin(
+    let configured =
+        if service.is_none() && saved.is_none() && gent_daemon::config::path(home).try_exists()? {
+            crate::node_home::inspect(home)?.service
+        } else {
+            None
+        };
+    let pin = account_pin(
         service
             .as_deref()
             .or_else(|| saved.as_ref().map(|s| s.service.as_str()))
+            .or_else(|| configured.as_ref().map(|s| s.origin.as_str()))
             .unwrap_or(DEFAULT_SERVICE),
     )?;
+    let base = ACCOUNT.destination(home, pin.clone())?;
     if let Some(previous) = &mut saved {
         ensure!(
-            origin(&previous.service)? == base,
+            account_pin(&previous.service)? == pin,
             "sign out before switching Gent services"
         );
         ensure!(
             previous.phase != Phase::Revoking,
             "session revocation is pending; retry gent auth logout first"
         );
-        if let Some(session) = service_session(&client, previous).await? {
+        if let Some(session) = service_session(&client, &base, previous).await? {
             if previous
                 .session
                 .as_ref()
@@ -772,7 +814,7 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
     };
     let pending = Saved {
         version: 1,
-        service: base.to_string(),
+        service: pin.to_string(),
         token: candidate()?,
         phase: Phase::Pending,
         session: None,
@@ -806,7 +848,7 @@ async fn execute_at(directory: &Path, command: Command, desktop: bool) -> Result
     let session = match result {
         Ok((status, value)) if status.is_success() => serde_json::from_value(value)
             .map_err(|_| anyhow::anyhow!("invalid Gent session response"))?,
-        other => match service_session(&client, &pending).await? {
+        other => match service_session(&client, &base, &pending).await? {
             Some(session) => session,
             None => {
                 if let Ok((status, _)) = other {
@@ -1102,6 +1144,28 @@ pub fn print(value: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn billing_uses_the_signed_in_hosted_account() -> Result<()> {
+        for (service, expected) in [
+            (DEFAULT_SERVICE, "https://gent.link/account"),
+            (ACCOUNT.beta, "https://beta.gent.link/account"),
+        ] {
+            let mut page = billing_page(&origin(service)?)?;
+            page.set_fragment(Some("grant"));
+            assert_eq!(page.as_str(), format!("{expected}#grant"));
+        }
+        for unsupported in [
+            "https://gent.link",
+            "https://staging.gent.link:8443",
+            "https://staging.gent.link.example",
+            "http://127.0.0.1:8000",
+        ] {
+            assert!(billing_page(&origin(unsupported)?).is_err());
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn diagnostic_account_checks_are_optional_pinned_and_do_not_mutate_credentials() {
         use std::{

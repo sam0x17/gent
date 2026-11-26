@@ -146,7 +146,7 @@ pub struct Run {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
     /// Publish through Gent's web bridge using an outbound connection. This route is not E2EE.
-    #[arg(long, num_args=0..=1, default_missing_value="https://mcp.gent.link", conflicts_with_all=["origin","tls_cert","tls_key"])]
+    #[arg(long, num_args=0..=1, default_missing_value=gent_daemon::backend::MCP.stable, conflicts_with_all=["origin","tls_cert","tls_key"])]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hosted: Option<String>,
     /// Exact external HTTPS origin when serving TLS directly.

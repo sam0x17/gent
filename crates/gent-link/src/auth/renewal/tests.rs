@@ -278,3 +278,57 @@ fn lease_validation_rejects_rebinding_rollback_and_excessive_extension() {
     changed.github_login = "renamed".into();
     assert!(validate(&original, &changed, timestamp).is_ok());
 }
+
+#[test]
+fn signed_channel_switch_keeps_saved_login_account_binding_and_notification_scope() -> Result<()> {
+    use gent_protocol::{ConfigurationEdit, OwnerOp, ReleaseChannel, Request, Response};
+    let scratch = tempfile::tempdir()?;
+    let home = scratch.path().join("node");
+    config::initialize(&home, "account")?;
+    let mut store = gent_daemon::store::Store::open(&home)?;
+    let owner = config::read_private(&home.join("owner.key"))?;
+    let account = session();
+    saved(&home, DEFAULT_SERVICE, &account);
+    let path = home.join("auth/session.json");
+    let snapshot = Snapshot::read(&path)?;
+    let login = read(&path)?.unwrap();
+    let mut pin = ServiceConfig {
+        origin: ACCOUNT.beta.into(),
+        account_id: account.account_id.clone(),
+    };
+    for (channel, service, billing) in [
+        (
+            ReleaseChannel::Beta,
+            ACCOUNT.beta,
+            "https://beta.gent.link/account",
+        ),
+        (
+            ReleaseChannel::Stable,
+            DEFAULT_SERVICE,
+            "https://gent.link/account",
+        ),
+    ] {
+        let request = Request::Owner {
+            credential: owner.clone(),
+            action: OwnerOp::Configure {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                edit: ConfigurationEdit::SetReleaseChannel { channel },
+            },
+        };
+        assert!(matches!(store.handle(request), Response::Ok(_)));
+        check_pin(&login, Some(&pin))?;
+        let endpoint = account_endpoint(&home, &login.service)?;
+        assert_eq!(endpoint.origin().ascii_serialization(), service);
+        assert_eq!(billing_page(&endpoint)?.as_str(), billing);
+        let scope = notifications::scope(&home).unwrap();
+        assert_eq!(scope.origin, login.service);
+        assert_eq!(scope.account, account.account_id);
+        snapshot.verify()?;
+    }
+    pin.account_id = uuid::Uuid::new_v4().to_string();
+    assert!(check_pin(&login, Some(&pin)).is_err());
+    pin.account_id = account.account_id;
+    pin.origin = STAGING_SERVICE.into();
+    assert!(check_pin(&login, Some(&pin)).is_err());
+    Ok(())
+}

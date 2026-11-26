@@ -31,7 +31,7 @@ impl StoreSession<'_> {
             return Ok(json!({"queued":false}));
         };
         ensure!(notice.valid(self.timestamp), "invalid notification");
-        let origin = reqwest::Url::parse(&scope.origin)?;
+        let origin = crate::backend::ACCOUNT.identity(reqwest::Url::parse(&scope.origin)?);
         self.db.execute(
             "INSERT OR IGNORE INTO account_outbox VALUES(?1,?2,?3,?4)",
             params![
@@ -47,9 +47,19 @@ impl StoreSession<'_> {
         let mut list = Vec::new();
         let mut query = self
             .db
-            .prepare("SELECT notice FROM account_outbox WHERE scope=?1 AND origin=?2 ORDER BY rowid LIMIT 64")?;
+            .prepare("SELECT notice FROM account_outbox WHERE scope=?1 AND origin IN (?2,?3) ORDER BY rowid LIMIT 64")?;
         let origin = reqwest::Url::parse(&scope.origin)?;
-        let mut rows = query.query(params![scope.account, origin.as_str()])?;
+        let account = crate::backend::ACCOUNT;
+        let beta = account
+            .contains(&origin)
+            .then(|| reqwest::Url::parse(account.beta))
+            .transpose()?;
+        let stable = account.identity(origin);
+        let mut rows = query.query(params![
+            scope.account,
+            stable.as_str(),
+            beta.as_ref().map(reqwest::Url::as_str)
+        ])?;
         while let Some(row) = rows.next()? {
             list.push(serde_json::from_str::<Notice>(&row.get::<_, String>(0)?)?);
         }
