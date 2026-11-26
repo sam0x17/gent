@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "gent-crypto"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "gent-daemon"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "gent-link"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "age",
  "anyhow",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "gent-protocol"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "jpeg-decoder",
