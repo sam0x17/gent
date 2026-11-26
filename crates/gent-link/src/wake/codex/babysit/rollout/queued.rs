@@ -1,5 +1,6 @@
 //! Bind a native user admission to the records between its start and completion.
 use super::*;
+mod steer;
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -29,6 +30,7 @@ struct Item {
     duration_ms: Option<u64>,
     id: Option<String>,
     tool: Option<String>,
+    server: Option<String>,
     source: Option<String>,
     status: Option<String>,
     questions: Option<serde::de::IgnoredAny>,
@@ -69,6 +71,7 @@ fn passive_tool(name: &str) -> bool {
 
 pub(super) enum Source<'a> {
     Queue(&'a mut queued_exec::Queue, Option<&'a Completed>),
+    Drained(&'a mut queued_exec::Queue),
     Foreground,                       // terminal recognized failure
     Direct(&'a mut Vec<DirectInput>), // completed, needs a matching journal entry
 }
@@ -83,6 +86,31 @@ fn has_decision(meta: &ItemMeta) -> bool {
             .iter()
             .flatten()
             .any(|t| decision(&t.name))
+}
+
+// A foreground failure with a retained goal must not supersede an explicit
+// decision, a foreign turn, or a host-delivered thread message.
+pub(in crate::wake::codex) fn ordinary_work(line: &[u8], thread: &str, turn: &str) -> Result<bool> {
+    let row: Record<Event> = serde_json::from_slice(line)?;
+    let p = &row.payload;
+    Ok(p.belongs_to(thread, turn)
+        && !p.name.as_deref().is_some_and(decision)
+        && !p
+            .internal_chat_message_metadata_passthrough
+            .as_ref()
+            .is_some_and(has_decision)
+        && !(p.call_id.is_none()
+            && thread_message_result(p.namespace.as_deref(), p.name.as_deref()))
+        && p.item.as_ref().is_none_or(|item| {
+            item.questions.is_none()
+                && !item.tool.as_deref().is_some_and(decision)
+                && !item.name.as_deref().is_some_and(decision)
+                && !thread_message_result(item.namespace.as_deref(), item.name.as_deref())
+                && !item
+                    .internal_chat_message_metadata_passthrough
+                    .as_ref()
+                    .is_some_and(has_decision)
+        }))
 }
 
 fn thread_message_result(namespace: Option<&str>, name: Option<&str>) -> bool {
@@ -127,7 +155,14 @@ impl Admission {
         self.work_ms = None;
     }
 
-    fn item(&mut self, item: Item, foreground: bool, turn: &str, started_ms: Option<i64>) -> bool {
+    fn item(
+        &mut self,
+        item: Item,
+        foreground: bool,
+        drained_wait: bool,
+        turn: &str,
+        started_ms: Option<i64>,
+    ) -> bool {
         if item.questions.is_some()
             || item
                 .internal_chat_message_metadata_passthrough
@@ -176,8 +211,13 @@ impl Admission {
             }
             "McpToolCall" => {
                 self.work(started_ms);
-                (item.status.as_deref() == Some("completed")
-                    || foreground && item.status.as_deref() == Some("failed"))
+                let failed = item.status.as_deref() == Some("failed");
+                let failed_wait = drained_wait
+                    && failed
+                    && item.server.as_deref() == Some("gent")
+                    && item.tool.as_deref() == Some("gent_wait");
+                self.exec.failed_wait |= failed_wait;
+                (item.status.as_deref() == Some("completed") || foreground && failed || failed_wait)
                     && item.id.is_some_and(|id| !id.is_empty())
                     && item
                         .tool
@@ -347,7 +387,8 @@ pub(super) fn confirm(
     older: &HashSet<&str>,
 ) -> Result<bool> {
     let mut admission = Admission::default();
-    let foreground = !matches!(source, Source::Queue(..));
+    let foreground = matches!(source, Source::Foreground | Source::Direct(_));
+    let drained = matches!(source, Source::Drained(_));
     let direct = matches!(source, Source::Direct(_));
     let witness = match &source {
         Source::Queue(_, prior) => *prior,
@@ -355,9 +396,15 @@ pub(super) fn confirm(
     };
     let mut receipt_hash = None;
     let mut message_hash = None;
+    let mut later_receipt = None;
+    let mut steer = None;
     let mut needs_declaration = false;
     let mut needs_tool_update = false;
-    while rows.previous(line)? {
+    loop {
+        let position = rows.offset + rows.end as u64;
+        if !rows.previous(line)? {
+            return Ok(false);
+        }
         let row: Record<Event> = serde_json::from_slice(line)?;
         let p = row.payload;
         // Background completions may arrive during a subsequent turn. Their
@@ -438,6 +485,23 @@ pub(super) fn confirm(
             needs_tool_update = true;
             continue;
         }
+        if drained
+            && row.r#type == "event_msg"
+            && p.r#type == "item_completed"
+            && p.item.as_ref().is_some_and(|i| i.r#type == "UserMessage")
+            && let Some(later) = later_receipt.replace(position)
+        {
+            if steer.is_some() || !admission.user_message {
+                return Ok(false);
+            }
+            steer = steer::confirm(rows, later, &p, thread, turn)?;
+            if steer.is_none() {
+                return Ok(false);
+            }
+            // The earlier pair must still prove the initial queue admission.
+            admission.user_message = false;
+            admission.user_receipt = false;
+        }
         if direct {
             if row.r#type == "event_msg"
                 && p.r#type == "item_completed"
@@ -470,11 +534,11 @@ pub(super) fn confirm(
                     return Ok(false);
                 }
                 let admitted = match source {
-                    Source::Queue(queue, _) => {
+                    Source::Queue(queue, _) | Source::Drained(queue) => {
                         p.starts(turn, Some("queue"))
                             && admission
                                 .client_id
-                                .is_some_and(|id| queue.admit(id, admission.exec))
+                                .is_some_and(|id| queue.admit(id, admission.exec, steer))
                     }
                     Source::Foreground => p.starts(turn, Some("user")) || p.starts(turn, None),
                     Source::Direct(inputs) => {
@@ -487,6 +551,7 @@ pub(super) fn confirm(
                             return Ok(false);
                         }
                         inputs.push(DirectInput {
+                            completed_relay: false,
                             turn: Uuid::parse_str(&turn.id)?,
                             client,
                             hash,
@@ -516,7 +581,15 @@ pub(super) fn confirm(
                         {
                             admission.timed_receipt();
                         }
-                        admission.item(item, foreground, &turn.id, p.started_at_ms)
+                        let drained_wait = drained
+                            && p.started_at_ms.zip(p.completed_at_ms).is_some_and(
+                                |(start, end)| {
+                                    start <= end
+                                        && start.div_euclid(1000) >= turn.started
+                                        && end.div_euclid(1000) <= turn.ended
+                                },
+                            );
+                        admission.item(item, foreground, drained_wait, &turn.id, p.started_at_ms)
                     })
             }
             ("event_msg", "token_count") | ("world_state", "") => true,
@@ -552,7 +625,6 @@ pub(super) fn confirm(
             return Ok(false);
         }
     }
-    Ok(false)
 }
 
 // An external active setter resets Codex's consecutive-empty-turn counter.

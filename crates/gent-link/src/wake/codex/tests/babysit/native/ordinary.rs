@@ -267,3 +267,4 @@ async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&st
     child.kill().await?;
     result
 }
+mod blocked_goal;

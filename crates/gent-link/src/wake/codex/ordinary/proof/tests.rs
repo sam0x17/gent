@@ -18,6 +18,7 @@ fn automatic_steers_require_all_scoped_sources_and_the_immediate_parent() -> Res
         error: "fixture".into(),
         reason: Failure::RequestPayload,
         goal: Value::Null,
+        previous_turns: Vec::new(),
         legacy_history: false,
         handoff_parent: true,
     };
@@ -146,6 +147,7 @@ fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -
         reason: Failure::ToolSchema,
         error: "fixture".into(),
         goal: Value::Null,
+        previous_turns: Vec::new(),
         legacy_history: false,
         handoff_parent: true,
     };
@@ -223,5 +225,33 @@ fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -
         json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":turn}}),
     );
     assert!(observe(&stopped)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn mixed_goal_foreground_work_yields_to_native_decisions_and_thread_messages() -> Result<()> {
+    let allows = |payload: Value| {
+        babysit::rollout::ordinary_work(
+            &serde_json::to_vec(&json!({"type":"event_msg","payload":payload}))?,
+            "thread",
+            "turn",
+        )
+    };
+    assert!(allows(
+        json!({"type":"item_completed","thread_id":"thread","turn_id":"turn",
+        "item":{"type":"Reasoning"}})
+    )?);
+    for payload in [
+        json!({"type":"function_call","name":"functions.update_goal"}),
+        json!({"type":"reasoning","internal_chat_message_metadata_passthrough":{
+            "executed_tool_calls":[{"name":"request_user_input"}]}}),
+        json!({"type":"item_completed","item":{"type":"RequestUserInput","questions":[]}}),
+        json!({"type":"item_completed","item":{"type":"McpToolCall","tool":"create_goal"}}),
+        json!({"type":"item_completed","item":{"type":"FunctionCallOutput",
+            "namespace":"codex_tui","name":"send_message_to_thread"}}),
+        json!({"type":"task_started","thread_id":"other"}),
+    ] {
+        assert!(!allows(payload)?);
+    }
     Ok(())
 }

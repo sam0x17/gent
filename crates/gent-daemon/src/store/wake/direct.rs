@@ -13,6 +13,7 @@ impl StoreSession<'_> {
         who: &Agent,
         thread: uuid::Uuid,
         turn: uuid::Uuid,
+        completed_relay: bool,
     ) -> Result<Value> {
         ensure!(!turn.is_nil(), "invalid native turn");
         let thread = thread.to_string();
@@ -44,7 +45,8 @@ impl StoreSession<'_> {
             || record.submission_id.as_ref() != Some(&turn)
             || record.inbox_seen_at.is_none()
             || record.updated_at > self.timestamp
-            || !direct.finished
+            || (!completed_relay && !direct.finished)
+            || (completed_relay && !self.completed_relay(&message, &who.id)?)
         {
             return Ok(Value::Null);
         }
@@ -52,6 +54,22 @@ impl StoreSession<'_> {
             attempt_id: record.attempt_id,
             input_hash: direct.input_hash
         }))
+    }
+
+    // A steer shares its native turn with another input. The collector leaves
+    // its final answer to the explicit relay responder. Verify that responder's
+    // durable completion even when the native direct-reply flag is unset.
+    fn completed_relay(&self, request: &str, agent: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .prepare(
+                "SELECT 1 FROM relay_turns r JOIN messages m ON m.id=r.final_message
+             WHERE r.id=?1 AND r.target=?2 AND r.cancel_message IS NULL AND r.closed_reason IS NULL
+             AND m.sender=r.target AND m.recipient=r.intermediary
+             AND json_extract(m.payload,'$.relay.kind')='complete'
+             AND json_extract(m.payload,'$.relay.turn_id')=r.id",
+            )?
+            .exists(params![request, agent])?)
     }
 
     fn direct_record(

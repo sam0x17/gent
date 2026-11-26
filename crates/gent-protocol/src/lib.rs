@@ -822,6 +822,9 @@ pub enum OwnerOp {
     },
     /// Local supervisor lookup for one retained Codex dispatch. Metadata only.
     WakeDirectTurnEvidence {
+        /// A second input to a drained queue requires a completed relay request.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        completed_relay: bool,
         agent_credential: String,
         thread_id: uuid::Uuid,
         turn: uuid::Uuid,

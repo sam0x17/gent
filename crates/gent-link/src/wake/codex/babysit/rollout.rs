@@ -2,7 +2,9 @@
 use super::*;
 use history::{Candidate, Completed, Failed};
 
+pub(in crate::wake::codex) mod prior_block;
 mod queued;
+pub(in crate::wake::codex) use queued::ordinary_work;
 mod queued_exec;
 use rustix::fs::{Mode, OFlags};
 use std::{collections::HashSet, fs::File, io::BufReader, os::unix::fs::FileExt};
@@ -161,7 +163,14 @@ impl Evidence {
                         &mut line,
                         thread,
                         &t.times,
-                        queued::Source::Queue(&mut admissions, None),
+                        // A completed queue may explain the idle time after the
+                        // original goal failed. Its steer or failed wait provides
+                        // no evidence that a later failure belongs to that goal.
+                        if !has_later_failure {
+                            queued::Source::Drained(&mut admissions)
+                        } else {
+                            queued::Source::Queue(&mut admissions, None)
+                        },
                         Some(goal.updated_at),
                         &older,
                     )? {
@@ -200,7 +209,9 @@ impl Evidence {
                 // Native goal timestamps have second precision. If the failed
                 // queue admission shares that second, keep its terminal position
                 // for a strict replay through the preceding active setter.
-                let fallback = ((!candidate.later.is_empty() || prior_id.is_some())
+                let goal_only = admissions.requires_goal_turn;
+                let fallback = (!goal_only
+                    && (!candidate.later.is_empty() || prior_id.is_some())
                     && anchor["startedAt"] == goal.updated_at)
                     .then(|| rows.clone());
                 if !admissions.bound()
@@ -209,8 +220,8 @@ impl Evidence {
                         &mut line,
                         &goal,
                         anchor,
-                        has_later_failure || !direct.is_empty(),
-                        false,
+                        has_later_failure || !direct.is_empty() || goal_only,
+                        goal_only,
                     )?
                 {
                     let Some(mut retry) = fallback else {
@@ -261,6 +272,7 @@ impl Evidence {
                     return Ok(None);
                 }
             }
+            direct.extend(admissions.steers);
             if stamp(std::fs::symlink_metadata(&path)?)? != before {
                 return Ok(None);
             }
@@ -288,7 +300,9 @@ impl Evidence {
     }
 }
 
-pub(super) struct DirectInput {
+#[derive(PartialEq)]
+pub(in crate::wake::codex) struct DirectInput {
+    pub(super) completed_relay: bool,
     pub(super) turn: Uuid,
     pub(super) client: String,
     pub(super) hash: String,

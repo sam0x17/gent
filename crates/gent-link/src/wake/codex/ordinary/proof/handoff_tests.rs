@@ -21,10 +21,10 @@ impl Fixture {
                 "id":turn,"rootTurnId":turn,"startedAt":2,"completedAt":5,"status":"failed",
                 "error":{"message":"Model at capacity","codexErrorInfo":"serverOverloaded"}
             }),
-            6,
+            0..=6,
             Value::Null,
-            &json!({"source":"vscode","threadSource":"user",
-            "parentThreadId":null,"attachedToThreadId":null,"historyMode":"paginated"}),
+            false,
+            true,
         )
         .unwrap();
         let ingress = json!({"type":"function_call_output","namespace":"codex_tui",

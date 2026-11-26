@@ -4,11 +4,23 @@ use super::*;
 #[tokio::test]
 #[ignore = "requires an installed Codex app-server"]
 async fn user_root_with_two_observed_gent_deliveries_gets_one_continuation() -> Result<()> {
+    mixed_foreground_trial(0, 2).await
+}
+
+#[tokio::test]
+#[ignore = "requires an installed Codex app-server"]
+async fn four_foreground_steers_then_a_gent_delivery_get_one_continuation() -> Result<()> {
+    mixed_foreground_trial(4, 1).await
+}
+
+async fn mixed_foreground_trial(steers: usize, deliveries: usize) -> Result<()> {
     let node = Node::start().await?;
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let (mut child, socket) = start_host(node.root.path(), listener.local_addr()?).await?;
     let calls = Arc::new(AtomicUsize::new(0));
-    let gates: Arc<[_; 3]> = Arc::new(std::array::from_fn(|_| tokio::sync::Notify::new()));
+    let gates: Arc<[_]> = (0..=steers + deliveries)
+        .map(|_| tokio::sync::Notify::new())
+        .collect();
     let requests = calls.clone();
     let provider_gates = gates.clone();
     let model = Router::new().route(
@@ -63,8 +75,16 @@ async fn user_root_with_two_observed_gent_deliveries_gets_one_continuation() -> 
         stopped(&mut host, thread, &primer["turn"]["id"], path).await?;
         let root = host.rpc("turn/start",json!({"threadId":thread,"turnTrigger":"user",
             "clientUserMessageId":Uuid::new_v4(),"input":[{"type":"text","text":"Resume the fixture task."}]})).await.context("start resumed operator turn")?["turn"]["id"].clone();
-        for (n, gate) in gates.iter().take(2).enumerate() {
-            while calls.load(Ordering::SeqCst) <= n + 1 {
+        for (i, gate) in gates.iter().take(steers).enumerate() {
+            while calls.load(Ordering::SeqCst) <= i + 1 {
+                sleep(Duration::from_millis(20)).await;
+            }
+            host.rpc("turn/steer", json!({"threadId":thread,"expectedTurnId":root,
+                "clientUserMessageId":Uuid::new_v4(),"input":[{"type":"text","text":format!("Foreground steer {i}.")}]})).await?;
+            gate.notify_one();
+        }
+        for (n, gate) in gates.iter().skip(steers).take(deliveries).enumerate() {
+            while calls.load(Ordering::SeqCst) <= steers + n + 1 {
                 sleep(Duration::from_millis(20)).await;
             }
             // Respect the native dispatch interval and separate the opener's second from each claim.
@@ -83,30 +103,30 @@ async fn user_root_with_two_observed_gent_deliveries_gets_one_continuation() -> 
             .await?;
             sweep(&node.home, &registry, &mut None, Sweep::WakeOnly).await?;
             gate.notify_one();
-            while calls.load(Ordering::SeqCst) <= n + 2 {
+            while calls.load(Ordering::SeqCst) <= steers + n + 2 {
                 sleep(Duration::from_millis(20)).await;
             }
             sweep(&node.home, &registry, &mut None, Sweep::WakeOnly).await?;
             assert_eq!(last(&mut host, thread).await?["id"], root);
         }
         // The claim guard vetoes any wake in the failure's own clock second.
-        // As in the incident, both dispatches have already completed before that second.
+        // As in the incident, all dispatches have already completed before that second.
         let delivered_at = gent_daemon::store::now();
         while gent_daemon::store::now() <= delivered_at {
             sleep(Duration::from_millis(20)).await;
         }
-        gates[2].notify_one();
+        gates[steers + deliveries].notify_one();
         stopped(&mut host, thread, &root, path).await?;
         let db = rusqlite::Connection::open_with_flags(
             node.home.join("state.sqlite3"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        let deliveries: i64 = db.query_row(
+        let finished: usize = db.query_row(
             "SELECT count(*) FROM wake_dispatches WHERE agent=?1 AND json_extract(payload,'$.direct.finished')=1
              AND json_extract(payload,'$.submission_id')=?2", rusqlite::params![recipient,root.as_str().unwrap()],
             |row| row.get(0),
         )?;
-        assert_eq!(deliveries, 2);
+        assert_eq!(finished, deliveries);
         config::set_ordinary_babysitter_enabled(&node.home, true)?;
         let (mut a, mut b) = (None, None);
         tokio::try_join!(
@@ -146,7 +166,7 @@ async fn user_root_with_two_observed_gent_deliveries_gets_one_continuation() -> 
         sleep(Duration::from_secs(16)).await;
         sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
         assert_eq!(last(&mut host, thread).await?["id"], continuation["id"]);
-        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert_eq!(calls.load(Ordering::SeqCst), steers + deliveries + 3);
         Ok::<_, anyhow::Error>(())
     };
     let outcome = tokio::select! {
