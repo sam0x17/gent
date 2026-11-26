@@ -52,12 +52,16 @@ impl Fixture {
     }
 
     fn origin(&self, rows: &[Value]) -> Result<Option<ChatOrigin>> {
+        self.read(rows, false)
+    }
+
+    fn read(&self, rows: &[Value], direct_handoff: bool) -> Result<Option<ChatOrigin>> {
         use std::io::Write;
         let mut f = File::create(&self.failed.path)?;
         for row in rows {
             writeln!(f, "{row}")?;
         }
-        Ok(read(&self.failed)?.map(|(o, _, _)| o))
+        Ok(read(&self.failed, direct_handoff)?.map(|(o, _, _)| o))
     }
 }
 
@@ -237,5 +241,83 @@ fn declared_tools_and_delayed_commands_preserve_a_named_handoff() -> Result<()> 
         None,
         "a foreign tail requires the named handoff proof"
     );
+    Ok(())
+}
+
+#[test]
+fn named_root_binds_all_notifications_and_never_falls_back_to_human() -> Result<()> {
+    for count in [1, 3] {
+        let mut f = Fixture::new()?;
+        let mut rows = f.rows.clone();
+        let terminal = rows.pop().unwrap();
+        rows[1]["payload"]["root_turn_id"] = json!(f.failed.turn);
+        for i in 0..count {
+            let text = format!("fixture {i}");
+            rows.push(json!({"type":"response_item","payload":{"type":"message","role":"user",
+                "id":format!("message-{i}"),"content":[{"type":"input_text","text":text}],
+                "internal_chat_message_metadata_passthrough":{"turn_id":f.failed.turn,
+                "content_item_kinds":["user.text"],"content_item_metadata":[{"provenance":{"type":"user"}}]}}}));
+            rows.push(json!({"type":"event_msg","timestamp":format!("1970-01-01T00:00:03.{i}00Z"),
+                "payload":{"type":"item_completed","thread_id":f.failed.thread,"turn_id":f.failed.turn,
+                "item":{"id":format!("item-{i}"),"type":"UserMessage","client_id":Uuid::new_v4(),
+                "content":[{"type":"text","text":text}]}}}));
+        }
+        rows.push(terminal);
+        let Some(ChatOrigin::DirectHandoff { item, proof }) = f.read(&rows, true)? else {
+            panic!("missing handoff")
+        };
+        assert_eq!(item, f.item);
+        assert_eq!(proof.inputs.len(), count);
+        for (i, input) in proof.inputs.iter().enumerate() {
+            assert_eq!(
+                json!(input.client),
+                rows[6 + i * 2]["payload"]["item"]["client_id"]
+            );
+        }
+        // An old daemon, a host missing thread ancestry, or an unpaired input
+        // cannot turn this known machine opener into an operator retry budget.
+        assert!(f.read(&rows, false)?.is_none());
+        f.failed.handoff_parent = false;
+        assert!(f.read(&rows, true)?.is_none());
+        f.failed.handoff_parent = true;
+        for (i, path, value) in [
+            (1, "/payload/root_turn_id", json!(Uuid::new_v4())),
+            (3, "/payload/name", json!("different")),
+            (4, "/payload/thread_id", json!(Uuid::new_v4())),
+            (
+                5,
+                "/payload/internal_chat_message_metadata_passthrough/turn_id",
+                json!(Uuid::new_v4()),
+            ),
+            (
+                5,
+                "/payload/internal_chat_message_metadata_passthrough/content_item_kinds/0",
+                json!("user.file"),
+            ),
+            (6, "/payload/item/content/0/text", json!("different")),
+            (6, "/payload/item/id", json!(" ")),
+        ] {
+            let mut bad = rows.clone();
+            *bad[i].pointer_mut(path).unwrap() = value;
+            assert!(f.read(&bad, true)?.is_none(), "{i} {path}");
+        }
+        for row in [
+            rows[5].clone(),
+            rows[6].clone(),
+            json!({"type":"event_msg","payload":{"type":"thread_rolled_back"}}),
+            json!({"type":"event_msg","payload":{"type":"turn_aborted"}}),
+            json!({"type":"event_msg","payload":{"type":"thread_goal_updated"}}),
+            json!({"type":"event_msg","payload":{"type":"thread_settings_applied"}}),
+            json!({"type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"q"}}),
+            json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":f.failed.thread,
+                "turn_id":f.failed.turn,"item":{"type":"AgentMessage","questions":[]}}}),
+        ] {
+            for at in [rows.len() - 1, rows.len()] {
+                let mut bad = rows.clone();
+                bad.insert(at, row.clone());
+                assert!(f.read(&bad, true)?.is_none());
+            }
+        }
+    }
     Ok(())
 }

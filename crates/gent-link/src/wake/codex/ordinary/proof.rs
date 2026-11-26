@@ -203,7 +203,10 @@ pub(super) struct Evidence {
     pub(super) direct: Vec<babysit::rollout::DirectInput>,
 }
 
-pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, Evidence)>> {
+pub(super) fn read(
+    failed: &Failed,
+    direct_handoff: bool,
+) -> Result<Option<(ChatOrigin, Option<Uuid>, Evidence)>> {
     let path = &failed.path;
     if !path.is_absolute()
         || !path
@@ -233,21 +236,33 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
     }
     let rows = ReverseLines::new(&file, stamp.len, true)?;
     let deadline = Instant::now() + Duration::from_secs(2);
-    let mut direct = Vec::new();
-    let found = prove_turn(failed, &file, &stamp, &header, rows, deadline, &mut direct)?;
-    Ok(found.map(|(origin, parent)| (origin, parent, Evidence { stamp, direct })))
+    let mut evidence = Evidence {
+        stamp,
+        direct: Vec::new(),
+    };
+    let found = prove_turn(
+        failed,
+        &file,
+        &header,
+        rows,
+        deadline,
+        &mut evidence,
+        direct_handoff,
+    )?;
+    Ok(found.map(|(origin, parent)| (origin, parent, evidence)))
 }
 
 fn prove_turn(
     failed: &Failed,
     file: &File,
-    stamp: &Stamp,
     header: &Record,
     mut rows: ReverseLines<'_>,
     deadline: Instant,
-    direct: &mut Vec<babysit::rollout::DirectInput>,
+    evidence: &mut Evidence,
+    direct_handoff: bool,
 ) -> Result<Option<(ChatOrigin, Option<Uuid>)>> {
     let path = &failed.path;
+    let stamp = &evidence.stamp;
     let legacy = failed.legacy_history && header.payload.history_mode.as_deref() == Some("legacy");
     let mut line = Vec::new();
     let mut previous = None;
@@ -259,9 +274,7 @@ fn prove_turn(
         deadline,
         |line| {
             terminal_command(line, &failed.thread, failed.turn)
-                || (failed.handoff_parent
-                    && failed.turn == failed.root
-                    && handoff::previous_receipt(&mut previous, line, failed))
+                || (failed.handoff_parent && handoff::previous_receipt(&mut previous, line, failed))
         },
     )?
     else {
@@ -282,6 +295,7 @@ fn prove_turn(
     // Earlier single-input hosts do not always supply response provenance.
     // Accumulate ambiguity here and require a complete pairing on multi-input descendants.
     let mut ambiguous = false;
+    let mut named_before_inputs = false;
     // Walk backwards across the first user receipt, its message and the root context.
     // If anything intervenes before task_started, the mixed-input exception stays closed.
     let mut proven = Vec::new();
@@ -293,6 +307,17 @@ fn prove_turn(
             return Ok(None);
         }
         let record: Record = serde_json::from_slice(&line)?;
+        // The earliest native admission determines ownership, even if Gent's
+        // delivery journal has since been pruned or the daemon predates this proof.
+        if record.payload.r#type.as_deref() == Some("function_call_output")
+            || record
+                .payload
+                .item
+                .as_ref()
+                .is_some_and(|i| i.r#type == "FunctionCallOutput")
+        {
+            named_before_inputs |= handoff::named_marker(&line);
+        }
         let receipt = pending_receipt.take();
         let input = pending_input.take();
         let next_is_message = std::mem::take(&mut paired_message);
@@ -332,6 +357,7 @@ fn prove_turn(
         let p = record.payload;
         match p.r#type.as_deref() {
             Some("user_message") if legacy => {
+                named_before_inputs = false;
                 let Some(item) = legacy::input(&mut rows, &mut line, &failed.thread, failed.turn)?
                 else {
                     return Ok(None);
@@ -360,6 +386,7 @@ fn prove_turn(
                 {
                     return Ok(None);
                 }
+                named_before_inputs = false;
                 pending_receipt = Some(inputs.len());
                 if failed.handoff_parent && (!descendant || blocked) {
                     pending_input = foreground_receipt(&line, &item);
@@ -417,6 +444,14 @@ fn prove_turn(
                             || parent.turn != parent_id
                             || parent_id == failed.turn
                             || parent.root != failed.root
+                            || previous.as_ref().is_some_and(|command| {
+                                !command.belongs_to(
+                                    parent_id,
+                                    parent.started,
+                                    parent.ended,
+                                    failed.started,
+                                )
+                            })
                             || p.root_turn_id.as_ref() != Some(&failed.root.to_string())
                         {
                             return Ok(None);
@@ -430,7 +465,7 @@ fn prove_turn(
                         // operator admission and provider block on the same file
                         // and deadline. The store separately binds the native
                         // client UUID to its latest admitted parent and budget.
-                        if prove_turn(&parent, file, stamp, header, rows, deadline, direct)?
+                        if prove_turn(&parent, file, header, rows, deadline, evidence, false)?
                             .is_none()
                         {
                             return Ok(None);
@@ -454,30 +489,69 @@ fn prove_turn(
                             &failed.previous_turns,
                             failed.started,
                             deadline,
-                            direct,
+                            &mut evidence.direct,
                         )?
                     {
                         return Ok(None);
                     }
                 }
                 let origin = match a.turn_trigger.as_deref() {
-                    None if inputs.is_empty()
+                    None if (inputs.is_empty() || named_before_inputs)
                         && failed.handoff_parent
                         && header.payload.history_mode.as_deref() == Some("paginated")
                         && a.parent_turn_id.is_none()
                         && failed.root == failed.turn =>
                     {
-                        let Some(item) = handoff::read(file, stamp, failed, deadline, previous)?
+                        if !inputs.is_empty() {
+                            let mut ids = HashSet::new();
+                            if !direct_handoff
+                                || blocked
+                                || previous.is_some()
+                                || ambiguous
+                                || proven.len() != inputs.len()
+                                || sources.len() != inputs.len()
+                                || !inputs.iter().all(|i| {
+                                    i.id.as_deref()
+                                        .is_some_and(|id| !id.trim().is_empty() && ids.insert(id))
+                                })
+                                || p.root_turn_id.as_ref() != Some(&turn)
+                                || p.thread_id.as_ref().is_some_and(|id| id != &failed.thread)
+                            {
+                                return Ok(None);
+                            }
+                        }
+                        let Some(item) =
+                            handoff::read(file, stamp, failed, deadline, previous, &proven)?
                         else {
                             return Ok(None);
                         };
-                        ChatOrigin::ThreadHandoff {
-                            item,
-                            started_at: failed.started,
+                        if inputs.is_empty() {
+                            ChatOrigin::ThreadHandoff {
+                                item,
+                                started_at: failed.started,
+                            }
+                        } else {
+                            let Some(thread) = canonical_uuid(&failed.thread) else {
+                                return Ok(None);
+                            };
+                            proven.reverse();
+                            return Ok(Some((
+                                ChatOrigin::DirectHandoff {
+                                    item,
+                                    proof: ForegroundInputs {
+                                        thread,
+                                        turn: failed.turn,
+                                        started_at: failed.started,
+                                        inputs: proven,
+                                    },
+                                },
+                                None,
+                            )));
                         }
                     }
                     None | Some("user" | "composer")
                         if previous.is_none()
+                            && !(named_before_inputs && a.turn_trigger.is_none())
                             && a.parent_turn_id.is_none()
                             && failed.root == failed.turn =>
                     {
@@ -505,6 +579,18 @@ fn prove_turn(
                         else {
                             return Ok(None);
                         };
+                        // A parent command can finish even after the retry has
+                        // failed. Bind the receipt to its native parent and
+                        // the period in which that parent was running.
+                        if previous.as_ref().is_some_and(|command| {
+                            terminal.started_at.zip(terminal.completed_at).is_none_or(
+                                |(start, end)| {
+                                    !command.belongs_to(parent, start, end, failed.started)
+                                },
+                            )
+                        }) {
+                            return Ok(None);
+                        }
                         let proven_sources =
                             !ambiguous && (legacy || sources.len() == inputs.len());
                         let Some(origin) =

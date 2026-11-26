@@ -1311,9 +1311,10 @@ impl StoreSession<'_> {
                 turn,
                 operator,
                 failed_at,
-            } => {
-                Ok(json!({"inspect":self.babysitter_chat_probe(&who, turn, operator, failed_at)?}))
-            }
+            } => Ok(
+                json!({"inspect":self.babysitter_chat_probe(&who, turn, operator, failed_at)?,
+                           "direct_handoff":true}),
+            ),
             AgentOp::BabysitterChatClaim {
                 turn,
                 failed_at,

@@ -34,9 +34,9 @@ Gent checks the latest failed turn of a loaded, input-ready chat with an empty q
 
 If a provider error blocks a Codex goal, you can start a separate turn in the same chat to investigate. If that turn also fails, Babysitter can continue your investigation while the goal stays blocked. Gent checks the user turn and the original goal failure against the history recorded by managed Codex 0.169 or later.
 
-In managed Codex CLI and VS Code chats, you can send another instruction while a turn is running. Gent checks the recorded inputs for that turn before continuing it. If you add input while Babysitter’s retry is running, the next eligible failure uses the time window and remaining attempts from the original turn. A command that reports completion after the provider error can still belong to the failed turn. If you have already continued the chat yourself, Gent skips that failure.
+In managed Codex CLI and VS Code chats, you can send another instruction while a turn is running. Gent checks the recorded inputs for that turn before continuing it. If you add input while Babysitter’s retry is running, the next eligible failure uses the time window and remaining attempts from the original turn. A command from the failed turn can report completion later, even after a Babysitter retry has failed. Gent checks which turn started the command before retrying again. If you have already continued the chat yourself, Gent skips that failure.
 
-A foreground Codex turn started by a recorded `codex_tui.send_message_to_thread` handoff can receive one `please continue`. If that continuation fails, Gent stops. Separate handoffs in the same registered chat can receive their own retry at least 15 seconds apart while the failure is still current.
+A foreground Codex turn started by a recorded `codex_tui.send_message_to_thread` handoff can receive one `please continue`. If Gent notifications arrived during that handoff, Babysitter checks each delivery against the local journal. A handoff waiting for your answer stays paused. If the continuation fails, Gent stops. Separate handoffs in the same registered chat can receive their own retry at least 15 seconds apart while the failure is still current.
 
 ## Permissions and About
 

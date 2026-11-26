@@ -58,7 +58,7 @@ fn automatic_steers_require_all_scoped_sources_and_the_immediate_parent() -> Res
         for row in rows {
             writeln!(file, "{row}")?;
         }
-        Ok(read(&f)?.map(|(origin, _, _)| origin))
+        Ok(read(&f, false)?.map(|(origin, _, _)| origin))
     };
     assert_eq!(
         observe(&rows)?,
@@ -71,6 +71,25 @@ fn automatic_steers_require_all_scoped_sources_and_the_immediate_parent() -> Res
             additional_client_ids: vec!["fresh".into()]
         })
     );
+    let mut late = rows.clone();
+    late[1]["payload"]["started_at"] = json!(60);
+    late.push(event(json!({"type":"item_completed","thread_id":thread,"turn_id":root,
+        "started_at_ms":70000,"completed_at_ms":1_650_000,
+        "item":{"type":"CommandExecution","id":"from-parent","status":"completed","source":"unified_exec_startup"}})));
+    assert_eq!(observe(&late)?, observe(&rows)?);
+    for (field, value) in [
+        ("turn_id", json!(Uuid::new_v4())),
+        ("thread_id", json!(Uuid::new_v4())),
+        ("started_at_ms", json!(59000)),
+        ("started_at_ms", json!(97000)),
+        ("completed_at_ms", json!(101000)),
+    ] {
+        let mut bad = late.clone();
+        bad.last_mut().unwrap()["payload"][field] = value;
+        assert!(observe(&bad)?.is_none(), "{field}");
+    }
+    late.push(event(json!({"type":"turn_aborted","turn_id":turn})));
+    assert!(observe(&late)?.is_none());
     let mut with_parent_receipt = rows.clone();
     with_parent_receipt.insert(
         2,
@@ -176,7 +195,7 @@ fn mixed_foreground_binds_the_first_admission_and_every_ordered_text_receipt() -
         for row in rows {
             writeln!(f, "{row}")?;
         }
-        Ok(read(&failed)?.map(|(origin, _, _)| origin))
+        Ok(read(&failed, false)?.map(|(origin, _, _)| origin))
     };
     let Some(ChatOrigin::ForegroundInputs(proof)) = observe(&rows)? else {
         panic!("missing scoped proof")

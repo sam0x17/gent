@@ -1,5 +1,6 @@
 //! Claims and native submission receipts stay on the registered chat's node.
 use super::*;
+mod direct_handoff;
 mod foreground;
 use gent_protocol::{
     babysitter::{CHAT_CHAIN_MAX_AGE, CHAT_FAILURE_MAX_AGE, ChatOrigin, MAX_CHAT_INPUTS},
@@ -23,6 +24,10 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS babysitter_chat_mixed_inputs(
             attempt TEXT PRIMARY KEY REFERENCES babysitter_chat_attempts(attempt) ON DELETE CASCADE,
             agent TEXT NOT NULL, opener TEXT NOT NULL, UNIQUE(agent,opener)
+        );
+        CREATE TABLE IF NOT EXISTS babysitter_chat_direct_handoffs(
+            attempt TEXT PRIMARY KEY REFERENCES babysitter_chat_attempts(attempt) ON DELETE CASCADE,
+            proof TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS babysitter_chat_handoffs(
             attempt TEXT PRIMARY KEY REFERENCES babysitter_chat_attempts(attempt) ON DELETE CASCADE,
@@ -168,6 +173,7 @@ impl StoreSession<'_> {
         let turn = turn.to_string();
 
         let mut handoff = None;
+        let mut direct_proof = None;
         let mut mixed = None;
         let (operator, operator_at, ordinal, parent) = match origin {
             ChatOrigin::Operator {
@@ -200,18 +206,17 @@ impl StoreSession<'_> {
                 }
                 (turn.clone(), proof.started_at, ordinal, None)
             }
+            ChatOrigin::DirectHandoff { item, proof } => {
+                if !self.direct_handoff_allowed(who, &turn, failed, &proof)? {
+                    return Ok(no);
+                }
+                let started_at = proof.started_at;
+                direct_proof = Some(proof);
+                handoff = Some(item);
+                (turn.clone(), started_at, 0, None)
+            }
             ChatOrigin::ThreadHandoff { item, started_at } => {
-                if item.is_nil()
-                    || !self.chat_operator_inputs_allowed(who, &turn, None, &[])?
-                    || self
-                        .db
-                        .prepare(
-                            "SELECT 1 FROM babysitter_chat_handoffs WHERE agent=?1 AND item=?2
-                         UNION ALL SELECT 1 FROM babysitter_chat_attempts
-                         WHERE agent=?1 AND ordinal=0 AND claimed_at>?3 LIMIT 1",
-                        )?
-                        .exists(params![who.id, item.to_string(), now - FIRST_RETRY_DELAY])?
-                {
+                if !self.chat_operator_inputs_allowed(who, &turn, None, &[])? {
                     return Ok(no);
                 }
                 handoff = Some(item);
@@ -284,6 +289,19 @@ impl StoreSession<'_> {
                 (operator, operator_at, previous + 1, Some(parent))
             }
         };
+        if let Some(item) = handoff
+            && (item.is_nil()
+                || self
+                    .db
+                    .prepare(
+                        "SELECT 1 FROM babysitter_chat_handoffs WHERE agent=?1 AND item=?2
+                 UNION ALL SELECT 1 FROM babysitter_chat_attempts
+                 WHERE agent=?1 AND ordinal=0 AND claimed_at>?3 LIMIT 1",
+                    )?
+                    .exists(params![who.id, item.to_string(), now - FIRST_RETRY_DELAY])?)
+        {
+            return Ok(no);
+        }
         if !(0..=failed).contains(&operator_at) {
             return Ok(no);
         }
@@ -307,6 +325,12 @@ impl StoreSession<'_> {
                 params![id.to_string(), who.id, opener],
             )?;
         }
+        if let Some(proof) = direct_proof {
+            self.db.execute(
+                "INSERT INTO babysitter_chat_direct_handoffs(attempt,proof) VALUES(?1,?2)",
+                params![id.to_string(), serde_json::to_string(&proof)?],
+            )?;
+        }
         if let Some(item) = handoff {
             self.db.execute(
                 "INSERT INTO babysitter_chat_handoffs(attempt,agent,item) VALUES(?1,?2,?3)",
@@ -317,7 +341,11 @@ impl StoreSession<'_> {
     }
 
     pub(super) fn babysitter_chat_check(&self, who: &Agent, attempt: Uuid) -> Result<Value> {
-        let eligible = self.chat_enabled(who)?
+        if !self.chat_enabled(who)? {
+            return Ok(json!({"eligible":false}));
+        }
+        let direct_handoff = self.direct_handoff_status(who, attempt)?;
+        let eligible = direct_handoff != Some(false)
             && self.wake_pending(who)?["pending"]
                 .as_array()
                 .is_some_and(Vec::is_empty)
@@ -337,6 +365,9 @@ impl StoreSession<'_> {
                     self.timestamp - CHAT_CHAIN_MAX_AGE
                 ],
             )? == 1;
+        if eligible && direct_handoff == Some(true) {
+            return Ok(json!({"eligible":true,"direct_handoff":true}));
+        }
         Ok(json!({"eligible":eligible}))
     }
 

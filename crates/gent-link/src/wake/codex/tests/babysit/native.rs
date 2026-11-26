@@ -243,6 +243,7 @@ mod blocked;
 mod consecutive;
 mod queue;
 
+mod direct_handoff;
 mod foreground;
 mod handoff;
 mod ordinary;

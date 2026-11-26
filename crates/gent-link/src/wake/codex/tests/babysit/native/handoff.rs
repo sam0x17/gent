@@ -15,7 +15,12 @@ async fn handoff(host: &mut Host, thread: &str, name: &str, path: &Path) -> Resu
     Ok(id)
 }
 
-async fn retry(host: &mut Host, thread: &str, failed: &Value, path: &Path) -> Result<Value> {
+pub(super) async fn retry(
+    host: &mut Host,
+    thread: &str,
+    failed: &Value,
+    path: &Path,
+) -> Result<Value> {
     let current = last(host, thread).await?;
     assert_ne!(current["id"], *failed);
     assert_eq!(current["rootTurnId"], *failed);

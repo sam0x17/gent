@@ -19,6 +19,11 @@ pub enum ChatOrigin {
     },
     /// Ordered, source-paired admissions on a native user-started root.
     ForegroundInputs(ForegroundInputs),
+    /// A named host handoff whose every user input was a journaled notification.
+    DirectHandoff {
+        item: Uuid,
+        proof: ForegroundInputs,
+    },
     ThreadHandoff {
         item: Uuid,
         started_at: i64,

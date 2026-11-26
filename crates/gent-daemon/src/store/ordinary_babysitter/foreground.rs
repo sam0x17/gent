@@ -55,19 +55,22 @@ impl StoreSession<'_> {
             "SELECT message_id FROM wake_dispatches WHERE agent=?1 AND
              (json_extract(payload,'$.submission_id')=?2 OR json_extract(payload,'$.direct.turn_id')=?2)
              ORDER BY claimed_at LIMIT ?3")?;
-        let messages = query
-            .query_map(params![who.id, turn, MAX_CHAT_INPUTS], |row| {
-                row.get::<_, String>(0)
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        // Only a contiguous suffix may be Gent deliveries. The native proof pairs
-        // every input with its receipt. Exclude all known automatic client IDs in
-        // the foreground prefix, including dispatches attributed to different turns.
-        if messages.is_empty() || messages.len() >= proof.inputs.len() {
-            return Ok(None);
+        let mut messages = query.query(params![who.id, turn, MAX_CHAT_INPUTS])?;
+        let mut deliveries = Vec::new();
+        while let Some(row) = messages.next()? {
+            let Some(record) = super::super::wake::record(self.db, &row.get::<_, String>(0)?)?
+            else {
+                return Ok(None);
+            };
+            deliveries.push(record);
         }
-        let (foreground, deliveries) = proof.inputs.split_at(proof.inputs.len() - messages.len());
-        if !self.chat_client_ids_allowed(who, Some(&opener), &additional[..foreground.len() - 1])? {
+        // A user starts this root. Its last receipt must settle the final Gent
+        // dispatch. Human steers between two deliveries must follow the previous
+        // delivery's completion and precede the next claim.
+        if deliveries.is_empty()
+            || deliveries.len() >= proof.inputs.len()
+            || deliveries.last().map(|r| &r.attempt_id) != additional.last()
+        {
             return Ok(None);
         }
         let target = WakeTarget::Codex {
@@ -77,40 +80,53 @@ impl StoreSession<'_> {
             "SELECT 1 FROM babysitter_chat_attempts WHERE agent=?1 AND attempt=?2
              UNION ALL SELECT 1 FROM babysitter_attempts WHERE agent=?1 AND attempt=?2",
         )?;
-        let mut previous_claim = foreground[foreground.len() - 1]
-            .received_at_ms
-            .div_euclid(1000);
-        for (input, message) in deliveries.iter().zip(messages) {
-            let id = input.client.to_string();
-            let Some(record) = super::super::wake::record(self.db, &message)? else {
-                return Ok(None);
+        let mut deliveries = deliveries.into_iter().peekable();
+        let mut previous_claim = first.received_at_ms.div_euclid(1000);
+        let mut previous_finished = None;
+        let mut human_ids = Vec::new();
+        let mut human_hashes = BTreeSet::from([first.sha256.as_str()]);
+        let mut delivery_hashes = BTreeSet::new();
+        for (input, id) in later.iter().zip(&additional) {
+            let Some(record) = deliveries.next_if(|r| &r.attempt_id == id) else {
+                let received = input.received_at_ms.div_euclid(1000);
+                if previous_finished.is_some_and(|at| at >= received) {
+                    return Ok(None);
+                }
+                previous_claim = received;
+                human_ids.push(id.clone());
+                human_hashes.insert(input.sha256.as_str());
+                continue;
             };
             let Some(direct) = record.direct else {
                 return Ok(None);
             };
             let received = input.received_at_ms.div_euclid(1000);
-            if record.attempt_id != id
-                || record.agent != who.id
+            if record.agent != who.id
                 || record.target != target
                 || record.state != WakeState::Submitted
                 || record.submission_id.as_ref() != Some(&turn)
                 || direct.turn_id.as_ref() != Some(&turn)
                 || !direct.finished
                 || direct.input_hash != input.sha256
-                || foreground
-                    .iter()
-                    .any(|input| input.sha256 == direct.input_hash)
                 || record.claimed_at <= previous_claim
                 || record.claimed_at > received
                 || record
                     .inbox_seen_at
-                    .is_none_or(|at| at < received || at > failed)
+                    .is_none_or(|at| at < received || at > record.updated_at)
                 || record.updated_at > failed
                 || automatic.exists(params![who.id, id])?
             {
                 return Ok(None);
             }
             previous_claim = record.claimed_at;
+            previous_finished = Some(record.updated_at);
+            delivery_hashes.insert(input.sha256.as_str());
+        }
+        if deliveries.next().is_some()
+            || !human_hashes.is_disjoint(&delivery_hashes)
+            || !self.chat_client_ids_allowed(who, Some(&opener), &human_ids)?
+        {
+            return Ok(None);
         }
         // Zero admits this failed root once and cannot authorize a child retry.
         Ok(Some(0))
