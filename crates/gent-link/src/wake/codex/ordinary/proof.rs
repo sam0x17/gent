@@ -1,6 +1,9 @@
 //! Bind the failed turn to native admission metadata without reading prompt text.
 use super::super::babysit::rollout::{ReverseLines, completed_command};
 use super::*;
+mod handoff;
+#[cfg(test)]
+mod handoff_tests;
 mod legacy;
 use gent_protocol::babysitter::MAX_CHAT_INPUTS;
 use rustix::fs::{Mode, OFlags};
@@ -227,6 +230,20 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                     return Ok(None);
                 }
                 let origin = match a.turn_trigger.as_deref() {
+                    None if inputs.is_empty()
+                        && failed.handoff_parent
+                        && header.payload.history_mode.as_deref() == Some("paginated")
+                        && a.parent_turn_id.is_none()
+                        && failed.root == failed.turn =>
+                    {
+                        let Some(item) = handoff::read(&file, &stamp, failed, deadline)? else {
+                            return Ok(None);
+                        };
+                        ChatOrigin::ThreadHandoff {
+                            item,
+                            started_at: failed.started,
+                        }
+                    }
                     None | Some("user" | "composer")
                         if a.parent_turn_id.is_none() && failed.root == failed.turn =>
                     {

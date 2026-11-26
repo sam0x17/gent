@@ -63,21 +63,6 @@ fn passive_tool(name: &str) -> bool {
     )
 }
 
-fn decision(name: &str) -> bool {
-    let name = name.rsplit(['.', ':']).next().unwrap_or(name);
-    matches!(
-        name.rsplit("__").next(),
-        Some(
-            "create_goal"
-                | "update_goal"
-                | "request_user_input"
-                | "request_user_input_async"
-                | "send_message_to_user_async"
-                | "send_user_message_async"
-        )
-    )
-}
-
 pub(super) enum Source<'a> {
     Queue(&'a mut HashSet<String>),
     Foreground,                       // terminal recognized failure

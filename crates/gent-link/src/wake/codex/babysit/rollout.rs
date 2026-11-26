@@ -6,6 +6,21 @@ mod queued;
 use rustix::fs::{Mode, OFlags};
 use std::{collections::HashSet, fs::File, io::BufReader, os::unix::fs::FileExt};
 
+pub(in crate::wake::codex) fn decision(name: &str) -> bool {
+    let name = name.rsplit(['.', ':']).next().unwrap_or(name);
+    matches!(
+        name.rsplit("__").next(),
+        Some(
+            "create_goal"
+                | "update_goal"
+                | "request_user_input"
+                | "request_user_input_async"
+                | "send_message_to_user_async"
+                | "send_user_message_async"
+        )
+    )
+}
+
 #[derive(Clone, PartialEq)]
 pub(super) struct Evidence {
     path: PathBuf,

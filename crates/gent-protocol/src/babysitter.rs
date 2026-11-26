@@ -17,6 +17,10 @@ pub enum ChatOrigin {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_client_ids: Vec<String>,
     },
+    ThreadHandoff {
+        item: Uuid,
+        started_at: i64,
+    },
     Continuation {
         attempt: Uuid,
     },
