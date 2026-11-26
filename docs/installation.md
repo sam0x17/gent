@@ -12,6 +12,8 @@ cargo install --locked gent-link && gent setup
 
 On your first machine, choose **Create a cluster** and sign in with GitHub when prompted. Anyone with a GitHub account can sign up for Free. Free includes one person and one active node per cluster. A Codex chat and a Claude Code chat on the same laptop can exchange messages and files using that single node. After setup, reload the hosts you selected and run `gent doctor` to check the installation.
 
+Automatic updates are on by default. To pause them on this machine, run `gent update disable` or turn off **Automatically update Gent** in Gent Desktop’s **Settings**. While paused, Gent still applies an explicit cluster switch between Stable and Beta once. Run `gent update enable` to resume routine updates.
+
 Free includes Babysitter on Stable and Beta. Goal recovery starts on for managed Codex and Claude Code chats. Ordinary Codex chat recovery is opt-in. [Babysitter settings](desktop.md#dashboard-chats-and-settings)
 
 Pro costs $8 USD per month for one person. It adds chat dashboards and removes the plan limit on active nodes per cluster. Protocol limits still apply. [Plans and pricing](https://gent.link/pricing) · [Add another machine](service-setup.md#add-another-machine-through-gent)
@@ -54,7 +56,7 @@ Keep the commit and archive manifest with the installed version. The historical 
 
 ## Upgrade and remove
 
-For a standard Cargo installation, the running daemon checks the public `stable` tag every five minutes by default. Use `gent version` to see the installed revision, `gent update status` to inspect update state and `gent update` to check and install now. [Updates and rollback](updates.md)
+For a standard Cargo installation, the running daemon checks the cluster’s selected release channel every five minutes by default. Use `gent version` to see the installed revision, `gent update status` to inspect update state and `gent update` to check and install now. [Updates and rollback](updates.md)
 
 For a manual upgrade from a checkout or archive, back up your Gent state and stop the daemon with `gent daemon stop`. From the new source directory, run `cargo install --locked --path crates/gent-link --force` with the same install prefix as before. Use the same Gent home, run `gent daemon install`, rerun `gent integration install` for each host you use, then run `gent doctor`. Database upgrades can be one-way. [Backup and recovery](recovery.md)
 

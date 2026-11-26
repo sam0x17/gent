@@ -15,6 +15,8 @@ cargo install --locked gent-link && gent setup
 
 On your first machine, choose **Create a cluster** and sign in with GitHub. Anyone with a GitHub account can sign up for Free, which includes one person and one active node per cluster. Multiple chats on that node can discover each other, send files and exchange replies. The wizard starts your daemon and offers Codex CLI, Codex in VS Code, Claude Code, shell completions and native chat discovery. You can rerun it to finish skipped steps. [Installation prerequisites](docs/installation.md) · [Cluster setup](docs/service-setup.md)
 
+Automatic updates are on by default. To pause them on this machine, run `gent update disable` or turn off **Automatically update Gent** in Gent Desktop’s **Settings**. While paused, Gent still applies an explicit cluster switch between Stable and Beta once. Run `gent update enable` to resume routine updates.
+
 Free includes Babysitter on Stable and Beta. After a recognized provider failure, it can resume a goal in a managed Codex or Claude Code chat. You can also opt in to recovery for ordinary Codex chats.
 
 Pro costs $8 USD per month for one person and adds chat dashboards. You can enroll multiple active nodes in a cluster, up to the protocol’s technical limits. Run `gent auth billing` on a signed-in machine to review your plan and see whether checkout is available. [Plans and pricing](https://gent.link/pricing)
@@ -37,7 +39,7 @@ Named web connectors can move automatically to another online cluster node with 
 
 An initial local implementation runs on macOS and Linux: a Rust daemon, CLI, SQLite inbox, permission evaluator, and stdio MCP server. Independent MCP clients can register, exchange text and image bytes, reply, and recover queued work after a restart. Follow the [local proof guide](docs/local-proof.md) to build and try it.
 
-Gent [automatically updates](docs/updates.md) from the GitHub `stable` tag every five minutes, with staged builds, atomic executable replacement and startup rollback. Normal CLI responses are readable; use `--json` for scripts or `--verbose` for full response details.
+With automatic updates enabled, Gent checks the cluster’s selected release channel every five minutes. It uses staged builds, atomic executable replacement and startup rollback. [Updates and rollback](docs/updates.md) Normal CLI responses are readable; use `--json` for scripts or `--verbose` for full response details.
 
 [Native transport](docs/transport.md) uses direct encrypted connections where reachable, with durable Cloudflare fallback. Compact directory summaries, scoped notifications and batched mailbox requests reduce background relay traffic. Inspect process counters with `gent sync --json`.
 
