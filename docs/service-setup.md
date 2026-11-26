@@ -8,7 +8,9 @@ gent setup
 
 On your first machine, choose **Create a cluster** and sign in with GitHub. New accounts start on Free. Free includes one person and one active node per cluster. A native machine or a hosted node counts toward that limit. Chats on the same node share its enrollment. Gent uses the account service at `https://api.gent.link` and the ciphertext relay at `https://relay.gent.link`.
 
-To use multiple active nodes in one cluster, open your account with `gent auth billing` on a signed-in machine. Pro costs $8 USD per month for one person and includes chat dashboards and Babysitter. Pro has no plan limit on active nodes per cluster. Protocol limits still apply. The account page shows whether checkout is available. [Plans and pricing](https://gent.link/pricing)
+Free includes Babysitter on Stable and Beta for eligible goals in managed Codex and Claude Code chats and for ordinary Codex chats when enabled. [Babysitter settings](desktop.md#dashboard-chats-and-settings)
+
+To use multiple active nodes in one cluster, open your account with `gent auth billing` on a signed-in machine. Pro costs $8 USD per month for one person and includes chat dashboards. Pro has no plan limit on active nodes per cluster. Protocol limits still apply. The account page shows whether checkout is available. [Plans and pricing](https://gent.link/pricing)
 
 If you already have a cluster, choose to join with a node invitation code or an invitation file. After enrollment the wizard starts the per-user daemon and offers the integrations below. `gent daemon install` runs the same wizard.
 
