@@ -53,7 +53,7 @@ async fn display(home: &Path, destination: &Destination, notice: &Notice) -> Res
         Event::GoalResumed { chat, reason, .. } => {
             let name = directory_name(home, OwnerOp::Agents, *chat).await;
             (
-                "Goal resumed",
+                "Gent Babysitter resumed a goal",
                 format!("{name} resumed after {}.", reason.label()),
             )
         }

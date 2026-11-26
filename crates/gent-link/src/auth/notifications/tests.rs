@@ -85,7 +85,10 @@ async fn device_cursor_survives_reconnect_and_skips_future_event_kinds() {
         "--hint=string:desktop-entry:{}",
         crate::desktop::desktop_entry_id(&home)
     );
-    for (banner, title) in banners_sent.iter().zip(["Gent updated", "Goal resumed"]) {
+    for (banner, title) in banners_sent
+        .iter()
+        .zip(["Gent updated", "Gent Babysitter resumed a goal"])
+    {
         assert_eq!(
             banner[..6],
             [
