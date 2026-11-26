@@ -1005,8 +1005,10 @@ func checkDashboardVisibility(_ desktop: Desktop) {
         let selected = (editor.string as NSString).substring(with: editor.selectedRange())
         require(selected == prompt, "field editor selects the entire prompt")
         if hasPasteboard {
-            pasteboard.declareTypes([.string], owner: nil)
-            require(editor.writeSelection(to: pasteboard, type: .string) && pasteboard.string(forType: .string) == prompt,
+            // NSTextField's field editor advertises the legacy name for plain text.
+            let nativeStringType = NSPasteboard.PasteboardType(rawValue: "NSStringPboardType")
+            pasteboard.declareTypes([nativeStringType], owner: nil)
+            require(editor.writeSelection(to: pasteboard, type: nativeStringType) && pasteboard.string(forType: .string) == prompt,
                     "selected prompt copies as plain text")
         }
         reply(free)
