@@ -229,7 +229,8 @@ async fn supervise(
         "setup"
     };
     #[cfg(target_os = "macos")]
-    let (mut child, mut input, mut events) = notification_app::launch(runtime, &icon, mode).await?;
+    let (mut child, mut input, mut events) =
+        notification_app::launch(home, runtime, &icon, mode).await?;
     #[cfg(not(target_os = "macos"))]
     let (mut child, mut input, mut events) = {
         let mut child = frontend(runtime)?

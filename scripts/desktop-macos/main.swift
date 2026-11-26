@@ -1343,6 +1343,10 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
         require(false, "Quit menu item")
         return
     }
+    let window = desktop.window!
+    window.performClose(nil)
+    require(!desktop.applicationShouldHandleReopen(app, hasVisibleWindows: false)
+            && desktop.window === window && window.isVisible, "Finder reopens the existing window after close")
     FileHandle.standardError.write(Data("PASS: AppKit menu bar, Status tab, setup, daemon controls, node search and actions, Dashboard layout, scrolling, web links and button dispatch, directories, editable settings, account confirmation, permissions, about, update check, close, reopen and quit\n".utf8))
     _ = app.sendAction(stop, to: quit.target, from: quit)
 }

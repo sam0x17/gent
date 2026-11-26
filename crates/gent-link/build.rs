@@ -46,6 +46,8 @@ fn bootstrap_commit(root: &Path, head: Option<&str>) -> Option<String> {
 fn build_desktop() {
     let source = "src/desktop/macos.swift";
     let main = "src/desktop/main.swift";
+    let launcher = "src/desktop/Launcher.swift";
+    println!("cargo:rerun-if-changed={launcher}");
     let dashboard = "src/desktop/dashboard.swift";
     println!("cargo:rerun-if-changed={dashboard}");
     let tabs = "src/desktop/macos_tabs.swift";
@@ -73,6 +75,7 @@ fn build_desktop() {
             management,
             dashboard,
             "src/desktop/notifications/Delivery.swift",
+            launcher,
             main,
         ],
     );
