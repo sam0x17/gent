@@ -5,15 +5,24 @@ import UserNotifications
 
 // Finder and Notification Center may launch an app without a supervisor.
 let args = CommandLine.arguments
+guard Bundle.main.bundleIdentifier == "link.gent.notifications" else { exit(0) }
 let flags = args.dropFirst(3)
 let launchedByServices = flags.contains("--launch-services")
 let diagnose = flags.contains("--notification-diagnostics")
-guard args.count >= 3, ["tray", "window", "setup"].contains(args[2]),
-      flags.allSatisfy({ ["--launch-services", "--notification-diagnostics"].contains($0) }),
-      Bundle.main.bundleIdentifier == "link.gent.notifications" else { exit(0) }
 var session = SessionAttributeBits()
 let sessionStatus = SessionGetInfo(callerSecuritySession, nil, &session)
-guard sessionStatus == errSecSuccess && session.contains(.sessionHasGraphicAccess) else {
+let graphical = sessionStatus == errSecSuccess && session.contains(.sessionHasGraphicAccess)
+if args.count == 1 || (args.count == 2 && args[1].hasPrefix("-psn_")) {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let launcher = DesktopLauncher(graphical: graphical)
+    app.delegate = launcher
+    withExtendedLifetime(launcher) { app.run() }
+    exit(0)
+}
+guard args.count >= 3, ["tray", "window", "setup"].contains(args[2]),
+      flags.allSatisfy({ ["--launch-services", "--notification-diagnostics"].contains($0) }) else { exit(0) }
+guard graphical else {
     if diagnose { sendPage("notification_diagnostic", ["stage": "no_gui", "code": sessionStatus]) }
     exit(1)
 }

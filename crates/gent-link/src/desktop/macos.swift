@@ -149,6 +149,18 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         return false
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        reopen()
+        return false
+    }
+
+    private func reopen() {
+        guard let window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        show()
+        if NSApp.isHidden { NSApp.unhide(nil) }
+    }
+
     func makeWindow() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 850, height: 605),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -280,7 +292,7 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
         case "release_channel": settings.channel.receive(m); return
         default: break
         }
-        if m["show"] as? Bool == true { show(); return }
+        if m["show"] as? Bool == true { reopen(); return }
         if m["quit"] as? Bool == true { quit(); return }
         pending = false
         lastRead = Date()

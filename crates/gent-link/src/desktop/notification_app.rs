@@ -94,7 +94,27 @@ fn install(root: &Path) -> Result<PathBuf> {
 
 type Frontend = (Child, pipe::Sender, Lines<BufReader<pipe::Receiver>>);
 
-pub(super) async fn launch(runtime: &Path, icon: &Path, mode: &str) -> Result<Frontend> {
+// Finder supplies neither the CLI path nor the node home. Store the same
+// foreground launch arguments separately from the signed, replaceable bundle.
+fn save_launcher(user: &Path, binary: &Path, home: &Path) -> Result<()> {
+    ensure!(
+        binary.is_absolute() && home.is_absolute(),
+        "expected absolute desktop launch paths"
+    );
+    let path = user.join("Library/Application Support/Gent/desktop-launch.json");
+    let binding = serde_json::to_vec(&serde_json::json!({
+        "binary": binary.to_str().context("desktop executable path is not UTF-8")?,
+        "home": home.to_str().context("desktop home path is not UTF-8")?,
+    }))?;
+    gent_daemon::config::write_private(&path, &binding)
+}
+
+pub(super) async fn launch(
+    home: &Path,
+    runtime: &Path,
+    icon: &Path,
+    mode: &str,
+) -> Result<Frontend> {
     let user = std::env::var_os("HOME").context("missing user Applications directory")?;
     let applications = Path::new(&user).join("Applications");
     ensure!(
@@ -114,6 +134,7 @@ pub(super) async fn launch(runtime: &Path, icon: &Path, mode: &str) -> Result<Fr
     // Serialize installs across profiles until Launch Services has started this build.
     let _lock = crate::managed_file::lock(&applications.join(".gent-desktop-install.lock"))?;
     let app = install(&applications)?;
+    save_launcher(Path::new(&user), &std::env::current_exe()?, home)?;
     launch_at(Path::new("/usr/bin/open"), &app, runtime, icon, mode).await
 }
 

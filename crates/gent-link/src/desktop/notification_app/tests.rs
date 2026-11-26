@@ -54,6 +54,67 @@ fn user_app_install_preserves_foreign_apps_and_replaces_only_its_own_bundle() {
     );
 }
 
+#[test]
+fn finder_uses_the_registered_cli_and_home_without_a_shell_or_path_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let user = temp.path().join("Mac user");
+    let home = temp.path().join("node 'A' & B");
+    let binary = temp.path().join("custom prefix").join("gent");
+    fs::create_dir(binary.parent().unwrap()).unwrap();
+    fs::write(
+        &binary,
+        r#"#!/bin/sh
+printf '%s\n' "$@" > "$0.tmp" && /bin/mv "$0.tmp" "$0.args"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = temp.path().join("launcher-test");
+    let compile = std::process::Command::new("/usr/bin/xcrun")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "--sdk",
+            "macosx",
+            "swiftc",
+            "-swift-version",
+            "5",
+            "-warnings-as-errors",
+            "src/desktop/Launcher.swift",
+            "../../scripts/desktop-macos/launcher/main.swift",
+            "-o",
+        ])
+        .arg(&fixture)
+        .status()
+        .unwrap();
+    assert!(compile.success());
+    let open = || {
+        std::process::Command::new(&fixture)
+            .arg(&user)
+            .env("PATH", "/nonexistent")
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(!open());
+    save_launcher(&user, &binary, &home).unwrap();
+    let record = user.join("Library/Application Support/Gent/desktop-launch.json");
+    assert_eq!(fs::metadata(&record).unwrap().mode() & 0o777, 0o600);
+    assert!(open());
+    let args = binary.with_extension("args");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !args.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        fs::read_to_string(args).unwrap(),
+        format!("--home\n{}\ndesktop\n", home.display())
+    );
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!open());
+    save_launcher(&user, &temp.path().join("removed-cli"), &home).unwrap();
+    assert!(!open());
+}
+
 #[tokio::test]
 async fn launch_services_streams_survive_handshake_and_close_at_eof() {
     use tokio::io::AsyncWriteExt;
