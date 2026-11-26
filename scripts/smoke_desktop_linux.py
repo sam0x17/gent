@@ -16,7 +16,10 @@ import uuid
 
 from gi.repository import Gio, GLib
 from desktop_fixture_browser import install_fixture_browser
-from desktop_tabs_linux import assert_selected_tab, exercise_enrolled_without_daemon, exercise_setup, exercise_stats, exercise_tabs, wait_for
+from desktop_tabs_linux import (
+    assert_selected_tab, exercise_enrolled_without_daemon, exercise_ordinary_recovery, exercise_setup,
+    exercise_stats, exercise_tabs, exercise_unconfigured_recovery, tab, wait_for,
+)
 from mcp_client import Client
 
 
@@ -181,10 +184,18 @@ def main():
             cleanup.callback(tray.close)
             setup = launch("desktop")
             exercise_setup()
-            assert not (home / "config.toml").exists()
+            exercise_unconfigured_recovery()
+            for action in ("status", "enable", "disable"):
+                result = subprocess.run(base + ["config", "ordinary-chat-recovery", action],
+                                        timeout=20, capture_output=True)
+                assert result.returncode != 0, action
+            for name in ("config.toml", "babysitter-ordinary.lock", "babysitter-ordinary-enabled", "babysitter-disabled"):
+                assert not (home / name).exists(), name
             quit_setup = tray.menu("Quit Gent Desktop")
             created = json.loads(cli("--json", "cluster", "new", "desktop-test", "--local").stdout)
             exercise_enrolled_without_daemon(created["node"])
+            tab("Settings")
+            exercise_ordinary_recovery(cli)
             # A Free node can read the owner snapshot as soon as the daemon returns.
             launch_daemon()
             exercise_stats(cli, empty=True)

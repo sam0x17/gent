@@ -77,11 +77,7 @@ async fn set(home: &Path, key: Preference, enabled: bool) -> Result<()> {
         }
         Preference::OrdinaryBabysitter => config::set_ordinary_babysitter_enabled(home, enabled),
         Preference::Babysitter => {
-            let cfg = crate::node_home::inspect(home)?;
-            ensure!(
-                gent_daemon::entitlements::paid(home, &cfg),
-                "Babysitter requires Gent Pro. See https://gent.link/pricing"
-            );
+            crate::node_home::inspect(home)?;
             let marker = Snapshot::read(&home.join("babysitter-disabled"))?;
             if enabled {
                 marker.remove()
@@ -247,18 +243,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn ordinary_recovery_is_local_independent_and_requires_pro_to_enable() {
+    async fn recovery_settings_do_not_initialize_an_unconfigured_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let empty = temp.path().join("empty");
+        config::private_dir(&empty).unwrap();
+
+        for home in [&missing, &empty] {
+            assert!(settings(home).is_err());
+            for key in [Preference::Babysitter, Preference::OrdinaryBabysitter] {
+                for enabled in [true, false] {
+                    assert!(set(home, key, enabled).await.is_err());
+                }
+            }
+        }
+        assert!(!missing.exists());
+        assert_eq!(std::fs::read_dir(empty).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn free_node_persists_independent_recovery_preferences() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("node");
-        let cfg = config::initialize(&home, "preferences").unwrap();
+        config::initialize(&home, "preferences").unwrap();
         let key = Preference::OrdinaryBabysitter;
         let goal = home.join("babysitter-disabled");
         let marker = home.join("babysitter-ordinary-enabled");
 
-        assert_eq!(settings(&home).unwrap()["ordinary_babysitter"], false);
-        assert!(set(&home, key, true).await.is_err());
+        let initial = settings(&home).unwrap();
+        assert_eq!(initial["paid"], false);
+        assert_eq!(initial["babysitter"], true);
+        assert_eq!(initial["ordinary_babysitter"], false);
         assert!(!marker.exists() && !goal.exists());
-        gent_daemon::entitlements::grant_test(&home, &cfg);
         set(&home, Preference::Babysitter, false).await.unwrap();
         let disabled_goal = Snapshot::read(&goal).unwrap();
         let mut pages = Pages::default();
@@ -277,7 +293,6 @@ mod tests {
         set(&home, Preference::Babysitter, true).await.unwrap();
         ordinary.verify().unwrap();
 
-        std::fs::remove_file(home.join("test-entitlement")).unwrap();
         assert_eq!(settings(&home).unwrap()["ordinary_babysitter"], true);
         set(&home, key, false).await.unwrap();
         assert!(!marker.exists() && !goal.exists());

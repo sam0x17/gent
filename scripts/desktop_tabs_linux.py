@@ -158,6 +158,14 @@ def exercise_setup():
     click("Cancel")
 
 
+def exercise_unconfigured_recovery():
+    tab("Settings")
+    for title in ("Resume goals after provider failures", "Continue ordinary chats after provider errors"):
+        button = get(title, "check box")
+        assert not button.getState().contains(pyatspi.STATE_SENSITIVE), title
+    tab("Status")
+
+
 def exercise_ordinary_recovery(cli):
     def saved(action="status"):
         return json.loads(cli("--json", "config", "ordinary-chat-recovery", action).stdout)["enabled"]

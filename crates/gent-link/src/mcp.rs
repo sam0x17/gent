@@ -132,7 +132,7 @@ fn tools() -> Vec<Tool> {
     let declarations = vec![
         (
             "gent_babysit",
-            "Read or change automatic goal recovery for this chat. Pass enabled=false to disable or true to enable under the system setting.",
+            "Read whether goal recovery is enabled for this chat. Pass enabled=false to opt out of both goal and ordinary chat recovery, or true to allow either under its own node setting.",
             json!({"enabled":{"type":"boolean"}}),
             vec![],
         ),

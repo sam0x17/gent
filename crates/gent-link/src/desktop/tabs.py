@@ -286,10 +286,6 @@ class SettingsPane(Gtk.Box):
                 detail = label("Sends “please continue” in eligible Codex chats on this node.", "quiet")
                 detail.set_line_wrap(True)
                 form.pack_start(detail, False, False, 0)
-                self.pricing = Gtk.LinkButton.new_with_label("https://gent.link/pricing", "Babysitter requires Gent Pro · View plans")
-                self.pricing.set_halign(Gtk.Align.START)
-                self.pricing.set_no_show_all(True)
-                form.pack_start(self.pricing, False, False, 0)
         form.pack_start(label("Network changes take effect when the daemon restarts.", "quiet"), False, False, 0)
         edit = Gtk.Button(label="Edit full configuration…")
         edit.set_halign(Gtk.Align.START)
@@ -361,11 +357,9 @@ class SettingsPane(Gtk.Box):
         self.updating = True
         self.values = reply.get("values", self.values)
         for key, button in self.checks.items():
-            needs_pro = key == "babysitter" or (key == "ordinary_babysitter" and not self.values.get(key))
-            available = key in self.values and (not needs_pro or self.values.get("paid") is True)
+            available = key in self.values
             button.set_active(bool(available and self.values[key]))
             button.set_sensitive(available)
-        self.pricing.set_visible(self.values.get("paid") is False)
         self.updating = False
         self.stack.set_sensitive(True)
         if "document" in reply:

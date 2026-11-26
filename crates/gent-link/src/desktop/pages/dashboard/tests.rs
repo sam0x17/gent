@@ -1,4 +1,4 @@
-use super::super::{Pages, Preference, set, settings};
+use super::super::Pages;
 use super::*;
 use gent_daemon::config;
 use std::{fs, os::unix::fs::PermissionsExt};
@@ -114,9 +114,6 @@ async fn free_desktop_clears_cached_boards_and_refuses_old_clicks() {
         );
         assert!(pages.dashboard.view.is_none());
     }
-    assert!(!settings(&home).unwrap()["paid"].as_bool().unwrap());
-    assert!(set(&home, Preference::Babysitter, false).await.is_err());
-    assert!(!home.join("babysitter-disabled").exists());
 }
 
 fn paid_home() -> (tempfile::TempDir, PathBuf) {

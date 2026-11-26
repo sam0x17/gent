@@ -5,7 +5,7 @@ use std::{fs, io::ErrorKind, os::unix::fs::MetadataExt, path::Path};
 
 const MARKER: &str = "babysitter-ordinary-enabled";
 
-/// The saved node preference. The host must also check entitlement and the chat's opt-out.
+/// The saved node preference. The host also checks the chat's opt-out.
 pub fn ordinary_babysitter_enabled(home: &Path) -> Result<bool> {
     match fs::symlink_metadata(home.join(MARKER)) {
         Ok(meta) => {
@@ -21,11 +21,7 @@ pub fn ordinary_babysitter_enabled(home: &Path) -> Result<bool> {
 }
 
 pub fn set_ordinary_babysitter_enabled(home: &Path, enabled: bool) -> Result<()> {
-    let cfg = load_for_runtime(home)?;
-    ensure!(
-        !enabled || crate::entitlements::paid(home, &cfg),
-        "Continuing ordinary chats requires Gent Pro. See https://gent.link/pricing"
-    );
+    load_for_runtime(home)?;
     let _lock = state_lock(home, "babysitter-ordinary.lock")?;
     if ordinary_babysitter_enabled(home)? != enabled {
         if enabled {

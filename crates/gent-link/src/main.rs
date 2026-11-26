@@ -469,7 +469,7 @@ enum NodeNameCommand {
 }
 #[derive(Subcommand)]
 enum ConfigCommand {
-    /// Read or change this node's opt-in to continue ordinary Codex chats after provider errors.
+    /// Read or change recovery for ordinary Codex chats on this node (off by default).
     OrdinaryChatRecovery {
         #[command(subcommand)]
         command: OrdinaryRecoveryCommand,
@@ -490,7 +490,7 @@ enum ConfigCommand {
 enum OrdinaryRecoveryCommand {
     /// Show the saved node preference.
     Status,
-    /// Allow recovery for eligible ordinary chats on this node (Gent Pro).
+    /// Allow Gent to send “please continue” in eligible Codex chats after provider errors.
     Enable,
     /// Stop ordinary chat recovery on this node.
     Disable,
