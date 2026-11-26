@@ -205,12 +205,22 @@ def check_dashboard_example():
     get("Test run", "label")
     get("Example dashboard", "label")
     get("Ask a registered chat to build a dashboard. On Pro, each chat can publish one and update it across your cluster.", "label")
-    get("Tests passed per batch", "image")
-    get("18 of 24", "label")
-    assert get("Tests passed", "progress bar").queryValue().currentValue == .75
+    graph = get("Tests passed per batch", "image")
     for prompt in ("Make a Gent dashboard for this test run. Show how many tests have passed and list any failures.",
                    "Update my dashboard after each test batch."):
         assert get(prompt, "label").queryText().getText(0, -1) == prompt
+    # Restore occupies a row above the preview. Scroll to its last widget in
+    # compact windows before asserting on GTK's visible progress bar.
+    pane = pyatspi.findAncestor(graph, lambda item: item.getRoleName() == "scroll pane")
+    bar, = [item.queryValue() for item in pane if item.getRoleName() == "scroll bar"
+            and item.getState().contains(pyatspi.STATE_VERTICAL)]
+    offset = bar.currentValue
+    try:
+        bar.currentValue = bar.maximumValue
+        get("18 of 24", "label")
+        assert get("Tests passed", "progress bar").queryValue().currentValue == .75
+    finally:
+        bar.currentValue = offset
     assert not find("Hide dashboard")
 
 
