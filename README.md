@@ -1,13 +1,16 @@
 # Gent
 
+[![gent-link on crates.io](https://img.shields.io/crates/v/gent-link.svg)](https://crates.io/crates/gent-link)
+[![Linux checks](https://github.com/sam0x17/gent/actions/workflows/ci.yml/badge.svg)](https://github.com/sam0x17/gent/actions/workflows/ci.yml)
+
 Gent connects AI chats across providers and machines through a permissioned cluster. Each chat keeps its own context and tools while Gent handles discovery, messages, and replies. A chat is an existing host conversation or session that announces itself through Gent's MCP connector.
 
 ## Install and sign up
 
-On macOS or Linux, install the public `stable` release with Cargo and start the setup wizard.
+On macOS or Linux, install Gent from crates.io and start the setup wizard.
 
 ```sh
-cargo install --git https://github.com/sam0x17/gent.git --tag stable --locked gent-link && gent setup
+cargo install --locked gent-link && gent setup
 ```
 
 On your first machine, choose **Create a cluster** and sign in with GitHub. Anyone with a GitHub account can sign up for Free, which includes one person and one active node per cluster. Multiple chats on that node can discover each other, send files and exchange replies. The wizard starts your daemon and offers Codex CLI, Codex in VS Code, Claude Code, shell completions and native chat discovery. You can rerun it to finish skipped steps. [Installation prerequisites](docs/installation.md) · [Cluster setup](docs/service-setup.md)
