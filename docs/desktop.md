@@ -30,9 +30,11 @@ Choose **Edit full configuration…** to edit the current node's TOML, including
 
 Under **Babysitter**, **Continue ordinary chats after provider errors** is off by default. With Gent Pro, enabling it allows a qualifying provider error to send “please continue” in an eligible ordinary Codex chat on this node. Chats with an explicit Babysitter opt-out are excluded. **Resume goals after provider failures** controls goal recovery separately. On a console-only node, use `gent config ordinary-chat-recovery status`, `enable`, or `disable`. Each subcommand accepts `--json`.
 
-Gent checks the latest failed turn of a loaded, input-ready chat with an empty queue. The latest provider failure must be within the past 10 minutes. A user turn can run for hours before it fails. Automatic retries stop 30 minutes after the original failure. A completed goal can stay in the chat if it finished before the user started that turn. Gent can send up to three `please continue` messages for that user turn. If an automatic continuation also fails, Gent waits at least 15 seconds before the second attempt and 60 seconds before the third. An uncertain submission consumes its attempt. After the third attempt, another user turn is required.
+Gent checks the latest failed turn of a loaded, input-ready chat with an empty queue. The latest provider failure must be within the past 10 minutes. A user turn can run for hours before it fails. Automatic retries stop 30 minutes after the original failure. A completed goal can stay in the chat if it finished before the user started that turn. Gent can send up to three `please continue` messages for that user turn. If an automatic continuation also fails, Gent waits at least 15 seconds before the second attempt and 60 seconds before the third. An uncertain submission consumes its attempt. After the third attempt, Gent stops retrying that user turn.
 
 In managed Codex CLI and VS Code chats, you can send another instruction while a turn is running. Gent checks the recorded inputs for that turn before continuing it. A command that reports completion after the provider error can still belong to the failed turn. If you have already continued the chat yourself, Gent skips that failure.
+
+A foreground Codex turn started by a recorded `codex_tui.send_message_to_thread` handoff can receive one `please continue`. If that continuation fails, Gent stops. Separate handoffs in the same registered chat can receive their own retry at least 15 seconds apart while the failure is still current.
 
 ## Permissions and About
 

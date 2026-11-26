@@ -6,6 +6,8 @@ use gent_protocol::{
 };
 use uuid::Uuid;
 
+const FIRST_RETRY_DELAY: i64 = 15;
+
 pub(super) fn schema(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS babysitter_chat_attempts(
@@ -16,14 +18,18 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
             cancelled INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(agent,turn), UNIQUE(agent,operator,ordinal)
         );
-        CREATE INDEX IF NOT EXISTS babysitter_chat_retention ON babysitter_chat_attempts(claimed_at);",
+        CREATE INDEX IF NOT EXISTS babysitter_chat_retention ON babysitter_chat_attempts(claimed_at);
+        CREATE TABLE IF NOT EXISTS babysitter_chat_handoffs(
+            attempt TEXT PRIMARY KEY REFERENCES babysitter_chat_attempts(attempt) ON DELETE CASCADE,
+            agent TEXT NOT NULL, item TEXT NOT NULL, UNIQUE(agent,item)
+        );",
     )?;
     Ok(())
 }
 
 fn retry_due(previous: i64, failed: i64, now: i64) -> bool {
     let delay = match previous {
-        1 => 15,
+        1 => FIRST_RETRY_DELAY,
         2 => 60,
         _ => return false,
     };
@@ -143,6 +149,7 @@ impl StoreSession<'_> {
         }
         let turn = turn.to_string();
 
+        let mut handoff = None;
         let (operator, operator_at, ordinal, parent) = match origin {
             ChatOrigin::Operator {
                 turn: operator,
@@ -161,6 +168,25 @@ impl StoreSession<'_> {
                     return Ok(no);
                 }
                 (operator.to_string(), started_at, 1, None)
+            }
+            ChatOrigin::ThreadHandoff { item, started_at } => {
+                if item.is_nil()
+                    || !self.chat_operator_inputs_allowed(who, &turn, None, &[])?
+                    || self
+                        .db
+                        .prepare(
+                            "SELECT 1 FROM babysitter_chat_handoffs WHERE agent=?1 AND item=?2
+                         UNION ALL SELECT 1 FROM babysitter_chat_attempts
+                         WHERE agent=?1 AND ordinal=0 AND claimed_at>?3 LIMIT 1",
+                        )?
+                        .exists(params![who.id, item.to_string(), now - FIRST_RETRY_DELAY])?
+                {
+                    return Ok(no);
+                }
+                handoff = Some(item);
+                // The legacy operator column groups attempts by root. Zero is outside
+                // the human retry sequence, including for an older daemon after rollback.
+                (turn.clone(), started_at, 0, None)
             }
             ChatOrigin::Continuation { attempt } => {
                 // Admission is durable even if turn/start's reply was lost. Only
@@ -207,6 +233,12 @@ impl StoreSession<'_> {
         )?;
         if inserted == 0 {
             return Ok(no);
+        }
+        if let Some(item) = handoff {
+            self.db.execute(
+                "INSERT INTO babysitter_chat_handoffs(attempt,agent,item) VALUES(?1,?2,?3)",
+                params![id.to_string(), who.id, item.to_string()],
+            )?;
         }
         Ok(json!({"claim":id,"operator":operator,"operator_at":operator_at,"parent":parent}))
     }

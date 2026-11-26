@@ -1,4 +1,4 @@
-//! Continue only a loaded native thread’s latest failed foreground user turn.
+//! Continue only a loaded native thread’s latest eligible failed foreground turn.
 use super::*;
 use gent_protocol::{
     babysitter::{CHAT_FAILURE_MAX_AGE, ChatOrigin},
@@ -23,6 +23,7 @@ struct Failed {
     error: String,
     goal: Value,
     legacy_history: bool,
+    handoff_parent: bool,
 }
 
 fn uuid(value: &Value) -> Option<Uuid> {
@@ -38,7 +39,7 @@ impl Failed {
         head: &Value,
         now: i64,
         goal: Value,
-        legacy_history: bool,
+        metadata: &Value,
     ) -> Option<Self> {
         let reason = babysit::terminal_failure(head)?;
         let started = head["startedAt"].as_i64()?;
@@ -48,7 +49,12 @@ impl Failed {
         }
         Some(Self {
             goal,
-            legacy_history,
+            legacy_history: metadata["historyMode"] == "legacy",
+            handoff_parent: metadata["historyMode"] == "paginated"
+                && metadata["threadSource"] == "user"
+                && metadata.get("parentThreadId") == Some(&Value::Null)
+                && metadata.get("attachedToThreadId") == Some(&Value::Null)
+                && matches!(metadata["source"].as_str(), Some("vscode" | "cli")),
             thread: thread.into(),
             path,
             turn: uuid(&head["id"])?,
@@ -109,7 +115,7 @@ async fn latest(host: &mut Host, thread: &str) -> Result<Option<Failed>> {
         head,
         gent_daemon::store::now(),
         goal.clone(),
-        t["historyMode"] == "legacy",
+        t,
     ) else {
         return Ok(None);
     };

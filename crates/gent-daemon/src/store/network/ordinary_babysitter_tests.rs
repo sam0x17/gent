@@ -199,6 +199,21 @@ async fn operator_claim_rejects_own_wake_and_ordinary_attempt_in_each_position()
     let clean_ids = operator_inputs(observed, clock, Some("first"), &["second"]);
     assert_eq!(p.agent(1, clean_ids)?, json!({"claim":null}));
 
+    assert!(
+        p.agent(
+            1,
+            claim(
+                observed,
+                clock,
+                ChatOrigin::ThreadHandoff {
+                    item: Uuid::now_v7(),
+                    started_at: clock,
+                }
+            )
+        )?["claim"]
+            .is_null()
+    );
+
     // A second local agent shares the database, including all three matching
     // pieces of evidence, but owns none of them.
     let other = config::secret();
@@ -353,6 +368,75 @@ async fn ordinary_chain_expires_from_original_failure_even_when_latest_failure_i
     assert!(
         pair.agent(0, claim(next, failed, ChatOrigin::Continuation { attempt }))?["claim"]
             .is_null()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn handoff_receipts_and_retry_pause_belong_to_the_authenticated_registration() -> Result<()> {
+    let mut p = Pair::new().await;
+    config::set_ordinary_babysitter_enabled(p.homes[0].path(), true)?;
+    let clock = now() + 5;
+    p.stores[0]
+        .db
+        .execute("UPDATE request_clock SET floor=?1", [clock])?;
+    let request = |item| {
+        claim(
+            Uuid::now_v7(),
+            clock,
+            ChatOrigin::ThreadHandoff {
+                item,
+                started_at: clock - 1,
+            },
+        )
+    };
+    let item = Uuid::now_v7();
+    let first = request(item);
+    // A second authenticated registration deliberately claims identical native IDs first.
+    let other = config::secret();
+    for action in [
+        AgentOp::Register {
+            name: "other".into(),
+            provider: "codex".into(),
+        },
+        first.clone(),
+    ] {
+        let result = p.stores[0].execute(Request::Agent {
+            credential: other.clone(),
+            action,
+        })?;
+        assert!(result["agent"]["id"].is_string() || result["claim"].is_string());
+    }
+    let attempt = serde_json::from_value(p.agent(0, first.clone())?["claim"].clone())?;
+    let check = AgentOp::BabysitterChatCheck { attempt };
+    assert_eq!(p.agent(0, check.clone())?["eligible"], true);
+    // Reopen after admission with no acknowledgement of the native send.
+    p.reopen(0);
+    assert_eq!(p.agent(0, check)?["eligible"], false);
+    let next = request(Uuid::now_v7());
+    p.stores[0]
+        .db
+        .execute("UPDATE request_clock SET floor=?1", [clock + 14])?;
+    assert!(p.agent(0, next.clone())?["claim"].is_null());
+    p.stores[0]
+        .db
+        .execute("UPDATE request_clock SET floor=?1", [clock + 15])?;
+    let failed_auto = claim(Uuid::now_v7(), clock, ChatOrigin::Continuation { attempt });
+    assert!(p.agent(0, failed_auto)?["claim"].is_null());
+    assert!(p.agent(0, first)?["claim"].is_null());
+    assert!(p.agent(0, request(item))?["claim"].is_null()); // Same item, different root.
+    assert!(p.agent(0, next)?["claim"].is_string()); // Same fresh failure, now due.
+
+    // Previous binaries prune the parent table without knowing handoff storage.
+    p.stores[0].db.execute(
+        "DELETE FROM babysitter_chat_attempts WHERE claimed_at<?1",
+        [clock + 16],
+    )?;
+    assert!(
+        !p.stores[0]
+            .db
+            .prepare("SELECT 1 FROM babysitter_chat_handoffs")?
+            .exists([])?
     );
     Ok(())
 }

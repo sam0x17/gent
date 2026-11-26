@@ -218,5 +218,6 @@ mod blocked;
 mod consecutive;
 mod queue;
 
+mod handoff;
 mod ordinary;
 mod output_limit;
