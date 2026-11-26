@@ -1,0 +1,115 @@
+name: Publish Gent
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: publish-gent-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUSTUP_TOOLCHAIN: '1.100.0'
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+
+jobs:
+  check:
+    if: github.repository == 'sam0x17/gent' && github.ref_type == 'tag' && !github.event.deleted && !github.event.forced
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    outputs:
+      hashes: ${{ steps.plan.outputs.hashes }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 scripts/release.py source
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Test, build and verify the packages from a fresh checkout
+        run: |
+          python3 -m unittest discover -s scripts -p test_release.py
+          cargo build --workspace --locked
+          CARGO_PROFILE_TEST_OPT_LEVEL=1 RUST_TEST_THREADS=2 cargo test --workspace --locked
+          cargo package --workspace --locked
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py plan
+
+  publish:
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 scripts/release.py source
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish missing versions in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/package-target
+          HASHES: ${{ needs.check.outputs.hashes }}
+        run: python3 scripts/release.py publish
+
+  install:
+    needs: [check, publish]
+    if: >-
+      !cancelled() && needs.check.result == 'success' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - env:
+          HASHES: ${{ needs.check.outputs.hashes }}
+        run: python3 scripts/release.py verify
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Install the exact release from crates.io
+        working-directory: ${{ runner.temp }}
+        run: cargo install --locked --registry crates-io --root "$RUNNER_TEMP/install" --version "=${GITHUB_REF_NAME#v}" gent-link
+      - run: python3 scripts/release.py installed
+
+  release:
+    needs: [check, install]
+    if: "!cancelled() && needs.check.result == 'success' && needs.install.result == 'success'"
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Create or verify the official GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HASHES: ${{ needs.check.outputs.hashes }}
+        run: python3 scripts/release.py release
