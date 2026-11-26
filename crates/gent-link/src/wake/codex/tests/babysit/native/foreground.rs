@@ -1,24 +1,44 @@
 //! A private Codex app-server, two disposable Gent registrations and a loopback provider.
 use super::*;
 
+#[derive(Clone, Copy)]
+enum Input {
+    User,
+    Gent,
+}
+
 #[tokio::test]
 #[ignore = "requires an installed Codex app-server"]
 async fn user_root_with_two_observed_gent_deliveries_gets_one_continuation() -> Result<()> {
-    mixed_foreground_trial(0, 2).await
+    mixed_foreground_trial(&[Input::Gent, Input::Gent]).await
 }
 
 #[tokio::test]
 #[ignore = "requires an installed Codex app-server"]
 async fn four_foreground_steers_then_a_gent_delivery_get_one_continuation() -> Result<()> {
-    mixed_foreground_trial(4, 1).await
+    mixed_foreground_trial(&[
+        Input::User,
+        Input::User,
+        Input::User,
+        Input::User,
+        Input::Gent,
+    ])
+    .await
 }
 
-async fn mixed_foreground_trial(steers: usize, deliveries: usize) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires an installed Codex app-server"]
+async fn user_inputs_between_gent_deliveries_get_one_continuation() -> Result<()> {
+    use Input::{Gent, User};
+    mixed_foreground_trial(&[Gent, User, User, Gent, Gent, Gent]).await
+}
+
+async fn mixed_foreground_trial(inputs: &[Input]) -> Result<()> {
     let node = Node::start().await?;
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let (mut child, socket) = start_host(node.root.path(), listener.local_addr()?).await?;
     let calls = Arc::new(AtomicUsize::new(0));
-    let gates: Arc<[_]> = (0..=steers + deliveries)
+    let gates: Arc<[_]> = (0..=inputs.len())
         .map(|_| tokio::sync::Notify::new())
         .collect();
     let requests = calls.clone();
@@ -75,39 +95,47 @@ async fn mixed_foreground_trial(steers: usize, deliveries: usize) -> Result<()> 
         stopped(&mut host, thread, &primer["turn"]["id"], path).await?;
         let root = host.rpc("turn/start",json!({"threadId":thread,"turnTrigger":"user",
             "clientUserMessageId":Uuid::new_v4(),"input":[{"type":"text","text":"Resume the fixture task."}]})).await.context("start resumed operator turn")?["turn"]["id"].clone();
-        for (i, gate) in gates.iter().take(steers).enumerate() {
-            while calls.load(Ordering::SeqCst) <= i + 1 {
+        let mut deliveries = 0;
+        for (n, input) in inputs.iter().enumerate() {
+            while calls.load(Ordering::SeqCst) <= n + 1 {
                 sleep(Duration::from_millis(20)).await;
             }
-            host.rpc("turn/steer", json!({"threadId":thread,"expectedTurnId":root,
-                "clientUserMessageId":Uuid::new_v4(),"input":[{"type":"text","text":format!("Foreground steer {i}.")}]})).await?;
-            gate.notify_one();
-        }
-        for (n, gate) in gates.iter().skip(steers).take(deliveries).enumerate() {
-            while calls.load(Ordering::SeqCst) <= steers + n + 1 {
-                sleep(Duration::from_millis(20)).await;
+            let gate = &gates[n];
+            match input {
+                Input::User => {
+                    // Distinguish a subsequent user steer from the prior delivery's
+                    // completion on the journal's second-resolution clock.
+                    if n > 0 && matches!(inputs[n - 1], Input::Gent) {
+                        sleep(Duration::from_millis(1100)).await;
+                    }
+                    host.rpc("turn/steer", json!({"threadId":thread,"expectedTurnId":root,
+                        "clientUserMessageId":Uuid::new_v4(),"input":[{"type":"text","text":format!("Foreground steer {n}.")}]})).await?;
+                    gate.notify_one();
+                }
+                Input::Gent => {
+                    sleep(Duration::from_secs(if deliveries == 0 { 2 } else { 6 })).await;
+                    deliveries += 1;
+                    agent(
+                        &node.home,
+                        &sender,
+                        AgentOp::Send {
+                            recipient: recipient.clone(),
+                            request_id: Uuid::now_v7().to_string(),
+                            text: format!("Fixture notification {n}."),
+                            files: vec![],
+                            file_ids: vec![],
+                        },
+                    )
+                    .await?;
+                    sweep(&node.home, &registry, &mut None, Sweep::WakeOnly).await?;
+                    gate.notify_one();
+                    while calls.load(Ordering::SeqCst) <= n + 2 {
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                    sweep(&node.home, &registry, &mut None, Sweep::WakeOnly).await?;
+                    assert_eq!(last(&mut host, thread).await?["id"], root);
+                }
             }
-            // Respect the native dispatch interval and separate the opener's second from each claim.
-            sleep(Duration::from_secs(if n == 0 { 2 } else { 6 })).await;
-            agent(
-                &node.home,
-                &sender,
-                AgentOp::Send {
-                    recipient: recipient.clone(),
-                    request_id: Uuid::now_v7().to_string(),
-                    text: format!("Fixture notification {n}."),
-                    files: vec![],
-                    file_ids: vec![],
-                },
-            )
-            .await?;
-            sweep(&node.home, &registry, &mut None, Sweep::WakeOnly).await?;
-            gate.notify_one();
-            while calls.load(Ordering::SeqCst) <= steers + n + 2 {
-                sleep(Duration::from_millis(20)).await;
-            }
-            sweep(&node.home, &registry, &mut None, Sweep::WakeOnly).await?;
-            assert_eq!(last(&mut host, thread).await?["id"], root);
         }
         // The claim guard vetoes any wake in the failure's own clock second.
         // As in the incident, all dispatches have already completed before that second.
@@ -115,7 +143,7 @@ async fn mixed_foreground_trial(steers: usize, deliveries: usize) -> Result<()> 
         while gent_daemon::store::now() <= delivered_at {
             sleep(Duration::from_millis(20)).await;
         }
-        gates[steers + deliveries].notify_one();
+        gates[inputs.len()].notify_one();
         stopped(&mut host, thread, &root, path).await?;
         let db = rusqlite::Connection::open_with_flags(
             node.home.join("state.sqlite3"),
@@ -166,7 +194,7 @@ async fn mixed_foreground_trial(steers: usize, deliveries: usize) -> Result<()> 
         sleep(Duration::from_secs(16)).await;
         sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
         assert_eq!(last(&mut host, thread).await?["id"], continuation["id"]);
-        assert_eq!(calls.load(Ordering::SeqCst), steers + deliveries + 3);
+        assert_eq!(calls.load(Ordering::SeqCst), inputs.len() + 3);
         Ok::<_, anyhow::Error>(())
     };
     let outcome = tokio::select! {

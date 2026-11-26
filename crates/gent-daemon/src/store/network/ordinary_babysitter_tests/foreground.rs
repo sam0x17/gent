@@ -215,3 +215,37 @@ async fn foreground_steers_before_a_finished_delivery_get_only_one_retry() -> Re
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn steers_between_confirmed_deliveries_keep_one_ordinary_retry() -> Result<()> {
+    let mut p = Pair::new().await;
+    config::set_ordinary_babysitter_enabled(p.homes[0].path(), true)?;
+    let at = now();
+    let proof = root(7, at);
+    for index in [1, 4, 5, 6] {
+        record(&p, &proof, index)?;
+    }
+
+    let mut ambiguous = proof.clone();
+    ambiguous.inputs[2].received_at_ms = proof.inputs[1].received_at_ms;
+    assert!(p.agent(0, request(&ambiguous, at))?["claim"].is_null());
+    let mut copied = proof.clone();
+    copied.inputs[2].sha256.clone_from(&proof.inputs[1].sha256);
+    assert!(p.agent(0, request(&copied, at))?["claim"].is_null());
+
+    let attempt = serde_json::from_value(p.agent(0, request(&proof, at))?["claim"].clone())?;
+    assert_eq!(
+        p.agent(0, AgentOp::BabysitterChatCheck { attempt })?["eligible"],
+        true
+    );
+    p.reopen(0);
+    assert!(p.agent(0, request(&proof, at))?["claim"].is_null());
+    assert!(
+        p.agent(
+            0,
+            claim(Uuid::now_v7(), at, ChatOrigin::Continuation { attempt })
+        )?["claim"]
+            .is_null()
+    );
+    Ok(())
+}
