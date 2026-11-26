@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 pub const CHAT_FAILURE_MAX_AGE: i64 = 10 * 60;
 pub const CHAT_CHAIN_MAX_AGE: i64 = 30 * 60;
-/// Maximum number of client IDs on one operator claim, including the original.
+/// Maximum number of client IDs on one chat claim, including the original.
 pub const MAX_CHAT_INPUTS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +23,16 @@ pub enum ChatOrigin {
     },
     Continuation {
         attempt: Uuid,
+    },
+    // Keep old single-input continuations wire compatible. Older daemons must
+    // reject this proof in full instead of dropping its additional input IDs.
+    SteeredContinuation {
+        attempt: Uuid,
+        root: Uuid,
+        parent: Uuid,
+        parent_failed_at: i64,
+        started_at: i64,
+        additional_client_ids: Vec<String>,
     },
 }
 

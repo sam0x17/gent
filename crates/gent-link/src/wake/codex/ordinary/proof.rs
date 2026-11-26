@@ -133,6 +133,47 @@ fn operator(failed: &Failed, mut inputs: Vec<Item>, trigger: Option<&str>) -> Op
     })
 }
 
+// The reverse scan ends at the oldest input. Only its client ID may match
+// the durable admission for the preceding failure.
+fn continuation(
+    failed: &Failed,
+    mut inputs: Vec<Item>,
+    parent: Uuid,
+    terminal: Payload,
+    proven_sources: bool,
+) -> Option<ChatOrigin> {
+    terminal.error?;
+    let first = inputs.pop()?;
+    let client = first.client_id.as_deref()?;
+    let attempt = Uuid::parse_str(client).ok()?;
+    if inputs.is_empty() {
+        return Some(ChatOrigin::Continuation { attempt });
+    }
+    let mut ids = HashSet::new();
+    if !proven_sources
+        || attempt.is_nil()
+        || attempt.to_string() != client
+        || !std::iter::once(&first).chain(&inputs).all(|i| {
+            i.id.as_deref()
+                .is_some_and(|id| !id.trim().is_empty() && ids.insert(id))
+        })
+    {
+        return None;
+    }
+    Some(ChatOrigin::SteeredContinuation {
+        attempt,
+        parent,
+        root: failed.root,
+        started_at: failed.started,
+        parent_failed_at: terminal.completed_at?,
+        additional_client_ids: inputs
+            .into_iter()
+            .rev()
+            .map(|i| i.client_id)
+            .collect::<Option<_>>()?,
+    })
+}
+
 pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, Stamp)>> {
     let path = &failed.path;
     if !path.is_absolute()
@@ -175,10 +216,30 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
     {
         return Ok(None);
     }
-    let mut inputs = Vec::new();
+    let mut inputs: Vec<Item> = Vec::new();
+    let descendant = failed.root != failed.turn;
+    let mut pending_receipt: Option<usize> = None;
+    let mut sources = HashSet::new();
+    // Earlier single-input hosts do not always supply response provenance.
+    // Accumulate ambiguity here and require a complete pairing on multi-input descendants.
+    let mut ambiguous = false;
     while Instant::now() < deadline && rows.previous(&mut line)? {
         let record: Record = serde_json::from_slice(&line)?;
+        let receipt = pending_receipt.take();
         if record.r#type != "event_msg" {
+            if descendant
+                && !legacy
+                && record.r#type == "response_item"
+                && record.payload.r#type.as_deref() == Some("message")
+                && legacy::unpaired_user(&line).unwrap_or(true)
+            {
+                let source = receipt
+                    .and_then(|index| inputs[index].client_id.as_deref())
+                    .and_then(|client| {
+                        legacy::user_source(&line, &failed.thread, failed.turn, client)
+                    });
+                ambiguous |= source.is_none_or(|id| !sources.insert(id));
+            }
             if legacy && record.r#type == "response_item" && legacy::unpaired_user(&line)? {
                 return Ok(None);
             }
@@ -196,6 +257,7 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                 }
                 inputs.push(item);
             }
+            Some("user_message") if descendant => ambiguous = true,
             Some(
                 "turn_aborted"
                 | "task_complete"
@@ -214,6 +276,7 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                 {
                     return Ok(None);
                 }
+                pending_receipt = Some(inputs.len());
                 inputs.push(item);
             }
             Some("task_started") => {
@@ -254,24 +317,25 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
                         origin
                     }
                     Some(TRIGGER) if failed.root != failed.turn => {
-                        let (Some(parent), [item]) = (a.parent_turn_id, inputs.as_slice()) else {
-                            return Ok(None);
-                        };
-                        let Some(attempt) = item
-                            .client_id
-                            .as_deref()
-                            .and_then(|id| Uuid::parse_str(id).ok())
+                        let Some(parent) = a
+                            .parent_turn_id
+                            .filter(|id| !id.is_nil() && id != &failed.turn)
                         else {
                             return Ok(None);
                         };
-                        // A goal control or a new turn could have landed between
-                        // the previous admission check and this automatic start.
-                        if completion(&mut rows, &mut line, &failed.thread, parent, deadline)?
-                            .is_none_or(|p| p.error.is_none())
-                        {
+                        let Some(terminal) =
+                            completion(&mut rows, &mut line, &failed.thread, parent, deadline)?
+                        else {
                             return Ok(None);
-                        }
-                        ChatOrigin::Continuation { attempt }
+                        };
+                        let proven_sources =
+                            !ambiguous && (legacy || sources.len() == inputs.len());
+                        let Some(origin) =
+                            continuation(failed, inputs, parent, terminal, proven_sources)
+                        else {
+                            return Ok(None);
+                        };
+                        origin
                     }
                     _ => return Ok(None),
                 };
@@ -282,3 +346,6 @@ pub(super) fn read(failed: &Failed) -> Result<Option<(ChatOrigin, Option<Uuid>, 
     }
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests;

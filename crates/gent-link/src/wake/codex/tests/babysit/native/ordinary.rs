@@ -25,6 +25,12 @@ async fn user_trigger_recovers_a_failed_request_after_a_user_steer() -> Result<(
     ordinary_native_trial(true, Some("user")).await
 }
 
+#[tokio::test]
+#[ignore = "requires an installed Codex app-server"]
+async fn human_steer_on_the_automatic_turn_preserves_the_original_chain() -> Result<()> {
+    ordinary_native_trial(true, Some("gent_babysitter")).await
+}
+
 async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&str>) -> Result<()> {
     const FIXTURE_ROOT: &str = "GENT_TEST_ORDINARY_CODEX_ROOT";
     if let Some(root) = std::env::var_os(FIXTURE_ROOT) {
@@ -38,20 +44,24 @@ async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&st
     let (mut child, socket) = start_host(node.root.path(), listener.local_addr()?).await?;
     let calls = Arc::new(AtomicUsize::new(0));
     let received = calls.clone();
-    let steered = steered_trigger.is_some();
+    let steer_child = steered_trigger == Some("gent_babysitter");
+    let steer_root = steered_trigger.is_some() && !steer_child;
     let composer = steered_trigger == Some("composer");
-    let initial_calls = 1 + usize::from(steered);
+    let initial_calls = 1 + usize::from(steer_root);
+    let before_retry = initial_calls + 1 + usize::from(steer_child);
     let release = Arc::new(tokio::sync::Notify::new());
     let hold = release.clone();
     let provider = Router::new().route("/v1/responses",post(move || {
         let index = received.fetch_add(1,Ordering::SeqCst);
         let hold = hold.clone();
         async move {
-            if index > initial_calls { std::future::pending().await }
-            if steered && index == 0 { hold.notified().await; }
+            if index >= before_retry { std::future::pending().await }
+            if (steer_root && index == 0) || (steer_child && index == 1) { hold.notified().await; }
             let error = if composer && index == initial_calls {
                 json!({"type":"invalid_request_error","code":"invalid_value","message":"Invalid value: ''. Supported values are: 'assistant', 'system', 'developer', and 'user'.","param":"input[12]"})
-            } else if steered {
+            } else if steer_child {
+                json!({"type":"invalid_request_error","code":"invalid_request_error","message":"Invalid request payload","param":"1"})
+            } else if steer_root {
                 json!({"type":"invalid_request_error","code":"invalid_request_error","message":"Invalid request payload","param":"56959"})
             } else {
                 json!({"type":"invalid_request_error","code":"unknown_parameter","message":"Unknown parameter: 'input[0].tools[0].role'.","param":"input[0].tools[0].role"})
@@ -87,13 +97,13 @@ async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&st
         let id = host
             .rpc(
                 "turn/start",
-                json!({"threadId":thread,"turnTrigger":steered_trigger.unwrap_or("user"),
+                json!({"threadId":thread,"turnTrigger":if composer {"composer"} else {"user"},
             "clientUserMessageId":Uuid::new_v4(),
             "input":[{"type":"text","text":"please continue"}]}),
             )
             .await?["turn"]["id"]
             .clone();
-        if steered {
+        if steer_root {
             while calls.load(Ordering::SeqCst) == 0 {
                 sleep(Duration::from_millis(20)).await;
             }
@@ -114,7 +124,7 @@ async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&st
         }
         sweep(&node.home, &registry, &mut None, Sweep::WakeAndGoals).await?;
         assert_eq!(calls.load(Ordering::SeqCst), initial_calls);
-        if steered {
+        if steer_root {
             let items = host
                 .rpc("thread/items/list", json!({"threadId":thread,"turnId":id}))
                 .await?;
@@ -151,6 +161,17 @@ async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&st
                 Ok(())
             }
         )?;
+        let steer_id = Uuid::new_v4();
+        if steer_child {
+            while calls.load(Ordering::SeqCst) < 2 {
+                sleep(Duration::from_millis(20)).await;
+            }
+            let child = last(&mut host, thread).await?;
+            assert_ne!(child["id"], id);
+            host.rpc("turn/steer", json!({"threadId":thread, "expectedTurnId":child["id"],
+                "clientUserMessageId":steer_id, "input":[{"type":"text","text":"check the fixture result"}]})).await?;
+            release.notify_one();
+        }
         let first_auto = loop {
             let t = last(&mut host, thread).await?;
             if t["id"] != id && t["status"] == "failed" {
@@ -167,11 +188,15 @@ async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&st
         let items = host
             .rpc(
                 "thread/items/list",
-                json!({"threadId":thread,"turnId":first_auto["id"]}),
+                json!({"threadId":thread,"turnId":first_auto["id"],"sortDirection":"asc"}),
             )
             .await?;
         let items = items["data"].as_array().unwrap();
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 1 + usize::from(steer_child));
+        if steer_child {
+            assert_eq!(items[1]["item"]["clientId"], json!(steer_id));
+            assert_eq!(items[1]["item"]["type"], "userMessage");
+        }
         let user = &items[0]["item"];
         assert_eq!(user["type"], "userMessage");
         assert!(Uuid::parse_str(user["clientId"].as_str().unwrap()).is_ok());
@@ -180,14 +205,48 @@ async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&st
             json!([{"type":"text","text":"please continue","text_elements":[]}])
         );
         sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
-        assert_eq!(calls.load(Ordering::SeqCst), initial_calls + 1);
+        assert_eq!(calls.load(Ordering::SeqCst), before_retry);
         sleep(Duration::from_secs(15)).await;
         sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
-        while calls.load(Ordering::SeqCst) < initial_calls + 2 {
+        while calls.load(Ordering::SeqCst) < before_retry + 1 {
             sleep(Duration::from_millis(20)).await;
         }
         let second = last(&mut host, thread).await?;
         assert_eq!(second["rootTurnId"], id);
+        if steer_child {
+            let db = rusqlite::Connection::open(node.home.join("state.sqlite3"))?;
+            let mut q = db.prepare("SELECT ordinal,turn,attempt FROM babysitter_chat_attempts
+                WHERE agent=?1 AND operator=?2 AND submitted=1 AND reason='\"request_payload\"' ORDER BY ordinal")?;
+            let receipts = q
+                .query_map([registered.as_str(), id.as_str().unwrap()], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            assert_eq!(receipts.len(), 2);
+            assert_eq!(
+                (receipts[0].0, json!(receipts[0].1), json!(receipts[0].2)),
+                (1, id.clone(), user["clientId"].clone())
+            );
+            assert_eq!(
+                (receipts[1].0, json!(receipts[1].1)),
+                (2, first_auto["id"].clone())
+            );
+            let page = host
+                .rpc(
+                    "thread/items/list",
+                    json!({"threadId": thread,"turnId":second["id"]}),
+                )
+                .await?;
+            let [input] = page["data"].as_array().unwrap().as_slice() else {
+                panic!("expected one continuation")
+            };
+            assert_eq!(input["item"]["clientId"], receipts[1].2);
+            assert_eq!(input["item"]["content"], user["content"]);
+        }
         host.rpc(
             "turn/interrupt",
             json!({"threadId":thread,"turnId":second["id"]}),
@@ -197,7 +256,7 @@ async fn ordinary_native_trial(completed_goal: bool, steered_trigger: Option<&st
             sleep(Duration::from_millis(20)).await;
         }
         sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
-        assert_eq!(calls.load(Ordering::SeqCst), initial_calls + 2);
+        assert_eq!(calls.load(Ordering::SeqCst), before_retry + 1);
         assert_eq!(node.notices(&registered).await?, 0);
         Ok::<_, anyhow::Error>(())
     };
