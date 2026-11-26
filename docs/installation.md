@@ -13,7 +13,9 @@ gent setup
 
 On your first machine, choose **Create a cluster** and sign in with GitHub when prompted. Anyone with a GitHub account can sign up for Free. Free includes one person and one active node per cluster. A Codex chat and a Claude Code chat on the same laptop can exchange messages and files using that single node. After setup, reload the hosts you selected and run `gent doctor` to check the installation.
 
-Pro costs $8 USD per month for one person. It adds chat dashboards and Babysitter goal recovery and removes the plan limit on active nodes per cluster. Protocol limits still apply. [Plans and pricing](https://gent.link/pricing) · [Add another machine](service-setup.md#add-another-machine-through-gent)
+Free includes Babysitter on Stable and Beta. Goal recovery starts on for managed Codex and Claude Code chats. Ordinary Codex chat recovery is opt-in. [Babysitter settings](desktop.md#dashboard-chats-and-settings)
+
+Pro costs $8 USD per month for one person. It adds chat dashboards and removes the plan limit on active nodes per cluster. Protocol limits still apply. [Plans and pricing](https://gent.link/pricing) · [Add another machine](service-setup.md#add-another-machine-through-gent)
 
 Run `gent auth billing` on a signed-in machine and confirm sign-in on the account page to see your plan and whether checkout is available. If you subscribe, Pro renews monthly until you cancel. You can manage or cancel the subscription from the same account page. [Billing terms](https://gent.link/terms)
 
