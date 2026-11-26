@@ -412,7 +412,7 @@ fn parse_systemd(text: &str) -> State {
         ..Default::default()
     }
 }
-fn parse_launchd(text: &str) -> State {
+pub(crate) fn parse_launchd(text: &str) -> State {
     // launchctl print may contain inherited environment values. Extract only
     // top-level lifecycle fields; never surface or log the full output.
     let mut state = State {

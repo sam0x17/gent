@@ -127,7 +127,7 @@ fn activate(home: &Path, installation: &Installation) -> Result<()> {
     Err(error.into())
 }
 
-async fn monitor(home: &Path, installation: &Installation) {
+async fn wait_for_ready(home: &Path) {
     // Ready is an authenticated response from this process, not socket presence.
     loop {
         if let Ok(status) = crate::owner(home, gent_protocol::OwnerOp::Status).await
@@ -137,6 +137,33 @@ async fn monitor(home: &Path, installation: &Installation) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn repair_desktop(home: &Path) {
+    let result: Result<()> = async {
+        let binary = std::env::current_exe()?;
+        // An old process can retain the path of a CLI already replaced on disk.
+        if install::inspect(&binary).await? == build_info::current() {
+            let user = std::env::var_os("HOME").context("missing user Applications directory")?;
+            let home = home.to_owned();
+            tokio::task::spawn_blocking(move || {
+                crate::desktop::repair_installed(Path::new(&user), &binary, &home)
+            })
+            .await??;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        eprintln!(
+            "Gent Desktop app repair: {error:#}. Retry with gent desktop after quitting the old app."
+        );
+    }
+}
+
+async fn monitor(home: &Path, installation: &Installation) {
+    wait_for_ready(home).await;
     let notification = loop {
         match installation.healthy(home, &build_info::current()) {
             Ok(Some(build)) => {
@@ -149,6 +176,8 @@ async fn monitor(home: &Path, installation: &Installation) {
             }
         }
     };
+    #[cfg(target_os = "macos")]
+    repair_desktop(home).await;
     integrations::refresh(home, installation).await;
     if let Some(build) = notification {
         notification::installed(home, &build).await;
@@ -254,6 +283,12 @@ pub(crate) async fn run_daemon(home: &Path) -> Result<()> {
     };
     tokio::pin!(daemon);
     let Some(installation) = installation else {
+        // A launchd service or manually upgraded CLI can live outside CARGO_HOME.
+        #[cfg(target_os = "macos")]
+        tokio::select! {
+            result = &mut daemon => return result,
+            () = async { wait_for_ready(home).await; repair_desktop(home).await; } => {}
+        }
         return daemon.await;
     };
     let outcome = tokio::select! {

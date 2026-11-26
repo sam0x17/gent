@@ -7,6 +7,8 @@ pub use command::GatewayCommand;
 use command::{Action, Install};
 pub use display::print;
 mod manager;
+#[cfg(target_os = "macos")]
+pub(crate) use manager::parse_launchd;
 mod startup;
 use crate::{DaemonCommand, managed_file, owner};
 use anyhow::{Context, Result, ensure};
