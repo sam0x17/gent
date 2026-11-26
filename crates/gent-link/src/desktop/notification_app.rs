@@ -1,6 +1,8 @@
 //! Install the signed, data-free application in the per-user Applications folder.
+use crate::managed_file::{self, Snapshot};
 use anyhow::{Context, Result, bail, ensure};
 use rustix::fs::{CWD, RenameFlags, renameat_with};
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -94,19 +96,79 @@ fn install(root: &Path) -> Result<PathBuf> {
 
 type Frontend = (Child, pipe::Sender, Lines<BufReader<pipe::Receiver>>);
 
-// Finder supplies neither the CLI path nor the node home. Store the same
-// foreground launch arguments separately from the signed, replaceable bundle.
+const LAUNCHER: &str = "Library/Application Support/Gent/desktop-launch.json";
+
+#[derive(Deserialize, Serialize)]
+struct Launcher {
+    binary: PathBuf,
+    home: PathBuf,
+}
+
+// Finder supplies neither the CLI path nor the node home.
 fn save_launcher(user: &Path, binary: &Path, home: &Path) -> Result<()> {
     ensure!(
         binary.is_absolute() && home.is_absolute(),
         "expected absolute desktop launch paths"
     );
-    let path = user.join("Library/Application Support/Gent/desktop-launch.json");
-    let binding = serde_json::to_vec(&serde_json::json!({
-        "binary": binary.to_str().context("desktop executable path is not UTF-8")?,
-        "home": home.to_str().context("desktop home path is not UTF-8")?,
-    }))?;
-    gent_daemon::config::write_private(&path, &binding)
+    let binding = Launcher {
+        binary: binary.into(),
+        home: home.into(),
+    };
+    gent_daemon::config::write_private(&user.join(LAUNCHER), &serde_json::to_vec(&binding)?)
+}
+
+fn same_path(recorded: &Path, current: &Path) -> bool {
+    recorded == current
+        || (recorded.is_absolute()
+            && recorded
+                .canonicalize()
+                .is_ok_and(|path| current.canonicalize().is_ok_and(|current| current == path)))
+}
+
+pub(crate) fn repair_installed(user: &Path, binary: &Path, home: &Path) -> Result<()> {
+    let applications = user.join("Applications");
+    let app = applications.join("Gent.app");
+    if !app.try_exists()? {
+        return Ok(());
+    }
+    let _lock = installation_lock(&applications)?;
+    if !app.try_exists()? {
+        return Ok(());
+    }
+    let record = Snapshot::read(&user.join(LAUNCHER))?;
+    record.private()?;
+    if let Some(text) = &record.text {
+        let saved: Launcher =
+            serde_json::from_str(text).context("invalid Gent Desktop launch record")?;
+        if !same_path(&saved.home, home) || !same_path(&saved.binary, binary) {
+            return Ok(());
+        }
+    } else {
+        // Legacy bundles had no launch record. A profile which never installed
+        // Desktop has no icon pair (first-run setup kept it in auth/desktop).
+        let used_desktop = [home.to_owned(), home.join("auth/desktop")]
+            .into_iter()
+            .any(|dir| {
+                dir.join("desktop-icon.png").is_file() && dir.join("inkling-tray-128.png").is_file()
+            });
+        if !used_desktop {
+            return Ok(());
+        }
+    }
+    install(&applications)?;
+    if record.text.is_none() {
+        save_launcher(user, binary, home)?;
+    }
+    Ok(())
+}
+
+fn installation_lock(applications: &Path) -> Result<fs::File> {
+    let meta = fs::metadata(applications)?;
+    ensure!(
+        meta.is_dir() && managed_file::owned_not_world_writable(&meta),
+        "expected a user-owned Applications directory"
+    );
+    managed_file::lock(&applications.join(".gent-desktop-install.lock"))
 }
 
 pub(super) async fn launch(
@@ -126,13 +188,8 @@ pub(super) async fn launch(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
         Err(e) => return Err(e.into()),
     }
-    let meta = fs::metadata(&applications)?;
-    ensure!(
-        meta.is_dir() && crate::managed_file::owned_not_world_writable(&meta),
-        "expected a user-owned Applications directory"
-    );
     // Serialize installs across profiles until Launch Services has started this build.
-    let _lock = crate::managed_file::lock(&applications.join(".gent-desktop-install.lock"))?;
+    let _lock = installation_lock(&applications)?;
     let app = install(&applications)?;
     save_launcher(Path::new(&user), &std::env::current_exe()?, home)?;
     launch_at(Path::new("/usr/bin/open"), &app, runtime, icon, mode).await

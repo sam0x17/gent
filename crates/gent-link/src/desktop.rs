@@ -28,6 +28,8 @@ mod model;
 #[cfg(target_os = "macos")]
 mod notification_app;
 #[cfg(target_os = "macos")]
+pub(crate) use notification_app::repair_installed;
+#[cfg(target_os = "macos")]
 pub(crate) mod notification_delivery;
 mod pages;
 mod release_channel;

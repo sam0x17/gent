@@ -178,6 +178,17 @@ enum Change {
     Remove,
 }
 
+#[cfg(target_os = "macos")]
+fn unload_login_job(change: Change, running: bool, installed: &str, desired: &str) -> bool {
+    match change {
+        // A stopped RunAtLoad job must stay quit until login or explicit enable.
+        Change::Migrate => running && installed != desired,
+        // A stopped job may still have the previous plist loaded in memory.
+        Change::Enable => !running || installed != desired,
+        Change::Remove => true,
+    }
+}
+
 fn reconcile(home: &Path, change: Change) -> Result<()> {
     let enable = change != Change::Remove;
     let label = label(home);
@@ -202,14 +213,17 @@ fn reconcile(home: &Path, change: Change) -> Result<()> {
     let launch = if graphical_session() {
         let domain = aqua();
         let job = format!("{domain}/{label}");
-        let registered = &snapshots[0].text;
-        let loaded = launchctl(&["print", &job]);
-        if loaded {
-            ensure!(
-                registered.is_some(),
-                "loaded desktop agent has no managed registration"
-            );
-            if !enable || registered.as_ref() != Some(&entries[0].contents) {
+        let status = Process::new("/bin/launchctl")
+            .args(["print", &job])
+            .stderr(Stdio::null())
+            .output()?;
+        if status.status.success() {
+            let registered = snapshots[0]
+                .text
+                .as_deref()
+                .context("loaded desktop agent has no managed registration")?;
+            let state = crate::service::parse_launchd(&String::from_utf8_lossy(&status.stdout));
+            if unload_login_job(change, state.running, registered, &entries[0].contents) {
                 ensure!(
                     launchctl(&["bootout", &job]),
                     "could not unload desktop login agent"
@@ -322,4 +336,47 @@ pub(crate) fn previously_configured(home: &Path) -> Result<bool> {
     // The serialization lock persists across registration and removal. A
     // never-configured home must stay empty on an idempotent uninstall.
     Ok(home.join("desktop-login.lock").try_exists()?)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_restarts_only_a_running_login_job_when_the_build_changes() {
+        let desired = entries(Path::new("/node"), Path::new("/prefix/gent"), "test")
+            .unwrap()
+            .remove(0)
+            .contents;
+        let stamp = format!("<!-- Gent build {} -->", env!("GENT_COMMIT"));
+        assert!(desired.contains(&stamp));
+        let old = desired.replace(&stamp, "<!-- Gent build prior -->");
+        let running = crate::service::parse_launchd("job = {\n\tstate = running\n\tpid = 31\n}");
+        // A separately running foreground presenter does not belong to this job.
+        let stopped = crate::service::parse_launchd("job = {\n\tstate = not running\n}");
+        assert!(unload_login_job(
+            Change::Migrate,
+            running.running,
+            &old,
+            &desired
+        ));
+        assert!(!unload_login_job(
+            Change::Migrate,
+            running.running,
+            &desired,
+            &desired
+        ));
+        assert!(!unload_login_job(
+            Change::Migrate,
+            stopped.running,
+            &old,
+            &desired
+        ));
+        assert!(unload_login_job(
+            Change::Enable,
+            stopped.running,
+            &desired,
+            &desired
+        ));
+    }
 }

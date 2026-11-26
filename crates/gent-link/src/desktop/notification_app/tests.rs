@@ -115,6 +115,92 @@ printf '%s\n' "$@" > "$0.tmp" && /bin/mv "$0.tmp" "$0.args"
     assert!(!open());
 }
 
+#[test]
+fn passive_upgrade_repairs_the_legacy_bundle_after_quit_or_with_a_manual_presenter() {
+    for running in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let user = temp.path();
+        let apps = user.join("Applications");
+        let volume = user.join("User Applications");
+        fs::create_dir(&volume).unwrap();
+        std::os::unix::fs::symlink(&volume, &apps).unwrap();
+        fs::set_permissions(&volume, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(installation_lock(&apps).is_err());
+        fs::set_permissions(&volume, fs::Permissions::from_mode(0o755)).unwrap();
+        let app = install(&apps).unwrap();
+        let executable = app.join("Contents/MacOS/GentDesktop");
+        fs::write(&executable, b"old managed presenter").unwrap();
+        let home = user.join("node");
+        gent_daemon::config::private_dir(&home).unwrap();
+        super::super::install_icon(&home).unwrap();
+        fs::write(home.join("desktop-disabled"), "disabled").unwrap();
+        let socket = home.join("desktop.sock");
+        let presenter = running.then(|| std::os::unix::net::UnixDatagram::bind(&socket).unwrap());
+        let binary = user.join("custom prefix/gent");
+        repair_installed(user, &binary, &home).unwrap();
+        assert_eq!(
+            fs::read(&executable).unwrap(),
+            bundled!("MacOS/GentDesktop").1
+        );
+        let record = user.join(LAUNCHER);
+        let binding: Launcher = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        assert_eq!(
+            (binding.binary, binding.home),
+            (binary.clone(), home.clone())
+        );
+        assert_eq!(socket.exists(), running);
+        assert!(home.join("desktop-disabled").is_file());
+        assert!(!user.join("Library/LaunchAgents").exists());
+        if let Some(presenter) = presenter {
+            presenter.set_nonblocking(true).unwrap();
+            assert_eq!(
+                presenter.recv(&mut [0; 16]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        let inode = fs::metadata(&app).unwrap().ino();
+        let record_inode = fs::metadata(&record).unwrap().ino();
+        repair_installed(user, &binary, &home).unwrap();
+        assert_eq!(fs::metadata(&app).unwrap().ino(), inode);
+        assert_eq!(fs::metadata(record).unwrap().ino(), record_inode);
+    }
+}
+
+#[test]
+fn passive_upgrade_leaves_absent_and_unrelated_installations_alone() {
+    let temp = tempfile::tempdir().unwrap();
+    let user = temp.path();
+    let apps = user.join("Applications");
+    let home = user.join("node");
+    let binary = user.join("bin/gent");
+    repair_installed(user, &binary, &home).unwrap();
+    assert!(!apps.exists());
+
+    fs::create_dir(&apps).unwrap();
+    let app = install(&apps).unwrap();
+    let executable = app.join("Contents/MacOS/GentDesktop");
+    fs::write(&executable, b"other installation").unwrap();
+    repair_installed(user, &binary, &home).unwrap();
+    assert!(!user.join(LAUNCHER).exists());
+    gent_daemon::config::private_dir(&home).unwrap();
+    super::super::install_icon(&home).unwrap();
+    for (cli, node) in [
+        (binary.clone(), user.join("other")),
+        (user.join("other/gent"), home.clone()),
+    ] {
+        save_launcher(user, &cli, &node).unwrap();
+        let saved = fs::read(user.join(LAUNCHER)).unwrap();
+        repair_installed(user, &binary, &home).unwrap();
+        assert_eq!(fs::read(user.join(LAUNCHER)).unwrap(), saved);
+        assert_eq!(fs::read(&executable).unwrap(), b"other installation");
+    }
+    fs::remove_file(user.join(LAUNCHER)).unwrap();
+    fs::write(app.join("Contents/Info.plist"), "unmanaged app").unwrap();
+    assert!(repair_installed(user, &binary, &home).is_err());
+    assert!(!user.join(LAUNCHER).exists());
+    assert_eq!(fs::read(executable).unwrap(), b"other installation");
+}
+
 #[tokio::test]
 async fn launch_services_streams_survive_handshake_and_close_at_eof() {
     use tokio::io::AsyncWriteExt;
