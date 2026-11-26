@@ -68,7 +68,7 @@ fn passive_tool(name: &str) -> bool {
 }
 
 pub(super) enum Source<'a> {
-    Queue(&'a mut queued_exec::Queue, Option<&'a str>),
+    Queue(&'a mut queued_exec::Queue, Option<&'a Completed>),
     Foreground,                       // terminal recognized failure
     Direct(&'a mut Vec<DirectInput>), // completed, needs a matching journal entry
 }
@@ -101,11 +101,10 @@ struct Admission {
     // Outputs occur first when walking backwards. Every call must consume its
     // own output. An incomplete wrapper inventory needs independent evidence
     // that execution began after the live goal's last mutation second.
-    needs_later_start: bool,
     outputs: std::collections::HashMap<String, Output>,
     exec: queued_exec::Turn,
     sleeps: HashSet<String>,
-    earliest_work_ms: Option<i64>,
+    work_ms: Option<(i64, i64)>,
 }
 
 struct Output {
@@ -116,16 +115,16 @@ struct Output {
 
 impl Admission {
     fn work(&mut self, start_ms: Option<i64>) {
-        self.needs_later_start = true;
         // Without an execution timestamp only the ordinary admission or an
         // earlier in-turn reasoning/user receipt can establish the ordering.
         let start = start_ms.unwrap_or(i64::MIN);
-        self.earliest_work_ms = Some(self.earliest_work_ms.map_or(start, |ms| ms.min(start)));
+        self.work_ms = Some(self.work_ms.map_or((start, start), |(first, last)| {
+            (first.min(start), last.max(start))
+        }));
     }
 
     fn timed_receipt(&mut self) {
-        self.needs_later_start = false;
-        self.earliest_work_ms = None;
+        self.work_ms = None;
     }
 
     fn item(&mut self, item: Item, foreground: bool, turn: &str, started_ms: Option<i64>) -> bool {
@@ -418,14 +417,17 @@ pub(super) fn confirm(
             // A command belonging to the proved earlier turn may finish after
             // this queue starts. Its host clock and the scoped start times of
             // all later opaque work must agree before using it as a witness.
-            if witness.is_some()
-                && p.turn_id.as_deref() == witness
+            if let Some(prior) = witness
+                && p.turn_id.as_deref() == Some(&prior.id)
                 && updated_at == Some(turn.started)
                 && receipt.payload.item.r#type == "CommandExecution"
-                && let (Some(done), Some(work)) = (p.completed_at_ms, admission.earliest_work_ms)
+                && let (Some(start), Some(done), Some((first, last))) =
+                    (p.started_at_ms, p.completed_at_ms, admission.work_ms)
+                && (prior.started..=prior.ended).contains(&start.div_euclid(1000))
+                && start <= done
                 && done.div_euclid(1000) > turn.started
-                && work >= done
-                && work.div_euclid(1000) <= turn.ended
+                && first >= done
+                && last.div_euclid(1000) <= turn.ended
             {
                 admission.timed_receipt();
             }
@@ -496,7 +498,7 @@ pub(super) fn confirm(
                 if !admission.user_message
                     || !admission.outputs.is_empty()
                     || !admission.sleeps.is_empty()
-                    || (admission.needs_later_start
+                    || (admission.work_ms.is_some()
                         && !updated_at.is_some_and(|t| turn.started > t))
                 {
                     return Ok(false);
