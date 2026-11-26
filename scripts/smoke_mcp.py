@@ -60,10 +60,12 @@ def main():
             daemon = start_daemon()
             a, b, outsider = connect("a.key"), connect("b.key"), connect("outsider.key")
             aid = a.call("gent_register", {"name": "a", "provider": "agents"})[0]["agent"]["id"]
-            assert a.call("gent_babysit")[0]["enabled"] is False
-            for name, arguments in [("gent_dashboard_get", {}), ("gent_babysit", {"enabled": True})]:
-                denial = a.call(name, arguments, error=True)
-                assert "Gent Pro" in denial["result"]["content"][0]["text"], denial
+            assert a.call("gent_babysit")[0]["enabled"] is True
+            for enabled in (False, True):
+                assert a.call("gent_babysit", {"enabled": enabled})[0]["enabled"] is enabled
+                assert a.call("gent_babysit")[0]["enabled"] is enabled
+            denial = a.call("gent_dashboard_get", error=True)
+            assert "Gent Pro" in denial["result"]["content"][0]["text"], denial
             bid = b.call("gent_register", {"name": "b", "provider": "arbitrary-b"})[0]["agent"]["id"]
             hid = outsider.call("gent_register", {"name": "hidden", "provider": "hidden-provider"})[0]["agent"]["id"]
             assert {agent["id"] for agent in a.call("gent_agents")[0]} == {aid, bid, hid}
