@@ -5,6 +5,7 @@ mod direct;
 mod preamble;
 mod previous;
 use crate::wake::codex::babysit::rollout::decision;
+pub(super) use preamble::foreground_start;
 use previous::Previous;
 pub(super) use previous::observe as previous_receipt;
 

@@ -56,6 +56,29 @@ pub(super) fn start(
     if row.r#type != "world_state" {
         return Ok(Some(row));
     }
+    declared_start(rows, line, thread, turn)
+}
+
+// Probe from the world-state row without consuming any ordinary proof records.
+// An unfamiliar row can still contribute to the ordinary reader's result.
+pub(in crate::wake::codex::ordinary::proof) fn foreground_start(
+    rows: &ReverseLines<'_>,
+    line: &mut Vec<u8>,
+    thread: &str,
+    turn: &str,
+) -> bool {
+    matches!(declared_start(&mut rows.clone(), line, thread, turn), Ok(Some(start))
+        if start.r#type == "event_msg"
+            && start.payload.r#type.as_deref() == Some("task_started")
+            && start.payload.turn_id.as_deref() == Some(turn))
+}
+
+fn declared_start(
+    rows: &mut ReverseLines<'_>,
+    line: &mut Vec<u8>,
+    thread: &str,
+    turn: &str,
+) -> Result<Option<Row>> {
     let Ok(delta) = serde_json::from_slice::<Record<Delta>>(line) else {
         return Ok(None);
     };

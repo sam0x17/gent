@@ -297,11 +297,12 @@ fn prove_turn(
     let mut ambiguous = false;
     let mut named_before_inputs = false;
     // Walk backwards across the first user receipt, its message and the root context.
-    // If anything intervenes before task_started, the mixed-input exception stays closed.
+    // Only a complete native tool declaration may separate that context from task_started.
     let mut proven = Vec::new();
     let mut pending_input = None::<ForegroundInput>;
     let mut paired_message = false;
     let mut opening_context = false;
+    let mut declared_at_start = false;
     while Instant::now() < deadline && rows.previous(&mut line)? {
         if blocked && !babysit::rollout::ordinary_work(&line, &failed.thread, &turn)? {
             return Ok(None);
@@ -348,6 +349,16 @@ fn prove_turn(
                     && p.turn_id.as_ref() == Some(&turn)
                     && p.root_turn_id.as_ref() == Some(&turn)
                     && p.thread_id.as_ref().is_none_or(|id| id == &failed.thread);
+            }
+            if next_is_context
+                && record.r#type == "world_state"
+                && !blocked
+                && !descendant
+                && failed.handoff_parent
+                && inputs.len() > 1
+            {
+                declared_at_start =
+                    handoff::foreground_start(&rows, &mut line, &failed.thread, &turn);
             }
             if legacy && record.r#type == "response_item" && legacy::unpaired_user(&line)? {
                 return Ok(None);
@@ -610,7 +621,7 @@ fn prove_turn(
                     && failed.handoff_parent
                     && a.turn_trigger.as_deref() == Some("user")
                     && header.payload.history_mode.as_deref() == Some("paginated")
-                    && next_is_context
+                    && (next_is_context || declared_at_start)
                     && !ambiguous
                     && sources.len() == additional_client_ids.len() + 1
                     && proven.len() == sources.len()
