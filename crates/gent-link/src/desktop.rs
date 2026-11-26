@@ -156,7 +156,7 @@ fn install_icon(home: &Path) -> Result<std::path::PathBuf> {
         ),
         (
             &about,
-            include_bytes!("../../../assets/branding/inkling.svg").as_slice(),
+            include_bytes!("../branding/inkling.svg").as_slice(),
         ),
     ] {
         if fs::read(path).ok().as_deref() != Some(image) {
