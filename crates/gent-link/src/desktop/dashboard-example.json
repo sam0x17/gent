@@ -1,0 +1,13 @@
+{
+  "chat": "Example dashboard",
+  "board": {
+    "title": "Test run",
+    "widgets": [
+      {"kind": "progress", "label": "Tests passed", "value": 18, "max": 24, "unit": "of 24"},
+      {"kind": "events", "label": "Latest results", "value": ["All 6 login tests passed.", "Checkout tests started."]},
+      {"kind": "text", "label": "How dashboards work", "value": "Each registered chat on a Pro cluster can publish one dashboard. When the chat posts new results, Gent Desktop shows them across the cluster."},
+      {"kind": "text", "label": "Ask a registered chat to build your dashboard", "value": "Make a Gent dashboard for this test run. Show how many tests have passed and list any failures."},
+      {"kind": "text", "label": "Then ask it for updates", "value": "Update my dashboard after each test batch."}
+    ]
+  }
+}

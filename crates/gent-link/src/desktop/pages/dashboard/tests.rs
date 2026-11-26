@@ -110,7 +110,7 @@ async fn free_desktop_clears_cached_boards_and_refuses_old_clicks() {
         pages.dashboard.view_mut().unwrap().hide(agent).unwrap();
         assert_eq!(
             pages.respond(&home, op).await,
-            json!({"page":"dashboard","pro_required":true,"rows":[],"hidden":[]})
+            json!({"page":"dashboard","pro_required":true,"rows":[],"hidden":[],"example":example()})
         );
         assert!(pages.dashboard.view.is_none());
     }
@@ -126,6 +126,49 @@ fn paid_home() -> (tempfile::TempDir, PathBuf) {
 
 fn request(op: &str, agent: Uuid) -> String {
     json!({"op":op,"agent":agent}).to_string()
+}
+
+#[tokio::test]
+async fn example_requires_a_complete_empty_snapshot_even_with_retained_labels() {
+    let (_root, home) = paid_home();
+    let file = active_file(&home).unwrap();
+    let mut pages = Pages::default();
+    let resize = r#"{"op":"dashboard_layout","chart_widths":[320]}"#;
+    let first = pages.respond(&home, r#"{"op":"dashboard"}"#).await;
+    assert!(first["error"].is_string() && first.get("example").is_none());
+    assert!(pages.respond(&home, resize).await.get("example").is_none());
+
+    let agent = Uuid::new_v4();
+    let layout = Layout::default();
+    pages
+        .dashboard
+        .refresh(&file, layout.clone(), vec![board(agent, "Runner")])
+        .unwrap();
+    let hidden = pages
+        .respond(&home, &request("dashboard_hide", agent))
+        .await;
+    assert_eq!(hidden["rows"], json!([]));
+    assert!(hidden.get("example").is_none());
+    let deleted = pages.dashboard.refresh(&file, layout, vec![]).unwrap();
+    assert_eq!(deleted["rows"], json!([]));
+    assert_eq!(deleted["hidden"], hidden["hidden"]);
+    let empty = pages.respond(&home, resize).await;
+    assert_eq!(empty["example"], example());
+    assert!(empty.get("pro_required").is_none());
+    assert!(empty["example"].get("agent").is_none());
+    let widgets = empty["example"]["board"]["widgets"].as_array().unwrap();
+    assert!(
+        widgets
+            .iter()
+            .all(|w| matches!(w["kind"].as_str(), Some("progress" | "events" | "text")))
+    );
+    assert_eq!(
+        pages
+            .respond(&home, &request("dashboard_restore", agent))
+            .await["example"],
+        example()
+    );
+    assert!(!file.exists());
 }
 
 #[tokio::test]

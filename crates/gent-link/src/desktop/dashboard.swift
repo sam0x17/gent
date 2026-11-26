@@ -195,8 +195,9 @@ final class DashboardTab: NSObject {
     private var lastPalette: [String: [Int]]?
     private var lastWidths: [Int] = []
     private var pendingLayout: DispatchWorkItem?
-    private var rows: [[String: Any]] = []
+    private var rows: [[String: Any]]?
     private var hidden: [[String: String]] = []
+    private var example: [String: Any]?
     private var cards: [NSBox] = []
     private var columns = 0
     private static let cardSpacing: CGFloat = 10
@@ -296,36 +297,41 @@ final class DashboardTab: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: update)
     }
 
+    private var displayedRows: [[String: Any]] {
+        if let example, !showingFeedback { return [example] }
+        return rows ?? []
+    }
+
     func receive(_ reply: [String: Any]) {
+        let previous = displayedRows
         let locked = reply["pro_required"] as? Bool == true
-        if locked {
-            setHidden([])
-        } else if let next = reply["hidden"] as? [[String: String]] {
-            setHidden(next)
-        }
-        let nextRows: [[String: Any]]? = locked ? [] : reply["rows"] as? [[String: Any]]
-        if let next = nextRows, !NSArray(array: rows).isEqual(to: next) {
-            let position = scroll.documentVisibleRect.origin
+        if let next: [[String: Any]] = locked ? [] : reply["rows"] as? [[String: Any]] {
             rows = next
-            cards = next.compactMap(makeCard)
-            arrangeCards()
-            view.layoutSubtreeIfNeeded()
-            grid.scroll(position)
-        }
-        guard nextRows != nil || reply["unchanged"] as? Bool == true || reply["hidden"] != nil else {
-            let message = (reply["error"] ?? reply["notice"]) as? String ?? ""
-            showingFeedback = !message.isEmpty
-            showNotice(message)
-            return
+            example = next.isEmpty ? reply["example"] as? [String: Any] : nil
         }
         pricing.isHidden = !locked
         if locked {
+            setHidden([])
             showingFeedback = false
             showNotice("Dashboards require an active Gent Pro plan for this cluster.")
-        } else if !showingFeedback || reply["layout_only"] as? Bool != true {
-            showingFeedback = false
-            let empty = hidden.isEmpty ? "No chats have published a dashboard." : "All dashboards are hidden."
-            showNotice(rows.isEmpty ? empty : "")
+        } else {
+            if let next = reply["hidden"] as? [[String: String]] { setHidden(next) }
+            if let message = (reply["error"] ?? reply["notice"]) as? String {
+                showingFeedback = true
+                showNotice(message)
+            } else if !showingFeedback || reply["layout_only"] as? Bool != true {
+                showingFeedback = false
+                let empty = hidden.isEmpty || example != nil ? "No chats have published a dashboard." : "All dashboards are hidden."
+                showNotice(rows?.isEmpty == true ? empty : "")
+            }
+        }
+        let displayed = displayedRows
+        if !NSArray(array: previous).isEqual(to: displayed) {
+            let position = scroll.documentVisibleRect.origin
+            cards = displayed.compactMap(makeCard)
+            arrangeCards()
+            view.layoutSubtreeIfNeeded()
+            grid.scroll(position)
         }
     }
 
@@ -451,6 +457,7 @@ final class DashboardTab: NSObject {
             let title = item["label"] as? String ?? ""
             let kind = item["kind"] as? String ?? ""
             let value = item["value"]
+            if (kind == "button" || kind == "link") && row["agent"] == nil { continue }
             let section = content.addSection()
             if kind == "metric", let previous = previousMetric { content.setCustomSpacing(4, after: previous) }
             previousMetric = kind == "metric" ? section : nil
