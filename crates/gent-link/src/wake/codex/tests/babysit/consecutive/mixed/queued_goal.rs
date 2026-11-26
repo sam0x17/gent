@@ -14,6 +14,8 @@ async fn queue_drained_after_goal_failure_in_same_second() -> Result<()> {
         "goal replaced",
         "foreign witness",
         "early witness",
+        "command started after owner finished",
+        "impossible file time",
         "early exec",
         "no exec start",
         "refused command",
@@ -82,6 +84,12 @@ async fn queue_drained_after_goal_failure_in_same_second() -> Result<()> {
             json!({"id":"command","type":"CommandExecution","status":"failed","source":"unified_exec_startup"}),
             (second + i64::from(case != "early witness")) * 1000,
         );
+        witness["payload"]["started_at_ms"] =
+            json!(if case == "command started after owner finished" {
+                (second + 1) * 1000
+            } else {
+                (second - 1) * 1000
+            });
         if case == "foreign witness" {
             witness["payload"]["turn_id"] = json!(Uuid::new_v4());
         }
@@ -110,7 +118,13 @@ async fn queue_drained_after_goal_failure_in_same_second() -> Result<()> {
             &queued,
             json!({"type":"FileChange","id":"file",
             "status":if case == "interrupted file" {"interrupted"} else {"completed"}}),
-            (second + 2) * 1000,
+            (second
+                + if case == "impossible file time" {
+                    10
+                } else {
+                    2
+                })
+                * 1000,
         ));
         if case == "early supplement" {
             rows.push(supplement(&queued, "too-early"));

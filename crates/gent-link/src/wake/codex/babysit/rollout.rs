@@ -81,7 +81,11 @@ impl Evidence {
             if header.r#type != "session_meta" || header.payload.id != *thread {
                 return Ok(None);
             }
-            let mut rows = ReverseLines::new(&file, before.size, !candidate.later.is_empty())?;
+            let mut rows = ReverseLines::new(
+                &file,
+                before.size,
+                !candidate.later.is_empty() || candidate.preceding.is_some(),
+            )?;
             let mut line = Vec::new();
             let mut receipt_turns = HashSet::new();
             let mut admissions = queued_exec::Queue::default();
@@ -94,10 +98,11 @@ impl Evidence {
                 .as_str()
                 .context("missing anchor ID")?;
             older.insert(anchor_id);
-            let prior_id = candidate
+            let prior_times = candidate
                 .preceding
                 .as_ref()
-                .and_then(|p| p.turn["id"].as_str());
+                .and_then(|p| Completed::read(&p.turn));
+            let prior_id = prior_times.as_ref().map(|p| p.id.as_str());
 
             for later in candidate
                 .later
@@ -219,7 +224,7 @@ impl Evidence {
                         &mut line,
                         thread,
                         &failed,
-                        queued::Source::Queue(&mut admissions, prior_id),
+                        queued::Source::Queue(&mut admissions, prior_times.as_ref()),
                         prior_id.map(|_| goal.updated_at),
                         &older,
                     )? || !admissions.bound()
