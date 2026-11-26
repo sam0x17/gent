@@ -112,6 +112,7 @@ impl StoreSession<'_> {
             let mut attempt = self.db.prepare(
                 "SELECT 1 FROM wake_dispatches WHERE agent=?1 AND attempt_id=?2
                  UNION ALL SELECT 1 FROM babysitter_chat_attempts WHERE agent=?1 AND attempt=?2
+                 UNION ALL SELECT 1 FROM babysitter_attempts WHERE agent=?1 AND attempt=?2
                  LIMIT 1",
             )?;
             for id in std::iter::once(first).chain(additional_client_ids.iter().map(String::as_str))
@@ -188,11 +189,12 @@ impl StoreSession<'_> {
                 // the human retry sequence, including for an older daemon after rollback.
                 (turn.clone(), started_at, 0, None)
             }
-            ChatOrigin::Continuation { attempt } => {
+            ChatOrigin::Continuation { attempt }
+            | ChatOrigin::SteeredContinuation { attempt, .. } => {
                 // Admission is durable even if turn/start's reply was lost. Only
                 // the host adapter that observed the matching native input can continue it.
                 let parent = self.db.query_row(
-                    "SELECT operator,operator_at,ordinal,claimed_at,turn FROM babysitter_chat_attempts
+                    "SELECT operator,operator_at,ordinal,claimed_at,turn,failed_at FROM babysitter_chat_attempts
                      WHERE agent=?1 AND attempt=?2 AND admitted=1 AND cancelled=0
                      AND EXISTS(SELECT 1 FROM babysitter_chat_attempts root WHERE root.agent=?1
                                 AND root.turn=babysitter_chat_attempts.operator AND root.failed_at>=?3)
@@ -205,14 +207,49 @@ impl StoreSession<'_> {
                             row.get::<_, i64>(2)?,
                             row.get::<_, i64>(3)?,
                             row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
                         ))
                     },
                 ).optional()?;
-                let Some((operator, operator_at, previous, claimed, parent)) = parent else {
+                let Some((operator, operator_at, previous, claimed, parent, previous_failure)) =
+                    parent
+                else {
                     return Ok(no);
                 };
                 if failed < claimed || !retry_due(previous, failed, now) {
                     return Ok(no);
+                }
+                if let ChatOrigin::SteeredContinuation {
+                    root,
+                    parent: native_parent,
+                    parent_failed_at,
+                    started_at,
+                    additional_client_ids,
+                    ..
+                } = origin
+                {
+                    let Some((first, rest)) = additional_client_ids.split_first() else {
+                        return Ok(no);
+                    };
+                    if root.to_string() != operator
+                        || native_parent.to_string() != parent
+                        || turn == parent
+                        || turn == operator
+                        || parent_failed_at != previous_failure
+                        || !(claimed..=failed).contains(&started_at)
+                        || first.trim().is_empty()
+                        || additional_client_ids.len() >= MAX_CHAT_INPUTS
+                        || !self.chat_operator_inputs_allowed(who, &turn, Some(first), rest)?
+                        || self
+                            .db
+                            .prepare(
+                                "SELECT 1 FROM wake_dispatches WHERE agent=?1 AND attempt_id=?2
+                                 UNION ALL SELECT 1 FROM babysitter_attempts WHERE agent=?1 AND attempt=?2",
+                            )?
+                            .exists(params![who.id, attempt.to_string()])?
+                    {
+                        return Ok(no);
+                    }
                 }
                 (operator, operator_at, previous + 1, Some(parent))
             }

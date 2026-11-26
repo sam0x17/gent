@@ -369,6 +369,142 @@ async fn ordinary_chain_expires_from_original_failure_even_when_latest_failure_i
         pair.agent(0, claim(next, failed, ChatOrigin::Continuation { attempt }))?["claim"]
             .is_null()
     );
+    let steered = ChatOrigin::SteeredContinuation {
+        attempt,
+        root: turn,
+        parent: turn,
+        started_at: base,
+        parent_failed_at: base,
+        additional_client_ids: vec!["human".into()],
+    };
+    assert!(pair.agent(0, claim(next, failed, steered))?["claim"].is_null());
+    Ok(())
+}
+
+#[tokio::test]
+async fn steered_continuation_claim_binds_every_input_to_the_original_budget() -> Result<()> {
+    let mut p = Pair::new().await;
+    config::set_ordinary_babysitter_enabled(p.homes[0].path(), true)?;
+    let base = now() + 5;
+    let root = Uuid::new_v4();
+    let child = Uuid::new_v4();
+    let failed = base + 1549;
+    let clock = |p: &Pair, t| {
+        p.stores[0]
+            .db
+            .execute("UPDATE request_clock SET floor=?1", [t])
+    };
+    clock(&p, base)?;
+    let parent = p.agent(0, operator(root, base - 4))?;
+    let attempt: Uuid = serde_json::from_value(parent["claim"].clone())?;
+    let goal = p.agent(
+        0,
+        AgentOp::BabysitterClaim {
+            turn: Uuid::new_v4(),
+            goal: "a".repeat(64),
+            failed_at: base,
+            reason: Failure::RequestPayload,
+        },
+    )?;
+    let goal = goal["claim"].as_str().unwrap();
+    let wake = Uuid::new_v4().to_string();
+    p.stores[0].db.execute("INSERT INTO wake_dispatches(message_id,agent,attempt_id,claimed_at,payload) VALUES(?1,?2,?3,?4,?5)",
+        params![Uuid::now_v7().to_string(),p.agents[0],wake,base-5,"{}"])?;
+    let origin = json!({"kind":"steered_continuation","root":root,"parent":root,"attempt":attempt,
+        "started_at":base,"parent_failed_at":base-4,"additional_client_ids":["human"]});
+    let request = |v: Value| claim(child, failed, serde_json::from_value(v).unwrap());
+    // A claimed but never admitted parent cannot authorize a native child.
+    clock(&p, failed + 15)?;
+    assert!(p.agent(0, request(origin.clone()))?["claim"].is_null());
+    // Reconstruct the prior durable admission with a lost turn/start response.
+    p.stores[0].db.execute(
+        "UPDATE babysitter_chat_attempts SET admitted=1 WHERE attempt=?1",
+        [attempt.to_string()],
+    )?;
+    p.reopen(0);
+    for (key, value) in [
+        ("root", json!(child)),
+        ("parent", json!(child)),
+        ("attempt", json!(Uuid::new_v4())),
+        ("started_at", json!(base - 1)),
+        ("started_at", json!(failed + 1)),
+        ("parent_failed_at", json!(base)),
+        ("additional_client_ids", json!([])),
+        ("additional_client_ids", json!([" "])),
+        ("additional_client_ids", json!(["a", "a"])),
+        ("additional_client_ids", json!(["a", attempt])),
+        ("additional_client_ids", json!([wake, "a"])),
+        ("additional_client_ids", json!(["a", goal])),
+        ("additional_client_ids", json!(["x".repeat(257)])),
+        (
+            "additional_client_ids",
+            json!(
+                (0..MAX_CHAT_INPUTS)
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+            ),
+        ),
+    ] {
+        let mut bad = origin.clone();
+        bad[key] = value;
+        assert!(p.agent(0, request(bad))?["claim"].is_null(), "{key}");
+    }
+    for key in ["submission_id", "direct.turn_id"] {
+        let mut record = json!({"target":{"host":"codex"},"direct":{}});
+        if key == "submission_id" {
+            record[key] = json!(child);
+        } else {
+            record["direct"]["turn_id"] = json!(child);
+        }
+        p.stores[0].db.execute(
+            "UPDATE wake_dispatches SET payload=?1 WHERE attempt_id=?2",
+            params![record.to_string(), wake],
+        )?;
+        assert!(
+            p.agent(0, request(origin.clone()))?["claim"].is_null(),
+            "{key}"
+        );
+    }
+    p.stores[0].db.execute(
+        "UPDATE wake_dispatches SET payload='{}' WHERE attempt_id=?1",
+        [wake],
+    )?;
+    let next = p.agent(0, request(origin.clone()))?;
+    assert_eq!(next["parent"], json!(root));
+    assert_eq!(next["operator_at"], parent["operator_at"]);
+    assert!(p.agent(0, request(origin))?["claim"].is_null());
+    let next: Uuid = serde_json::from_value(next["claim"].clone())?;
+    assert_eq!(
+        p.agent(0, AgentOp::BabysitterChatCheck { attempt: next })?["eligible"],
+        true
+    );
+    let third = Uuid::new_v4();
+    let due = failed + 75;
+    let op = |turn, attempt, parent, start, previous_failure| {
+        claim(
+            turn,
+            start,
+            ChatOrigin::SteeredContinuation {
+                attempt,
+                root,
+                parent,
+                started_at: start,
+                parent_failed_at: previous_failure,
+                additional_client_ids: vec!["new".into()],
+            },
+        )
+    };
+    let last = op(third, next, child, failed + 15, failed);
+    clock(&p, due - 1)?;
+    assert!(p.agent(0, last.clone())?["claim"].is_null());
+    clock(&p, due)?;
+    let last = serde_json::from_value(p.agent(0, last)?["claim"].clone())?;
+    assert_eq!(
+        p.agent(0, AgentOp::BabysitterChatCheck { attempt: last })?["eligible"],
+        true
+    );
+    clock(&p, due + 120)?;
+    assert!(p.agent(0, op(Uuid::new_v4(), last, third, due, failed + 15))?["claim"].is_null());
     Ok(())
 }
 

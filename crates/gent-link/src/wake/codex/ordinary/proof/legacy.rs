@@ -93,6 +93,21 @@ impl Turn<'_> {
 }
 
 impl Row {
+    fn user_message_id(&self, turn: &Turn<'_>, client: &str) -> Option<&str> {
+        let p = &self.payload;
+        let id = p.id.as_deref()?;
+        (self.r#type == "response_item"
+            && p.r#type == "message"
+            && p.role.as_deref() == Some("user")
+            && !id.trim().is_empty()
+            && self.agrees(turn, id)
+            && p.client_id.as_deref().is_none_or(|id| id == client)
+            && p.internal_chat_message_metadata_passthrough
+                .as_ref()?
+                .user_input(turn))
+        .then_some(id)
+    }
+
     fn agrees(&self, turn: &Turn<'_>, item: &str) -> bool {
         turn.agrees(self.thread_id.as_deref(), self.turn_id)
             && turn.agrees(self.payload.thread_id.as_deref(), self.payload.turn_id)
@@ -130,6 +145,14 @@ impl MessageMetadata {
     }
 }
 
+// A scoped item receipt and its response message use different native item
+// IDs. Check the message against its own retained source and the receipt's turn.
+pub(super) fn user_source(line: &[u8], thread: &str, turn: Uuid, client: &str) -> Option<String> {
+    let message = serde_json::from_slice::<Row>(line).ok()?;
+    message.user_message_id(&Turn { thread, id: turn }, client)?;
+    message.payload.id
+}
+
 pub(super) fn input(
     rows: &mut ReverseLines<'_>,
     line: &mut Vec<u8>,
@@ -157,25 +180,22 @@ pub(super) fn input(
     let Ok(message) = serde_json::from_slice::<Row>(line) else {
         return Ok(None);
     };
-    let p = &message.payload;
-    let (Some(id), Some(metadata)) = (&p.id, &p.internal_chat_message_metadata_passthrough) else {
+    let turn = Turn { thread, id: turn };
+    let Some(id) = event
+        .payload
+        .client_id
+        .as_deref()
+        .and_then(|client| message.user_message_id(&turn, client))
+    else {
         return Ok(None);
     };
-    let turn = Turn { thread, id: turn };
-    if message.r#type != "response_item"
-        || p.r#type != "message"
-        || p.role.as_deref() != Some("user")
-        || id.trim().is_empty()
-        || !event.agrees(&turn, id)
-        || !message.agrees(&turn, id)
+    if !event.agrees(&turn, id)
         || event.payload.id.as_ref().is_some_and(|other| other != id)
         || event
             .payload
             .role
             .as_deref()
             .is_some_and(|role| role != "user")
-        || (p.client_id.is_some() && p.client_id != event.payload.client_id)
-        || !metadata.user_input(&turn)
     {
         return Ok(None);
     }
