@@ -270,8 +270,6 @@ final class SettingsTab: NSObject {
     private var checks: [String: NSButton] = [:]
     private var controls: [NSButton] = []
     private var loaded: [String: Bool] = [:]
-    private lazy var pricing = NSButton(title: "Babysitter requires Gent Pro · View plans", target: self, action: #selector(openPricing))
-    @objc private func openPricing() { NSWorkspace.shared.open(URL(string: "https://gent.link/pricing")!) }
     private var busy = false
 
     override init() {
@@ -294,10 +292,6 @@ final class SettingsTab: NSObject {
             checks[key] = button
             fields.append(button)
             if key == "updates" { fields.append(channel.view) }
-            if key == "babysitter" {
-                pricing.isHidden = true
-                fields.append(pricing)
-            }
             if key == "ordinary_babysitter" {
                 let detail = NSTextField(wrappingLabelWithString: "Sends “please continue” in eligible Codex chats on this node.")
                 detail.textColor = .secondaryLabelColor
@@ -363,12 +357,10 @@ final class SettingsTab: NSObject {
     private func enableControls() {
         for button in controls { button.isEnabled = !busy }
         for (key, button) in checks {
-            let needsPro = key == "babysitter" || (key == "ordinary_babysitter" && loaded[key] != true)
-            let available = loaded[key] != nil && (!needsPro || loaded["paid"] == true)
+            let available = loaded[key] != nil
             button.state = available && loaded[key] == true ? .on : .off
             button.isEnabled = !busy && available
         }
-        pricing.isHidden = loaded["paid"] != false
         text.isEditable = !busy
     }
 

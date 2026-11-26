@@ -37,20 +37,26 @@ func checkOrdinaryRecovery() {
     func show(paid: Bool, goals: Bool, chats: Bool) {
         pane.receive(["values": ["paid": paid, "babysitter": goals, "ordinary_babysitter": chats]])
     }
-    show(paid: true, goals: true, chats: false)
-    require(goal.state == .on && ordinary.state == .off && ordinary.isEnabled, "independent initial recovery preferences")
-    require(requests { ordinary.performClick(nil) } == [.json(["op":"set","key":"ordinary_babysitter","enabled":true])],
-            "ordinary recovery click submits just its own preference")
-    show(paid: true, goals: true, chats: true)
-    require(goal.state == .on && ordinary.state == .on, "ordinary recovery preserves enabled goal recovery")
-    require(requests { goal.performClick(nil) } == [.json(["op":"set","key":"babysitter","enabled":false])],
-            "goal recovery click submits just the goal preference")
-    show(paid: true, goals: false, chats: true)
-    require(goal.state == .off && ordinary.state == .on, "goals can be disabled while ordinary recovery runs")
-    show(paid: false, goals: false, chats: false)
-    require(!ordinary.isEnabled, "free node cannot opt into ordinary recovery")
-    show(paid: false, goals: false, chats: true)
-    require(ordinary.isEnabled && ordinary.state == .on, "a lapsed plan can clear a saved opt-in")
+    pane.receive(["error": "node configuration is missing"])
+    require(!goal.isEnabled && !ordinary.isEnabled, "recovery controls require a configured node")
+    for paid in [false, true] {
+        show(paid: paid, goals: true, chats: false)
+        require(goal.isEnabled && ordinary.isEnabled && goal.state == .on && ordinary.state == .off,
+                "both recovery preferences are editable with independent defaults")
+        require(requests { ordinary.performClick(nil) } == [.json(["op":"set","key":"ordinary_babysitter","enabled":true])],
+                "enable ordinary recovery")
+        show(paid: paid, goals: true, chats: true)
+        require(goal.state == .on && ordinary.state == .on, "ordinary recovery preserves goal recovery")
+        require(requests { goal.performClick(nil) } == [.json(["op":"set","key":"babysitter","enabled":false])],
+                "disable goal recovery")
+        show(paid: paid, goals: false, chats: true)
+        require(goal.state == .off && ordinary.state == .on, "goal opt-out preserves ordinary recovery")
+        require(requests { ordinary.performClick(nil) } == [.json(["op":"set","key":"ordinary_babysitter","enabled":false])],
+                "disable ordinary recovery")
+        show(paid: paid, goals: false, chats: false)
+        require(requests { goal.performClick(nil) } == [.json(["op":"set","key":"babysitter","enabled":true])],
+                "restore goal recovery")
+    }
 }
 
 let accountRead = Request.json(["op": "cluster"])
