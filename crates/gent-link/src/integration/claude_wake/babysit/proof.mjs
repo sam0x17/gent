@@ -271,7 +271,7 @@ await human();
 await timers.shift()();
 assert.equal(store.size,0);
 // The native sender cannot bind a bare "please continue" to a retained guard.
-// A paid node with ordinary chat recovery enabled must still leave this lane idle.
+// A node with ordinary chat recovery enabled must still leave this lane idle.
 await reload();
 writeFileSync(transcript,'');
 const priorPrompts = prompts.length;

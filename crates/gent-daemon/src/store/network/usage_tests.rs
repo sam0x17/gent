@@ -106,6 +106,7 @@ async fn usage_counts_original_sends_bytes_and_names_across_replication_and_clea
 #[tokio::test]
 async fn usage_counts_confirmed_submissions_once_and_excludes_goal_opt_out() -> Result<()> {
     let mut p = Pair::new().await;
+    std::fs::remove_file(p.homes[0].path().join("test-entitlement"))?;
     let at = now();
     let goal = |id: char| AgentOp::BabysitterClaim {
         goal: id.to_string().repeat(64),

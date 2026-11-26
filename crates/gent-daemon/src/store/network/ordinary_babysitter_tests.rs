@@ -235,10 +235,11 @@ async fn operator_claim_rejects_own_wake_and_ordinary_attempt_in_each_position()
 }
 
 #[tokio::test]
-async fn ordinary_checks_apply_both_preferences_entitlement_and_freshness() -> Result<()> {
+async fn ordinary_checks_apply_both_preferences_and_freshness_on_free() -> Result<()> {
     let mut p = Pair::new().await;
     let h = p.homes[0].path().to_path_buf();
     let clock = now();
+    std::fs::remove_file(h.join("test-entitlement"))?;
     config::set_ordinary_babysitter_enabled(&h, true)?;
     config::write_private(&h.join("babysitter-disabled"), b"")?;
     let turn = Uuid::now_v7();
@@ -270,10 +271,6 @@ async fn ordinary_checks_apply_both_preferences_entitlement_and_freshness() -> R
     config::set_ordinary_babysitter_enabled(&h, false)?;
     assert_eq!(p.agent(0, check.clone())?["eligible"], false);
     config::set_ordinary_babysitter_enabled(&h, true)?;
-    std::fs::remove_file(h.join("test-entitlement"))?;
-    assert_eq!(p.agent(0, check.clone())?["eligible"], false);
-    assert!(p.agent(0, operator(Uuid::now_v7(), clock))?["claim"].is_null());
-    crate::entitlements::grant_test(&h, &p.stores[0].config);
     p.agent(
         0,
         AgentOp::Babysit {

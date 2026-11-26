@@ -65,17 +65,13 @@ impl StoreSession<'_> {
         Ok(!self.home.join("babysitter-disabled").try_exists()? && self.babysitter_allowed(who)?)
     }
     pub(super) fn babysitter_allowed(&self, who: &Agent) -> Result<bool> {
-        Ok(crate::entitlements::paid(self.home, &self.config)
-            && self.db.query_row(
-                "SELECT COALESCE((SELECT enabled FROM babysitter_preferences WHERE agent=?1),1)",
-                [&who.id],
-                |r| r.get::<_, bool>(0),
-            )?)
+        Ok(self.db.query_row(
+            "SELECT COALESCE((SELECT enabled FROM babysitter_preferences WHERE agent=?1),1)",
+            [&who.id],
+            |r| r.get(0),
+        )?)
     }
     pub(super) fn babysit(&self, who: &Agent, setting: Option<bool>) -> Result<Value> {
-        if setting.is_some() {
-            require_pro(self.home, &self.config, "Babysitter")?;
-        }
         if let Some(on) = setting {
             self.db.execute("INSERT INTO babysitter_preferences VALUES(?1,?2) ON CONFLICT(agent) DO UPDATE SET enabled=excluded.enabled",params![who.id,on])?;
             if !on {

@@ -424,10 +424,6 @@ async fn babysitter_installed_plugin_and_native_transcript() {
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let home = home();
-    gent_daemon::entitlements::grant_test(
-        home.path(),
-        &gent_daemon::config::load(home.path()).unwrap(),
-    );
     config::set_ordinary_babysitter_enabled(home.path(), true).unwrap();
     let directory = home.path().join("claude");
     install::change(

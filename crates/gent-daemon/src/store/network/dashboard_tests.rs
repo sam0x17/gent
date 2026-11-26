@@ -570,7 +570,7 @@ async fn babysitter_recovers_fifteen_failures_in_one_goal_across_a_day() {
 }
 
 #[tokio::test]
-async fn losing_pro_blocks_boards_and_claims_without_blocking_messages_or_erasing_state() {
+async fn losing_pro_blocks_boards_but_preserves_babysitter_and_local_messages() {
     use gent_protocol::notifications::Failure;
 
     let mut pair = Pair::new().await;
@@ -623,17 +623,22 @@ async fn losing_pro_blocks_boards_and_claims_without_blocking_messages_or_erasin
     );
     assert_eq!(
         pair.agent(0, AgentOp::BabysitterCheck { attempt }).unwrap()["eligible"],
-        false
+        true
     );
     assert!(pair.agent(0, claim).unwrap()["claim"].is_null());
-    assert!(
+    assert_eq!(
         pair.agent(
             0,
             AgentOp::Babysit {
                 enabled: Some(false)
             }
         )
-        .is_err()
+        .unwrap()["enabled"],
+        false
+    );
+    assert_eq!(
+        pair.agent(0, AgentOp::BabysitterCheck { attempt }).unwrap()["eligible"],
+        false
     );
     // A locally delivered message does not need a cross-node data stream.
     let local_key = config::secret();
@@ -698,7 +703,7 @@ async fn losing_pro_blocks_boards_and_claims_without_blocking_messages_or_erasin
     assert_eq!(pair.agent(0, AgentOp::DashboardGet).unwrap()["revision"], 1);
     assert_eq!(
         pair.agent(0, AgentOp::Babysit { enabled: None }).unwrap()["enabled"],
-        true
+        false
     );
 
     // A lapsed receiver leaves the ordered queue available for its next lease.
