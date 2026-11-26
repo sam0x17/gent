@@ -198,6 +198,7 @@ final class DashboardTab: NSObject {
     private var rows: [[String: Any]]?
     private var hidden: [[String: String]] = []
     private var example: [String: Any]?
+    private var allHidden = false
     private var cards: [NSBox] = []
     private var columns = 0
     private static let cardSpacing: CGFloat = 10
@@ -304,8 +305,10 @@ final class DashboardTab: NSObject {
 
     func receive(_ reply: [String: Any]) {
         let previous = displayedRows
+        let wasExample = example != nil && !showingFeedback
         let locked = reply["pro_required"] as? Bool == true
         if let next: [[String: Any]] = locked ? [] : reply["rows"] as? [[String: Any]] {
+            allHidden = reply["all_hidden"] as? Bool == true
             rows = next
             example = next.isEmpty ? reply["example"] as? [String: Any] : nil
         }
@@ -319,9 +322,9 @@ final class DashboardTab: NSObject {
             if let message = (reply["error"] ?? reply["notice"]) as? String {
                 showingFeedback = true
                 showNotice(message)
-            } else if !showingFeedback || reply["layout_only"] as? Bool != true {
+            } else if !showingFeedback || (reply["layout_only"] as? Bool != true && reply["stale"] as? Bool != true) {
                 showingFeedback = false
-                let empty = hidden.isEmpty || example != nil ? "No chats have published a dashboard." : "All dashboards are hidden."
+                let empty = allHidden ? "All dashboards are hidden." : "No chats have published a dashboard."
                 showNotice(rows?.isEmpty == true ? empty : "")
             }
         }
@@ -331,7 +334,7 @@ final class DashboardTab: NSObject {
             cards = displayed.compactMap(makeCard)
             arrangeCards()
             view.layoutSubtreeIfNeeded()
-            grid.scroll(position)
+            grid.scroll(example != nil && !wasExample && !showingFeedback ? .zero : position)
         }
     }
 

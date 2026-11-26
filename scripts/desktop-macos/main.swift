@@ -976,15 +976,28 @@ func checkDashboardVisibility(_ desktop: Desktop) {
     let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         .deletingLastPathComponent().deletingLastPathComponent()
     let spec = repo.appendingPathComponent("crates/gent-link/src/desktop/dashboard-example.json")
-    let example = try! JSONSerialization.jsonObject(with: Data(contentsOf: spec)) as! [String: Any]
+    var example = try! JSONSerialization.jsonObject(with: Data(contentsOf: spec)) as! [String: Any]
+    var board = example["board"] as! [String: Any]
+    var widgets = board["widgets"] as! [[String: Any]]
+    let graph = widgets.firstIndex { $0["kind"] as? String == "graph" }!
+    widgets[graph]["chart_svg"] = #"<svg xmlns="http://www.w3.org/2000/svg" width="760" height="232"><path d="M4 100L245 20L490 70L750 45" fill="none" stroke="blue"/></svg>"#
+    widgets[graph]["chart_description"] = "Tests passed per batch. 4 samples."
+    board["widgets"] = widgets
+    example["board"] = board
     let empty: [String: Any] = ["rows": [], "hidden": [], "example": example]
     let free = empty.merging(["pro_required": true]) { _, new in new }
-    resizeDesktop(desktop, width: 510, height: 400)
+    resizeDesktop(desktop, width: 850, height: 605)
     reply(free)
     let sample = cards().first!
     require(cards().count == 1 && shows("Test run") && shows("Example dashboard") && shows("18 of 24")
             && descendants(sample, of: NSButton.self).isEmpty, "Free displays one labeled, read-only example")
-    require(shows("Each registered chat on a Pro cluster can publish one dashboard. When the chat posts new results, Gent Desktop shows them across the cluster."), "example explains who publishes results and where updates appear")
+    let intro = descendants(sample, of: NSTextField.self).first { $0.stringValue == "Ask a registered chat to build a dashboard. On Pro, each chat can publish one and update it across your cluster." }!
+    let plot = descendants(sample, of: NSImageView.self).first!
+    let clip = intro.enclosingScrollView!.contentView
+    require(plot.accessibilityLabel() == "Tests passed per batch. 4 samples." && plot.image != nil
+            && [intro as NSView, plot as NSView].allSatisfy { clip.bounds.insetBy(dx: -1, dy: -1).contains($0.convert($0.bounds, to: clip)) },
+            "the first viewport explains the example and shows its graph")
+    resizeDesktop(desktop, width: 510, height: 400)
     let progress = descendants(sample, of: NSProgressIndicator.self).first!
     require(progress.accessibilityLabel() == "Tests passed" && progress.doubleValue == 18 && progress.maxValue == 24,
             "example progress identifies the completed tests")
@@ -1044,22 +1057,25 @@ func checkDashboardVisibility(_ desktop: Desktop) {
     require(hideRequests == [.json(["op": "dashboard_hide", "agent": "reviewer"])],
             "hide sends only the displayed agent, received \(hideRequests)")
     require(cards().first === card, "the displayed card waits for supervisor data after hide")
-    reply(["rows": [], "hidden": [review]])
-    require(cards().isEmpty && shows("All dashboards are hidden."), "hiding the last card shows the all-hidden state")
+    reply(["rows": [], "hidden": [review], "all_hidden": true, "example": example])
+    require(cards().count == 1 && shows("Example dashboard") && shows("All dashboards are hidden."),
+            "hiding the last card shows the example and explains the hidden boards")
     guard let restore = restoreLink() else { fatalError("Missing restore link with all dashboards hidden") }
     require(restore.controlSize == .small && restore.accessibilityRole() == .link && restore.action != nil && restore.isEnabled
             && restore.menu?.items.map({ $0.title }) == ["Build — Review"], "even one hidden board is a named choice")
 
-    reply(["layout_only": true, "rows": [], "hidden": []])
+    reply(["layout_only": true, "rows": [], "hidden": [], "all_hidden": false, "example": example])
     require(restoreLink() == nil && shows("No chats have published a dashboard."), "cached data updates the empty state")
-    reply(["unchanged": true, "hidden": [review, first, second]])
+    reply(["rows": [], "hidden": [review, first, second], "example": example, "all_hidden": false])
+    require(shows("No chats have published a dashboard.") && shows("Example dashboard"),
+            "retained labels still have a restore menu after their boards disappear")
     guard let menu = restore.menu else { fatalError("Missing hidden dashboard choices") }
     let labels = menu.items.map { $0.title }
     require(Set(labels) == ["Build — Review", "Build — Runner (runner-1)", "Build — Runner (runner-2)"]
             && labels.count == 3, "restore choices distinguish identical titles and chat names")
     let intermediate: [[String: Any]] = [
         ["notice": "Action sent"], ["unchanged": true, "layout_only": true], ["error": "Refresh failed"],
-        ["rows": [], "layout_only": true], ["rows": []], ["unchanged": true],
+        ["rows": [], "layout_only": true], ["rows": [], "example": example, "all_hidden": true], ["unchanged": true],
     ]
     for fields in intermediate {
         reply(fields)
@@ -1070,9 +1086,9 @@ func checkDashboardVisibility(_ desktop: Desktop) {
     let restoreRequests = requests { menu.performActionForItem(at: selection) }
     require(restoreRequests == [.json(["op": "dashboard_restore", "agent": "runner-2"])],
             "restore sends only the selected duplicate's agent, received \(restoreRequests)")
-    require(cards().isEmpty, "restoring a card waits for supervisor data")
+    require(shows("Example dashboard"), "restoring a card waits for supervisor data")
     reply(["rows": [row(second)], "hidden": [review, first]])
-    require(cards().count == 1 && shows("Runner") && !shows("All dashboards are hidden.")
+    require(cards().count == 1 && shows("Runner") && !shows("Example dashboard") && !shows("All dashboards are hidden.")
             && restoreLink()?.menu?.items.map({ $0.title }) == ["Build — Review", "Build — Runner"],
             "restored card returns and the menu lists the remaining publishers")
     reply(["unchanged": true, "hidden": []])

@@ -110,10 +110,38 @@ async fn free_desktop_clears_cached_boards_and_refuses_old_clicks() {
         pages.dashboard.view_mut().unwrap().hide(agent).unwrap();
         assert_eq!(
             pages.respond(&home, op).await,
-            json!({"page":"dashboard","pro_required":true,"rows":[],"hidden":[],"example":example()})
+            json!({"page":"dashboard","pro_required":true,"rows":[],"hidden":[],"example":example(&Layout::default())})
         );
         assert!(pages.dashboard.view.is_none());
     }
+}
+
+#[tokio::test]
+async fn free_example_renders_at_the_single_card_width_and_in_the_requested_palette() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("free");
+    let mut pages = Pages::default();
+    let first = pages
+        .respond(&home, r#"{"op":"dashboard","chart_widths":[720,336]}"#)
+        .await;
+    let dark = pages.respond(&home, r#"{"op":"dashboard_layout","chart_widths":[720,336],
+        "palette":{"surface":[24,24,24],"text":[230,230,230],"secondary":[170,170,170],"accent":[255,170,80]}}"#).await;
+    let svg = |reply: &Value| {
+        reply["example"]["board"]["widgets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|w| w.get("chart_svg"))
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(svg(&first).contains(r#"viewBox="0 0 720 "#));
+    assert!(svg(&dark).contains(r#"viewBox="0 0 720 "#));
+    assert_ne!(svg(&first), svg(&dark));
+    assert_eq!(dark["pro_required"], true);
+    assert!(!home.exists());
 }
 
 fn paid_home() -> (tempfile::TempDir, PathBuf) {
@@ -129,7 +157,7 @@ fn request(op: &str, agent: Uuid) -> String {
 }
 
 #[tokio::test]
-async fn example_requires_a_complete_empty_snapshot_even_with_retained_labels() {
+async fn example_distinguishes_hidden_boards_from_retained_labels_and_failed_reads() {
     let (_root, home) = paid_home();
     let file = active_file(&home).unwrap();
     let mut pages = Pages::default();
@@ -148,25 +176,46 @@ async fn example_requires_a_complete_empty_snapshot_even_with_retained_labels() 
         .respond(&home, &request("dashboard_hide", agent))
         .await;
     assert_eq!(hidden["rows"], json!([]));
-    assert!(hidden.get("example").is_none());
+    assert_eq!(hidden["all_hidden"], true);
+    assert_eq!(hidden["example"], example(&layout));
+    let restored = pages
+        .respond(&home, &request("dashboard_restore", agent))
+        .await;
+    assert_eq!(restored["rows"][0]["agent"], json!(agent));
+    assert!(restored.get("example").is_none());
+    pages
+        .respond(&home, &request("dashboard_hide", agent))
+        .await;
     let deleted = pages.dashboard.refresh(&file, layout, vec![]).unwrap();
-    assert_eq!(deleted["rows"], json!([]));
     assert_eq!(deleted["hidden"], hidden["hidden"]);
     let empty = pages.respond(&home, resize).await;
-    assert_eq!(empty["example"], example());
+    assert_eq!(empty["all_hidden"], false);
     assert!(empty.get("pro_required").is_none());
     assert!(empty["example"].get("agent").is_none());
     let widgets = empty["example"]["board"]["widgets"].as_array().unwrap();
     assert!(
         widgets
             .iter()
-            .all(|w| matches!(w["kind"].as_str(), Some("progress" | "events" | "text")))
+            .all(|w| matches!(w["kind"].as_str(), Some("progress" | "graph" | "text")))
+    );
+    let graph = widgets.iter().find(|w| w["kind"] == "graph").unwrap();
+    assert!(
+        graph["chart_svg"]
+            .as_str()
+            .unwrap()
+            .contains(r#"viewBox="0 0 320 "#)
+    );
+    assert!(
+        graph["chart_description"]
+            .as_str()
+            .unwrap()
+            .contains("4 samples")
     );
     assert_eq!(
         pages
             .respond(&home, &request("dashboard_restore", agent))
             .await["example"],
-        example()
+        empty["example"]
     );
     assert!(!file.exists());
 }

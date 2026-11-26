@@ -203,7 +203,8 @@ def exercise_ordinary_recovery(cli):
 def check_dashboard_example():
     get("Test run", "label")
     get("Example dashboard", "label")
-    get("Each registered chat on a Pro cluster can publish one dashboard. When the chat posts new results, Gent Desktop shows them across the cluster.", "label")
+    get("Ask a registered chat to build a dashboard. On Pro, each chat can publish one and update it across your cluster.", "label")
+    get("Tests passed per batch", "image")
     get("18 of 24", "label")
     assert get("Tests passed", "progress bar").queryValue().currentValue == .75
     for prompt in ("Make a Gent dashboard for this test run. Show how many tests have passed and list any failures.",
@@ -414,7 +415,7 @@ def exercise_dashboard(fixture, agent, cli, xid):
     assert not find(restore) and not find("Example dashboard", "label")
     click("Hide dashboard")
     get("All dashboards are hidden.", "label")
-    assert not find("Example dashboard", "label")
+    check_dashboard_example()
     assert not find(board["title"], "label") and not find("Inspect job")
     assert call("get") == {"revision": 1, "board": board}
     tab("Chats")
@@ -424,7 +425,7 @@ def exercise_dashboard(fixture, agent, cli, xid):
     get(f"{board['title']} — {agent['name']}", "menu item")
     subprocess.run(["xdotool", "key", "Home", "Return"], check=True)
     get(board["title"], "label")
-    assert not find(restore)
+    assert not find(restore) and not find("Example dashboard", "label")
     open_report([url])
     for name in ("Job queued", "Throughput: 72%", "Queued\nStarted", "15 ms", "6 jobs"):
         get(name, "label")

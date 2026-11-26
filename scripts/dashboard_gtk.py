@@ -14,7 +14,7 @@ from desktop_dashboard_samples import chart_widgets, image_uri
 from desktop_fixture_browser import install_fixture_browser
 
 
-def exercise_visibility(pane, Gtk, widgets, requests, boards):
+def exercise_visibility(pane, Gtk, widgets, requests, boards, example):
     from gi.repository import Pango
 
     restore, = widgets(pane, Gtk.MenuButton)
@@ -54,8 +54,10 @@ def exercise_visibility(pane, Gtk, widgets, requests, boards):
     pane.receive({"layout_only": True, "rows": rows[:1]})
     assert pane.grid.get_children() == [remaining] and restore.get_popup() == menu
 
-    pane.receive({"rows": [], "hidden": hidden})
-    assert not pane.grid.get_children() and pane.notice.get_text() == "All dashboards are hidden."
+    pane.receive({"rows": [], "hidden": hidden, "all_hidden": True, "example": example})
+    sample, = pane.grid.get_children()
+    assert sample.publisher.get_text() == "Example dashboard" and not widgets(sample, Gtk.Button)
+    assert restore.get_visible() and pane.notice.get_text() == "All dashboards are hidden."
     choices = restore.get_popup().get_children()
     for choice, row in zip(choices, rows, strict=True):
         assert choice.get_label() == f"Same title — Fixture chat ({row['agent']})"
@@ -67,11 +69,13 @@ def exercise_visibility(pane, Gtk, widgets, requests, boards):
     pane.receive({"unchanged": True, "hidden": hidden[1:]})
     choice, = restore.get_popup().get_children()
     assert choice.get_label() == "Same title — Fixture chat" and pane.notice.get_text() == "All dashboards are hidden."
-    pane.receive({"layout_only": True, "rows": [], "hidden": []})
+    pane.receive({"layout_only": True, "rows": [], "hidden": [], "all_hidden": False, "example": example})
     assert not restore.get_visible() and pane.notice.get_text() == "No chats have published a dashboard."
     pane.receive({"layout_only": True, "unchanged": True, "hidden": hidden})
-    assert restore.get_visible() and pane.notice.get_text() == "All dashboards are hidden."
+    assert restore.get_visible() and pane.notice.get_text() == "No chats have published a dashboard."
     pane.receive({"rows": rows[1:], "hidden": hidden[:1]})
+    real, = pane.grid.get_children()
+    assert real.publisher.get_text() == "Fixture chat"
     choice, = restore.get_popup().get_children()
     choice.activate()
     assert requests.pop() == ("dashboard_restore", {"agent": rows[0]["agent"]})
@@ -486,9 +490,20 @@ def exercise(root):
     inspect.clicked()
     assert requests == [("dashboard_click", {"agent": "agent-0", "revision": 1, "widget": "inspect"})]
     example = json.loads((desktop / "dashboard-example.json").read_text())
+    graph, = [w for w in example["board"]["widgets"] if w["kind"] == "graph"]
+    graph.update(chart_svg=svg, chart_description="Tests passed per batch. 4 samples.")
     empty = {"rows": [], "hidden": [], "example": example}
     free = dict(empty, pro_required=True)
+    window.resize(850, 605)
     pane.receive(free)
+    settle()
+    sample, = pane.grid.get_children()
+    plot, = widgets(sample, Gtk.DrawingArea)
+    assert plot.get_accessible().get_name() == "Tests passed per batch"
+    intro = next(label for label in widgets(sample, Gtk.Label) if label.get_text().startswith("Ask a registered chat to build a dashboard."))
+    for widget in [intro, plot]:
+        _, top = widget.translate_coordinates(viewport, 0, 0)
+        assert 0 <= top < viewport.get_allocated_height()
     window.resize(284, 424)
     settle()
     card, = pane.grid.get_children()
@@ -498,7 +513,7 @@ def exercise(root):
     assert bar.get_fraction() == .75 and bar.get_accessible().get_name() == "Tests passed"
     assert h.get_page_size() == h.get_upper() and viewport.get_allocated_width() <= 260
     labels = {label.get_text(): label for label in widgets(card, Gtk.Label)}
-    assert "Each registered chat on a Pro cluster can publish one dashboard. When the chat posts new results, Gent Desktop shows them across the cluster." in labels
+    assert "Ask a registered chat to build a dashboard. On Pro, each chat can publish one and update it across your cluster." in labels
     assert "18 of 24" in labels
     clipboard = Gtk.Clipboard.get(ui["Gdk"].SELECTION_CLIPBOARD)
     for prompt in ("Make a Gent dashboard for this test run. Show how many tests have passed and list any failures.",
@@ -518,7 +533,7 @@ def exercise(root):
     assert not pane.grid.get_children() and pane.notice.get_text() == "Daemon offline"
     pane.receive(empty)
     assert len(pane.grid.get_children()) == 1
-    exercise_visibility(pane, Gtk, widgets, requests, boards)
+    exercise_visibility(pane, Gtk, widgets, requests, boards, example)
     pane.receive({"rows": []})
     assert not widgets(pane, Gtk.Frame) and pane.notice.get_visible()
     pane.receive({"error": "Disconnected"})
