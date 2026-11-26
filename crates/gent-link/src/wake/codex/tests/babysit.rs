@@ -17,17 +17,33 @@ impl Drop for Node {
 }
 impl Node {
     async fn start() -> Result<Self> {
+        Self::start_with_service(false).await
+    }
+
+    async fn start_with_service(enrolled: bool) -> Result<Self> {
         let root = tempfile::tempdir()?;
         let home = root.path().join("node");
         let mut cfg = config::initialize(&home, "babysitter-test")?;
-        gent_daemon::entitlements::grant_test(&home, &cfg);
         cfg.extra
             .insert("transport".into(), toml::toml! { direct = "off" }.into());
-        config::save(&home, &cfg)?;
         let scope = gent_protocol::notifications::Scope {
             account: Uuid::new_v4().to_string(),
             origin: "https://127.0.0.1:9".into(),
         };
+        if enrolled {
+            cfg.cluster.local_only = false;
+            cfg.relay = Some(config::RelayConfig {
+                endpoint: scope.origin.clone(),
+                credential_file: "relay.key".into(),
+            });
+            config::write_private(&home.join("relay.key"), config::secret().as_bytes())?;
+            cfg.service = Some(config::ServiceConfig {
+                origin: scope.origin.clone(),
+                account_id: scope.account.clone(),
+            });
+        }
+        config::save(&home, &cfg)?;
+        assert!(!gent_daemon::entitlements::paid(&home, &cfg));
         let now = gent_daemon::store::now();
         config::private_dir(&home.join("auth"))?;
         config::write_private(

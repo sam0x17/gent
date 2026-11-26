@@ -21,7 +21,7 @@ async fn goal_output_limit() -> Result<()> {
 }
 
 async fn trial(goal: bool) -> Result<()> {
-    let node = Node::start().await?;
+    let node = Node::start_with_service(true).await?;
     config::set_ordinary_babysitter_enabled(&node.home, true)?;
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let (mut child, socket) = start_host(node.root.path(), listener.local_addr()?).await?;
@@ -99,6 +99,28 @@ async fn trial(goal: bool) -> Result<()> {
             assert!(goal_state.is_null());
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let key = registry
+            .credential(thread)?
+            .context("missing registration")?;
+        agent(
+            &node.home,
+            &key,
+            AgentOp::Babysit {
+                enabled: Some(false),
+            },
+        )
+        .await?;
+        sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
+        assert_eq!(last(&mut host, thread).await?["id"], turn["id"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        agent(
+            &node.home,
+            &key,
+            AgentOp::Babysit {
+                enabled: Some(true),
+            },
+        )
+        .await?;
         sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
         while calls.load(Ordering::SeqCst) < 2 {
             sleep(Duration::from_millis(20)).await;

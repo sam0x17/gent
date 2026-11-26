@@ -3,8 +3,6 @@ use gent_protocol::{notifications::Failure, wake::VERIFIED_BLOCKED_MAX_AGE_SECS}
 
 fn fixture() -> (Fixture, i64) {
     let f = Fixture::new();
-    let home = f.home.path();
-    gent_daemon::entitlements::grant_test(home, &config::load(home).unwrap());
     let clock = gent_daemon::store::now() + 60;
     f.db()
         .execute("UPDATE request_clock SET floor=?1", [clock])
