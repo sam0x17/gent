@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import cairo
 
+from dashboard_lanes_gtk import exercise_lanes
 from desktop_dashboard_samples import chart_widgets, image_uri
 from desktop_fixture_browser import install_fixture_browser
 
@@ -534,6 +535,7 @@ def exercise(root):
     pane.receive(empty)
     assert len(pane.grid.get_children()) == 1
     exercise_visibility(pane, Gtk, widgets, requests, boards, example)
+    exercise_lanes(window, pane, row, widgets, settle, requests, clipboard)
     pane.receive({"rows": []})
     assert not widgets(pane, Gtk.Frame) and pane.notice.get_visible()
     pane.receive({"error": "Disconnected"})

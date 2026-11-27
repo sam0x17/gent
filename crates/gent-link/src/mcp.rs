@@ -125,7 +125,7 @@ fn tools() -> Vec<Tool> {
             "bar, pie, radar: up to 16 {label,value} entries. Use bar for signed comparisons, pie for nonnegative shares with a positive total, radar for at least 3 nonnegative dimensions on a common scale. ",
             "events: up to 64 milestone strings. image: a small still PNG/JPEG base64 data URI (up to 2048 px per side and 1048576 pixels total). ",
             "link: an absolute HTTP(S) URL to open. button: a nonblank instruction delivered to the publishing chat ID on click. Text, event entries, URLs and callback instructions each allow up to 2048 UTF-8 bytes.")},
-        "unit":{"type":"string","maxLength":32,"description":"Numeric reading or value-axis unit, e.g. ms or %. Up to 32 UTF-8 bytes. Omit for links."},
+        "unit":{"type":"string","maxLength":32,"description":"Numeric unit, e.g. ms or %. For events, gent:lane:v1 displays a status card (e.g. [\"success: Ready\",\"Epoch 42\"] or [] for an empty slot). gent:feed-pair:v1 pairs adjacent feeds. Up to 32 UTF-8 bytes. Omit for links."},
         "x_unit":{"type":"string","maxLength":32,"description":"Scatter only. Horizontal-axis unit, e.g. seconds. Up to 32 UTF-8 bytes."},
         "min":{"type":"number","description":"Gauge or progress lower bound, inclusive. Defaults to 0 and must be less than max."},
         "max":{"type":"number","description":"Gauge or progress upper bound, inclusive. Defaults to 100. Use a known work total for progress."}}});

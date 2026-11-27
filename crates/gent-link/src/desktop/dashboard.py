@@ -21,6 +21,7 @@ def dashboard_web_url(value):
 
 def dashboard_label(text, style=None):
     widget = label(text, style)
+    widget.set_selectable(True)
     widget.set_line_wrap(True)
     widget.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
     return widget
@@ -137,6 +138,7 @@ def dashboard_image(title, value):
 class DashboardGrid(Gtk.Fixed):
     column_width = 280
     minimum_height = 160
+    expand_short_row = True
     gap = 10
 
     def do_get_request_mode(self):
@@ -167,7 +169,7 @@ class DashboardGrid(Gtk.Fixed):
         minimums = []
         for start in range(0, len(cards), columns):
             children = cards[start:start + columns]
-            count = len(children)
+            count = len(children) if self.expand_short_row else columns
             base, extra = divmod(self.row_space(width, count), count)
             row = [(card, max(1, base + (i < extra))) for i, card in enumerate(children)]
             rows.append(row)
@@ -207,6 +209,45 @@ class DashboardGrid(Gtk.Fixed):
             y += height + self.gap
 
 
+class DashboardColumns(DashboardGrid):
+    """Lay out a section at its allocated width inside one board."""
+    minimum_height = 0
+    expand_short_row = False
+    gap = 8
+
+    def __init__(self, children, column_width):
+        super().__init__()
+        self.column_width = column_width
+        self.count = len(children)
+        for child in children:
+            self.put(child, 0, 0)
+
+    def columns(self, width):
+        return max(1, min(self.count, (width + self.gap) // (self.column_width + self.gap)))
+
+
+def dashboard_lane(lane):
+    card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    card.get_style_context().add_class("gent-dashboard-lane")
+    card.get_accessible().set_name(lane["label"])
+    card.add(dashboard_label(lane["label"], "gent-dashboard-heading"))
+    state = dashboard_label(lane["state"], "gent-dashboard-state")
+    state.get_style_context().add_class(lane["tone"])
+    state.set_halign(Gtk.Align.START)
+    card.add(state)
+    for line in lane["details"]:
+        card.add(dashboard_label(line))
+    return card
+
+
+def dashboard_feed(widget):
+    feed = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    feed.get_style_context().add_class("gent-dashboard-feed")
+    feed.add(dashboard_label(widget["label"], "gent-dashboard-heading"))
+    feed.add(dashboard_label("\n".join(widget["value"]), "gent-dashboard-current"))
+    return feed
+
+
 DASHBOARD_CSS = b"""
 .gent-dashboard { padding: 12px; outline-color: @theme_selected_bg_color; }
 .gent-dashboard, .gent-dashboard viewport { background-color: @theme_bg_color; }
@@ -224,6 +265,22 @@ DASHBOARD_CSS = b"""
 .gent-dashboard-title { font-size: 18px; font-weight: bold; }
 .gent-dashboard-publisher { color: mix(@theme_text_color, @theme_base_color, .30); }
 .gent-dashboard-heading { font-weight: bold; }
+.gent-dashboard-lane, .gent-dashboard-feed {
+    background-color: mix(@theme_base_color, @theme_bg_color, .45);
+    border: 1px solid alpha(@theme_text_color, .15);
+    border-radius: 6px;
+    padding: 9px;
+}
+.gent-dashboard-state {
+    background-color: alpha(@theme_text_color, .07);
+    border-left: 3px solid alpha(@theme_text_color, .45);
+    padding: 2px 6px;
+    font-weight: bold;
+}
+.gent-dashboard-state.info { border-color: @theme_selected_bg_color; }
+.gent-dashboard-state.success { border-color: @success_color; }
+.gent-dashboard-state.warning { border-color: @warning_color; }
+.gent-dashboard-state.critical { border-color: @error_color; }
 .gent-dashboard-current { font-feature-settings: "tnum"; }
 .gent-dashboard-card levelbar trough { padding: 0; border: none; background: none; }
 .gent-dashboard-card progressbar trough, .gent-dashboard-card progressbar progress,
@@ -439,7 +496,17 @@ class DashboardPane(Gtk.Box):
     def card(self, row):
         board = row["board"]
         frame = DashboardCard(board["title"], row["chat"], row.get("agent"))
-        for w in board["widgets"]:
+        widgets = board["widgets"]
+        for section in board.get("layout_v1", range(len(widgets))):
+            if isinstance(section, dict):
+                if "lanes" in section:
+                    cards = [dashboard_lane(lane) for lane in section["lanes"]]
+                    frame.body.add(DashboardColumns(cards, 166))
+                elif "feeds" in section:
+                    feeds = [dashboard_feed(widgets[i]) for i in section["feeds"]]
+                    frame.body.add(DashboardColumns(feeds, 280))
+                continue
+            w = widgets[section]
             v, kind = w["value"], w["kind"]
             if kind in ("button", "link") and not row.get("agent"):
                 continue
@@ -469,7 +536,6 @@ class DashboardPane(Gtk.Box):
                 title = GLib.markup_escape_text(re.sub(r"[:\s]+\Z", "", w["label"]))
                 number = GLib.markup_escape_text(dashboard_reading(v, w.get("unit")))
                 metric.set_markup(f"<b>{title}:</b> {number}")
-                metric.set_selectable(True)
                 box.pack_start(metric, False, False, 0)
                 continue
             caption = dashboard_label(w["label"], "gent-dashboard-heading")
@@ -479,7 +545,6 @@ class DashboardPane(Gtk.Box):
                 current = (v[-1] if v else None) if kind == "graph" else v
                 readout = dashboard_label(dashboard_reading(current, w.get("unit")), "gent-dashboard-current")
                 readout.set_xalign(1)
-                readout.set_selectable(True)
                 heading.pack_end(readout, False, False, 0)
                 box.add(heading)
             else:
@@ -500,6 +565,5 @@ class DashboardPane(Gtk.Box):
             shown = "\n".join(v) if kind == "events" else v
             value = dashboard_label(shown + (" " + w["unit"] if w.get("unit") else ""))
             value.set_max_width_chars(38)
-            value.set_selectable(True)
             box.pack_start(value, False, False, 0)
         return frame

@@ -160,7 +160,10 @@ async fn dashboard_link_survives_legacy_storage_downgrade_and_idle_reopen() -> R
         {"id":"action","kind":"button","label":"Check","value":"Check the run."},
         {"id":"plain","kind":"text","label":"Plain","value":"https://example.org/"},
         {"id":"other","kind":"text","label":"Other","value":"https://example.org/","unit":"url"},
-        {"id":"note","kind":"text","label":"Note","value":"Reference pending","unit":"URL"}
+        {"id":"note","kind":"text","label":"Note","value":"Reference pending","unit":"URL"},
+        {"id":"slot","kind":"events","label":"Slot","unit":"gent:lane:v1","value":[]},
+        {"id":"finished","kind":"events","label":"Finished","unit":"gent:feed-pair:v1","value":["Epoch 3"]},
+        {"id":"queued","kind":"events","label":"Queued","unit":"gent:feed-pair:v1","value":["Epoch 4"]}
     ]});
     let mut legacy = native.clone();
     legacy["widgets"][0]["kind"] = json!("text");
