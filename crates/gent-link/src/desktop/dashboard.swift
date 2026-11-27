@@ -387,17 +387,6 @@ private final class DashboardDocument: NSObject, WKURLSchemeHandler {
 private final class DashboardPreview: WKWebView, WKNavigationDelegate, WKUIDelegate {
     private var initialLoad = true
     var displayPreview: ((Bool) -> Void)?
-    private var viewportFit: NSLayoutConstraint?
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        viewportFit?.isActive = false
-        guard window != nil, let scroll = enclosingScrollView else { return }
-        let fit = heightAnchor.constraint(equalTo: scroll.contentView.heightAnchor, constant: -88)
-        fit.priority = .defaultHigh
-        fit.isActive = true
-        viewportFit = fit
-    }
 
     init(_ html: String) {
         let config = WKWebViewConfiguration()
@@ -450,6 +439,23 @@ private final class DashboardPreviewCard: NSBox {
     let revision: Int
     let chat: String
     let html: String
+
+    private var viewportFit: NSLayoutConstraint?
+    var previewReady = false {
+        didSet { viewportFit?.isActive = previewReady }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        viewportFit?.isActive = false
+        viewportFit = nil
+        guard window != nil, let clip = enclosingScrollView?.contentView else { return }
+        // Fit the whole ready card. The document uses the space below its actual heading.
+        let fit = heightAnchor.constraint(equalTo: clip.heightAnchor)
+        fit.priority = .defaultHigh
+        fit.isActive = previewReady
+        viewportFit = fit
+    }
 
     init(_ row: [String: Any], html: String) {
         publisher = row["agent"] as? String ?? ""
@@ -612,11 +618,7 @@ final class DashboardTab: NSObject {
         let displayed = displayedRows
         if !NSArray(array: previous).isEqual(to: displayed) {
             let position = scroll.documentVisibleRect.origin
-            let updated = displayed.compactMap(makeCard)
-            if !updated.elementsEqual(cards, by: { $0 === $1 }) {
-                cards = updated
-                arrangeCards()
-            }
+            updateCards(displayed.compactMap(makeCard))
             view.layoutSubtreeIfNeeded()
             grid.scroll(example != nil && !wasExample && !showingFeedback ? .zero : position)
         }
@@ -670,6 +672,26 @@ final class DashboardTab: NSObject {
     @objc private func resized() {
         if viewportColumns != columns { arrangeCards() }
         if chartWidths != lastWidths { scheduleLayout(after: 0.08) }
+    }
+
+    private func updateCards(_ updated: [NSBox]) {
+        let previous = cards
+        cards = updated
+        // Only replace siblings in place if a retained card can stay in its original slot.
+        // Removing a web view from the window would discard its first responder.
+        let slots = zip(previous, updated)
+        guard updated.count == previous.count, slots.contains(where: { $0 === $1 }),
+              slots.allSatisfy({ $0 === $1 || $1.superview == nil }) else {
+            arrangeCards()
+            return
+        }
+        for (index, card) in updated.enumerated() where card !== previous[index] {
+            let line = grid.arrangedSubviews[index / columns] as! NSStackView
+            line.removeArrangedSubview(previous[index])
+            previous[index].removeFromSuperview()
+            line.insertArrangedSubview(card, at: index % columns)
+            card.heightAnchor.constraint(equalTo: line.heightAnchor).isActive = true
+        }
     }
 
     private func arrangeCards() {
@@ -747,7 +769,7 @@ final class DashboardTab: NSObject {
             hide.widthAnchor.constraint(equalToConstant: 24).isActive = true
             hide.heightAnchor.constraint(equalToConstant: 24).isActive = true
         }
-        header.addText(row["chat"] as? String ?? "", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
+        let byline = header.addText(row["chat"] as? String ?? "", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
         var previousMetric: NSView?
         func addWidget(_ item: [String: Any]) {
             let title = item["label"] as? String ?? ""
@@ -879,7 +901,21 @@ final class DashboardTab: NSObject {
             preview.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
             // The web document scrolls inside its card while the board header remains available.
             preview.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-            preview.displayPreview = { [weak preview] ready in
+            let compactHeight = header.heightAnchor.constraint(equalToConstant: 24)
+            let publisher = byline.stringValue.isEmpty ? nil : "Published by \(byline.stringValue)"
+            let fullTitle = [previewCard.title, publisher].compactMap { $0 }.joined(separator: ". ")
+            preview.displayPreview = { [weak previewCard, weak preview, weak content] ready in
+                guard let previewCard, previewCard.previewReady != ready else { return }
+                previewCard.previewReady = ready
+                compactHeight.isActive = ready
+                byline.isHidden = ready
+                title.maximumNumberOfLines = ready ? 1 : 0
+                title.lineBreakMode = ready ? .byTruncatingTail : .byWordWrapping
+                title.toolTip = ready ? fullTitle : nil
+                title.setAccessibilityHelp(ready ? publisher : nil)
+                title.setAccessibilityLabel(ready ? fullTitle : nil)
+                previewCard.contentViewMargins = ready ? NSSize(width: Self.cardMargins.width, height: 6) : Self.cardMargins
+                content?.spacing = ready ? 4 : 12
                 native.forEach { $0.isHidden = ready }
                 preview?.isHidden = !ready
             }
