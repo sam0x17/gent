@@ -585,9 +585,23 @@ class DashboardPane(Gtk.Box):
                 self.notice.set_text(empty if self.rows == [] else "")
         displayed = self.displayed_rows()
         if previous != displayed:
-            for card in self.grid.get_children():
-                self.grid.remove(card)
-            for row in displayed:
+            cards = self.grid.get_children()
+            retained = 0
+            # Ordinary widget/layout updates retain their existing redraw semantics.
+            existing = cards if any(getattr(card, "attachment", None) is not None for card in cards) else []
+            for card, old, row in zip(existing, previous, displayed):
+                # The header holds the native hide action. Keep its frame (and
+                # any loaded document) while the same board occupies this slot.
+                if (old.get("agent"), old["chat"], old["board"]["title"]) != (
+                    row.get("agent"), row["chat"], row["board"]["title"]
+                ):
+                    break
+                if old != row:
+                    self.card(row, card)
+                retained += 1
+            for card in cards[retained:]:
+                card.destroy()
+            for row in displayed[retained:]:
                 self.grid.put(self.card(row), 0, 0)
             self.grid.show_all()
             if self.example and not was_example and not self.showing_feedback:
@@ -595,29 +609,51 @@ class DashboardPane(Gtk.Box):
             cards = self.grid.get_children()
             if cards:
                 first = cards[0]
-                for widget in (first, first.title, first.publisher):
-                    widget.connect("style-updated", self.queue_refresh)
+                if not retained:
+                    for widget in (first, first.title, first.publisher):
+                        widget.connect("style-updated", self.queue_refresh)
                 self.queue_refresh()
 
-    def card(self, row):
+    def card(self, row, frame=None):
         board = row["board"]
-        frame = DashboardCard(board["title"], row["chat"], row.get("agent"))
+        if frame is None:
+            frame = DashboardCard(board["title"], row["chat"], row.get("agent"))
+        source = board.get("static_html")
+        revision = row.get("revision")
+        attachment = getattr(frame, "attachment", None)
+        if attachment is not None and (attachment.source, attachment.revision) == (source, revision):
+            body = attachment.native
+            for child in body.get_children():
+                child.destroy()
+        else:
+            for child in frame.body.get_children()[1:]:
+                child.destroy()
+            frame.attachment = None
+            body = frame.body
+            if isinstance(source, str) and source and (browser := dashboard_browser()):
+                try:
+                    frame.attachment = DashboardStatic(browser, source, revision)
+                except (OSError, GLib.Error):
+                    pass
+                if frame.attachment is not None:
+                    frame.body.pack_start(frame.attachment, True, True, 0)
+                    body = frame.attachment.native
         widgets = board["widgets"]
         for section in board.get("layout_v1", range(len(widgets))):
             if isinstance(section, dict):
                 if "lanes" in section:
                     cards = [dashboard_lane(lane) for lane in section["lanes"]]
-                    frame.body.add(DashboardColumns(cards, 140))
+                    body.add(DashboardColumns(cards, 140))
                 elif "feeds" in section:
                     left, right = section["feeds"]
-                    frame.body.add(dashboard_feeds(widgets[left], widgets[right]))
+                    body.add(dashboard_feeds(widgets[left], widgets[right]))
                 continue
             w = widgets[section]
             v, kind = w["value"], w["kind"]
             if kind in ("button", "link") and not row.get("agent"):
                 continue
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-            frame.body.add(box)
+            body.add(box)
             if kind == "link":
                 if dashboard_web_url(v):
                     link = Gtk.LinkButton.new_with_label(v, w["label"])
