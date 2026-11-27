@@ -20,7 +20,6 @@ enum PageRequest {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
-    About,
     Cluster,
     Permissions,
     Chats,
@@ -161,7 +160,6 @@ impl Pages {
             Err(_) => return json!({"page":"settings","error":"Invalid desktop request"}),
         };
         let page = match request {
-            Request::About => "about",
             Request::Cluster => "cluster",
             Request::Permissions => "permissions",
             Request::Chats => "chats",
@@ -178,7 +176,6 @@ impl Pages {
 
     async fn handle(&mut self, home: &Path, request: Request) -> Result<Value> {
         match request {
-            Request::About => Ok(super::admin::about()),
             Request::Cluster => super::admin::cluster(home),
             Request::Permissions => super::admin::permissions(home).await,
             Request::Chats => Ok(
