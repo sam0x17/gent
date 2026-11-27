@@ -1,7 +1,5 @@
 //! Typed desktop actions. Both native views submit the same commands on a private pipe.
-use crate::{
-    auth, build_info, configure, enrollment, node, node_home, owner, pairing, setup, update,
-};
+use crate::{auth, configure, enrollment, node, node_home, owner, pairing, setup, update};
 use anyhow::{Context, Result};
 use gent_daemon::config;
 use gent_protocol::{
@@ -238,13 +236,6 @@ fn change_result(result: &Value) -> Result<Value> {
         result["reason"].as_str().unwrap_or("unknown reason")
     );
     Ok(json!({"notice":format!("Configuration change: {state}")}))
-}
-
-pub(super) fn about() -> Value {
-    let build = build_info::current();
-    json!({"title":"Gent","detail":format!("Version {} · {}{}\nCopyright © 2026 DuroSoft LLC",
-        build.version,build.commit.chars().take(12).collect::<String>(),if build.dirty {" (development)"} else {""}),
-        "actions":[{"kind":"check_update","title":"Check for updates"}]})
 }
 
 pub(super) fn cluster(home: &Path) -> Result<Value> {

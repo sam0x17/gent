@@ -21,6 +21,7 @@ use tokio::{
     process::Command,
 };
 
+mod about;
 mod admin;
 mod charts;
 mod login;
@@ -251,6 +252,8 @@ async fn supervise(
         (child, input, events)
     };
     let mut pages = pages::Pages::default();
+    let mut about = about::Cache::default();
+    let mut about_jobs = tokio::task::JoinSet::new();
     #[cfg(target_os = "macos")]
     let (destination, mut deliveries) = notification_delivery::channel();
     #[cfg(not(target_os = "macos"))]
@@ -275,6 +278,11 @@ async fn supervise(
             Some(result) = jobs.join_next() => result?,
             Some(result) = channel_jobs.join_next() => result?,
             Some(result) = stats_jobs.join_next() => result?,
+            Some(result) = about_jobs.join_next() => {
+                let (cache, page) = result?;
+                about = cache;
+                page
+            },
             size = socket.recv(&mut activation) => match &activation[..size?] {
                 b"show" => json!({"show":true}),
                 b"quit" => json!({"quit":true}),
@@ -300,6 +308,11 @@ async fn supervise(
                             continue;
                         }
                         json!({"page":"release_channel","notice":"A channel request is in progress."})
+                    } else if let Ok(about::Request::About) = serde_json::from_str(&line) {
+                        if about_jobs.is_empty() {
+                            about_jobs.spawn(std::mem::take(&mut about).load());
+                        }
+                        continue;
                     } else if let Ok(admin::Request::Manage { action }) = serde_json::from_str(&line) {
                         if jobs.is_empty() {
                             let home = home.to_owned();
