@@ -1597,27 +1597,50 @@ func checkStaticBoard(_ desktop: Desktop) {
     <details><summary>More readings</summary>Late reading</details><span id="expanded">Opened readings</span>
     <script>document.body.append("Author " + "script ran")</script><a href="about:blank">Leave preview</a>
     """
-    func publish(_ document: Any?, nativeLabel: String = "Native widget") {
+    var showSibling = false
+    func publish(_ document: Any?, nativeLabel: String = "Native widget", layoutOnly: Bool = false) {
         var board: Object = ["title":"Synthetic report",
                              "widgets":[["id":"fallback","kind":"text","label":nativeLabel,"value":"Native content"]]]
         board["static_html"] = document
-        desktop.receive(["page":"dashboard", "rows":[["agent":"fixture","chat":"Synthetic","revision":17,"board":board]]])
+        var rows: [Object] = [["agent":"fixture","chat":"Synthetic","revision":17,"board":board]]
+        if showSibling {
+            rows.append(["agent":"second","chat":"Other","revision":5,
+                         "board":["title":"Second report","widgets":[["kind":"text","label":"Status","value":nativeLabel]]]])
+        }
+        desktop.receive(["page":"dashboard","layout_only":layoutOnly,"rows":rows])
     }
     func previews() -> [WKWebView] { descendants(desktop.dashboard.view, of: WKWebView.self) }
-    func nativeVisible() -> Bool {
-        descendants(desktop.dashboard.view, of: NSTextField.self).contains {
-            $0.stringValue == "Native content" && !$0.isHiddenOrHasHiddenAncestor
+    func visibleField(_ value: String) -> NSTextField? {
+        descendants(desktop.dashboard.view, of: NSTextField.self).first {
+            $0.stringValue == value && !$0.isHiddenOrHasHiddenAncestor
         }
     }
+    func nativeVisible() -> Bool { visibleField("Native content") != nil }
+    func bylineVisible() -> Bool { visibleField("Synthetic") != nil }
     publish(nil)
-    require(previews().isEmpty && nativeVisible(), "absent document preserves the native board")
+    require(previews().isEmpty && nativeVisible() && bylineVisible(), "absent document preserves the native board")
     publish(["unsupported":true])
-    require(previews().isEmpty && nativeVisible(), "unsupported document preserves the native board")
+    require(previews().isEmpty && nativeVisible() && bylineVisible(), "unsupported document preserves the native board")
     resizeDesktop(desktop, width: 1024, height: 760)
     publish(html)
+    require(bylineVisible() && nativeVisible(), "loading board retains visible publisher and native widgets")
     require(waitInMainRunLoop(timeout: 20) { previews().first.map { !$0.isHidden && !$0.isLoading } == true },
             "private static document loaded")
     let web = previews()[0]
+    desktop.window.contentView!.layoutSubtreeIfNeeded()
+    let title = visibleField("Synthetic report")!
+    let hide = descendants(desktop.dashboard.view, of: NSButton.self).first { $0.accessibilityLabel() == "Hide dashboard" }!
+    require(!bylineVisible() && title.maximumNumberOfLines == 1
+            && title.toolTip?.contains("Published by Synthetic") == true && title.accessibilityHelp() == "Published by Synthetic"
+            && title.accessibilityLabel()?.contains("Published by Synthetic") == true,
+            "ready board keeps its publisher on the accessible title and tooltip")
+    let titleRect = title.convert(title.bounds, to: nil)
+    let hideRect = hide.convert(hide.bounds, to: nil)
+    require(!hide.isHiddenOrHasHiddenAncestor && titleRect.midY >= hideRect.minY && titleRect.midY <= hideRect.maxY
+            && titleRect.maxX <= hideRect.minX, "ready board title and hide control share one row")
+    let clip = web.enclosingScrollView!.contentView
+    require(clip.bounds.contains(web.convert(web.bounds, to: clip)) && clip.bounds.height - web.bounds.height <= 46,
+            "compact heading gives remaining visible card height to document")
     require(!web.configuration.websiteDataStore.isPersistent && !web.configuration.defaultWebpagePreferences.allowsContentJavaScript
             && web.configuration.userContentController.userScripts.isEmpty && !nativeVisible(), "ephemeral scriptless preview")
     func finds(_ text: String) -> Bool {
@@ -1642,14 +1665,24 @@ func checkStaticBoard(_ desktop: Desktop) {
     require(finds("More readings"), "native disclosure heading is searchable")
     resizeDesktop(desktop, width: 540, height: 720)
     require(waitInMainRunLoop { web.bounds.width < 650 } && finds("Narrow report"), "narrow CSS media query")
-    publish(html, nativeLabel: "Refreshed fallback")
-    require(previews().first === web && finds("Narrow report"), "layout refresh preserves the mounted document")
+    showSibling = true
+    publish(html)
+    require(desktop.window.makeFirstResponder(web), "document takes focus")
+    let responder = desktop.window.firstResponder
+    publish(html, nativeLabel: "Refreshed fallback", layoutOnly: true)
+    require(previews().first === web && !bylineVisible() && desktop.window.firstResponder === responder
+            && visibleField("Refreshed fallback") != nil,
+            "a sibling layout refresh preserves the ready document and focus")
     let url = web.url
     web.load(URLRequest(url: URL(string: "about:blank")!))
     RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
     require(web.url == url && finds("Native selection sample"), "navigation stays in the document")
+    web.navigationDelegate?.webViewWebContentProcessDidTerminate?(web)
+    desktop.window.contentView!.layoutSubtreeIfNeeded()
+    require(web.isHidden && nativeVisible() && bylineVisible() && title.maximumNumberOfLines == 0
+            && title.toolTip == nil, "failed preview restores visible publisher and native board")
     publish(nil)
-    require(previews().isEmpty && nativeVisible(), "removing the projection restores native content")
+    require(previews().isEmpty && nativeVisible() && bylineVisible(), "removing the projection restores native content")
     print("PASS: scriptless ephemeral static board, native fallback, SVG, responsive CSS, text search, navigation and refresh identity")
 }
 
