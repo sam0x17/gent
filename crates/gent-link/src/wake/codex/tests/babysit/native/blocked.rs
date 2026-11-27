@@ -49,6 +49,15 @@ async fn installed_codex_retries_provider_blocks_once_and_preserves_deliberate_b
             (
                 StatusCode::BAD_REQUEST,
                 "application/json",
+                r#"{"error":{"type":"server_error","message":"We’re currently experiencing high demand, which may cause temporary errors."}}"#,
+            ),
+            json!("other"),
+            Outcome::Resume,
+        ),
+        (
+            (
+                StatusCode::BAD_REQUEST,
+                "application/json",
                 r#"{"error":{"message":"Unknown parameter: 'input[0].tools[0].tools[0].role'.","type":"invalid_request_error","code":"unknown_parameter","param":"input[0].tools[0].tools[0].role"}}"#,
             ),
             json!("other"),
