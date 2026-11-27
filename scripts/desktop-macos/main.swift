@@ -1248,9 +1248,112 @@ func checkDashboard(_ desktop: Desktop) {
     resizeDesktop(desktop, width: 850, height: 605)
 }
 
+func checkAbout(_ desktop: Desktop) {
+    desktop.tabs.selectTabViewItem(withIdentifier: "About")
+    let tab = desktop.about
+    let text = tab.detail
+    let sha = String(repeating: "abcdef0123456789", count: 2) + "12345678"
+    let root = "https://github.com/sam0x17/gent"
+    let tag = root + "/releases/tag/v0.1.7", commit = root + "/commit/" + sha
+    let notes = "Changes to Gent Desktop.\n\n- Select text in the release notes.\n- Retain <literal> text & punctuation.\n\n"
+                + String(repeating: "Long paragraph with wrapping words. ", count: 38) + "\n\nFinal line."
+    let release: [String: Any] = ["version": "0.1.7", "url": tag, "notes": notes]
+    func show(_ latest: [String: Any]?, revisionURL: String? = nil, installed: String = "0.1.7") {
+        var reply: [String: Any] = ["page":"about", "title":"Gent", "version":installed, "revision":sha,
+                                    "detail":"Version \(installed) · \(sha.prefix(12))\nCopyright © 2026 DuroSoft LLC",
+                                    "actions":[["kind":"check_update","title":"Check for updates"]]]
+        reply["latest_release"] = latest
+        reply["revision_url"] = revisionURL
+        desktop.receive(reply)
+        desktop.tabs.layoutSubtreeIfNeeded()
+    }
+    func links() -> [(URL, NSRange)] {
+        let storage = text.textStorage!
+        var result = [(URL, NSRange)]()
+        storage.enumerateAttribute(.link, in: NSRange(location: 0, length: storage.length)) { link, range, _ in
+            if let url = link as? URL { result.append((url, range)) }
+        }
+        return result
+    }
+    func urls() -> [String] { links().map { $0.0.absoluteString } }
+    var opened = [String]()
+    tab.openURL = { opened.append($0.absoluteString) }
+    show(release, revisionURL: commit)
+    for (width, height) in [(850, 605), (510, 400)] {
+        resizeDesktop(desktop, width: CGFloat(width), height: CGFloat(height))
+        desktop.window.displayIfNeeded()
+        let clip = text.enclosingScrollView!.contentView
+        let logo = descendants(tab.view, of: NSImageView.self).first { $0.accessibilityLabel() == "Gent logo" }!
+        let logoRect = logo.convert(logo.bounds, to: tab.view)
+        let textRect = clip.convert(clip.bounds, to: tab.view)
+        require(logo.image != nil && logoRect.width >= 48 && tab.view.bounds.contains(logoRect)
+                && logoRect.maxX < textRect.minX, "logo visible beside the text after resize")
+        require(!text.isEditable && text.isSelectable && text.string.hasSuffix(notes), "selectable plain notes")
+        require(clip.bounds.width >= 235 && clip.bounds.height >= 100, "readable text viewport")
+        let layout = text.layoutManager!
+        layout.ensureLayout(for: text.textContainer!)
+        require(layout.usedRect(for: text.textContainer!).height > clip.bounds.height, "notes wrap and scroll")
+        let last = (text.string as NSString).range(of: "Final line.")
+        text.setSelectedRange(last)
+        text.scrollRangeToVisible(last)
+        require(text.selectedRange() == last && clip.bounds.minY > 0, "final paragraph reachable and selectable")
+        text.setSelectedRange(NSRange(location: 0, length: 0))
+        text.scrollRangeToVisible(text.selectedRange())
+        let button = actionButton(tab.actions, "Check for updates")
+        let rect = button.convert(button.bounds, to: tab.view)
+        require(tab.view.bounds.contains(rect) && button.isEnabled, "update action on screen")
+        print("About tab \(Int(tab.view.bounds.width))×\(Int(tab.view.bounds.height))pt, logo \(Int(logoRect.width))pt, text viewport \(Int(textRect.width))×\(Int(textRect.height))pt")
+        if width == 510, let file = ProcessInfo.processInfo.environment["GENT_TEST_ABOUT_SCREENSHOT"],
+           let bitmap = tab.view.bitmapImageRepForCachingDisplay(in: tab.view.bounds) {
+            tab.view.cacheDisplay(in: tab.view.bounds, to: bitmap)
+            let image = NSImage(size: tab.view.bounds.size, flipped: false) { rect in
+                NSColor.windowBackgroundColor.setFill()
+                rect.fill()
+                _ = bitmap.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                return true
+            }
+            let capture = NSBitmapImageRep(data: image.tiffRepresentation!)!
+            try! capture.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: file))
+        }
+    }
+    require(urls() == [tag, commit, tag], "same package version can have a different revision")
+    for (url, range) in links() { text.clicked(onLink: url, at: range.location) }
+    text.clicked(onLink: URL(string: "https://example.org")!, at: 0)
+    descendants(tab.view, of: NSButton.self).first { $0.title == "https://gent.link" }!.performClick(nil)
+    require(opened == [tag, commit, tag, "https://gent.link"], "native clicks pass exact destinations to opener")
+    show(release, revisionURL: tag)
+    require(urls() == [tag, tag, tag], "verified release SHA opens release")
+    show(release, revisionURL: commit, installed: "0.1.6")
+    require(urls() == [commit, tag], "older installed version stays distinct")
+    for bad in [tag + "?x=1", tag + "/../other", tag.replacingOccurrences(of: "github.com", with: "github.com.evil"),
+                tag.replacingOccurrences(of: "sam0x17", with: "another-owner"), "file:///tmp/test"] {
+        show(["notes": notes, "version":"0.1.7", "url": bad], revisionURL: bad)
+        require(urls().isEmpty && text.string.hasSuffix(notes), "invalid links leave the notes readable")
+    }
+    show(["notes":"Notes without a version."])
+    require(urls().isEmpty && text.string.hasSuffix("Notes without a version."), "notes without version")
+    show(["version":"0.1.7", "url":tag])
+    require(urls() == [tag, tag] && text.string.hasSuffix("Latest release v0.1.7"), "release without notes")
+    show(nil, revisionURL: commit)
+    require(urls() == [commit] && !text.string.contains("Release notes"), "known revision without release")
+    show(nil)
+    require(urls().isEmpty && !text.string.contains("Latest release") && !text.string.hasSuffix(notes), "stale release cleared")
+    text.clicked(onLink: URL(string: tag)!, at: 0)
+    require(opened.count == 4, "stale destination blocked")
+    resizeDesktop(desktop, width: 850, height: 605)
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
+if CommandLine.arguments.dropFirst(2).contains("--about") {
+    desktop.makeWindow()
+    desktop.window.orderFront(nil)
+    checkAbout(desktop)
+    desktop.window.orderOut(nil)
+    print("PASS: native AppKit About release notes, links and legacy fallback")
+    exit(0)
+}
 if CommandLine.arguments.dropFirst(2).contains("--settings") {
     desktop.makeWindow()
     checkReleaseChannel(desktop)
@@ -1354,6 +1457,7 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     desktop.receive(["page":"permissions","title":"Cluster permissions","detail":"Allow Send","actions":[]])
     require(desktop.permissions.detail.string == "Allow Send", "permission rules displayed")
     desktop.tabs.selectTabViewItem(withIdentifier: "About")
+    checkAbout(desktop)
     desktop.receive(["page":"about","title":"Gent","detail":"Version 0.1.0 · fixture","actions":[["title":"Check for updates","kind":"check_update"]]])
     require(desktop.about.detail.string.contains("0.1.0"), "version displayed")
     desktop.window.contentView?.layoutSubtreeIfNeeded()

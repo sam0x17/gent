@@ -151,6 +151,7 @@ def main():
     if not args.setup_only:
         subprocess.run([sys.executable, Path(__file__).with_name("dashboard_gtk.py")], check=True)
         subprocess.run([sys.executable, Path(__file__).with_name("release_channel_gtk.py")], check=True)
+        subprocess.run([sys.executable, Path(__file__).with_name("about_gtk.py")], check=True)
         # Each proof gets its own GTK process, accessibility bus, watcher and node home.
         with tempfile.TemporaryDirectory(prefix="gent-setup-runtime-") as runtime:
             env = dict(os.environ, XDG_RUNTIME_DIR=runtime)

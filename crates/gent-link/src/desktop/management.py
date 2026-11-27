@@ -116,22 +116,82 @@ class ActionBar(Gtk.Box):
             code.select_region(0, -1)
 
 
-class AboutLogo(Gtk.Layout):
+def about_text(reply):
+    """Build selectable GTK text. Only exact repository permalinks become links."""
+    import re
+    from html import escape
+
+    root = "https://github.com/sam0x17/gent"
+    links = set()
+
+    def link(text, url):
+        if not url:
+            return escape(text)
+        links.add(url)
+        return f'<a href="{escape(url)}">{escape(text)}</a>'
+
+    def string(value):
+        return value if isinstance(value, str) else ""
+
+    detail = string(reply.get("error") or reply.get("detail"))
+    release = reply.get("latest_release")
+    release = release if isinstance(release, dict) and not reply.get("error") else {}
+    version = string(release.get("version")).removeprefix("v")
+    release_url = None
+    if re.fullmatch(r"[0-9][0-9A-Za-z.+-]{0,127}", version):
+        expected = f"{root}/releases/tag/v{version}"
+        if release.get("url") == expected:
+            release_url = expected
+
+    installed = string(reply.get("version"))
+    revision = string(reply.get("revision"))
+    text = escape(detail)
+    prefix = f"Version {installed} · "
+    if installed and detail.startswith(prefix):
+        text = "Version " + link(installed, release_url if installed == version else None) + " · "
+        rest = detail[len(prefix):]
+        short = revision[:12]
+        if re.fullmatch(r"[0-9a-f]{40}", revision) and rest.startswith(short):
+            target = reply.get("revision_url")
+            revision_url = target if target in (release_url, f"{root}/commit/{revision}") else None
+            text += link(short, revision_url)
+            rest = rest[len(short):]
+        text += escape(rest)
+
+    notes = string(release.get("notes"))
+    if not notes.strip():
+        notes = ""
+    if version or notes:
+        heading = "Release notes" if notes else "Latest release"
+        if version:
+            heading += (" for " if notes else " ") + link("v" + version, release_url)
+        text += ("\n\n" if text else "") + "<b>" + heading + "</b>"
+        if notes:
+            text += "\n\n" + escape(notes)
+    return text, links, bool(version or notes)
+
+
+class AboutLogo(Gtk.Image):
     def __init__(self):
         super().__init__()
         self.source = GdkPixbuf.Pixbuf.new_from_file(ICON)
-        self.image = Gtk.Image()
-        self.image.get_accessible().set_name("Gent logo")
-        self.put(self.image, 0, 0)
+        self.get_accessible().set_name("Gent logo")
         self.size = 0
         self.connect("size-allocate", self.resize)
+
+    # Let the available space determine the icon size, even after shrinking a
+    # window that previously displayed the full-resolution image.
+    def do_get_preferred_width(self):
+        return 0, 0
+
+    def do_get_preferred_height(self):
+        return 0, 0
 
     def resize(self, _, rect):
         size = max(1, min(512, rect.width, rect.height))
         if size != self.size:
-            self.image.set_from_pixbuf(self.source.scale_simple(size, size, GdkPixbuf.InterpType.BILINEAR))
+            self.set_from_pixbuf(self.source.scale_simple(size, size, GdkPixbuf.InterpType.BILINEAR))
             self.size = size
-        self.move(self.image, (rect.width - size) // 2, (rect.height - size) // 2)
 
 
 class ManagementPane(Gtk.Box):
@@ -146,6 +206,8 @@ class ManagementPane(Gtk.Box):
             self.set_orientation(Gtk.Orientation.HORIZONTAL)
             self.pack_start(AboutLogo(), True, True, 0)
             body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, valign=Gtk.Align.CENTER)
+            self.about_body = body
+            self.about_links = set()
             self.pack_start(body, False, False, 0)
         if name == "cluster":
             self.expander = Gtk.Expander()
@@ -161,7 +223,16 @@ class ManagementPane(Gtk.Box):
         self.detail.set_selectable(True)
         self.detail.set_line_wrap(True)
         self.detail.set_yalign(0)
-        if name == "permissions":
+        if name == "about":
+            from gi.repository import Pango
+            self.detail.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            self.detail.set_halign(Gtk.Align.FILL)
+            self.detail.connect("activate-link", self.open_about_link)
+            self.about_scroll = Gtk.ScrolledWindow()
+            self.about_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            self.about_scroll.add(self.detail)
+            body.pack_start(self.about_scroll, True, True, 0)
+        elif name == "permissions":
             scroll = Gtk.ScrolledWindow()
             scroll.add(self.detail)
             body.pack_start(scroll, True, True, 0)
@@ -175,6 +246,11 @@ class ManagementPane(Gtk.Box):
         body.pack_start(self.actions, False, False, 0)
         self.notice = notice_label()
         (self if name == "cluster" else body).pack_start(self.notice, False, False, 0)
+
+    def open_about_link(self, _label, uri):
+        if uri in self.about_links:
+            Gtk.show_uri_on_window(self.get_toplevel(), uri, Gtk.get_current_event_time())
+        return True
 
     def load(self):
         if not self.loading:
@@ -196,7 +272,17 @@ class ManagementPane(Gtk.Box):
             return
         self.loading = False
         self.title.set_text(reply.get("title", self.name.title()))
-        self.detail.set_text(reply.get("error") or reply.get("detail", ""))
+        if self.name == "about":
+            text, self.about_links, expanded = about_text(reply)
+            if self.detail.get_label() != text:
+                self.detail.set_markup(text)
+                self.about_scroll.get_vadjustment().set_value(0)
+            self.about_body.set_valign(Gtk.Align.FILL if expanded else Gtk.Align.CENTER)
+            self.about_scroll.set_min_content_height(64)
+            self.detail.set_max_width_chars(44 if expanded else 32)
+            self.set_child_packing(self.about_body, expanded, True, 0, Gtk.PackType.START)
+        else:
+            self.detail.set_text(reply.get("error") or reply.get("detail", ""))
         self.actions.configure(reply.get("actions", []))
         if self.reload_queued:
             self.reload_queued = False
