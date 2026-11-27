@@ -240,12 +240,118 @@ def dashboard_lane(lane):
     return card
 
 
-def dashboard_feed(widget):
+def dashboard_select_feed(field, title, text):
+    dialog = Gtk.Dialog(title=title, transient_for=field.get_toplevel(), modal=True, destroy_with_parent=True)
+    dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+    dialog.connect("response", lambda window, _: window.destroy())
+    view = Gtk.TextView(editable=False, wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=10, right_margin=10)
+    view.get_accessible().set_name(title)
+    buffer = view.get_buffer()
+    buffer.set_text(text)
+    buffer.place_cursor(buffer.get_start_iter())
+    scroll = Gtk.ScrolledWindow()
+    scroll.add(view)
+    dialog.get_content_area().pack_start(scroll, True, True, 0)
+    dialog.set_default_size(440, 320)
+    dialog.show_all()
+    view.grab_focus()
+
+
+def dashboard_feed(title, rows, entire_feed=None):
     feed = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
     feed.get_style_context().add_class("gent-dashboard-feed")
-    feed.add(dashboard_label(widget["label"], "gent-dashboard-heading"))
-    feed.add(dashboard_label("\n".join(widget["value"]), "gent-dashboard-current"))
+    feed.add(dashboard_label(title, "gent-dashboard-heading"))
+    body = dashboard_label("\n".join(rows), "gent-dashboard-current")
+    if entire_feed is not None:
+        def populate(field, menu):
+            name, text = entire_feed
+            copy = Gtk.MenuItem(label="Copy entire feed")
+            copy.connect("activate", lambda _: field.get_clipboard(Gdk.SELECTION_CLIPBOARD).set_text(text, -1))
+            select = Gtk.MenuItem(label="Select feed text…")
+            select.connect("activate", lambda _: dashboard_select_feed(field, name, text))
+            for item in (copy, select):
+                menu.append(item)
+                item.show()
+
+        body.connect("populate-popup", populate)
+    feed.add(body)
     return feed
+
+
+class DashboardFeedLayouts(Gtk.Stack):
+    """Negotiate the feed height for the same page that receives the allocation."""
+    def __init__(self, pair, split):
+        super().__init__(homogeneous=False)
+        self.pair, self.split = pair, split
+        self.add(pair)
+        self.add(split)
+        self.right = pair.get_children()[1].get_children()[1]
+        self.continued_at = len(split.get_children()[1].get_children()[1].get_text()) + 1
+        self.spans_break = False
+        for prop in ("cursor-position", "selection-bound"):
+            self.right.connect("notify::" + prop, self.selection_changed)
+
+    def page(self, width):
+        return self.split if not self.spans_break and self.split.columns(width) == 3 else self.pair
+
+    def selection_changed(self, *_):
+        selected, start, end = self.right.get_selection_bounds()
+        # The newline at the break belongs to the full label only.
+        spans = selected and start < self.continued_at <= end
+        if self.spans_break != spans:
+            self.spans_break = spans
+            self.queue_resize()
+
+    def switch(self, old, new):
+        # GtkStack restores focus to its last child and GtkLabel may select all
+        # on focus. Restore the actual cursor, anchor and focus after switching.
+        saved = []
+        for column, card in enumerate(old.get_children()):
+            for part, field in enumerate(card.get_children()):
+                if not field.is_focus() and not field.get_selection_bounds()[0]:
+                    continue
+                anchor, cursor = field.props.selection_bound, field.props.cursor_position
+                dest = min(column, 1)
+                if part == 1 and column > 0:
+                    if column == 2:
+                        anchor += self.continued_at
+                        cursor += self.continued_at
+                    elif new == self.split and min(anchor, cursor) >= self.continued_at:
+                        dest = 2
+                        anchor -= self.continued_at
+                        cursor -= self.continued_at
+                target = new.get_children()[dest].get_children()[part]
+                saved.append((target, anchor, cursor, field.is_focus()))
+        self.set_visible_child(new)
+        for target, _, _, focused in saved:
+            if focused:
+                target.grab_focus()
+        for target, anchor, cursor, _ in saved:
+            target.select_region(anchor, cursor)
+
+    def do_get_preferred_height_for_width(self, width):
+        return self.page(width).get_preferred_height_for_width(width)
+
+    def do_size_allocate(self, allocation):
+        new = self.page(allocation.width)
+        old = self.get_visible_child()
+        if old is not None and old != new:
+            self.switch(old, new)
+        Gtk.Stack.do_size_allocate(self, allocation)
+
+
+def dashboard_feeds(left, right):
+    pair = DashboardColumns([dashboard_feed(w["label"], w["value"]) for w in (left, right)], 280)
+    rows = right["value"]
+    if len(rows) < max(4, 2 * len(left["value"])):
+        return pair
+    title = right["label"]
+    middle = (len(rows) + 1) // 2
+    whole = (title, "\n".join(rows))
+    split = DashboardColumns([dashboard_feed(left["label"], left["value"]),
+                              dashboard_feed(title, rows[:middle], whole),
+                              dashboard_feed(title + " (continued)", rows[middle:], whole)], pair.column_width)
+    return DashboardFeedLayouts(pair, split)
 
 
 DASHBOARD_CSS = b"""
@@ -503,8 +609,8 @@ class DashboardPane(Gtk.Box):
                     cards = [dashboard_lane(lane) for lane in section["lanes"]]
                     frame.body.add(DashboardColumns(cards, 140))
                 elif "feeds" in section:
-                    feeds = [dashboard_feed(widgets[i]) for i in section["feeds"]]
-                    frame.body.add(DashboardColumns(feeds, 280))
+                    left, right = section["feeds"]
+                    frame.body.add(dashboard_feeds(widgets[left], widgets[right]))
                 continue
             w = widgets[section]
             v, kind = w["value"], w["kind"]
