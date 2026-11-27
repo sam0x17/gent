@@ -1186,7 +1186,25 @@ func checkLaneSelection(_ field: NSTextField, copyTo pasteboard: NSPasteboard? =
     field.window?.makeFirstResponder(nil)
 }
 
-func checkDashboardLanes(_ desktop: Desktop, scroll: NSScrollView, copyTo pasteboard: NSPasteboard? = nil) {
+func checkDashboardLanes(_ desktop: Desktop, copyTo pasteboard: NSPasteboard? = nil) {
+    checkDashboardLanes(in: desktop.dashboard, fixedPane: false, copyTo: pasteboard) { size in
+        resizeDesktop(desktop, width: size.width, height: size.height)
+    }
+
+    // A tab strip can widen the full window. Exercise exact pane sizes separately.
+    let pane = DashboardTab()
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 720),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    window.contentView = pane.view
+    checkDashboardLanes(in: pane, fixedPane: true, copyTo: pasteboard) { size in
+        window.setContentSize(size)
+        pane.view.layoutSubtreeIfNeeded()
+    }
+}
+
+func checkDashboardLanes(in dashboard: DashboardTab, fixedPane: Bool, copyTo pasteboard: NSPasteboard?,
+                         resize: (NSSize) -> Void) {
+    let scroll = descendants(dashboard.view, of: NSScrollView.self).first!
     typealias Object = [String: Any]
     let tones: [(String, NSColor)] = [("neutral", .secondaryLabelColor), ("info", .systemBlue),
                                      ("success", .systemGreen), ("warning", .systemOrange), ("critical", .systemRed)]
@@ -1215,8 +1233,8 @@ func checkDashboardLanes(_ desktop: Desktop, scroll: NSScrollView, copyTo pasteb
         var board: Object = ["title":"Fixture jobs", "widgets":widgets]
         board["layout_v1"] = projection
         let row: Object = ["agent":"jobs", "chat":"Fixture", "revision":42, "board":board]
-        desktop.receive(["page":"dashboard", "rows":beside ? [row, neighbor] : [row]])
-        return descendants(desktop.dashboard.view, of: NSBox.self).first { $0.title == "Fixture jobs" }!
+        dashboard.receive(["rows":beside ? [row, neighbor] : [row]])
+        return descendants(dashboard.view, of: NSBox.self).first { $0.title == "Fixture jobs" }!
     }
     func label(_ text: String, in view: NSView) -> NSTextField {
         descendants(view, of: NSTextField.self).first { $0.stringValue == text }!
@@ -1231,24 +1249,38 @@ func checkDashboardLanes(_ desktop: Desktop, scroll: NSScrollView, copyTo pasteb
 
     let cases: [(width: CGFloat, beside: Bool, columns: Int)] = [
         (420, false, 2), (420, true, 2), (540, false, 3), (540, true, 3),
-        (1024, false, 5), (1024, true, 3)
+        (1024, false, 5), (1024, true, 3), (420, false, 2)
     ]
-    for (width, beside, columns) in cases {
-        resizeDesktop(desktop, width: width, height: width == 540 ? 720 : 760)
+    var initialContentWidth: CGFloat?
+    for (width, beside, fixedColumns) in cases {
+        resize(NSSize(width: width, height: width == 540 ? 720 : 760))
         let card = publish(layout, beside: beside)
         let boxes = lanes.map { lane in
             descendants(card, of: NSBox.self).first { $0.accessibilityLabel() == lane["label"] as? String }!
         }
         // The layout uses the board's allocated width, which can change after row insertion.
         require(waitInMainRunLoop {
-            desktop.tabs.layoutSubtreeIfNeeded()
+            dashboard.view.window?.contentView?.layoutSubtreeIfNeeded()
+            let available = card.contentView!.bounds.width
+            let columns = min(lanes.count, max(1, Int((available + 8) / (140 + 8))))
+            if fixedPane && (abs(dashboard.view.bounds.width - width) > 1 || columns != fixedColumns) {
+                return false
+            }
             let frames = boxes.map(rect)
             return frames.enumerated().allSatisfy { index, frame in
                 let row = frames[index / columns * columns]
                 return frame.width >= 140 && abs(frame.minY - row.minY) < 1 &&
                     (index < columns || frame.minY >= frames[index - columns].maxY)
             }
-        }, "lane columns respond to board width")
+        }, "lane geometry for requested \(width) pt, available \(card.contentView!.bounds.width) pt, neighbor \(beside), fixed pane \(fixedPane)")
+        if width == 420 && !beside {
+            let contentWidth = card.contentView!.bounds.width
+            if let initialContentWidth {
+                require(abs(contentWidth - initialContentWidth) <= 1, "return to the initial board content width")
+            } else {
+                initialContentWidth = contentWidth
+            }
+        }
         for (i, box) in boxes.enumerated() {
             require(descendants(box, of: NSBox.self).contains { $0.fillColor == tones[i].1 },
                     "system color for \(tones[i].0)")
@@ -1263,7 +1295,8 @@ func checkDashboardLanes(_ desktop: Desktop, scroll: NSScrollView, copyTo pasteb
         let fit = text.cell!.cellSize(forBounds: NSRect(x:0, y:0, width:text.bounds.width, height:10_000))
         require(fit.height > 25 && text.bounds.height >= fit.height - 1, "long lane detail wraps fully")
         let left = rect(label("Finished", in: card)), right = rect(label("Queue", in: card))
-        let paired = width == 1024 && !beside
+        let paired = card.contentView!.bounds.width >= 295 * 2 + 8
+        if fixedPane { require(paired == (width == 1024 && !beside), "feed breakpoint in fixed pane") }
         require(paired ? (abs(left.minY - right.minY) < 1 && left.minX < right.minX) : left.maxY < right.minY,
                 "paired feeds use the width of the individual board")
         for entries in [finished, queued] {
@@ -1435,7 +1468,7 @@ func checkDashboard(_ desktop: Desktop) {
     checkDashboardMedia(desktop, scroll: scroll)
     checkDashboardVisibility(desktop)
     checkDashboardAppearance(desktop, scroll: scroll)
-    checkDashboardLanes(desktop, scroll: scroll)
+    checkDashboardLanes(desktop)
     require(opened == targets, "button, malformed links, media and scrolling leave opener idle")
     resizeDesktop(desktop, width: 850, height: 605)
 }
@@ -1573,8 +1606,7 @@ if let mode = CommandLine.arguments.firstIndex(of: "--lane-copy") {
             checkLaneSelection(field, copyTo: pasteboard)
         }
     } else {
-        let scroll = descendants(desktop.dashboard.view, of: NSScrollView.self).first!
-        checkDashboardLanes(desktop, scroll: scroll, copyTo: pasteboard)
+        checkDashboardLanes(desktop, copyTo: pasteboard)
     }
     pasteboard.releaseGlobally()
     require(!desktop.window.isVisible, "private copy fixture stayed offscreen")
