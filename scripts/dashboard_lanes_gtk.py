@@ -37,14 +37,15 @@ def exercise_lanes(window, pane, row, widgets, settle, requests, clipboard):
     viewport, = widgets(pane, Gtk.Viewport)
     for dark in (False, True):
         settings.props.gtk_application_prefer_dark_theme = dark
-        for width, rows, lane_columns, feed_columns in [
-            (1024, [projected], 5, 2), (420, [projected], 2, 1),
-            (1024, [projected, other], 2, 1), (420, [projected, other], 2, 1),
+        for width, height, rows, lane_columns, feed_columns in [
+            (1024, 760, [projected], 5, 2), (1024, 760, [projected, other], 3, 1),
+            (540, 720, [projected], 3, 1), (540, 720, [projected, other], 3, 1),
+            (420, 760, [projected], 2, 1), (420, 760, [projected, other], 2, 1),
         ]:
-            window.resize(width, 760)
+            window.resize(width, height)
             pane.receive({"rows": rows})
             settle()
-            assert window.get_size() == (width, 760)
+            assert window.get_size() == (width, height)
             frames = pane.grid.get_children()
             assert [frame.title.get_text() for frame in frames] == [r["board"]["title"] for r in rows]
             frame = frames[0]
@@ -64,6 +65,10 @@ def exercise_lanes(window, pane, row, widgets, settle, requests, clipboard):
                     assert w <= field.get_allocated_width() and h <= field.get_allocated_height()
             for card, lane in zip(lane_grid.get_children(), lanes, strict=True):
                 assert labels(card) == [lane["label"], lane["state"], *lane["details"]]
+                for field in card.get_children():
+                    x, y = field.translate_coordinates(card, 0, 0)
+                    assert 0 <= x <= card.get_allocated_width() - field.get_allocated_width()
+                    assert 0 <= y <= card.get_allocated_height() - field.get_allocated_height()
                 state = card.get_children()[1]
                 assert state.get_style_context().has_class(lane["tone"])
             assert lane_grid.get_children()[0].get_children()[-1].get_layout().get_line_count() > 1

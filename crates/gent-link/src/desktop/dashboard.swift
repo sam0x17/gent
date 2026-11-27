@@ -694,7 +694,7 @@ final class DashboardTab: NSObject {
                 let group = part as? [String: Any]
                 let columns: DashboardColumns
                 if let lanes = group?["lanes"] as? [[String: Any]], !lanes.isEmpty {
-                    columns = DashboardColumns(lanes.map(dashboardLane), minimumWidth: 156, alignHeights: true)
+                    columns = DashboardColumns(lanes.map(dashboardLane), minimumWidth: 140, alignHeights: true)
                 } else if let feeds = group?["feeds"] as? [Int], feeds.count == 2,
                           feeds.allSatisfy({ widgets.indices.contains($0) && widgets[$0]["kind"] as? String == "events" }) {
                     columns = DashboardColumns(feeds.map { dashboardFeed(widgets[$0]) }, minimumWidth: 295)
