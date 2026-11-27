@@ -58,6 +58,10 @@ pub(super) fn terminal_failure(last: &Value) -> Option<Failure> {
             error["additionalDetails"].as_str().unwrap_or("")
         ),
     )
+    .or_else(|| {
+        let http = &error["codexErrorInfo"]["httpConnectionFailed"];
+        (http["httpStatusCode"].as_u64() == Some(503)).then_some(Failure::Capacity)
+    })
 }
 
 async fn stalled(host: &mut Host, thread: &str) -> Result<Option<Stall>> {
