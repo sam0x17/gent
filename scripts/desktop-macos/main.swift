@@ -989,9 +989,9 @@ func checkDashboardVisibility(_ desktop: Desktop) {
     resizeDesktop(desktop, width: 850, height: 605)
     reply(free)
     let sample = cards().first!
-    require(cards().count == 1 && shows("Test run") && shows("Example dashboard") && shows("18 of 24")
+    require(cards().count == 1 && sample.title == "Example dashboard" && shows("Sample test results") && shows("18 of 24")
             && descendants(sample, of: NSButton.self).isEmpty, "Free displays one labeled, read-only example")
-    let intro = descendants(sample, of: NSTextField.self).first { $0.stringValue == "Ask a registered chat to build a dashboard. On Pro, each chat can publish one and update it across your cluster." }!
+    let intro = descendants(sample, of: NSTextField.self).first { $0.stringValue == "Ask a registered chat to build a dashboard like this one. On Pro, each chat can publish one and update it across your cluster." }!
     let plot = descendants(sample, of: NSImageView.self).first!
     let clip = intro.enclosingScrollView!.contentView
     require(plot.accessibilityLabel() == "Tests passed per batch. 4 samples." && plot.image != nil
@@ -1039,11 +1039,11 @@ func checkDashboardVisibility(_ desktop: Desktop) {
     reply(["layout_only": true, "unchanged": true])
     require(cards().isEmpty && shows("Daemon offline"), "offline error survives resize and clears the example")
     reply(empty)
-    require(cards().count == 1 && shows("Test run"), "a successful empty refresh restores the example")
+    require(cards().count == 1 && shows("Example dashboard"), "a successful empty refresh restores the example")
     reply(["rows": [row(review)], "hidden": []])
     // Negotiate the current viewport before performClick services queued resize work.
     _ = requests { desktop.dashboard.load() }
-    require(cards().count == 1 && !shows("Test run") && restoreLink() == nil, "published board replaces example")
+    require(cards().count == 1 && !shows("Example dashboard") && restoreLink() == nil, "published board replaces example")
     let card = cards()[0]
     guard let title = descendants(card, of: NSTextField.self).first(where: { $0.stringValue == "Build" }),
           let hide = descendants(card, of: NSButton.self).first(where: { $0.title == "×" }) else {

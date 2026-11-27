@@ -1,9 +1,9 @@
 {
-  "chat": "Example dashboard",
+  "chat": "Sample test results",
   "board": {
-    "title": "Test run",
+    "title": "Example dashboard",
     "widgets": [
-      {"kind": "text", "label": "How dashboards work", "value": "Ask a registered chat to build a dashboard. On Pro, each chat can publish one and update it across your cluster."},
+      {"kind": "text", "label": "How dashboards work", "value": "Ask a registered chat to build a dashboard like this one. On Pro, each chat can publish one and update it across your cluster."},
       {"kind": "text", "label": "Start with this prompt", "value": "Make a Gent dashboard for this test run. Show how many tests have passed and list any failures."},
       {"kind": "graph", "label": "Tests passed per batch", "value": [3, 6, 4, 5], "unit": "tests"},
       {"kind": "text", "label": "Ask the same chat for updates", "value": "Update my dashboard after each test batch."},
