@@ -43,14 +43,23 @@ pub(crate) fn classify(code: &str, details: &str) -> Option<Failure> {
                 .zip(text.rfind('}'))
                 .and_then(|(start, end)| text.get(start..=end))
                 .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
-                && error["error"]["type"] == "invalid_request_error"
             {
                 let error = &error["error"];
-                return validation_failure(
-                    error["code"].as_str(),
-                    error["message"].as_str()?,
-                    error["param"].as_str(),
-                );
+                match error["type"].as_str() {
+                    Some("invalid_request_error") => {
+                        return validation_failure(
+                            error["code"].as_str(),
+                            error["message"].as_str()?,
+                            error["param"].as_str(),
+                        );
+                    }
+                    Some("server_error" | "overloaded_error")
+                        if error["message"].as_str().is_some_and(high_demand) =>
+                    {
+                        return Some(Failure::Capacity);
+                    }
+                    _ => {}
+                }
             }
             match code {
                 "badRequest" | "invalid_request" | "invalid_request_error" | "other" => {
@@ -106,9 +115,18 @@ fn validation_failure(code: Option<&str>, message: &str, param: Option<&str>) ->
     }
 }
 
+fn high_demand(text: &str) -> bool {
+    matches!(
+        text.trim().trim_end_matches('.'),
+        "we’re currently experiencing high demand, which may cause temporary errors"
+            | "we're currently experiencing high demand, which may cause temporary errors"
+    )
+}
+
 fn classify_details(text: &str) -> Option<Failure> {
     match () {
-        _ if text.trim() == "incomplete response returned, reason: max_output_tokens"
+        _ if high_demand(text)
+            || text.trim() == "incomplete response returned, reason: max_output_tokens"
             || text.contains("at capacity")
             || text.contains("model is overloaded")
             || text.contains("model is currently overloaded") =>

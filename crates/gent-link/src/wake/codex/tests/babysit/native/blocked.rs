@@ -33,6 +33,15 @@ async fn installed_codex_retries_provider_blocks_once_and_preserves_deliberate_b
     );
     let http_error = json!({"httpConnectionFailed":{"httpStatusCode":503}});
     for ((status, content_type, body), expected_error, outcome) in [
+        (
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "text/plain",
+                "Server is draining",
+            ),
+            http_error.clone(),
+            Outcome::Resume,
+        ),
         (overload, http_error.clone(), Outcome::Resume),
         (overload, http_error.clone(), Outcome::UserBlock),
         (overload, http_error, Outcome::ToolBlock),

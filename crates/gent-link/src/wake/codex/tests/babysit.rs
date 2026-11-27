@@ -386,6 +386,36 @@ async fn an_existing_human_stop_or_newer_goal_never_reaches_the_claim_recheck() 
 }
 
 #[test]
+fn temporary_unavailability_on_failed_provider_turns_is_retryable() {
+    use super::super::babysit::terminal_failure;
+    use gent_protocol::notifications::Failure;
+
+    let demand = "We’re currently experiencing high demand, which may cause temporary errors.";
+    let mut turn = json!({"status":"failed","error":{
+        "codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":503}},
+        "message":"unexpected status 503 Service Unavailable: Server is draining, url: https://provider.example/responses"
+    }});
+    assert_eq!(terminal_failure(&turn), Some(Failure::Capacity));
+    // A status number quoted in the body must not override the host's status.
+    turn["error"]["codexErrorInfo"]["httpConnectionFailed"]["httpStatusCode"] = json!(403);
+    assert_eq!(terminal_failure(&turn), None);
+    turn["error"]["codexErrorInfo"] = json!("other");
+    for message in [
+        demand.to_owned(),
+        demand.replace('’', "'"),
+        json!({"error":{"type":"server_error","message":demand}}).to_string(),
+    ] {
+        turn["error"]["message"] = json!(message);
+        assert_eq!(terminal_failure(&turn), Some(Failure::Capacity));
+    }
+    turn["error"]["message"] = json!(format!("A tool printed: {demand}"));
+    assert_eq!(terminal_failure(&turn), None);
+    turn["error"]["message"] = json!(demand);
+    turn["status"] = json!("interrupted");
+    assert_eq!(terminal_failure(&turn), None);
+}
+
+#[test]
 fn output_limit_must_be_the_error_on_a_failed_codex_turn() {
     use crate::wake::codex::babysit::terminal_failure;
 
