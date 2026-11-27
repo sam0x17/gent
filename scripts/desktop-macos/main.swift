@@ -1240,6 +1240,30 @@ func checkDashboardLanes(in dashboard: DashboardTab, fixedPane: Bool, copyTo pas
         descendants(view, of: NSTextField.self).first { $0.stringValue == text }!
     }
     func rect(_ view: NSView) -> NSRect { view.convert(view.bounds, to: scroll.documentView!) }
+    func checkFeeds(_ card: NSBox, left: [String], right: [String], split: Bool) {
+        let cut = (right.count + 1) / 2
+        let expected = split ? [left, Array(right.prefix(cut)), Array(right.dropFirst(cut))] : [left, right]
+        let titles = ["Finished", "Queue"] + (split ? ["Queue (continued)"] : [])
+        let columns = descendants(card, of: NSStackView.self).filter { $0.accessibilityRole() == .group &&
+            ["Finished", "Queue", "Queue (continued)"].contains($0.accessibilityLabel() ?? "") }
+        require(columns.count == titles.count, "only visible feed columns are accessible")
+        for (title, values) in zip(titles, expected) {
+            let column = columns.first { $0.accessibilityLabel() == title }!
+            let fields = column.arrangedSubviews.compactMap { $0 as? NSTextField }
+            let cells = (column.accessibilityChildren() ?? []).compactMap { $0 as? NSTextFieldCell }
+            require(column.isAccessibilityElement() && cells.map(\.stringValue) == [title] + values,
+                    "accessibility exposes the complete feed column in reading order")
+            require(fields.map(\.stringValue) == [title] + values && fields.allSatisfy { $0.isSelectable && !$0.isEditable },
+                    "feed heading and rows retain their original selectable text")
+            for (earlier, later) in zip(fields, fields.dropFirst()) {
+                require(rect(earlier).maxY <= rect(later).minY + 1, "rows read top to bottom")
+            }
+        }
+        if split {
+            let right = rect(label(titles[1], in: card)), tail = rect(label(titles[2], in: card))
+            require(right.maxX < tail.minX && abs(right.minY - tail.minY) < 1, "continuation occupies the third column")
+        }
+    }
     let original = publish(nil)
     require(label("Spare worker", in: original).isSelectable, "legacy event renders without projection")
     require(label(queued.joined(separator: "\n"), in: original).isSelectable, "legacy feed retains all rows")
@@ -1249,7 +1273,7 @@ func checkDashboardLanes(in dashboard: DashboardTab, fixedPane: Bool, copyTo pas
 
     let cases: [(width: CGFloat, beside: Bool, columns: Int)] = [
         (420, false, 2), (420, true, 2), (540, false, 3), (540, true, 3),
-        (1024, false, 5), (1024, true, 3), (420, false, 2)
+        (760, false, 4), (1024, false, 5), (760, false, 4), (1024, true, 3), (420, false, 2)
     ]
     var initialContentWidth: CGFloat?
     for (width, beside, fixedColumns) in cases {
@@ -1296,16 +1320,11 @@ func checkDashboardLanes(in dashboard: DashboardTab, fixedPane: Bool, copyTo pas
         require(fit.height > 25 && text.bounds.height >= fit.height - 1, "long lane detail wraps fully")
         let left = rect(label("Finished", in: card)), right = rect(label("Queue", in: card))
         let paired = card.contentView!.bounds.width >= 295 * 2 + 8
-        if fixedPane { require(paired == (width == 1024 && !beside), "feed breakpoint in fixed pane") }
+        if fixedPane { require(paired == (width >= 760 && !beside), "feed breakpoint in fixed pane") }
         require(paired ? (abs(left.minY - right.minY) < 1 && left.minX < right.minX) : left.maxY < right.minY,
                 "paired feeds use the width of the individual board")
-        for entries in [finished, queued] {
-            let fields = entries.map { label($0, in: card) }
-            require(fields.allSatisfy { $0.isSelectable && !$0.isEditable }, "selectable feed rows")
-            for (earlier, later) in zip(fields, fields.dropFirst()) {
-                require(rect(earlier).maxY <= rect(later).minY + 1, "every feed row in sequence")
-            }
-        }
+        let split = card.contentView!.bounds.width >= 3 * 295 + 2 * 8
+        checkFeeds(card, left: finished, right: queued, split: split)
         let last = label(queued.last!, in: card)
         last.scrollToVisible(last.bounds)
         require(scroll.documentVisibleRect.insetBy(dx: -1, dy: -1).contains(rect(last)), "final feed row reachable")
@@ -1322,6 +1341,62 @@ func checkDashboardLanes(in dashboard: DashboardTab, fixedPane: Bool, copyTo pas
         }
         require(clicks == [.json(["op":"dashboard_click", "agent":"jobs", "revision":42, "widget":"inspect"])],
                 "indexed button preserves revision and widget ID: \(output)")
+    }
+    if fixedPane {
+        resize(NSSize(width: 1024, height: 760))
+        for (leftCount, rightCount, split) in [(0, 3, false), (1, 4, true), (3, 5, false),
+                                               (3, 6, true), (3, 7, true), (6, 2, false)] {
+            let left = Array(finished.prefix(leftCount)), right = Array(queued.prefix(rightCount))
+            widgets[6]["value"] = left
+            widgets[7]["value"] = right
+            let card = publish(layout)
+            require(waitInMainRunLoop {
+                dashboard.view.layoutSubtreeIfNeeded()
+                let first = rect(label("Finished", in: card)), second = rect(label("Queue", in: card))
+                return second.minX >= first.maxX && abs(first.minY - second.minY) < 1
+            }, "wide feed geometry after changing list lengths")
+            checkFeeds(card, left: left, right: right, split: split)
+        }
+        widgets[6]["value"] = finished
+        widgets[7]["value"] = queued
+        let card = publish(layout)
+        dashboard.view.layoutSubtreeIfNeeded()
+        let margins = dashboard.view.bounds.width - card.contentView!.bounds.width
+        let threshold: CGFloat = 3 * 295 + 2 * 8
+        let last = label(queued.last!, in: card)
+        func reflow(to available: CGFloat) {
+            resize(NSSize(width: available + margins, height: 760))
+            let split = available >= threshold
+            require(waitInMainRunLoop {
+                dashboard.view.layoutSubtreeIfNeeded()
+                let hasContinuation = descendants(card, of: NSTextField.self).contains { $0.stringValue == "Queue (continued)" }
+                return card.contentView!.bounds.width == available && hasContinuation == split
+            }, "split and rejoin at the exact allocated three-column width")
+            checkFeeds(card, left: finished, right: queued, split: split)
+            require(last === label(queued.last!, in: card), "reflow retains the original row field")
+        }
+        reflow(to: threshold)
+        let lower = threshold - 1, upper = threshold + 1
+        reflow(to: upper)
+        // Cover a moved row, an unmoved feed row, and focus outside the feed.
+        for field in [last, label(finished[0], in: card), label(longDetail, in: card)] {
+            field.scrollToVisible(field.bounds)
+            field.selectText(nil)
+            let editor = field.currentEditor() as! NSTextView
+            let range = NSRange(location: 1, length: 4)
+            editor.setSelectedRange(range)
+            for width in [lower, upper] {
+                reflow(to: width)
+                require(field.currentEditor() === editor && field.window?.firstResponder === editor &&
+                        editor.selectedRange() == range && editor.string == field.stringValue,
+                        "the same field editor and selected substring survive feed reflow")
+            }
+        }
+        let window = dashboard.view.window!
+        window.makeFirstResponder(nil)
+        let responder = window.firstResponder
+        reflow(to: lower)
+        require(window.firstResponder === responder && last.currentEditor() == nil, "reflow does not start an edit")
     }
 }
 

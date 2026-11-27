@@ -193,6 +193,7 @@ private final class DashboardColumns: NSStackView {
     private let items: [NSView]
     private let minimumWidth: CGFloat
     private let alignHeights: Bool
+    private var continuation: (original: NSStackView, column: NSStackView, rows: [NSView])?
     private var columns = 0
     private static let gap: CGFloat = 8
 
@@ -209,8 +210,21 @@ private final class DashboardColumns: NSStackView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
+    convenience init(left: [String: Any], right: [String: Any]) {
+        let leftRows = left["value"] as? [String] ?? []
+        let rightRows = right["value"] as? [String] ?? []
+        let label = right["label"] as? String ?? ""
+        let original = dashboardFeed(label, entries: rightRows)
+        self.init([dashboardFeed(left["label"] as? String ?? "", entries: leftRows), original], minimumWidth: 295)
+        if rightRows.count >= max(4, 2 * leftRows.count) {
+            continuation = (original, dashboardFeed(label + " (continued)", entries: []),
+                            Array(original.arrangedSubviews.suffix(rightRows.count / 2)))
+        }
+    }
+
     private var fittingColumns: Int {
-        max(1, min(items.count, Int((bounds.width + Self.gap) / (minimumWidth + Self.gap))))
+        let maximum = items.count + (continuation == nil ? 0 : 1)
+        return max(1, min(maximum, Int((bounds.width + Self.gap) / (minimumWidth + Self.gap))))
     }
 
     override func setFrameSize(_ size: NSSize) {
@@ -225,16 +239,48 @@ private final class DashboardColumns: NSStackView {
     }
 
     private func arrange(_ count: Int) {
+        guard continuation != nil, (columns == 3) != (count == 3),
+              let window, let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
+              let field = editor.delegate as? NSTextField, field.isDescendant(of: self),
+              field.currentEditor() === editor else {
+            layoutColumns(count)
+            return
+        }
+        // Removing the row ends field editing even though its NSTextField is reused.
+        let ranges = editor.selectedRanges, affinity = editor.selectionAffinity
+        layoutColumns(count)
+        guard field.window === window else { return }
+        if field.currentEditor() == nil {
+            guard window.firstResponder == nil || window.firstResponder === window else { return }
+            field.selectText(nil)
+        }
+        if field.currentEditor() === editor {
+            editor.setSelectedRanges(ranges, affinity: affinity, stillSelecting: false)
+        }
+    }
+
+    private func layoutColumns(_ count: Int) {
         columns = count
         arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for start in stride(from: 0, to: items.count, by: count) {
+        var visible = items
+        if let continuation {
+            let split = count == 3
+            let target = split ? continuation.column : continuation.original
+            for field in continuation.rows where field.superview !== target {
+                field.removeFromSuperview()
+                target.addArrangedSubview(field)
+                field.widthAnchor.constraint(equalTo: target.widthAnchor).isActive = true
+            }
+            if split { visible.append(continuation.column) }
+        }
+        for start in stride(from: 0, to: visible.count, by: count) {
             let row = NSStackView()
             row.orientation = .horizontal
             row.alignment = .top
             row.spacing = Self.gap
             addArrangedSubview(row)
             let fraction = 1 / CGFloat(count)
-            for item in items[start..<min(start + count, items.count)] {
+            for item in visible[start..<min(start + count, visible.count)] {
                 row.addArrangedSubview(item)
                 item.widthAnchor.constraint(equalTo: widthAnchor, multiplier: fraction,
                                             constant: -Self.gap * (1 - fraction)).isActive = true
@@ -296,19 +342,20 @@ private func dashboardLane(_ lane: [String: Any]) -> NSBox {
     return card
 }
 
-private func dashboardFeed(_ widget: [String: Any]) -> NSView {
+private func dashboardFeed(_ label: String, entries: [String]) -> NSStackView {
     let feed = NSStackView()
     feed.orientation = .vertical
     feed.alignment = .leading
     feed.spacing = 5
-    let label = widget["label"] as? String ?? ""
+    feed.setAccessibilityElement(true)
+    feed.setAccessibilityRole(.group)
     feed.setAccessibilityLabel(label)
     feed.addWrappingText(label, font: .systemFont(ofSize: 13, weight: .semibold))
     let rule = NSBox()
     rule.boxType = .separator
     feed.addArrangedSubview(rule)
     rule.widthAnchor.constraint(equalTo: feed.widthAnchor).isActive = true
-    for entry in widget["value"] as? [String] ?? [] {
+    for entry in entries {
         feed.addWrappingText(entry, font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular))
     }
     return feed
@@ -697,7 +744,7 @@ final class DashboardTab: NSObject {
                     columns = DashboardColumns(lanes.map(dashboardLane), minimumWidth: 140, alignHeights: true)
                 } else if let feeds = group?["feeds"] as? [Int], feeds.count == 2,
                           feeds.allSatisfy({ widgets.indices.contains($0) && widgets[$0]["kind"] as? String == "events" }) {
-                    columns = DashboardColumns(feeds.map { dashboardFeed(widgets[$0]) }, minimumWidth: 295)
+                    columns = DashboardColumns(left: widgets[feeds[0]], right: widgets[feeds[1]])
                 } else {
                     continue
                 }
