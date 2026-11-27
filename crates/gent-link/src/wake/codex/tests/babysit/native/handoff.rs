@@ -140,3 +140,103 @@ async fn named_host_handoff_gets_one_continuation() -> Result<()> {
     child.kill().await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires an installed Codex app-server"]
+async fn multiple_named_handoffs_in_one_turn_share_the_opening_admission() -> Result<()> {
+    let node = Node::start().await?;
+    config::set_ordinary_babysitter_enabled(&node.home, true)?;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let (mut child, socket) = start_host(node.root.path(), listener.local_addr()?).await?;
+    let release = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let gate = release.clone();
+    let provider = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let index = count.fetch_add(1, Ordering::SeqCst);
+            let gate = gate.clone();
+            async move {
+                if index == 1 {
+                    gate.notified().await;
+                }
+                (StatusCode::SERVICE_UNAVAILABLE, "Server is draining")
+            }
+        }),
+    );
+    let trial = async {
+        let mut host = Host::connect(&socket).await?;
+        let t=host.rpc("thread/start",json!({"cwd":node.root.path().join("work"),"threadSource":"user","historyMode":"paginated"})).await?;
+        let thread = t["thread"]["id"].as_str().unwrap();
+        let path = Path::new(t["thread"]["path"].as_str().unwrap());
+        let (_bindings, registry, recipient) = node.register(&socket, thread).await?;
+        let prior=host.rpc("thread/goal/set", json!({"threadId":thread,"objective":"Finished fixture","status":"complete","origin":"user"})).await?["goal"].clone();
+        let primer=host.rpc("turn/start",json!({"threadId":thread,"turnTrigger":"user","input":[{"type":"text","text":"Prime the fixture."}]})).await?;
+        stopped(&mut host, thread, &primer["turn"]["id"], path).await?;
+        while gent_daemon::store::now() <= prior["updatedAt"].as_i64().unwrap() {
+            sleep(Duration::from_millis(20)).await;
+        }
+        let input = json!({"threadId":thread,"input":[],"toolOutput":{"namespace":"codex_tui","name":"send_message_to_thread","output":"fixture","retain":true}});
+        let root = host.rpc("turn/start", input.clone()).await?["turn"]["id"].clone();
+        while calls.load(Ordering::SeqCst) < 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+        host.rpc("turn/start", input).await?;
+        release.notify_one();
+        stopped(&mut host, thread, &root, path).await?;
+        assert_eq!(
+            last(&mut host, thread).await?["error"]["codexErrorInfo"],
+            json!({"httpConnectionFailed":{"httpStatusCode":503}})
+        );
+        let items: Vec<_> = rollout(path)?
+            .into_iter()
+            .filter(|r| {
+                r["payload"]["turn_id"] == root
+                    && r["payload"]["item"]["type"] == "FunctionCallOutput"
+            })
+            .collect();
+        assert_eq!(items.len(), 2);
+        let opening = items[0]["payload"]["item"]["id"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("fco_")
+            .unwrap();
+        assert_ne!(
+            items[0]["payload"]["item"]["id"],
+            items[1]["payload"]["item"]["id"]
+        );
+        let (mut a, mut b) = (None, None);
+        tokio::try_join!(
+            sweep(&node.home, &registry, &mut a, Sweep::GoalsOnly),
+            sweep(&node.home, &registry, &mut b, Sweep::WakeAndGoals)
+        )?;
+        let automatic = retry(&mut host, thread, &root, path).await?;
+        let db = rusqlite::Connection::open_with_flags(
+            node.home.join("state.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let rows: (usize, String) = db.query_row(
+            "SELECT count(*),item FROM babysitter_chat_attempts a
+             JOIN babysitter_chat_handoffs h USING(attempt,agent)
+             WHERE a.agent=?1 AND turn=?2 AND ordinal=0 AND submitted=1",
+            rusqlite::params![recipient, root.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        assert_eq!(rows, (1, opening.to_owned()));
+        sweep(&node.home, &registry, &mut None, Sweep::GoalsOnly).await?;
+        assert_eq!(last(&mut host, thread).await?["id"], automatic);
+        assert_eq!(
+            host.rpc("thread/goal/get", json!({"threadId":thread}))
+                .await?["goal"],
+            prior
+        );
+        Ok::<_, anyhow::Error>(())
+    };
+    let result = tokio::select! {
+        result=tokio::time::timeout(Duration::from_secs(25),trial)=>result?,
+        result=axum::serve(listener,provider)=>{result?;anyhow::bail!("fixture provider stopped")}
+    };
+    child.kill().await?;
+    result
+}

@@ -321,3 +321,5 @@ fn named_root_binds_all_notifications_and_never_falls_back_to_human() -> Result<
     }
     Ok(())
 }
+
+mod collab;

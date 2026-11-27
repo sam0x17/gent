@@ -1,6 +1,7 @@
 //! A first, named host input may open its own root. The receipt identifies
 //! the receiving item, without making a claim about the sender.
 use super::*;
+mod collab;
 mod direct;
 mod preamble;
 mod previous;
@@ -25,6 +26,11 @@ struct Fields {
     client_id: Option<String>,
     role: Option<String>,
     source: Option<String>,
+    tool: Option<String>,
+    server: Option<String>,
+    sender_thread_id: Option<String>,
+    receiver_thread_ids: Option<Vec<String>>,
+    questions: Option<serde::de::IgnoredAny>,
     status: Option<String>,
     started_at_ms: Option<i64>,
     completed_at_ms: Option<i64>,
@@ -236,34 +242,57 @@ pub(super) fn read(
     }
     let dispatched = !inputs.is_empty();
     let mut named = HashSet::new();
+    let mut collab = collab::Work::default();
+    let mut opener = None;
+    let mut unbound_tool = false;
     while Instant::now() < deadline {
         let Some(row) = Row::next(&mut rows, &mut line)? else {
             break;
         };
-        let work = if dispatched {
-            direct::work(&row, &mut rows, &mut line, failed, &turn, &mut inputs)?
-        } else {
-            row.work(&failed.thread, &turn)
-        };
-        if work {
+        let preceding_pair = opener.take();
+        if row.r#type != "turn_context" {
+            // The notification lane has already consumed its final user receipt.
+            // Its original opener must still immediately follow the context.
+            if dispatched && preceding_pair.is_some() {
+                break;
+            }
+            let work = if dispatched {
+                direct::work(&row, &mut rows, &mut line, failed, &turn, &mut inputs)?
+            } else if collab.group(&row, &mut rows, &mut line, failed, deadline)? {
+                true
+            } else {
+                // Legacy single admissions may contain ordinary tools. A new
+                // mixed path requires both ends of every invoked tool group.
+                unbound_tool |= row.payload.call_id.is_some()
+                    || row.payload.questions.is_some()
+                    || row
+                        .payload
+                        .item
+                        .as_ref()
+                        .is_some_and(|i| i.questions.is_some());
+                row.work(&failed.thread, &turn)
+            };
+            if work {
+                continue;
+            }
+            let Some(id) = named_pair(row, &mut rows, &mut line, failed)? else {
+                break;
+            };
+            if named.len() >= MAX_CHAT_INPUTS || !named.insert(id) {
+                break;
+            }
+            if inputs.is_empty() {
+                opener = Some(id);
+            }
             continue;
         }
-        let Some(id) = named_pair(row, &mut rows, &mut line, failed)? else {
-            break;
-        };
-        if !named.insert(id) {
+        let Some(id) = preceding_pair else { break };
+        if !dispatched && (named.len() > 1 || collab.has_nested()) && unbound_tool {
             break;
         }
-        if !inputs.is_empty() {
-            continue;
-        }
-        let Some(context) = Row::next(&mut rows, &mut line)? else {
-            break;
-        };
-        if context.r#type != "turn_context"
-            || !context.payload.within(&failed.thread, &turn)
-            || context.payload.turn_id.as_ref() != Some(&turn)
-            || context.payload.root_turn_id.as_ref() != Some(&turn)
+        if !row.payload.within(&failed.thread, &turn)
+            || row.payload.turn_id.as_ref() != Some(&turn)
+            || row.payload.root_turn_id.as_ref() != Some(&turn)
         {
             break;
         }
