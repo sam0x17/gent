@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 CRATES = ("gent-protocol", "gent-crypto", "gent-daemon", "gent-link")
 REPO = "sam0x17/gent"
 REPOSITORY = f"https://github.com/{REPO}"
+NOTES_END = "<!-- gent-release-notes:end -->"
 
 
 def require(condition, message):
@@ -34,6 +35,32 @@ def workspace_version():
     return tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
 
 
+def notes_path(version):
+    return f"crates/gent-link/releases/{version}.md"
+
+
+def release_notes(version, head):
+    path = notes_path(version)
+    entry = output("git", "ls-tree", head, "--", path)
+    require(entry.startswith(("100644 blob ", "100755 blob ")), f"Missing regular file {path} in the release commit")
+    notes = subprocess.check_output(["git", "show", f"{head}:{path}"], encoding="utf-8").strip("\n")
+    require(NOTES_END not in notes, f"{path} contains the reserved release-body delimiter")
+    # Headings, links and authoring instructions alone would leave About with no release news.
+    visible = re.sub(r"<!--.*?(?:-->|$)", "", notes, flags=re.DOTALL)
+    visible = re.sub(r"!?\[[^\]\n]*\]\([^)\n]*\)|https?://\S+", "", visible)
+    lines = []
+    for line in visible.splitlines():
+        line = re.sub(r"^[-*+]\s+", "", line.strip())
+        if (not line or line.startswith("#")
+                or re.match(r"(?:TODO|TBD|FIXME|TK)\b", line, re.IGNORECASE)
+                or line.startswith(("**Full Changelog**:", "Install this version with `cargo install "))
+                or re.fullmatch(r"(?:coming soon|release notes|bug fixes and improvements)[.!]?", line, re.IGNORECASE)):
+            continue
+        lines.append(line)
+    require(len(re.findall(r"[^\W\d_]+", " ".join(lines))) >= 3, f"Describe a user-visible change in {path}")
+    return notes
+
+
 def source():
     tag = os.environ["GITHUB_REF_NAME"]
     require(os.environ["GITHUB_REF_TYPE"] == "tag" and os.environ["GITHUB_REPOSITORY"] == REPO,
@@ -44,6 +71,7 @@ def source():
     head = clean_head()
     require(head == output("git", "rev-parse", os.environ["GITHUB_SHA"] + "^{commit}"),
             "Checkout differs from the triggering revision")
+    notes = release_notes(version, head)
     ref = f"refs/tags/{tag}"
     refs = {name: oid for oid, name in (line.split() for line in output(
         "git", "ls-remote", "origin", ref, ref + "^{}", "refs/heads/main",
@@ -52,7 +80,7 @@ def source():
     allowed = [refs.get("refs/heads/main"), refs.get("refs/tags/stable^{}", refs.get("refs/tags/stable"))]
     require(any(oid and subprocess.run(["git", "merge-base", "--is-ancestor", head, oid]).returncode == 0
                 for oid in allowed), "The version tag must select a commit on public main or Stable")
-    return version, head
+    return version, head, notes
 
 
 def archive_checksum(path, name, version, head):
@@ -152,7 +180,7 @@ def github_releases():
     return [release for page in pages for release in page]
 
 
-def existing_release(version, head, missing, releases):
+def existing_release(version, head, missing, releases, notes):
     tag = f"v{version}"
     found = [r for r in releases if r["tag_name"] == tag]
     if not found:
@@ -166,6 +194,16 @@ def existing_release(version, head, missing, releases):
     require(not release["draft"] and release["prerelease"] == is_prerelease(version)
             and set(links(version)).issubset(published_links),
             f"{tag}: existing GitHub Release conflicts with the version or crate links")
+    lines = release["body"].splitlines()
+    end = next((i for i, line in enumerate(lines) if line.strip() == NOTES_END), None)
+    if end is None:
+        # Older releases use the generated changelog/crate footer without a delimiter.
+        end = next((i for i, line in enumerate(lines) if line.strip().startswith("**Full Changelog**:")
+                    or line.strip() == "### Published crates"), len(lines))
+    authored = "\n".join(lines[:end])
+    require(f"\n{notes}\n" in f"\n{authored}\n",
+            f"{tag}: existing release must include the tagged notes from {notes_path(version)}; "
+            "preserve maintainer edits when restoring them")
     return True
 
 
@@ -196,26 +234,21 @@ def github_post(endpoint, payload):
         input=json.dumps(payload), text=True))
 
 
-def create_release(version, head, releases):
+def create_release(version, head, releases, notes):
     tag = f"v{version}"
     ancestors = set(output("git", "tag", "--merged", head, "--list", "v[0-9]*").splitlines())
     previous = next((r["tag_name"] for r in releases if not r["draft"] and r["tag_name"] != tag
                      and r["tag_name"] in ancestors), None)
+    sections = [notes, NOTES_END]
     if previous:
-        notes = github_post("/generate-notes", {"tag_name": tag, "target_commitish": head,
-                                                "previous_tag_name": previous})["body"]
-    else:
-        notes = ("This is Gent’s first crates.io release. The `gent` CLI and desktop companion connect "
-                 "managed Codex and Claude Code chats across enrolled machines. "
-                 "Free includes Babysitter. It resumes eligible goals after provider failures in managed Codex "
-                 "and Claude Code chats. Ordinary Codex recovery is off by default. Enable it in Settings "
-                 "or with `gent config ordinary-chat-recovery enable`.\n\n"
-                 "Install with `cargo install --locked gent-link`, then run `gent setup`. "
-                 "To pause routine updates on this node, run `gent update disable`.")
+        generated = github_post("/generate-notes", {"tag_name": tag, "target_commitish": head,
+                                                    "previous_tag_name": previous})["body"]
+        if generated.strip():
+            sections.append(generated.strip())
     crates = "\n".join(f"- [{n} {version}]({url})" for n, url in zip(CRATES, links(version)))
-    body = f"{notes}\n\n### Published crates\n\n{crates}"
-    if previous or is_prerelease(version):
-        body += f"\n\nInstall this version with `cargo install --locked --version '={version}' gent-link`."
+    sections.extend([f"### Published crates\n\n{crates}",
+                     f"Install this version with `cargo install --locked --version '={version}' gent-link`."])
+    body = "\n\n".join(sections)
     source()
     release = github_post("", {"tag_name": tag, "target_commitish": head, "draft": False,
                                "prerelease": is_prerelease(version), "name": f"Gent {tag}", "body": body})
@@ -225,12 +258,13 @@ def create_release(version, head, releases):
 def main(command):
     if command == "bootstrap-check":
         version, head = workspace_version(), clean_head()
+        release_notes(version, head)
         hashes = package_hashes(version, head)
         pending = missing_crates(version, hashes)
         for name, checksum in hashes.items():
             print(name, version, head, checksum, "missing" if name in pending else "verified")
         return
-    version, head = source()
+    version, head, notes = source()
     if command == "source":
         return
     if command == "installed":
@@ -242,7 +276,7 @@ def main(command):
     if command == "plan":
         hashes = package_hashes(version, head)
         missing = missing_crates(version, hashes)
-        existing_release(version, head, missing, github_releases())
+        existing_release(version, head, missing, github_releases(), notes)
         print(f"Verified {len(CRATES) - len(missing)} registry archives. Pending: {', '.join(missing) or 'none'}")
         with open(os.environ["GITHUB_OUTPUT"], "a") as out:
             print(f"hashes={json.dumps(hashes)}", f"publish={'true' if missing else 'false'}", sep="\n", file=out)
@@ -255,8 +289,8 @@ def main(command):
         require(not missing, f"Missing crates at {version}: {', '.join(missing)}")
         if command == "release":
             releases = github_releases()
-            if not existing_release(version, head, missing, releases):
-                create_release(version, head, releases)
+            if not existing_release(version, head, missing, releases, notes):
+                create_release(version, head, releases, notes)
 
 
 if __name__ == "__main__":

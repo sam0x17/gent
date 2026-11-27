@@ -31,7 +31,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - run: python3 scripts/release.py source
+      - name: Verify the tagged source and release notes
+        run: python3 scripts/release.py source
       - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - name: Test, build and verify the packages from a fresh checkout
         run: |
@@ -59,7 +60,8 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - run: python3 scripts/release.py source
+      - name: Verify the tagged source and release notes
+        run: python3 scripts/release.py source
       - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6

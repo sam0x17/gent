@@ -16,6 +16,7 @@ import release as r
 
 class ReleaseTest(unittest.TestCase):
     version = "0.1.0"
+    notes = "Open About to read the latest release notes."
     sha = "a" * 40
     hashes = dict.fromkeys(r.CRATES, "b" * 64)
 
@@ -30,14 +31,17 @@ class ReleaseTest(unittest.TestCase):
             git("config", "user.name", "Release fixture")
             git("config", "user.email", "fixture@example.invalid")
             Path("Cargo.toml").write_text('[workspace.package]\nversion = "0.1.0"\n')
-            git("add", "Cargo.toml")
+            path = Path(r.notes_path(self.version))
+            path.parent.mkdir(parents=True)
+            path.write_text(self.notes + "\n")
+            git("add", "Cargo.toml", str(path))
             git("commit", "-m", "fixture")
             git("tag", "-a", "v0.1.0", "-m", "fixture")
             git("remote", "add", "origin", ".")
             env = {"GITHUB_REF_NAME": "v0.1.0", "GITHUB_REF_TYPE": "tag",
                    "GITHUB_REPOSITORY": r.REPO, "GITHUB_SHA": git("rev-parse", "refs/tags/v0.1.0")}
             with patch.dict(os.environ, env):
-                self.assertEqual(r.source(), ("0.1.0", git("rev-parse", "HEAD")))
+                self.assertEqual(r.source(), ("0.1.0", git("rev-parse", "HEAD"), self.notes))
                 with patch.dict(os.environ, GITHUB_REF_NAME="v0.1.0-rc.1"):
                     with self.assertRaisesRegex(ValueError, "workspace version"):
                         r.source()
@@ -50,6 +54,45 @@ class ReleaseTest(unittest.TestCase):
                 git("checkout", "--detach", env["GITHUB_SHA"])
                 with self.assertRaisesRegex(ValueError, "no longer selects"):
                     r.source()
+
+    def test_tag_preflight_rejects_missing_empty_and_placeholder_notes_before_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = Path.cwd()
+            self.addCleanup(os.chdir, original)
+            os.chdir(directory)
+            def git(*args):
+                return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
+            git("init", "-b", "main")
+            git("config", "user.name", "Release fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            Path("Cargo.toml").write_text('[workspace.package]\nversion = "0.1.0"\n')
+            path = Path(r.notes_path(self.version))
+            path.parent.mkdir(parents=True)
+            for invalid in [None, " \n", "# Gent 0.1.0\n\n<!-- Describe the changes here -->",
+                            "- TBD: fill in what changed", "[Full changelog](https://example.org/1)",
+                            "**Full Changelog**: https://example.org/compare\n### Published crates\n"
+                            "- [crate](https://example.org/crate)\nInstall this version with `cargo install gent-link`.",
+                            self.notes + "\n" + r.NOTES_END]:
+                with self.subTest(invalid=invalid):
+                    if invalid is not None:
+                        path.write_text(invalid)
+                    git("add", ".")
+                    git("commit", "-m", "fixture")
+                    env = {"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v0.1.0",
+                           "GITHUB_REPOSITORY": r.REPO, "GITHUB_SHA": git("rev-parse", "HEAD")}
+                    with patch.dict(os.environ, env), patch.object(r, "publish") as publish:
+                        with self.assertRaisesRegex(ValueError, r"crates/gent-link/releases/0\.1\.0\.md"):
+                            r.main("publish")
+                        publish.assert_not_called()
+            # Only the exact path in the tagged tree qualifies, including a prerelease suffix.
+            path.write_text(self.notes)
+            pre = Path(r.notes_path("0.1.0-rc.1"))
+            pre.symlink_to(path.name)
+            git("add", ".")
+            git("commit", "-m", "fixture")
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                r.release_notes("0.1.0-rc.1", git("rev-parse", "HEAD"))
+            self.assertEqual(r.release_notes(self.version, git("rev-parse", "HEAD")), self.notes)
 
     def test_archive_checks_content_identity_and_cargo_provenance(self):
         name = r.CRATES[0]
@@ -138,35 +181,61 @@ class ReleaseTest(unittest.TestCase):
 
     def test_release_retry_and_prerelease_mismatches(self):
         version = "0.1.0-rc.1"
-        release = {"tag_name": "v" + version, "target_commitish": self.sha, "draft": False, "prerelease": True, "body": "\n".join(r.links(version))}
-        self.assertTrue(r.existing_release(version, self.sha, [], [release]))
+        footer = "\n".join(r.links(version))
+        release = {"tag_name": "v" + version, "target_commitish": self.sha, "draft": False, "prerelease": True,
+                   "body": f"{self.notes}\n\n{r.NOTES_END}\n\n{footer}"}
+        self.assertTrue(r.existing_release(version, self.sha, [], [release], self.notes))
         for changed in [{"draft": True}, {"prerelease": False}, {"body": ""}, {"target_commitish": "f"*40},
-                        {"body": "\n".join(r.links(version + "0"))}]:
-            with self.assertRaises(ValueError):
-                r.existing_release(version, self.sha, [], [release | changed])
+                        {"body": "\n".join(r.links(version + "0"))},
+                        {"body": footer}, {"body": f"{r.NOTES_END}\n{self.notes}\n{footer}"}]:
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                r.existing_release(version, self.sha, [], [release | changed], self.notes)
         with self.assertRaisesRegex(ValueError, "incomplete"):
-            r.existing_release(version, self.sha, [r.CRATES[-1]], [release])
+            r.existing_release(version, self.sha, [r.CRATES[-1]], [release], self.notes)
 
-    def test_first_release_and_subsequent_generated_notes(self):
+    def test_rerun_preserves_enriched_and_legacy_releases(self):
+        for boundary in [r.NOTES_END, "**Full Changelog**: https://example.org/compare", "### Published crates"]:
+            body = f"Maintainer introduction.\n\n{self.notes}\n\nExtra instructions.\n\n{boundary}\n"
+            body += "\n".join(r.links(self.version))
+            release = {"tag_name": "v" + self.version, "target_commitish": self.sha,
+                       "draft": False, "prerelease": False, "body": body.replace("\n", "\r\n")}
+            with (self.subTest(boundary=boundary), patch.object(r, "source", return_value=(self.version, self.sha, self.notes)),
+                  patch.dict(os.environ, HASHES=json.dumps(self.hashes)), patch.object(r, "missing_crates", return_value=[]),
+                  patch.object(r, "github_releases", return_value=[release]), patch.object(r, "github_post") as post):
+                r.main("release")
+                post.assert_not_called()
+                release["body"] = body.replace(self.notes, "Different maintainer notes.")
+                with self.assertRaisesRegex(ValueError, "tagged notes"):
+                    r.main("release")
+                post.assert_not_called()
+
+    def test_explicit_delimiter_takes_precedence_over_legacy_heading(self):
+        body = f"### Published crates\n{self.notes}\n  {r.NOTES_END}  \n" + "\n".join(r.links(self.version))
+        release = {"tag_name": "v" + self.version, "target_commitish": self.sha,
+                   "draft": False, "prerelease": False, "body": body}
+        self.assertTrue(r.existing_release(self.version, self.sha, [], [release], self.notes))
+
+    def test_new_releases_put_authored_notes_before_generated_details(self):
+        notes = self.notes + "\n\n- Follow the link to GitHub Releases."
         for releases in [[], [{"draft": False, "tag_name": "v0.1.0"}]]:
             post = Mock(side_effect=lambda endpoint, _: {"body": "Included changes"} if endpoint else {"html_url": "fixture"})
             with patch.object(r, "source"), patch.object(r, "output", return_value="v0.1.0"), patch.object(r, "github_post", post):
-                r.create_release("0.2.0-rc.1", self.sha, releases)
+                r.create_release("0.2.0-rc.1", self.sha, releases, notes)
             endpoint, payload = post.call_args.args
             self.assertEqual(endpoint, "")
             self.assertTrue(payload["prerelease"])
             self.assertFalse(payload["draft"])
             self.assertEqual(payload["target_commitish"], self.sha)
-            self.assertTrue(all(url in payload["body"] for url in r.links("0.2.0-rc.1")))
+            authored, generated = payload["body"].split(f"\n\n{r.NOTES_END}\n\n")
+            self.assertEqual(authored, notes)
+            self.assertTrue(all(url in generated for url in r.links("0.2.0-rc.1")))
+            self.assertIn("cargo install --locked --version '=0.2.0-rc.1' gent-link", generated)
             if releases:
                 self.assertEqual(post.call_args_list[0], call("/generate-notes", {
                     "tag_name": "v0.2.0-rc.1", "target_commitish": self.sha, "previous_tag_name": "v0.1.0"}))
-                self.assertIn("Included changes", payload["body"])
+                self.assertIn("Included changes", generated)
             else:
                 self.assertEqual(post.call_count, 1)
-                for phrase in ["first crates.io release", "Free includes Babysitter", "off by default",
-                               "cargo install --locked gent-link", "gent update disable"]:
-                    self.assertIn(phrase, payload["body"])
 
 
 if __name__ == "__main__":

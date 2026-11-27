@@ -2,6 +2,12 @@
 
 The four crates share a workspace version. A version tag such as `v0.1.0` starts the Linux **Publish Gent** workflow. The tagged commit must be reachable from public `main` or `stable`. The workflow builds and tests the locked workspace, packages all four crates, publishes missing versions in dependency order, installs `gent-link` from crates.io, and verifies the installed binary’s version and Git commit before creating the GitHub Release. SemVer prereleases such as `v0.2.0-rc.1` get GitHub prereleases.
 
+## Write the release notes
+
+Commit `crates/gent-link/releases/<version>.md` with the version bump. Use the exact workspace version, including any prerelease suffix, without the leading `v`. Describe what changed for someone using Gent. Favor plain paragraphs or short bullets that read well in Desktop’s plain-text view. Leave the compare link, crate list and versioned install command to CI.
+
+The tag workflow checks the file before publication. GitHub displays the authored Markdown first, followed by `<!-- gent-release-notes:end -->` and the generated details. Desktop uses the authored section. A rerun accepts a matching release with additional maintainer text. If the authored notes are missing or changed, restore the tagged text in the release body and rerun.
+
 ## One-time setup and first publication
 
 Create the GitHub environment `crates-io` with a deployment rule allowing release **tags** matching `v*`. Limit who may create or update those tags. Configure each crate’s trusted publisher for repository `sam0x17/gent`, workflow filename `release.yml` and environment `crates-io`. crates.io requires a first publication before an owner can add the trusted publisher. Future releases use the official auth action’s short-lived token. [crates.io trusted publishing](https://crates.io/docs/trusted-publishing)
