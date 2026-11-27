@@ -1,7 +1,6 @@
 use super::*;
 use crate::gateway::downloads::Runtime;
 use axum::http::Method;
-use gent_protocol::file_objects::IncomingFile;
 
 async fn start(f: &Fixture, address: Option<SocketAddr>, enabled: bool) -> (Running, Arc<Runtime>) {
     let listener = TcpListener::bind(address.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()))
@@ -48,27 +47,6 @@ async fn start(f: &Fixture, address: Option<SocketAddr>, enabled: bool) -> (Runn
         downloads,
     )
 }
-async fn import(f: &Fixture, bytes: &[u8], name: &str, mime: &str) -> Value {
-    let registry = Registry::open(&f.home).unwrap();
-    let permit = registry.authenticate(&f.token).unwrap();
-    let credential = registry
-        .credential(&permit, &json!({"test/conversation":"a"}))
-        .unwrap();
-    gent_daemon::receive_file(
-        &f.home,
-        credential,
-        IncomingFile {
-            request_id: request_id(),
-            source_id: "a".repeat(64),
-            name: name.into(),
-            media_type: mime.into(),
-        },
-        bytes,
-    )
-    .await
-    .unwrap()["file"]
-        .clone()
-}
 async fn register(server: &Running, client: &reqwest::Client, f: &Fixture, chat: &str) -> Value {
     server
         .call(
@@ -107,7 +85,7 @@ async fn downloads_deliver_exact_bytes_safe_headers_and_survive_both_restarts() 
     let client = client();
     register(&server, &client, &f, "a").await;
     let bytes = vec![37; 2 * 1024 * 1024 + 19];
-    let file = import(&f, &bytes, "quote\" café.html", "text/html").await;
+    let file = import_file_for_chat_a(&f, &bytes, "quote\" café.html", "text/html").await;
     let linked = link(&server, &client, &f, "a", file["id"].as_str().unwrap()).await;
     let url = linked["download_url"].as_str().unwrap();
     let response = client
@@ -170,7 +148,7 @@ async fn downloads_deliver_exact_bytes_safe_headers_and_survive_both_restarts() 
             .status(),
         StatusCode::FORBIDDEN
     );
-    let empty = import(&f, b"", "empty.bin", "application/octet-stream").await;
+    let empty = import_file_for_chat_a(&f, b"", "empty.bin", "application/octet-stream").await;
     let empty_link = link(&server, &client, &f, "a", empty["id"].as_str().unwrap()).await;
     let response = client
         .get(empty_link["download_url"].as_str().unwrap())
@@ -206,7 +184,7 @@ async fn download_links_follow_message_permissions_agent_and_host_revocation() {
     let client = client();
     let a = register(&server, &client, &f, "a").await;
     let b = register(&server, &client, &f, "b").await;
-    let file = import(
+    let file = import_file_for_chat_a(
         &f,
         b"private-file",
         "private.bin",
@@ -296,7 +274,8 @@ async fn downloads_hold_capacity_through_body_clones_and_release_on_drop() {
     let (server, runtime) = start(&f, None, true).await;
     let client = client();
     register(&server, &client, &f, "a").await;
-    let file = import(&f, b"bounded body", "file.bin", "application/octet-stream").await;
+    let file =
+        import_file_for_chat_a(&f, b"bounded body", "file.bin", "application/octet-stream").await;
     let linked = link(&server, &client, &f, "a", file["id"].as_str().unwrap()).await;
     let token = linked["download_url"]
         .as_str()

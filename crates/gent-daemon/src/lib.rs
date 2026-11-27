@@ -253,6 +253,17 @@ async fn serve(
     let mut response = match decoded {
         Ok(Request::Owner {
             credential,
+            action: gent_protocol::OwnerOp::DashboardRemoteHtml { boards },
+        }) => {
+            let read = sync::direct::board_html::read(store, credential, boards);
+            match tokio::time::timeout_at(deadline, read).await {
+                Ok(Ok(rows)) => Response::Ok(serde_json::json!(rows)),
+                Ok(Err(error)) => Response::Error(error.to_string()),
+                Err(_) => Response::Error("board carrier timed out".into()),
+            }
+        }
+        Ok(Request::Owner {
+            credential,
             action: gent_protocol::OwnerOp::RefreshStats,
         }) => {
             // Move long-lived waiters out of the ordinary request pool as soon

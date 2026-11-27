@@ -524,3 +524,143 @@ fn pump(stores: &[Arc<Mutex<Store>>; 2]) {
     }
     panic!("direct proof history did not drain");
 }
+
+#[tokio::test]
+async fn remote_dashboard_html_requires_current_owner_peer_revision_and_file() -> Result<()> {
+    use crate::sync::direct::board_html;
+    use gent_protocol::dashboard::{HtmlProbe, HtmlProjection};
+    let html = format!("<main>{}</main>", "é".repeat(14_112));
+    let mut file = Uuid::nil();
+    // Both mutations predate enrollment. The new viewer must discover the current
+    // native revision without any object grant, file copy or original attach event.
+    let mut pair = Pair::with_initial_owner(true, |store, credential| {
+        let mut call = |action| store.execute(Request::Agent { credential: credential.to_owned(), action });
+        let paths = call(AgentOp::FilePaths)?;
+        std::fs::write(Path::new(paths["import_directory"].as_str().unwrap()).join("synthetic.html"), &html)?;
+        let imported = call(AgentOp::FileImport {request_id: Uuid::now_v7().to_string(),
+            name:"synthetic.html".into(), media_type:"text/html".into()})?;
+        file = Uuid::parse_str(imported["file"]["id"].as_str().unwrap())?;
+        let board = serde_json::from_value(json!({"title":"Native","widgets":[{"id":"phase","label":"Phase","kind":"text","value":"Ready"}]}))?;
+        call(AgentOp::DashboardDefine {expected_revision:0, board})?;
+        call(AgentOp::DashboardAttachHtml {expected_revision:1, file_id:file})?;
+        Ok(())
+    }).await;
+    super::directory_push_tests::negotiate(&mut pair);
+    let agent = Uuid::parse_str(&pair.agents[0])?;
+    pair.reopen(1);
+    let page = pair.owner(1, OwnerOp::Dashboards { after: None })?;
+    let carrier = pair.stores[0].local_node_id().to_owned();
+    assert_eq!(page["remote_html_candidates"][carrier], json!([agent]));
+    assert_eq!(page["rows"][0]["revision"], 2);
+    assert!(page["rows"][0]["board"].get("static_html").is_none());
+
+    let owner = config::read_private(&pair.homes[1].path().join("owner.key"))?;
+    let health = pair.stores.each_ref().map(|s| s.sync_health.clone());
+    let stores = pair.stores.map(|s| Arc::new(Mutex::new(s)));
+    let sender = Direct::start(stores[0].clone(), health[0].clone())
+        .await?
+        .unwrap();
+    let viewer = Direct::start(stores[1].clone(), health[1].clone())
+        .await?
+        .unwrap();
+    sender.advertise(stores[0].clone()).await?;
+    viewer.advertise(stores[1].clone()).await?;
+    pump(&stores);
+    let probe = |revision, known_sha256| HtmlProbe {
+        agent,
+        revision,
+        known_sha256,
+    };
+    let read = |probes| board_html::read(stores[1].clone(), owner.clone(), probes);
+    let first = read(vec![probe(2, None)]).await?;
+    let [document] = first.as_slice() else {
+        panic!("expected one document")
+    };
+    assert_eq!(document.static_html.as_deref(), Some(html.as_str()));
+    let digest = document.sha256.clone();
+    assert_eq!(digest, hash(&html));
+    let known = probe(2, Some(digest.clone()));
+    let second: Vec<HtmlProjection> = read(vec![known.clone()]).await?;
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].sha256, digest);
+    assert!(second[0].static_html.is_none());
+    eprintln!(
+        "remote dashboard app payload bytes: first request {} reply {}, conditional request {} reply {}, HTML {} then 0",
+        32 + serde_json::to_vec(&[probe(2, None)])?.len(),
+        serde_json::to_vec(&first)?.len(),
+        32 + serde_json::to_vec(std::slice::from_ref(&known))?.len(),
+        serde_json::to_vec(&second)?.len(),
+        html.len()
+    );
+    assert!(
+        board_html::read(stores[1].clone(), "wrong".into(), vec![known.clone()])
+            .await
+            .is_err()
+    );
+    assert!(read(vec![probe(1, None)]).await.is_err());
+    assert!(
+        stores[0]
+            .lock()
+            .unwrap()
+            .serve_board_html(
+                iroh::SecretKey::generate().public(),
+                [0; 32],
+                std::slice::from_ref(&known)
+            )
+            .is_err()
+    );
+    // Here the authoritative writer has a new policy checkpoint. Even this
+    // agent-owned import requires agreement before a new disclosure.
+    {
+        let mut source = stores[0].lock().unwrap();
+        source.execute(Request::Owner {
+            credential: config::read_private(&pair.homes[0].path().join("owner.key"))?,
+            action: OwnerOp::SetPolicy {
+                policy: Policy::default(),
+            },
+        })?;
+    }
+    assert!(read(vec![known.clone()]).await?.is_empty());
+    {
+        let source = stores[0].lock().unwrap();
+        let mut viewer = stores[1].lock().unwrap();
+        for stream in source
+            .sync_streams()?
+            .into_iter()
+            .filter(|s| s.configuration && s.outgoing)
+        {
+            loop {
+                source.sync_prepare(&stream.group)?;
+                let Some(packet) =
+                    source.sync_outgoing(&stream.group, viewer.sync_next(&stream.group)?)?
+                else {
+                    break;
+                };
+                viewer.sync_receive(&packet)?;
+            }
+        }
+    }
+    assert_eq!(read(vec![known.clone()]).await?.len(), 1);
+    let grant = pair.homes[0].path().join("test-entitlement");
+    let test_id = std::fs::read(&grant)?;
+    std::fs::remove_file(&grant)?;
+    assert!(read(vec![known.clone()]).await.is_err());
+    config::write_private(&grant, &test_id)?;
+    assert_eq!(read(vec![known.clone()]).await?.len(), 1);
+    stores[0].lock().unwrap().db.execute(
+        "UPDATE file_objects SET expires_at=1 WHERE id=?1",
+        [file.to_string()],
+    )?;
+    assert!(read(vec![known.clone()]).await?.is_empty());
+    stores[0].lock().unwrap().execute(Request::Agent {
+        credential: pair.keys[0].clone(),
+        action: AgentOp::DashboardDelete {
+            expected_revision: 2,
+        },
+    })?;
+    // Even before the native tombstone reaches the reader, the carrier declines.
+    assert!(read(vec![known.clone()]).await?.is_empty());
+    pump(&stores);
+    assert!(read(vec![known]).await.is_err());
+    Ok(())
+}

@@ -75,7 +75,7 @@ impl StoreSession<'_> {
     }
 
     /// Uniform absence/authorization errors for caller-selected opaque IDs.
-    fn accessible_file(&self, who: &Agent, id: &str) -> Result<FileGrant> {
+    pub(super) fn accessible_file(&self, who: &Agent, id: &str) -> Result<FileGrant> {
         let result = (|| {
             let (agent, message): (Option<String>, Option<String>) = self.db.query_row(
                 "SELECT agent,message FROM agent_files WHERE object_id=?1",

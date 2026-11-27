@@ -154,6 +154,12 @@ fn tools() -> Vec<Tool> {
             vec!["expected_revision", "board"],
         ),
         (
+            "gent_dashboard_attach_html",
+            "Attach one private static HTML view to this chat's existing dashboard. Supply a ready Gent text/html file ID (UTF-8, 1–65536 bytes). Desktop can show the view locally or through a reachable compatible publishing carrier while the file remains accessible. The native widgets provide the fallback. A later board edit clears the attachment.",
+            json!({"expected_revision":revision,"file_id":{"type":"string","format":"uuid"}}),
+            vec!["expected_revision", "file_id"],
+        ),
+        (
             "gent_dashboard_update",
             "Replace selected widget values by ID. Supply a complete series for a chart, a full list for events, or a new PNG/JPEG data URI for an image. Use gent_dashboard_define to change the labels, units or kinds.",
             json!({"expected_revision":revision,"values":{"type":"object","minProperties":1,"maxProperties":32}}),

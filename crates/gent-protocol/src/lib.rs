@@ -292,6 +292,10 @@ pub enum AgentOp {
         expected_revision: u64,
         board: dashboard::Board,
     },
+    DashboardAttachHtml {
+        expected_revision: u64,
+        file_id: uuid::Uuid,
+    },
     DashboardUpdate {
         expected_revision: u64,
         values: BTreeMap<String, serde_json::Value>,
@@ -670,6 +674,9 @@ pub enum OwnerOp {
     Stats,
     /// Refresh peer usage and return the latest available cluster totals.
     RefreshStats,
+    DashboardRemoteHtml {
+        boards: Vec<dashboard::HtmlProbe>,
+    },
     Dashboards {
         after: Option<String>,
     },

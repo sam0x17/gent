@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 mod grouping;
 mod preferences;
+mod remote;
 #[cfg(test)]
 mod tests;
 
@@ -152,6 +153,10 @@ impl View {
             self.hidden.contains_key(&agent),
             "Dashboard is no longer hidden. Refresh the dashboard."
         );
+        // Reopening a hidden private file requires a fresh owner snapshot.
+        if let Some(row) = self.rows.iter_mut().find(|row| row.agent == agent) {
+            row.board.extra.remove("static_html");
+        }
         self.hidden = preferences::edit(&self.file, |hidden| {
             hidden.remove(&agent);
         })?;
@@ -201,7 +206,7 @@ impl Page {
 
         let result = match request {
             Request::Dashboard(layout) => {
-                let rows = fetch(home).await;
+                let rows = fetch(home, &file, self.view.as_ref()).await;
                 if let Some(reply) = self.check_after_rpc(home, &file, &layout) {
                     return reply;
                 }
@@ -232,6 +237,20 @@ impl Page {
             }
         };
         let mut reply = result.unwrap_or_else(|error| json!({"error":error.to_string()}));
+        if !self.fresh
+            && let Some(view) = &mut self.view
+        {
+            let mut removed = false;
+            for row in &mut view.rows {
+                removed |= row.board.extra.remove("static_html").is_some();
+            }
+            if removed {
+                // An unavailable daemon cannot confirm continued access to the file.
+                let native = view.render();
+                reply["rows"] = native["rows"].clone();
+                reply["hidden"] = native["hidden"].clone();
+            }
+        }
         if switched && reply.get("rows").is_none() {
             reply.as_object_mut().unwrap().remove("unchanged");
             reply["rows"] = json!([]);
@@ -356,13 +375,15 @@ fn publisher(agent: &str) -> Result<Uuid> {
 struct BoardPage {
     rows: Vec<Row>,
     next: Option<String>,
+    #[serde(default)]
+    remote_html_candidates: std::collections::BTreeMap<String, Vec<Uuid>>,
 }
 
-async fn fetch(home: &Path) -> Result<Vec<Row>> {
+async fn fetch(home: &Path, file: &Path, previous: Option<&View>) -> Result<Vec<Row>> {
     let mut after = None;
     let mut rows = Vec::new();
     loop {
-        let page: BoardPage = serde_json::from_value(
+        let mut page: BoardPage = serde_json::from_value(
             owner(
                 home,
                 OwnerOp::Dashboards {
@@ -372,6 +393,10 @@ async fn fetch(home: &Path) -> Result<Vec<Row>> {
             .await?,
         )
         .context("invalid dashboard page")?;
+        if !page.remote_html_candidates.is_empty() {
+            let hidden = preferences::for_rows(file, &[])?;
+            remote::project(home, &mut page, previous, &hidden).await;
+        }
         rows.extend(page.rows);
         let Some(cursor) = page.next else {
             return Ok(rows);
