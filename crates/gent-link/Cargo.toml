@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 description = "Connect Codex and Claude Code chats across machines with the Gent CLI and desktop companion."
-include = ["/src/**", "/LICENSE", "/NOTICE.md", "/skills/**", "/build.rs", "/channel-v1-bootstrap.pin", "/branding/**", "/README.md"]
+include = ["/src/**", "/LICENSE", "/NOTICE.md", "/skills/**", "/build.rs", "/channel-v1-bootstrap.pin", "/branding/**", "/releases/*.md", "/README.md"]
 
 [[bin]]
 name = "gent"
