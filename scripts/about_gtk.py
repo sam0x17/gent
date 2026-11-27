@@ -102,7 +102,8 @@ def exercise():
     assert text.get_text() == base["detail"] and not urls()
     window.resize(850, 605)
     settle()
-    assert pane.get_children()[0].size == 512
+    viewport = pane.get_children()[0].viewport
+    assert (viewport.width, viewport.height) == (512, 512)
     calls = []
     with patch.dict(pane.load.__globals__, page_request=lambda op, **fields: calls.append((op, fields))):
         pane.actions.buttons[0][0].clicked()
