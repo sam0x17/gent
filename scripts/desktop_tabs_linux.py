@@ -202,9 +202,9 @@ def exercise_ordinary_recovery(cli):
 
 
 def check_dashboard_example():
-    get("Test run", "label")
     get("Example dashboard", "label")
-    get("Ask a registered chat to build a dashboard. On Pro, each chat can publish one and update it across your cluster.", "label")
+    get("Sample test results", "label")
+    get("Ask a registered chat to build a dashboard like this one. On Pro, each chat can publish one and update it across your cluster.", "label")
     graph = get("Tests passed per batch", "image")
     for prompt in ("Make a Gent dashboard for this test run. Show how many tests have passed and list any failures.",
                    "Update my dashboard after each test batch."):
