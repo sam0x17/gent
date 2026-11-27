@@ -77,6 +77,12 @@ impl Pair {
         Self::with_preexisting_chat(false).await
     }
     async fn with_preexisting_chat(before_join: bool) -> Self {
+        Self::with_initial_owner(before_join, |_, _| Ok(())).await
+    }
+    async fn with_initial_owner(
+        before_join: bool,
+        setup: impl FnOnce(&mut Store, &str) -> Result<()>,
+    ) -> Self {
         let homes = std::array::from_fn(|_| {
             let home = tempfile::tempdir().unwrap();
             std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -107,6 +113,7 @@ impl Pair {
                 })
                 .unwrap();
         }
+        setup(&mut owner, &keys[0]).unwrap();
         let credential = config::read_private(&homes[0].path().join("owner.key")).unwrap();
         pairing::join(
             homes[1].path(),

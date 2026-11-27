@@ -527,3 +527,132 @@ fn malformed_lane_values_remain_plain_events_in_their_original_position() {
         assert_eq!(grouping::sections(&[widget]), Some(json!([0])));
     }
 }
+
+#[tokio::test]
+async fn static_html_requires_fresh_snapshot_after_error_or_restore() {
+    let (_root, home) = paid_home();
+    let id = Uuid::new_v4();
+    let mut row = board(id, "Runner");
+    row.board
+        .extra
+        .insert("static_html".into(), json!("<main>Run</main>"));
+    let mut pages = Pages::default();
+    let refresh = |pages: &mut Pages| {
+        pages
+            .dashboard
+            .refresh(
+                &active_file(&home).unwrap(),
+                Layout::default(),
+                vec![row.clone()],
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        refresh(&mut pages)["rows"][0]["board"]["static_html"],
+        "<main>Run</main>"
+    );
+    assert_eq!(refresh(&mut pages), json!({"unchanged":true}));
+    assert_eq!(
+        pages.respond(&home, r#"{"op":"dashboard_layout"}"#).await["unchanged"],
+        true
+    );
+    assert_eq!(
+        pages.respond(&home, &request("dashboard_hide", id)).await["rows"],
+        json!([])
+    );
+    let restored = pages
+        .respond(&home, &request("dashboard_restore", id))
+        .await;
+    assert!(restored["rows"][0]["board"].get("static_html").is_none());
+    assert_eq!(
+        refresh(&mut pages)["rows"][0]["board"]["static_html"],
+        "<main>Run</main>"
+    );
+    let offline = pages.respond(&home, r#"{"op":"dashboard"}"#).await;
+    assert!(offline["error"].is_string());
+    assert_eq!(offline["stale"], true);
+    assert_eq!(offline["rows"][0]["agent"], json!(id));
+    assert!(offline["rows"][0]["board"].get("static_html").is_none());
+    assert!(
+        !offline["rows"][0]["board"]["widgets"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn remote_dashboard_reuses_only_a_freshly_confirmed_body() {
+    use gent_protocol::{Request as Rpc, Response};
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::UnixListener,
+    };
+    let (_root, home) = paid_home();
+    let listener = UnixListener::bind(home.join("daemon.sock")).unwrap();
+    let id = Uuid::new_v4();
+    let node = Uuid::new_v4();
+    let html = "<main>Fixture</main>";
+    let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(html));
+    let row = serde_json::to_value(board(id, "Remote")).unwrap();
+    let serve = async {
+        // First load, conditional refresh, permission loss, hidden refresh.
+        for index in 0..7 {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let Rpc::Owner { action, .. } = serde_json::from_str(&line).unwrap() else {
+                panic!("expected owner request")
+            };
+            let data = match action {
+                OwnerOp::Dashboards { after: None } => {
+                    assert!(matches!(index, 0 | 2 | 4 | 6));
+                    json!({"rows":[row],"next":null,"remote_html_candidates":{node.to_string():[id]}})
+                }
+                OwnerOp::DashboardRemoteHtml { boards } => {
+                    assert_eq!(boards.len(), 1);
+                    assert_eq!(boards[0].agent, id);
+                    assert_eq!(
+                        boards[0].known_sha256.as_ref(),
+                        (index != 1).then_some(&digest)
+                    );
+                    if index == 5 {
+                        json!([])
+                    } else {
+                        assert!(matches!(index, 1 | 3));
+                        let mut projection = json!({"agent":id,"revision":row["revision"],"sha256":digest,"expires_at":u64::MAX});
+                        if index == 1 {
+                            projection["static_html"] = json!(html);
+                        }
+                        json!([projection])
+                    }
+                }
+                _ => panic!("unexpected dashboard request"),
+            };
+            let frame = format!("{}\n", serde_json::to_string(&Response::Ok(data)).unwrap());
+            reader.get_mut().write_all(frame.as_bytes()).await.unwrap();
+        }
+    };
+    let view = async {
+        let mut pages = Pages::default();
+        let load = r#"{"op":"dashboard"}"#;
+        assert_eq!(
+            pages.respond(&home, load).await["rows"][0]["board"]["static_html"],
+            html
+        );
+        assert_eq!(pages.respond(&home, load).await["unchanged"], true);
+        let denied = pages.respond(&home, load).await;
+        assert_eq!(denied["rows"][0]["agent"], json!(id));
+        assert!(denied["rows"][0]["board"].get("static_html").is_none());
+        pages.respond(&home, &request("dashboard_hide", id)).await;
+        // Preferences survive a Desktop restart, including suppression of the first remote read.
+        let mut reopened = Pages::default();
+        assert_eq!(reopened.respond(&home, load).await["rows"], json!([]));
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(serve, view)
+    })
+    .await
+    .unwrap();
+}

@@ -79,6 +79,7 @@ const UNAVAILABLE: &str = "recipient or message unavailable";
 pub struct Store {
     db: Connection,
     direct_certs: direct::CertificateCache,
+    pub(crate) board_transport: std::sync::Weak<crate::sync::direct::Direct>,
     home: PathBuf,
     config: Config,
     identity: Identity,
@@ -243,6 +244,7 @@ impl Store {
             identity,
             sync_wakeup: Arc::new(Notify::new()),
             sync_health: Arc::default(),
+            board_transport: Default::default(),
         };
         // Projection failure must never replace committed authority with TOML.
         let _ = store.project_config();
@@ -997,6 +999,9 @@ impl StoreSession<'_> {
                     .execute("DELETE FROM account_outbox WHERE id=?1", [id.to_string()])?;
                 Ok(json!({}))
             }
+            OwnerOp::DashboardRemoteHtml { .. } => {
+                anyhow::bail!("remote board view requires live transport")
+            }
             OwnerOp::Dashboards { after } => self.dashboards(after.as_deref()),
             OwnerOp::DashboardClick {
                 agent,
@@ -1304,6 +1309,7 @@ impl StoreSession<'_> {
             }
             AgentOp::DashboardGet => self.dashboard_get(&who),
             op @ (AgentOp::DashboardDefine { .. }
+            | AgentOp::DashboardAttachHtml { .. }
             | AgentOp::DashboardUpdate { .. }
             | AgentOp::DashboardDelete { .. }) => self.dashboard_mutate(&who, op),
             AgentOp::Agents => self.visible_agents(&who),

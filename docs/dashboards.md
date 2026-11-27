@@ -31,6 +31,20 @@ The call returns the committed revision. To record epoch 5, call `gent_dashboard
 
 Supply the whole series for a graph and the whole list of strings for an event feed. A board can contain up to 32 widgets and 32 KiB of serialized data. Each graph can show 256 samples and each event feed can show 64 entries. Gauge and progress ranges default to 0 through 100. Use a text widget for a status line or paragraph.
 
+### Private static HTML (local prototype)
+
+Keep the native widgets as the fallback. Import a UTF-8 file of 1 to 65,536 bytes with media type `text/html` through the chat’s usual Gent file tools. Read the current board revision, then call `gent_dashboard_attach_html` with the file ID and that revision.
+
+```json
+{"expected_revision":1,"file_id":"a2355007-c576-424a-b587-7b792af2853c"}
+```
+
+An identical retry returns the saved revision. A different write against a stale revision fails. An update, redefinition or deletion clears the attachment. To replace the HTML, import the revised file and attach its ID against the current revision.
+
+Desktop reads the attachment locally or requests the exact board revision from the publishing carrier over Gent’s authenticated QUIC connection. Both nodes need Pro, direct transport enabled and a current advertised endpoint reachable by IP or a configured Iroh relay. The nodes must agree on the signed cluster configuration. Each read checks the chat’s current file access, expiry, UTF-8 and the complete content digest. For an unchanged document the viewer supplies its digest and the carrier returns a confirmation without the body.
+
+The visible Dashboard tab checks every 15 seconds. An unavailable carrier or file, a helper-only or mailbox-only route, and older clients show the native widgets. The widgets, board revision and deletion still replicate through the ordinary board stream. Hosted failover retains that native board. Attach the file against its current revision on the new carrier to enable the HTML view there.
+
 ### Status lanes and paired event feeds
 
 Use consecutive `events` widgets with `unit: "gent:lane:v1"` to show parallel work. Give each slot a permanent ID and label. The first string in its value is a tone, a colon, a space and a written state. Choose `neutral`, `info`, `success`, `warning` or `critical` for the tone. Follow the state with up to three detail strings. Keep the state and each detail on a single line. Desktop wraps long text to fit the card.

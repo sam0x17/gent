@@ -6,6 +6,8 @@ use crate::messages::{
 };
 use gent_protocol::dashboard::{Board, Kind};
 
+mod static_html;
+
 pub(super) fn schema(db: &Connection) -> Result<()> {
     let tx = db.unchecked_transaction()?;
     let first_dashboard_schema = !tx.table_exists(None, "dashboards")?;
@@ -15,6 +17,7 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
     CREATE TRIGGER IF NOT EXISTS dashboard_forget_peer AFTER DELETE ON network_links BEGIN DELETE FROM dashboard_sent WHERE peer=OLD.peer;
         DELETE FROM metadata WHERE key='dashboard_discovery:' || OLD.peer; END;
     CREATE TRIGGER IF NOT EXISTS dashboard_forget_agent AFTER DELETE ON agents BEGIN DELETE FROM dashboard_sent WHERE agent=OLD.id; END;")?;
+    static_html::schema(&tx)?;
     if !tx
         .prepare("SELECT 1 FROM pragma_table_info('dashboard_sent') WHERE name='peer_key'")?
         .exists([])?
@@ -71,11 +74,22 @@ impl StoreSession<'_> {
         if last.as_ref() == Some(&fingerprint) {
             return Ok(json!({"revision":revision}));
         }
+        let mut attachment = None;
         let (expected, next) = match op {
             AgentOp::DashboardDefine {
                 expected_revision,
                 board,
             } => (expected_revision, Some(board)),
+            AgentOp::DashboardAttachHtml {
+                expected_revision,
+                file_id,
+            } => {
+                attachment = Some(file_id.to_string());
+                (
+                    expected_revision,
+                    Some(previous.context("define a dashboard before attaching HTML")?),
+                )
+            }
             AgentOp::DashboardDelete { expected_revision } => (expected_revision, None),
             AgentOp::DashboardUpdate {
                 expected_revision,
@@ -110,6 +124,9 @@ impl StoreSession<'_> {
             WHERE node=?2 AND revision>durable ON CONFLICT(agent) DO UPDATE SET revision=excluded.revision",
             params![who.id,who.node_id])?;
         self.save_board(&who.id, revision, next.as_ref(), Some(&fingerprint))?;
+        if let Some(id) = attachment {
+            self.attach_board_html(who, revision, &id)?;
+        }
         let peers = self
             .db
             .prepare("SELECT peer,peer_key FROM network_links")?
@@ -239,7 +256,8 @@ impl StoreSession<'_> {
         require_pro(self.home, &self.config, "Dashboard access")?;
         let members = self.state.state().nodes.keys().collect::<Vec<_>>();
         let mut query = self.db.prepare(
-            "SELECT a.id,a.name,d.revision,d.body FROM dashboards d
+            "SELECT a.id,a.name,d.revision,d.body,h.file,h.sha256,a.node_id FROM dashboards d
+            LEFT JOIN dashboard_html h ON h.agent=d.agent AND h.revision=d.revision
             JOIN agents a ON a.id=d.agent WHERE d.body IS NOT NULL AND a.revoked=0
             AND a.node_id IN (SELECT value FROM json_each(?2)) AND a.id>?1
             AND NOT EXISTS(SELECT 1 FROM hosted_dashboard_gates g WHERE g.agent=a.id)
@@ -251,8 +269,11 @@ impl StoreSession<'_> {
         ])?;
         let mut rows = Vec::new();
         let mut next = None;
+        let mut html_bytes = 0;
+        let mut remote = BTreeMap::<String, Vec<String>>::new();
         while let Some(row) = records.next()? {
-            if rows.len() == 32 {
+            // Leave room for 32 native boards and worst-case JSON escaping in the RPC frame.
+            if rows.len() == 32 || html_bytes >= 512 * 1024 {
                 next = rows
                     .last()
                     .and_then(|r: &Value| r["agent"].as_str())
@@ -260,9 +281,31 @@ impl StoreSession<'_> {
                 break;
             }
             let board = serde_json::from_str::<Board>(&row.get::<_, String>(3)?)?;
-            rows.push(json!({"agent":row.get::<_,String>(0)?,"chat":row.get::<_,String>(1)?,"revision":row.get::<_,u64>(2)?,"board":display_board(board)}));
+            let mut board = serde_json::to_value(display_board(board))?;
+            let agent: String = row.get(0)?;
+            if let Some(file) = row.get::<_, Option<String>>(4)? {
+                let who = self.get_agent(&agent)?;
+                if self.local_node(&who.node_id)
+                    && let Ok((digest, html)) = self.board_html_file(&who, &file)
+                    && digest == row.get::<_, String>(5)?
+                {
+                    html_bytes += html.len();
+                    board["static_html"] = Value::String(html);
+                }
+            }
+            let node: String = row.get(6)?;
+            if let Ok(host) = self.state.transport_host(&node)
+                && host != self.identity.node.id()
+            {
+                remote.entry(host.into()).or_default().push(agent.clone());
+            }
+            rows.push(json!({"agent":agent,"chat":row.get::<_,String>(1)?,"revision":row.get::<_,u64>(2)?,"board":board}));
         }
-        Ok(json!({"rows":rows,"next":next}))
+        let mut page = json!({"rows":rows,"next":next});
+        if !remote.is_empty() {
+            page["remote_html_candidates"] = json!(remote);
+        }
+        Ok(page)
     }
     pub(super) fn dashboard_click(
         &mut self,

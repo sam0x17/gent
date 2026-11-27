@@ -12,6 +12,7 @@ use tokio::{
 mod capability;
 mod cimd;
 mod conversations;
+mod dashboard_html;
 mod downloads;
 mod files;
 mod mtls;
@@ -216,6 +217,28 @@ async fn owner(home: &Path, action: OwnerOp) -> Value {
     .await
     .unwrap()
 }
+async fn import_file_for_chat_a(f: &Fixture, bytes: &[u8], name: &str, mime: &str) -> Value {
+    let registry = Registry::open(&f.home).unwrap();
+    let permit = registry.authenticate(&f.token).unwrap();
+    let credential = registry
+        .credential(&permit, &json!({"test/conversation":"a"}))
+        .unwrap();
+    gent_daemon::receive_file(
+        &f.home,
+        credential,
+        gent_protocol::file_objects::IncomingFile {
+            request_id: request_id(),
+            source_id: "a".repeat(64),
+            name: name.into(),
+            media_type: mime.into(),
+        },
+        bytes,
+    )
+    .await
+    .unwrap()["file"]
+        .clone()
+}
+
 fn request_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }

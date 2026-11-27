@@ -8,50 +8,7 @@ pub(super) const ALPN: &[u8] = b"gent/file-chunks/1";
 const LINKS: usize = 2;
 const IDLE: Duration = Duration::from_secs(15);
 
-#[derive(Default)]
-pub(super) struct Client {
-    links: Mutex<BTreeMap<EndpointId, Connection>>,
-    failed: Mutex<BTreeMap<EndpointId, Instant>>,
-}
-
 impl Direct {
-    async fn primary_file_connection(&self, address: EndpointAddr) -> Option<Connection> {
-        let id = address.id;
-        {
-            let mut links = self.files.links.lock().expect("file links poisoned");
-            links.retain(|_, link| link.close_reason().is_none());
-            if let Some(link) = links.get(&id) {
-                return Some(link.clone());
-            }
-            if links.len() >= LINKS {
-                return None;
-            }
-        }
-        let address = self.primary_address(address);
-        let cooling = self
-            .files
-            .failed
-            .lock()
-            .expect("file backoff poisoned")
-            .get(&id)
-            .is_some_and(|at| at.elapsed() < BACKOFF);
-        if cooling || address.addrs.is_empty() {
-            return None;
-        }
-        let link = match tokio::time::timeout(DIAL, self.endpoint.connect(address, ALPN)).await {
-            Ok(Ok(conn)) => conn,
-            _ => {
-                self.files.backoff(id);
-                return None;
-            }
-        };
-        let mut links = self.files.links.lock().expect("file links poisoned");
-        if !links.contains_key(&id) && links.len() >= LINKS {
-            return None;
-        }
-        Some(links.entry(id).or_insert(link).clone())
-    }
-
     pub(crate) async fn file_chunk(
         &self,
         store: SharedStore,
@@ -83,7 +40,9 @@ impl Direct {
             Ok::<_, anyhow::Error>(bytes)
         };
         if let NativeTarget::Advertised(address) = target
-            && let Some(link) = self.primary_file_connection(address).await
+            && let Some(link) = self
+                .primary_pull_connection(&self.files, address, ALPN, LINKS)
+                .await
         {
             if let Ok(Ok(bytes)) = tokio::time::timeout_at(deadline, fetch(&link)).await {
                 return Some(bytes);
@@ -114,14 +73,6 @@ impl Direct {
         }
         link.close(1u32.into(), b"file request failed");
         None
-    }
-}
-
-impl Client {
-    fn backoff(&self, id: EndpointId) {
-        let mut failed = self.failed.lock().expect("file backoff poisoned");
-        failed.retain(|_, at| at.elapsed() < BACKOFF);
-        failed.insert(id, Instant::now());
     }
 }
 

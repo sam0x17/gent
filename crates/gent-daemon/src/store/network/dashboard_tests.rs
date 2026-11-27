@@ -723,3 +723,110 @@ async fn losing_pro_blocks_boards_but_preserves_babysitter_and_local_messages() 
         remote["message_id"]
     );
 }
+
+#[tokio::test]
+async fn dashboard_html_preserves_native_wire_and_rechecks_message_authority() -> Result<()> {
+    let mut pair = Pair::new().await;
+    directory_push_tests::negotiate(&mut pair);
+    let native = json!({"title":"Run","widgets":[{"id":"status","kind":"text","label":"State","value":"Ready"}]});
+    pair.agent(
+        0,
+        AgentOp::DashboardDefine {
+            expected_revision: 0,
+            board: serde_json::from_value(native.clone())?,
+        },
+    )?;
+    pair.pump();
+    let paths = pair.agent(0, AgentOp::FilePaths)?;
+    let name = "report.html";
+    let html = "<h1>Synthetic résumé</h1>";
+    std::fs::write(
+        Path::new(paths["import_directory"].as_str().unwrap()).join(name),
+        html,
+    )?;
+    let source = pair.agent(
+        0,
+        AgentOp::FileImport {
+            request_id: Uuid::now_v7().to_string(),
+            name: name.into(),
+            media_type: "text/html".into(),
+        },
+    )?;
+    let sent = pair.agent(
+        0,
+        AgentOp::Send {
+            recipient: pair.agents[1].clone(),
+            request_id: Uuid::now_v7().to_string(),
+            text: "fixture".into(),
+            files: vec![],
+            file_ids: vec![source["file"]["id"].as_str().unwrap().into()],
+        },
+    )?;
+    let file: String = pair.stores[0].db.query_row(
+        "SELECT object_id FROM agent_files WHERE message=?1",
+        [sent["message_id"].as_str().unwrap()],
+        |r| r.get(0),
+    )?;
+    pair.stores[0].file_uploaded(&file, &[0])?;
+    let attach = |expected_revision| AgentOp::DashboardAttachHtml {
+        expected_revision,
+        file_id: Uuid::parse_str(&file).unwrap(),
+    };
+    let list = |pair: &mut Pair, i| pair.owner(i, OwnerOp::Dashboards { after: None });
+    pair.agent(0, attach(1))?;
+    pair.pump();
+    pair.reopen(0);
+    assert_eq!(list(&mut pair, 0)?["rows"][0]["board"]["static_html"], html);
+    let peer = list(&mut pair, 1)?;
+    assert_eq!(peer["rows"][0]["board"], native);
+    assert_eq!(peer["rows"][0]["revision"], 2);
+    pair.policy(false);
+    assert_eq!(list(&mut pair, 0)?["rows"][0]["board"], native);
+    pair.policy(true);
+    assert_eq!(list(&mut pair, 0)?["rows"][0]["board"]["static_html"], html);
+    pair.stores[0]
+        .db
+        .execute("UPDATE file_objects SET complete=0 WHERE id=?1", [&file])?;
+    assert_eq!(list(&mut pair, 0)?["rows"][0]["board"], native);
+    pair.stores[0]
+        .db
+        .execute("UPDATE file_objects SET complete=1 WHERE id=?1", [&file])?;
+    pair.agent(
+        0,
+        AgentOp::DashboardUpdate {
+            expected_revision: 2,
+            values: BTreeMap::from([("status".into(), json!("Done"))]),
+        },
+    )?;
+    assert!(
+        list(&mut pair, 0)?["rows"][0]["board"]
+            .get("static_html")
+            .is_none()
+    );
+    pair.pump();
+    pair.agent(0, attach(3))?;
+    pair.pump();
+    pair.stores[0].db.execute(
+        "UPDATE file_chunks SET ciphertext=zeroblob(length(ciphertext)) WHERE object_id=?1",
+        [&file],
+    )?;
+    assert!(
+        list(&mut pair, 0)?["rows"][0]["board"]
+            .get("static_html")
+            .is_none()
+    );
+    pair.agent(
+        0,
+        AgentOp::DashboardDelete {
+            expected_revision: 4,
+        },
+    )?;
+    pair.pump();
+    assert_eq!(list(&mut pair, 1)?["rows"], json!([]));
+    assert_eq!(
+        pair.agent(0, AgentOp::DashboardGet)?,
+        json!({"revision":5,"board":null})
+    );
+    assert!(pair.agent(0, attach(5)).is_err());
+    Ok(())
+}

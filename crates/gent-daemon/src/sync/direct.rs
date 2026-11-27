@@ -9,12 +9,14 @@ use iroh::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::{sync::Semaphore, task::JoinSet};
 
+pub(crate) mod board_html;
 mod file_chunks;
 mod helper_routes;
 mod helper_service;
 mod hosting;
 mod legacy;
 mod path;
+mod pull;
 mod quic;
 pub(crate) mod session;
 
@@ -70,7 +72,8 @@ pub(crate) struct Direct {
     failed: Mutex<BTreeMap<EndpointId, Instant>>,
     in_flight: Semaphore,
     listener: JoinHandle<()>,
-    files: file_chunks::Client,
+    files: pull::Pool,
+    boards: pull::Pool,
     metrics: Arc<Metrics>,
 }
 impl Drop for Direct {
@@ -112,6 +115,7 @@ impl Direct {
                 quic::ALPN.to_vec(),
                 legacy::ALPN.to_vec(),
                 file_chunks::ALPN.to_vec(),
+                board_html::ALPN.to_vec(),
             ])
             .transport_config(
                 QuicTransportConfig::builder()
@@ -148,10 +152,10 @@ impl Direct {
         let listener = tokio::spawn(listen(
             endpoint.clone(),
             connections.clone(),
-            store,
+            store.clone(),
             metrics.clone(),
         ));
-        Ok(Some(Arc::new(Self {
+        let transport = Arc::new(Self {
             endpoint,
             connections,
             primary_relays,
@@ -161,9 +165,17 @@ impl Direct {
             failed: Mutex::new(BTreeMap::new()),
             in_flight: Semaphore::new(quic::MAX_LINKS),
             listener,
-            files: file_chunks::Client::default(),
+            files: pull::Pool::default(),
+            boards: pull::Pool::default(),
             metrics,
-        })))
+        });
+        let weak = Arc::downgrade(&transport);
+        local(store, move |s| {
+            s.board_transport = weak;
+            Ok(())
+        })
+        .await?;
+        Ok(Some(transport))
     }
 
     pub(crate) async fn advertise(&self, store: SharedStore) -> Result<()> {
@@ -396,6 +408,7 @@ async fn listen(
 ) {
     let limit = Arc::new(Semaphore::new(quic::MAX_LINKS));
     let file_limit = Arc::new(Semaphore::new(2));
+    let board_limit = Arc::new(Semaphore::new(4));
     let mut tasks = JoinSet::new();
     let mut prune = tokio::time::interval(Duration::from_secs(1));
     loop {
@@ -413,6 +426,7 @@ async fn listen(
                 let pool = pool.clone();
                 let metrics = metrics.clone();
                 let file_limit = file_limit.clone();
+                let board_limit = board_limit.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
                     let Ok(Ok(conn)) = tokio::time::timeout(Duration::from_secs(5), incoming).await else {
@@ -423,6 +437,11 @@ async fn listen(
                         conn.close(1u32.into(), b"unrecognized node");
                     } else if conn.alpn() == quic::ALPN {
                         pool.install(local_id, conn, false, store, metrics, None);
+                    } else if conn.alpn() == board_html::ALPN {
+                        if let Ok(_board) = board_limit.try_acquire() {
+                            let _ = board_html::serve(&conn, store).await;
+                        }
+                        conn.close(0u32.into(), b"board session ended");
                     } else if conn.alpn() == file_chunks::ALPN {
                         if let Ok(_file) = file_limit.try_acquire() {
                             let _ = file_chunks::serve(&conn, store, &metrics, None).await;

@@ -7,6 +7,29 @@ mod image;
 
 pub const MAX_BOARD_BYTES: usize = 32 * 1024;
 
+/// Conditional read of a native board already present on the viewer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HtmlProbe {
+    pub agent: uuid::Uuid,
+    pub revision: u64,
+    pub known_sha256: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HtmlProjection {
+    pub agent: uuid::Uuid,
+    pub revision: u64,
+    pub sha256: String,
+    pub expires_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub static_html: Option<String>,
+}
+
+pub const MAX_HTML_BYTES: usize = 64 * 1024;
+pub const HTML_BATCH: usize = 8;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Board {

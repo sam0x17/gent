@@ -313,7 +313,7 @@ pub(super) struct Source {
 }
 
 impl StoreSession<'_> {
-    pub(super) fn require_local_membership(&self) -> Result<()> {
+    pub(in crate::store) fn require_local_membership(&self) -> Result<()> {
         super::super::network::active_peer(
             &self.state,
             self.identity.node.id(),
