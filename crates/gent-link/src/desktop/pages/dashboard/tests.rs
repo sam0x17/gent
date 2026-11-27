@@ -457,3 +457,73 @@ async fn dashboard_fetch_preserves_newer_daemon_fields_and_widget_kinds() {
     graph.remove("chart_description");
     assert_eq!(rendered, row);
 }
+
+#[test]
+fn marked_events_keep_the_wire_board_and_only_group_eligible_widgets() {
+    let slot = |id: &str, value: Value| json!({"id":id,"kind":"events","label":id,"unit":"gent:lane:v1","value":value});
+    let feed = |id: &str| json!({"id":id,"kind":"events","label":id,"unit":"gent:feed-pair:v1","value":[id]});
+    let mut row = board(Uuid::new_v4(), "example");
+    let button = json!({"id":"inspect","kind":"button","label":"Inspect","value":"Inspect run"});
+    row.board.widgets = vec![
+        slot("reserve", json!([])),
+        slot(
+            "lane",
+            json!([
+                "warning: Delayed",
+                "Epoch 41",
+                "Replay · slot 5",
+                "ETA 09:15 UTC"
+            ]),
+        ),
+        slot("future", json!([])),
+        slot("unrecognized", json!(["mood: amber"])),
+        feed("landed"),
+        feed("estimated"),
+        feed("unpaired"),
+        button.clone(),
+    ];
+    let original = json!(row.board.widgets);
+    let temp = tempfile::tempdir().unwrap();
+    let mut view = View::new(&temp.path().join("boards"), Layout::default(), vec![row]).unwrap();
+    let rendered = view.render();
+    let displayed = &rendered["rows"][0]["board"];
+    assert_eq!(displayed["widgets"], original);
+    assert_eq!(displayed["widgets"][7], button);
+    assert_eq!(
+        displayed["layout_v1"],
+        json!([
+            {"lanes":[{"id":"lane","label":"lane","state":"Delayed","tone":"warning",
+                "details":["Epoch 41","Replay · slot 5","ETA 09:15 UTC"]}]},3,{"feeds":[4,5]},6,7
+        ])
+    );
+
+    view.rows[0].board.widgets = vec![slot("reserve", json!([]))];
+    assert_eq!(view.render()["rows"][0]["board"]["layout_v1"], json!([]));
+    view.rows[0].board.widgets[0]["value"] = json!(["info: Replay"]);
+    assert_eq!(
+        view.render()["rows"][0]["board"]["layout_v1"][0]["lanes"][0]["id"],
+        "reserve"
+    );
+
+    view.rows[0].board.widgets = vec![button];
+    view.rows[0]
+        .board
+        .extra
+        .insert("layout_v1".into(), json!([{"feeds":[0,0]}]));
+    assert!(view.render()["rows"][0]["board"].get("layout_v1").is_none());
+}
+
+#[test]
+fn malformed_lane_values_remain_plain_events_in_their_original_position() {
+    for value in [
+        json!(["warning: "]),
+        json!(["warning: A\nB"]),
+        json!(["Delayed"]),
+        json!(["info: OK", ""]),
+        json!(["info: OK", "one", "two", "three", "four"]),
+    ] {
+        let widget =
+            json!({"id":"lane","kind":"events","label":"Lane","unit":"gent:lane:v1","value":value});
+        assert_eq!(grouping::sections(&[widget]), Some(json!([0])));
+    }
+}

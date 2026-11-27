@@ -1167,6 +1167,118 @@ func checkDashboardVisibility(_ desktop: Desktop) {
     require(restoreLink() == nil && shows("No chats have published a dashboard."), "unlock starts with an empty hidden list")
 }
 
+// A field editor works in a screenless Studio session. Only the explicit
+// --lane-copy mode requires an Aqua pasteboard service.
+func checkLaneSelection(_ field: NSTextField, copyTo pasteboard: NSPasteboard? = nil) {
+    let expected = field.stringValue
+    field.scrollToVisible(field.bounds)
+    field.selectText(nil)
+    guard let editor = field.currentEditor() as? NSTextView else { fatalError("Missing lane field editor") }
+    editor.selectAll(nil)
+    require((editor.string as NSString).substring(with: editor.selectedRange()) == expected && !expected.isEmpty,
+            "select complete lane detail or feed entry")
+    if let pasteboard {
+        let nativeString = NSPasteboard.PasteboardType(rawValue: "NSStringPboardType")
+        pasteboard.declareTypes([nativeString], owner: nil)
+        require(editor.writeSelection(to: pasteboard, type: nativeString)
+                && pasteboard.string(forType: .string) == expected, "private pasteboard round-trip")
+    }
+    field.window?.makeFirstResponder(nil)
+}
+
+func checkDashboardLanes(_ desktop: Desktop, scroll: NSScrollView, copyTo pasteboard: NSPasteboard? = nil) {
+    typealias Object = [String: Any]
+    let tones: [(String, NSColor)] = [("neutral", .secondaryLabelColor), ("info", .systemBlue),
+                                     ("success", .systemGreen), ("warning", .systemOrange), ("critical", .systemRed)]
+    let longDetail = String(repeating: "A long operator update. ", count: 5)
+    let lanes: [Object] = tones.enumerated().map { i, tone in
+        ["id":"job-\(i)", "label":"Worker \(i)", "state":"State \(i)", "tone":tone.0,
+         "details":[i == 0 ? longDetail : "Stage \(i)"]]
+    }
+    func events(_ id: String, _ label: String, _ unit: String, _ values: [String]) -> Object {
+        ["kind":"events", "id":id, "label":label, "unit":unit, "value":values]
+    }
+    var widgets = lanes.map { lane in
+        events(lane["id"] as! String, lane["label"] as! String, "gent:lane:v1",
+               [lane["tone"] as! String + ": " + (lane["state"] as! String)] + (lane["details"] as! [String]))
+    }
+    widgets.append(events("empty", "Spare worker", "gent:lane:v1", []))
+    let finished = (1...6).map { "Completed job \($0)" }
+    let queued = (1...19).map { "Scheduled job \($0)" }
+    widgets.append(events("finished", "Finished", "gent:feed-pair:v1", finished))
+    widgets.append(events("queue", "Queue", "gent:feed-pair:v1", queued))
+    widgets.append(["kind":"button", "id":"inspect", "label":"Inspect", "value":"Inspect fixture progress"])
+    let layout: [Any] = [["lanes":lanes], ["feeds":[6,7]], 8]
+    let neighbor: Object = ["agent":"neighbor", "chat":"Fixture", "revision":8,
+                            "board":["title":"Neighbor", "widgets":[["kind":"text", "label":"Note", "value":"OK"]]]]
+    func publish(_ projection: [Any]?, beside: Bool = false) -> NSBox {
+        var board: Object = ["title":"Fixture jobs", "widgets":widgets]
+        board["layout_v1"] = projection
+        let row: Object = ["agent":"jobs", "chat":"Fixture", "revision":42, "board":board]
+        desktop.receive(["page":"dashboard", "rows":beside ? [row, neighbor] : [row]])
+        return descendants(desktop.dashboard.view, of: NSBox.self).first { $0.title == "Fixture jobs" }!
+    }
+    func label(_ text: String, in view: NSView) -> NSTextField {
+        descendants(view, of: NSTextField.self).first { $0.stringValue == text }!
+    }
+    func rect(_ view: NSView) -> NSRect { view.convert(view.bounds, to: scroll.documentView!) }
+    let original = publish(nil)
+    require(label("Spare worker", in: original).isSelectable, "legacy event renders without projection")
+    require(label(queued.joined(separator: "\n"), in: original).isSelectable, "legacy feed retains all rows")
+    let empty = publish([])
+    require(!descendants(empty, of: NSTextField.self).contains { $0.stringValue == "Worker 0" },
+            "explicit empty projection renders only the board header")
+
+    for (width, beside, wide) in [(CGFloat(1024), false, true), (420, false, false), (1024, true, false)] {
+        resizeDesktop(desktop, width: width, height: 760)
+        let card = publish(layout, beside: beside)
+        let boxes = lanes.map { lane in
+            descendants(card, of: NSBox.self).first { $0.accessibilityLabel() == lane["label"] as? String }!
+        }
+        // The layout uses the board's allocated width, which can change after row insertion.
+        require(waitInMainRunLoop {
+            desktop.tabs.layoutSubtreeIfNeeded()
+            return boxes.allSatisfy { rect($0).width > 0 } &&
+                (abs(rect(boxes[0]).minY - rect(boxes[4]).minY) < 1) == wide
+        }, "lane columns respond to board width")
+        for (i, box) in boxes.enumerated() {
+            require(descendants(box, of: NSBox.self).contains { $0.fillColor == tones[i].1 },
+                    "system color for \(tones[i].0)")
+            require(descendants(box, of: NSTextField.self).allSatisfy { $0.isSelectable && !$0.isEditable },
+                    "all lane labels, states and details are selectable")
+        }
+        let text = label(longDetail, in: boxes[0])
+        let fit = text.cell!.cellSize(forBounds: NSRect(x:0, y:0, width:text.bounds.width, height:10_000))
+        require(fit.height > 25 && text.bounds.height >= fit.height - 1, "long lane detail wraps fully")
+        let left = rect(label("Finished", in: card)), right = rect(label("Queue", in: card))
+        require(wide ? (abs(left.minY - right.minY) < 1 && left.minX < right.minX) : left.maxY < right.minY,
+                "paired feeds use the width of the individual board")
+        for entries in [finished, queued] {
+            let fields = entries.map { label($0, in: card) }
+            require(fields.allSatisfy { $0.isSelectable && !$0.isEditable }, "selectable feed rows")
+            for (earlier, later) in zip(fields, fields.dropFirst()) {
+                require(rect(earlier).maxY <= rect(later).minY + 1, "every feed row in sequence")
+            }
+        }
+        let last = label(queued.last!, in: card)
+        last.scrollToVisible(last.bounds)
+        require(scroll.documentVisibleRect.insetBy(dx: -1, dy: -1).contains(rect(last)), "final feed row reachable")
+        if width == 420 {
+            checkLaneSelection(text, copyTo: pasteboard)
+            checkLaneSelection(last, copyTo: pasteboard)
+        }
+        let button = descendants(card, of: NSButton.self).first { $0.title == "Inspect" }!
+        require(rect(button).minY >= rect(last).maxY - 1, "trailing widget order")
+        let output = requests { button.performClick(nil) }
+        let clicks = output.filter {
+            if case .json(let message) = $0 { return message["op"] as? String == "dashboard_click" }
+            return false
+        }
+        require(clicks == [.json(["op":"dashboard_click", "agent":"jobs", "revision":42, "widget":"inspect"])],
+                "indexed button preserves revision and widget ID: \(output)")
+    }
+}
+
 func checkDashboard(_ desktop: Desktop) {
     let initial = requests { DashboardTab().load() }
     guard case .json(let initialPage)? = initial.first else { fatalError("Missing initial dashboard read") }
@@ -1310,6 +1422,7 @@ func checkDashboard(_ desktop: Desktop) {
     checkDashboardMedia(desktop, scroll: scroll)
     checkDashboardVisibility(desktop)
     checkDashboardAppearance(desktop, scroll: scroll)
+    checkDashboardLanes(desktop, scroll: scroll)
     require(opened == targets, "button, malformed links, media and scrolling leave opener idle")
     resizeDesktop(desktop, width: 850, height: 605)
 }
@@ -1428,6 +1541,33 @@ if CommandLine.arguments.dropFirst(2).contains("--about") {
     print("PASS: native AppKit About release notes, links and legacy fallback")
     exit(0)
 }
+if let mode = CommandLine.arguments.firstIndex(of: "--lane-copy") {
+    desktop.makeWindow()
+    desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
+    let pasteboard = NSPasteboard.withUniqueName()
+    if let path = CommandLine.arguments.dropFirst(mode + 1).first {
+        typealias Object = [String: Any]
+        let page = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as! Object
+        let data = (page["rows"] as! [Object])[0]["board"] as! Object
+        let groups = data["layout_v1"] as! [Any]
+        let lanes = groups.compactMap { ($0 as? Object)?["lanes"] as? [Object] }.first!
+        let feeds = groups.compactMap { ($0 as? Object)?["feeds"] as? [Int] }.first!
+        let entries = (data["widgets"] as! [Object])[feeds[1]]["value"] as! [String]
+        desktop.receive(page)
+        resizeDesktop(desktop, width: 420, height: 760)
+        for text in [(lanes[0]["details"] as! [String])[0], entries.last!] {
+            let field = descendants(desktop.dashboard.view, of: NSTextField.self).first { $0.stringValue == text }!
+            checkLaneSelection(field, copyTo: pasteboard)
+        }
+    } else {
+        let scroll = descendants(desktop.dashboard.view, of: NSScrollView.self).first!
+        checkDashboardLanes(desktop, scroll: scroll, copyTo: pasteboard)
+    }
+    pasteboard.releaseGlobally()
+    require(!desktop.window.isVisible, "private copy fixture stayed offscreen")
+    print("PASS: selected lane detail and final feed entry round-trip through private Aqua pasteboard")
+    exit(0)
+}
 if CommandLine.arguments.dropFirst(2).contains("--settings") {
     desktop.makeWindow()
     checkReleaseChannel(desktop)
@@ -1471,7 +1611,7 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     if dashboardOnly {
         desktop.show()
         checkDashboard(desktop)
-        print("PASS: native Dashboard layout, scrolling, hide and restore, web links, button dispatch, SVG charts, metrics, inline images, negotiated widths, appearance palettes and cached redraws")
+        print("PASS: native Dashboard layout, projected lanes and feeds, native text selection, scrolling, hide and restore, web links, button dispatch, SVG charts, metrics, inline images, negotiated widths, appearance palettes and cached redraws")
         exit(0)
     }
     require(desktop.statusItem?.isVisible == true && desktop.statusItem?.button?.image != nil,

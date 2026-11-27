@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+mod grouping;
 mod preferences;
 #[cfg(test)]
 mod tests;
@@ -111,6 +112,12 @@ impl View {
         for line in rows.chunks_mut(self.layout.chart_widths.len()) {
             let width = usize::from(self.layout.chart_widths[line.len() - 1]);
             for row in line {
+                // Only the supervisor can supply presentation metadata. All
+                // indices refer to this board's complete widget array.
+                row.board.extra.remove("layout_v1");
+                if let Some(groups) = grouping::sections(&row.board.widgets) {
+                    row.board.extra.insert("layout_v1".into(), groups);
+                }
                 for widget in &mut row.board.widgets {
                     charts::decorate(widget, &self.layout.palette, width);
                 }

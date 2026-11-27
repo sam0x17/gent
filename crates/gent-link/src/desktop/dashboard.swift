@@ -139,6 +139,13 @@ private extension NSStackView {
         return field
     }
 
+    func addWrappingText(_ value: String, font: NSFont, color: NSColor = .labelColor) {
+        let field = addText(value, font: font, color: color)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.required, for: .vertical)
+        field.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+    }
+
     func addReading(_ label: String, _ value: String, metric: Bool = false) {
         let line = NSStackView()
         line.distribution = .fill
@@ -179,6 +186,132 @@ private extension NSStackView {
         width.isActive = true
         view.heightAnchor.constraint(equalTo: view.widthAnchor, multiplier: image.size.height / image.size.width).isActive = true
     }
+}
+
+// Reflow only this section when its board is resized or shares a gallery row.
+private final class DashboardColumns: NSStackView {
+    private let items: [NSView]
+    private let minimumWidth: CGFloat
+    private let alignHeights: Bool
+    private var columns = 0
+    private static let gap: CGFloat = 8
+
+    init(_ items: [NSView], minimumWidth: CGFloat, alignHeights: Bool = false) {
+        self.items = items
+        self.minimumWidth = minimumWidth
+        self.alignHeights = alignHeights
+        super.init(frame: .zero)
+        orientation = .vertical
+        alignment = .leading
+        spacing = Self.gap
+        arrange(1)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    private var fittingColumns: Int {
+        max(1, min(items.count, Int((bounds.width + Self.gap) / (minimumWidth + Self.gap))))
+    }
+
+    override func setFrameSize(_ size: NSSize) {
+        super.setFrameSize(size)
+        if fittingColumns != columns {
+            // AppKit can assign intermediate widths during constraint solving.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, fittingColumns != columns else { return }
+                arrange(fittingColumns)
+            }
+        }
+    }
+
+    private func arrange(_ count: Int) {
+        columns = count
+        arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for start in stride(from: 0, to: items.count, by: count) {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .top
+            row.spacing = Self.gap
+            addArrangedSubview(row)
+            let fraction = 1 / CGFloat(count)
+            for item in items[start..<min(start + count, items.count)] {
+                row.addArrangedSubview(item)
+                item.widthAnchor.constraint(equalTo: widthAnchor, multiplier: fraction,
+                                            constant: -Self.gap * (1 - fraction)).isActive = true
+                if alignHeights { item.heightAnchor.constraint(equalTo: row.heightAnchor).isActive = true }
+            }
+        }
+    }
+}
+
+private func dashboardLane(_ lane: [String: Any]) -> NSBox {
+    let label = lane["label"] as? String ?? ""
+    let state = lane["state"] as? String ?? ""
+    let tone: NSColor
+    switch lane["tone"] as? String {
+    case "info": tone = .systemBlue
+    case "success": tone = .systemGreen
+    case "warning": tone = .systemOrange
+    case "critical": tone = .systemRed
+    default: tone = .secondaryLabelColor
+    }
+    let card = NSBox()
+    card.boxType = .custom
+    card.titlePosition = .noTitle
+    card.fillColor = .windowBackgroundColor
+    card.borderColor = .separatorColor
+    card.borderWidth = 1
+    card.cornerRadius = 6
+    card.contentViewMargins = NSSize(width: 10, height: 8)
+    card.setAccessibilityLabel(label)
+    let body = NSStackView()
+    body.orientation = .vertical
+    body.alignment = .leading
+    body.spacing = 3
+    card.contentView = body
+    body.addWrappingText(label, font: .systemFont(ofSize: 13, weight: .semibold))
+    let status = NSStackView()
+    status.alignment = .centerY
+    status.spacing = 5
+    body.addArrangedSubview(status)
+    status.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+    let dot = NSBox()
+    dot.boxType = .custom
+    dot.titlePosition = .noTitle
+    dot.borderWidth = 0
+    dot.cornerRadius = 3
+    dot.fillColor = tone
+    dot.setAccessibilityElement(false)
+    status.addArrangedSubview(dot)
+    dot.widthAnchor.constraint(equalToConstant: 6).isActive = true
+    dot.heightAnchor.constraint(equalToConstant: 6).isActive = true
+    let statusText = status.addText(state, font: .systemFont(ofSize: 12, weight: .medium))
+    statusText.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    statusText.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    body.setCustomSpacing(6, after: status)
+    for detail in lane["details"] as? [String] ?? [] {
+        body.addWrappingText(detail, font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                             color: .secondaryLabelColor)
+    }
+    return card
+}
+
+private func dashboardFeed(_ widget: [String: Any]) -> NSView {
+    let feed = NSStackView()
+    feed.orientation = .vertical
+    feed.alignment = .leading
+    feed.spacing = 5
+    let label = widget["label"] as? String ?? ""
+    feed.setAccessibilityLabel(label)
+    feed.addWrappingText(label, font: .systemFont(ofSize: 13, weight: .semibold))
+    let rule = NSBox()
+    rule.boxType = .separator
+    feed.addArrangedSubview(rule)
+    rule.widthAnchor.constraint(equalTo: feed.widthAnchor).isActive = true
+    for entry in widget["value"] as? [String] ?? [] {
+        feed.addWrappingText(entry, font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular))
+    }
+    return feed
 }
 
 final class DashboardTab: NSObject {
@@ -456,11 +589,11 @@ final class DashboardTab: NSObject {
         }
         header.addText(row["chat"] as? String ?? "", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
         var previousMetric: NSView?
-        for item in board["widgets"] as? [[String: Any]] ?? [] {
+        func addWidget(_ item: [String: Any]) {
             let title = item["label"] as? String ?? ""
             let kind = item["kind"] as? String ?? ""
             let value = item["value"]
-            if (kind == "button" || kind == "link") && row["agent"] == nil { continue }
+            if (kind == "button" || kind == "link") && row["agent"] == nil { return }
             let section = content.addSection()
             if kind == "metric", let previous = previousMetric { content.setCustomSpacing(4, after: previous) }
             previousMetric = kind == "metric" ? section : nil
@@ -474,7 +607,7 @@ final class DashboardTab: NSObject {
                 } else {
                     section.addText(title)
                 }
-                continue
+                return
             }
             if kind == "button" {
                 let button = DashboardButton(title: title, target: nil, action: #selector(DashboardButton.invoke))
@@ -484,14 +617,14 @@ final class DashboardTab: NSObject {
                 button.fields = ["agent": row["agent"]!, "revision": row["revision"]!, "widget": item["id"]!]
                 section.addArrangedSubview(button)
                 button.widthAnchor.constraint(lessThanOrEqualTo: section.widthAnchor).isActive = true
-                continue
+                return
             }
             let unit = item["unit"] as? String
             if kind == "metric" {
                 var label = title[...]
                 while let last = label.last, last.isWhitespace || last == ":" { label = label.dropLast() }
                 section.addReading(String(label) + ":", dashboardReading(value as? NSNumber, unit: unit), metric: true)
-                continue
+                return
             }
             if kind == "graph" {
                 section.addReading(title, dashboardReading((value as? [NSNumber])?.last, unit: unit))
@@ -550,6 +683,30 @@ final class DashboardTab: NSObject {
             default:
                 section.addText(value as? String ?? "")
             }
+        }
+        let widgets = board["widgets"] as? [[String: Any]] ?? []
+        if let layout = board["layout_v1"] as? [Any] {
+            for part in layout {
+                if let index = part as? Int, widgets.indices.contains(index) {
+                    addWidget(widgets[index])
+                    continue
+                }
+                let group = part as? [String: Any]
+                let columns: DashboardColumns
+                if let lanes = group?["lanes"] as? [[String: Any]], !lanes.isEmpty {
+                    columns = DashboardColumns(lanes.map(dashboardLane), minimumWidth: 156, alignHeights: true)
+                } else if let feeds = group?["feeds"] as? [Int], feeds.count == 2,
+                          feeds.allSatisfy({ widgets.indices.contains($0) && widgets[$0]["kind"] as? String == "events" }) {
+                    columns = DashboardColumns(feeds.map { dashboardFeed(widgets[$0]) }, minimumWidth: 295)
+                } else {
+                    continue
+                }
+                previousMetric = nil
+                content.addArrangedSubview(columns)
+                columns.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+            }
+        } else {
+            widgets.forEach(addWidget)
         }
         // Keep controls at their natural height, grouped at the top of a tall card.
         let spacer = NSView()

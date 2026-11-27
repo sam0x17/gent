@@ -31,6 +31,28 @@ The call returns the committed revision. To record epoch 5, call `gent_dashboard
 
 Supply the whole series for a graph and the whole list of strings for an event feed. A board can contain up to 32 widgets and 32 KiB of serialized data. Each graph can show 256 samples and each event feed can show 64 entries. Gauge and progress ranges default to 0 through 100. Use a text widget for a status line or paragraph.
 
+### Status lanes and paired event feeds
+
+Use consecutive `events` widgets with `unit: "gent:lane:v1"` to show parallel work. Give each slot a permanent ID and label. The first string in its value is a tone, a colon, a space and a written state. Choose `neutral`, `info`, `success`, `warning` or `critical` for the tone. Follow the state with up to three detail strings. Keep the state and each detail on a single line. Desktop wraps long text to fit the card.
+
+```json
+[
+  {"id":"lane_1","kind":"events","unit":"gent:lane:v1","label":"Lane 1",
+   "value":["warning: Waiting for checkpoint","Epoch 42","Replay · slot 7","ETA 13:40 UTC"]},
+  {"id":"lane_2","kind":"events","unit":"gent:lane:v1","label":"Lane 2","value":[]},
+  {"id":"landed","kind":"events","unit":"gent:feed-pair:v1","label":"Landed (UTC)",
+   "value":["Epoch 40 · 11:28","Epoch 41 · 12:31"]},
+  {"id":"estimated","kind":"events","unit":"gent:feed-pair:v1","label":"Estimated (UTC)",
+   "value":["Epoch 42 · 13:40","Epoch 43 · 14:53"]}
+]
+```
+
+An empty lane value (`[]`) reserves the ID and takes up no space on a supporting Desktop. Fill or clear it with a values-only update. For example, send `{"expected_revision":1,"values":{"lane_2":["info: Starting","Epoch 43"]}}` to activate the second slot at revision 1. An unrecognized tone or malformed card displays as an ordinary event list.
+
+Mark both feeds with `gent:feed-pair:v1` and put them next to each other in the widget array. Desktop pairs consecutive marked feeds in twos and displays an odd final feed on its own. Each pair uses two columns when the board has room and stacks in document order on a narrower board. The page scrolls through every entry.
+
+For an existing board, call `gent_dashboard_get`, then `gent_dashboard_define` once with the complete board and its current revision to add the markers. Continue updating values by widget ID. Gent Desktop 0.1.7 reads these widgets as ordinary event lists, including the labels of reserved slots. Its GTK presenter also prints the unit marker after the event text.
+
 ### Metrics, charts and images
 
 A `metric` displays the field name in bold followed by the number and its optional unit, for example **GPU temperature:** 64 °C.
