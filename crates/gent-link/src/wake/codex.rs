@@ -166,7 +166,9 @@ async fn sweep(
         match registry.credential(&thread) {
             Ok(Some(credential)) => {
                 if mode != Sweep::GoalsOnly {
-                    failed |= dispatch(home, socket, &thread, &credential).await.is_err();
+                    failed |= dispatch(home, registry, &thread, &credential, None)
+                        .await
+                        .is_err();
                 }
                 if mode != Sweep::WakeOnly {
                     if gent_daemon::config::ordinary_babysitter_enabled(home).unwrap_or(false) {
@@ -191,13 +193,46 @@ async fn sweep(
     Ok(())
 }
 
-async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) -> Result<()> {
-    let recovery = direct::collect(home, socket, thread, credential).await;
+/// The daemon reconciles existing managed attachments without taking the MCP
+/// wake lease. A current coordinator racing this pass uses the same journal.
+pub(crate) async fn catch_up(
+    home: &Path,
+    socket: &Path,
+    thread: &str,
+    recipient: &str,
+) -> Result<()> {
+    let registry = Registry::codex(home, socket)?;
+    if registry.coordinator()?.is_none()
+        && let Some(credential) = registry.credential(thread)?
+    {
+        dispatch(home, &registry, thread, &credential, Some(recipient)).await?;
+    }
+    Ok(())
+}
+
+async fn dispatch(
+    home: &Path,
+    registry: &Registry,
+    thread: &str,
+    credential: &str,
+    recipient: Option<&str>,
+) -> Result<()> {
+    let socket = &registry.endpoint;
+    // The attached wake owner still collects receipts and relay replies. Catch-up
+    // handles only new pending messages on a host state that older owners declined.
+    let recovery = if recipient.is_some() {
+        Ok(())
+    } else {
+        direct::collect(home, socket, thread, credential).await
+    };
     // Registration may still be in flight. Revoked or otherwise unavailable
     // agents leave the pending path without any external host operation.
     let Ok(pending) = agent(home, credential, AgentOp::WakePending).await else {
         return Ok(());
     };
+    if recipient.is_some_and(|id| pending["agent"] != id) {
+        return Ok(());
+    }
     let pending = pending["pending"]
         .as_array()
         .context("invalid wake pending result")?;
@@ -205,7 +240,13 @@ async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) ->
         return recovery;
     }
     let mut host = Host::connect(socket).await?;
-    if !host.accepts(thread).await? {
+    let Some(ready) = host.input_ready(thread).await? else {
+        return Ok(());
+    };
+    if recipient.is_some()
+        && (ready == InputReady::Normal
+            || !crate::integration::refresh::codex_sockets(home)?.contains(socket))
+    {
         return Ok(());
     }
     // One claim per agent per sweep. The daemon enforces durable budgets.
@@ -231,6 +272,14 @@ async fn dispatch(home: &Path, socket: &Path, thread: &str, credential: &str) ->
     }
     // Any cancellation, error or lost response beyond the committed claim
     // leaves evidence. No external submission is retried here.
+    if ready != InputReady::Normal
+        && (host.input_ready(thread).await? != Some(ready)
+            || registry.credential(thread)?.as_deref() != Some(credential)
+            || (recipient.is_some()
+                && !crate::integration::refresh::codex_sockets(home)?.contains(socket)))
+    {
+        return Ok(());
+    }
     let checked = agent(
         home,
         credential,
@@ -295,6 +344,16 @@ pub(crate) async fn connect_socket(
     )
     .await??;
     Ok(socket)
+}
+
+#[derive(PartialEq)]
+enum InputReady {
+    Normal,
+    ProviderFailure {
+        turn: uuid::Uuid,
+        completed: i64,
+        reason: gent_protocol::notifications::Failure,
+    },
 }
 
 pub(crate) struct Host {
@@ -409,7 +468,7 @@ impl Host {
         })?
     }
 
-    async fn accepts(&mut self, thread: &str) -> Result<bool> {
+    async fn input_ready(&mut self, thread: &str) -> Result<Option<InputReady>> {
         let value = self
             .rpc(
                 "thread/read",
@@ -418,8 +477,56 @@ impl Host {
             .await?;
         let metadata = &value["thread"];
         ensure!(metadata["id"] == thread, "Codex returned another thread");
-        Ok(metadata["canAcceptDirectInput"] == true
-            && matches!(metadata["status"]["type"].as_str(), Some("idle" | "active")))
+        if metadata["canAcceptDirectInput"] != true {
+            return Ok(None);
+        }
+        let status = &metadata["status"];
+        match status["type"].as_str() {
+            Some("idle" | "active") => return Ok(Some(InputReady::Normal)),
+            Some("systemError")
+                if status
+                    .get("activeFlags")
+                    .is_none_or(|flags| flags.as_array().is_some_and(Vec::is_empty)) => {}
+            _ => return Ok(None),
+        }
+        let page = self
+            .rpc(
+                "thread/turns/list",
+                json!({"threadId":thread,
+            "sortDirection":"desc","limit":1,"itemsView":"notLoaded"}),
+            )
+            .await?;
+        let Some([head]) = page["data"].as_array().map(Vec::as_slice) else {
+            return Ok(None);
+        };
+        let Some(reason) = babysit::terminal_failure(head) else {
+            return Ok(None);
+        };
+        let Some(id) = head["id"]
+            .as_str()
+            .filter(|id| crate::integration::wake::valid_thread(id))
+        else {
+            return Ok(None);
+        };
+        let Some((started, completed)) =
+            head["startedAt"].as_i64().zip(head["completedAt"].as_i64())
+        else {
+            return Ok(None);
+        };
+        if !(0..=completed).contains(&started) || completed > gent_daemon::store::now() {
+            return Ok(None);
+        }
+        let queue = self
+            .rpc("thread/queue/list", json!({"threadId":thread}))
+            .await?;
+        Ok(
+            (queue["data"].as_array().is_some_and(Vec::is_empty) && queue["nextCursor"].is_null())
+                .then_some(InputReady::ProviderFailure {
+                    turn: uuid::Uuid::parse_str(id)?,
+                    completed,
+                    reason,
+                }),
+        )
     }
 
     async fn submit(&mut self, thread: &str, attempt: &str, prompt: &str) -> Result<String> {

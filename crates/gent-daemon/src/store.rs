@@ -53,6 +53,7 @@ mod requests;
 mod storage_tests;
 mod synchronization;
 mod wake;
+pub use wake::wake_binding_tag;
 mod work;
 
 pub fn now() -> i64 {
@@ -356,7 +357,8 @@ impl Store {
         let local_only = matches!(
             &request,
             Request::Agent {
-                action: AgentOp::BabysitterClaim { .. }
+                action: AgentOp::WakePending
+                    | AgentOp::BabysitterClaim { .. }
                     | AgentOp::BabysitterChatProbe { .. }
                     | AgentOp::BabysitterChatClaim { .. }
                     | AgentOp::BabysitterChatCheck { .. }

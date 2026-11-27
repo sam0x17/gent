@@ -159,6 +159,41 @@ pub(crate) fn print(value: &Value) {
     println!("  Existing registrations remain when discovery is disabled.");
 }
 
+pub(super) fn pending_recoveries(
+    home: &Path,
+    cfg: &config::Config,
+) -> Result<BTreeMap<String, config::RecoveryAgent>> {
+    if !cfg.discovery()?.enabled {
+        return Ok(BTreeMap::new());
+    }
+    let (_, catalog) = storage::read(home, cfg)?;
+    Ok(catalog
+        .entries
+        .into_values()
+        .filter_map(|entry| Some((entry.agent, entry.recovery?)))
+        .collect())
+}
+
+pub(super) async fn recover_pending(
+    home: &Path,
+    cfg: &config::Config,
+    id: &str,
+    entry: &config::RecoveryAgent,
+) -> Result<()> {
+    enabled(home, cfg)?;
+    match tokio::time::timeout(
+        Duration::from_secs(30),
+        super::recovery::recover_discovered(home, id, entry),
+    )
+    .await
+    .context("native recovery timed out; inspect the host")??
+    {
+        "needs_owner" => anyhow::bail!("native chat needs owner review before recovery"),
+        "limited" => anyhow::bail!("native recovery is waiting for its retry budget"),
+        _ => Ok(()),
+    }
+}
+
 async fn register(
     home: &Path,
     cfg: &config::Config,

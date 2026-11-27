@@ -7,6 +7,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     os::unix::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
@@ -20,7 +21,7 @@ pub(crate) fn valid_thread(thread: &str) -> bool {
 
 /// Preserve the advertised socket name across server restarts; resolve parent
 /// aliases such as macOS /tmp without following Codex's final rendezvous link.
-fn endpoint(path: &Path) -> Result<PathBuf> {
+pub(super) fn endpoint(path: &Path) -> Result<PathBuf> {
     ensure!(
         path.is_absolute() && path.file_name().is_some(),
         "wake socket must be an absolute file path"
@@ -176,6 +177,72 @@ pub(super) fn remember_discovered(
     )
 }
 
+pub(super) fn codex_binding_dir(home: &Path, cfg: &config::Config) -> PathBuf {
+    super::scope_path(home, cfg, super::Host::Codex)
+}
+
+/// Resolve only demand for this page. Legacy attachments have no persisted
+/// agent ID; their private sidecar already pins the credential hash and thread.
+/// These hints cannot authorize input. The dispatcher reopens the canonical
+/// binding and authenticates the exact pending recipient before contacting Codex.
+pub(super) fn pending_codex_bindings(
+    folder: &Path,
+    cfg: &config::Config,
+    tags: &BTreeMap<String, String>,
+    endpoints: &BTreeSet<PathBuf>,
+) -> Result<BTreeMap<String, (PathBuf, String)>> {
+    if endpoints.is_empty() || tags.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let by_tag: BTreeMap<_, _> = tags.iter().map(|(id, tag)| (tag, id)).collect();
+    let mut matches = BTreeMap::new();
+    let entries = match fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().ends_with(b".key.wake.json"))
+        {
+            continue;
+        }
+        let Ok(saved) = snapshot(&path) else { continue };
+        let Some(record) = saved
+            .text
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Record>(text).ok())
+        else {
+            continue;
+        };
+        if record.validate(cfg, &record.thread).is_err()
+            || path != binding::sidecar(&key_path(folder, &record.thread), ".wake.json")
+        {
+            continue;
+        }
+        let tag = gent_daemon::store::wake_binding_tag(&record.credential_hash);
+        if let Some(id) = by_tag.get(&tag)
+            && let Some(socket) = record.endpoint
+        {
+            // Two native threads sharing one credential cannot select a recipient.
+            matches
+                .entry((*id).clone())
+                .and_modify(|known| *known = None)
+                .or_insert(Some((socket, record.thread)));
+        }
+    }
+    Ok(matches
+        .into_iter()
+        .filter_map(|(id, target)| {
+            target
+                .filter(|(socket, _)| endpoints.contains(socket))
+                .map(|t| (id, t))
+        })
+        .collect())
+}
+
 pub(crate) struct Registry {
     home: PathBuf,
     folder: PathBuf,
@@ -185,7 +252,7 @@ pub(crate) struct Registry {
 impl Registry {
     pub(crate) fn codex(home: &Path, socket: &Path) -> Result<Self> {
         let cfg = config::load(home)?;
-        let folder = super::scope_path(home, &cfg, super::Host::Codex);
+        let folder = codex_binding_dir(home, &cfg);
         Self::new(home, folder, cfg, socket)
     }
 
