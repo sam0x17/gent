@@ -61,6 +61,29 @@ def exercise(private_document=None, evidence=None, require_browser=False):
         settle()
         return a, a.view
 
+    def check_heading(frame, compact):
+        assert frame.title.get_visible() and frame.publisher.get_visible() != compact
+        title = frame.title.get_text()
+        publisher = frame.publisher.get_text()
+        assert frame.get_accessible().get_name() == frame.title.get_accessible().get_name() == title
+        assert frame.body.get_margin_start() == frame.body.get_margin_end() == 15
+        assert frame.body.get_margin_top() == frame.body.get_margin_bottom() == (6 if compact else 15)
+        assert frame.body.get_spacing() == (4 if compact else 12)
+        if compact:
+            assert frame.title.get_layout().get_line_count() == 1
+            attribution = f"Published by {publisher}"
+            assert frame.title.get_accessible().get_description() == frame.get_accessible().get_description() == attribution
+            assert frame.title.get_tooltip_text() == f"{title}. {attribution}"
+            heading = frame.title.get_parent().get_parent()
+            hide, = [w for w in heading.get_children() if isinstance(w, Gtk.Button)]
+            assert hide.get_mapped() and hide.get_can_focus() and hide.get_accessible().get_name() == "Hide dashboard"
+            x, _ = hide.translate_coordinates(heading, 0, 0)
+            assert frame.title.get_allocated_width() <= x and heading.get_allocated_height() == max(
+                hide.get_allocated_height(), frame.title.get_allocated_height())
+        else:
+            assert frame.title.get_line_wrap() and frame.title.get_tooltip_text() is None
+            assert not frame.title.get_accessible().get_description()
+
     def click(view, x, y, button=1):
         wx, wy = view.translate_coordinates(win, x, y)
         _, rx, ry = win.get_window().get_origin()
@@ -83,9 +106,13 @@ def exercise(private_document=None, evidence=None, require_browser=False):
         pix = Gdk.pixbuf_get_from_window(win.get_window(), wx, wy, 1, 1)
         return tuple(pix.get_pixels()[:3])
 
-    assert publish(row()).attachment is None
+    plain = publish(row())
+    assert plain.attachment is None
+    check_heading(plain, False)
     if ui["dashboard_browser"]() is None:
-        assert publish(row("<p>Optional view</p>")).attachment is None
+        fallback = publish(row("<p>Optional view</p>"))
+        assert fallback.attachment is None
+        check_heading(fallback, False)
         assert not require_browser, "Sandboxed WebKitGTK unavailable"
         print("PASS static HTML unavailable; native widget fallback")
         win.destroy()
@@ -131,7 +158,9 @@ def exercise(private_document=None, evidence=None, require_browser=False):
         <script>document.body.append('Script ran')</script>"""
         r = row(html)
         frame = publish(r)
+        check_heading(frame, False)
         a, view = loaded(frame)
+        check_heading(frame, True)
         assert view.get_context().is_ephemeral() and view.get_context().get_sandbox_enabled()
         assert not view.get_settings().get_enable_javascript()
         assert not view.get_website_data_manager().get_persistent_credential_storage_enabled()
@@ -145,6 +174,7 @@ def exercise(private_document=None, evidence=None, require_browser=False):
         # A new fallback allocation need not replace the attachment or its open details.
         updated = dict(r, board=dict(r["board"], widgets=[dict(r["board"]["widgets"][0], value=4)]))
         assert publish(updated, layout_only=True) == frame and frame.attachment.view == view
+        check_heading(frame, True)
         assert "Expanded fixture row" in selected_text(view)
         click(view, 35, 117)
         click(view, 35, 150)
@@ -157,15 +187,22 @@ def exercise(private_document=None, evidence=None, require_browser=False):
         settle()
         assert color(view, 5, 8) == (0x34, 0x2a, 0xbc)
         other = dict(row("<p>Independent board</p>"), agent="other")
+        other["board"]["title"] = "A long title " * 12
         pane.receive({"rows": [updated, other]})
         first, second = pane.grid.get_children()
         _, other_view = loaded(second)
         assert first.attachment.view == view
+        check_heading(second, True)
+        assert second.title.get_layout().is_ellipsized()
         assert view.get_context() != other_view.get_context()
         assert view.get_website_data_manager() != other_view.get_website_data_manager()
+        ordinary = dict(other, board={k: v for k, v in other["board"].items() if k != "static_html"})
+        pane.receive({"rows": [updated, ordinary]})
+        check_heading(pane.grid.get_children()[1], False)
         pane.receive({"rows": [updated]})
         view.terminate_web_process()
         wait(GLib, lambda: a.get_visible_child() == a.native)
+        check_heading(frame, False)
         assert a.native.get_children()[0].get_children()[0].get_text() == "Count: 4"
         waiting.clear()
         thread.join(2)

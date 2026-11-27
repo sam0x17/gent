@@ -407,7 +407,7 @@ class DashboardCard(Gtk.Frame):
     def __init__(self, title, publisher, agent=None):
         super().__init__(shadow_type=Gtk.ShadowType.NONE)
         self.get_style_context().add_class("gent-dashboard-card")
-        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, border_width=15)
+        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=15)
         self.add(self.body)
         header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.title = dashboard_label(title, "gent-dashboard-title")
@@ -426,11 +426,30 @@ class DashboardCard(Gtk.Frame):
         self.body.add(heading)
         self.get_accessible().set_name(title)
 
+    def update_attachment_heading(self, *_):
+        attachment = self.attachment
+        compact = (attachment is not None and attachment.view is not None
+                   and attachment.get_visible_child() == attachment.view)
+        self.publisher.set_no_show_all(compact)
+        self.publisher.set_visible(not compact)
+        self.title.set_line_wrap(not compact)
+        self.title.set_ellipsize(Pango.EllipsizeMode.END if compact else Pango.EllipsizeMode.NONE)
+        self.body.set_margin_top(6 if compact else 15)
+        self.body.set_margin_bottom(6 if compact else 15)
+        self.body.set_spacing(4 if compact else 12)
+        publisher = self.publisher.get_text()
+        attribution = f"Published by {publisher}" if compact and publisher else ""
+        self.get_accessible().set_description(attribution)
+        self.title.get_accessible().set_description(attribution)
+        tooltip = ". ".join(filter(None, (self.title.get_text(), attribution)))
+        self.title.set_tooltip_text(tooltip if compact else None)
+
     def horizontal_inset(self):
         context = self.get_style_context()
         state = context.get_state()
         border, padding = context.get_border(state), context.get_padding(state)
-        return border.left + border.right + padding.left + padding.right + 2 * self.body.get_border_width()
+        margins = self.body.get_margin_start() + self.body.get_margin_end()
+        return border.left + border.right + padding.left + padding.right + margins
 
     def palette(self):
         context = self.get_style_context()
@@ -629,6 +648,8 @@ class DashboardPane(Gtk.Box):
             for child in frame.body.get_children()[1:]:
                 child.destroy()
             frame.attachment = None
+            if attachment is not None:
+                frame.update_attachment_heading()
             body = frame.body
             if isinstance(source, str) and source and (browser := dashboard_browser()):
                 try:
@@ -636,6 +657,7 @@ class DashboardPane(Gtk.Box):
                 except (OSError, GLib.Error):
                     pass
                 if frame.attachment is not None:
+                    frame.attachment.connect("notify::visible-child", frame.update_attachment_heading)
                     frame.body.pack_start(frame.attachment, True, True, 0)
                     body = frame.attachment.native
         widgets = board["widgets"]
