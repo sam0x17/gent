@@ -154,13 +154,82 @@ final class ActionBar: NSObject {
     }
 }
 
-final class ManagementTab: NSObject {
+// About receives plain text; links are the only rich-text attributes supplied by the view.
+private struct AboutText {
+    let text = NSMutableAttributedString()
+    var links = Set<URL>()
+    let expanded: Bool
+
+    init(_ reply: [String: Any], detail: String) {
+        let root = "https://github.com/sam0x17/gent"
+        let release = reply["error"] == nil ? reply["latest_release"] as? [String: Any] : nil
+        var version = release?["version"] as? String ?? ""
+        if version.hasPrefix("v") { version.removeFirst() }
+        let notes = release?["notes"] as? String ?? ""
+        let hasNotes = !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        expanded = !version.isEmpty || hasNotes
+        let releasePath = "\(root)/releases/tag/v\(version)"
+        var releaseURL: URL?
+        if version.range(of: #"\A[0-9][0-9A-Za-z.+-]{0,127}\z"#, options: .regularExpression) != nil,
+           release?["url"] as? String == releasePath {
+            releaseURL = URL(string: releasePath)
+        }
+        let installed = reply["version"] as? String ?? ""
+        let revision = reply["revision"] as? String ?? ""
+        let prefix = "Version \(installed) · "
+        if !installed.isEmpty && detail.hasPrefix(prefix) {
+            append("Version ")
+            append(installed, url: installed == version ? releaseURL : nil)
+            append(" · ")
+            var rest = detail.dropFirst(prefix.count)
+            let short = revision.prefix(12)
+            if revision.range(of: #"\A[0-9a-f]{40}\z"#, options: .regularExpression) != nil, rest.hasPrefix(short) {
+                let target = reply["revision_url"] as? String
+                let commit = "\(root)/commit/\(revision)"
+                let url = target == commit ? URL(string: commit) : (target == releaseURL?.absoluteString ? releaseURL : nil)
+                append(String(short), url: url)
+                rest = rest.dropFirst(short.count)
+            }
+            append(String(rest))
+        } else {
+            append(detail)
+        }
+        if expanded {
+            if !detail.isEmpty { append("\n\n") }
+            append(hasNotes ? "Release notes" : "Latest release", bold: true)
+            if !version.isEmpty {
+                append(hasNotes ? " for " : " ", bold: true)
+                append("v" + version, url: releaseURL, bold: true)
+            }
+            if hasNotes { append("\n\n" + notes) }
+        }
+    }
+
+    private mutating func append(_ string: String, url: URL? = nil, bold: Bool = false) {
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: bold ? .semibold : .regular),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        if let url = url {
+            attributes[.link] = url
+            links.insert(url)
+        }
+        text.append(NSAttributedString(string: string, attributes: attributes))
+    }
+}
+
+final class ManagementTab: NSObject, NSTextViewDelegate {
     let view = NSView()
     let title = NSTextField(labelWithString: "")
     let detail = NSTextView()
     let actions = ActionBar()
     let page: String
     private var busy = false
+    private var compactConstraints: [NSLayoutConstraint] = []
+    private var releaseConstraints: [NSLayoutConstraint] = []
+    private var aboutLinks = Set<URL>()
+    var openURL: (URL) -> Void = { _ = NSWorkspace.shared.open($0) }
+
     init(page: String, icon: NSImage? = nil) {
         self.page = page
         super.init()
@@ -191,19 +260,32 @@ final class ManagementTab: NSObject {
             image.setAccessibilityLabel("Gent logo")
             image.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             image.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-            scroll.heightAnchor.constraint(equalToConstant: 64).isActive = true
             let row = NSStackView(views: [image, body])
             row.spacing = 16
             row.alignment = .centerY
             pin(row, in: view, inset: 16)
-            body.widthAnchor.constraint(equalToConstant: 250).isActive = true
+            detail.delegate = self
+            detail.isAutomaticLinkDetectionEnabled = false
+            scroll.autohidesScrollers = true
+            compactConstraints = [body.widthAnchor.constraint(equalToConstant: 250),
+                                  scroll.heightAnchor.constraint(equalToConstant: 64)]
+            let width = body.widthAnchor.constraint(equalTo: row.widthAnchor, multiplier: 0.58)
+            width.priority = .defaultHigh
+            releaseConstraints = [width, body.widthAnchor.constraint(greaterThanOrEqualToConstant: 280),
+                                  body.heightAnchor.constraint(equalTo: row.heightAnchor)]
+            NSLayoutConstraint.activate(compactConstraints)
             image.heightAnchor.constraint(equalTo: row.heightAnchor).isActive = true
         } else {
             pin(body, in: view, inset: 16)
         }
         actions.reload = { [weak self] in self?.load() }
     }
-    @objc private func openSite() { NSWorkspace.shared.open(URL(string: "https://gent.link")!) }
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        if let url = link as? URL, aboutLinks.contains(url) { openURL(url) }
+        return true
+    }
+
+    @objc private func openSite() { openURL(URL(string: "https://gent.link")!) }
     func load() {
         guard !busy else { return }
         busy = true
@@ -213,7 +295,19 @@ final class ManagementTab: NSObject {
         if reply["operation"] as? Bool == true { actions.completed(reply); return }
         busy = false
         title.stringValue = reply["title"] as? String ?? page.capitalized
-        detail.string = (reply["error"] ?? reply["detail"]) as? String ?? ""
+        let value = (reply["error"] ?? reply["detail"]) as? String ?? ""
+        if page == "about" {
+            let content = AboutText(reply, detail: value)
+            aboutLinks = content.links
+            if detail.textStorage?.isEqual(to: content.text) != true {
+                detail.textStorage?.setAttributedString(content.text)
+                detail.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            }
+            NSLayoutConstraint.deactivate(content.expanded ? compactConstraints : releaseConstraints)
+            NSLayoutConstraint.activate(content.expanded ? releaseConstraints : compactConstraints)
+        } else {
+            detail.string = value
+        }
         actions.configure(reply["actions"] as? [[String: Any]] ?? [])
     }
 }
