@@ -132,6 +132,8 @@ fn frontend(_home: &Path) -> Result<Command> {
             "\n",
             include_str!("desktop/management.py"),
             "\n",
+            include_str!("desktop/dashboard_static.py"),
+            "\n",
             include_str!("desktop/dashboard.py"),
             "\ndesktop = Desktop()\nGtk.main()\n"
         ),
