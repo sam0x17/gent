@@ -1286,7 +1286,8 @@ func checkAbout(_ desktop: Desktop) {
         let logo = descendants(tab.view, of: NSImageView.self).first { $0.accessibilityLabel() == "Gent logo" }!
         let logoRect = logo.convert(logo.bounds, to: tab.view)
         let textRect = clip.convert(clip.bounds, to: tab.view)
-        require(logo.image != nil && logoRect.width >= 48 && tab.view.bounds.contains(logoRect)
+        require(logo.image != nil && logo.image === desktop.aboutLogo && logo.image?.cacheMode == .never
+                && logoRect.width >= 48 && tab.view.bounds.contains(logoRect)
                 && logoRect.maxX < textRect.minX, "logo visible beside the text after resize")
         require(!text.isEditable && text.isSelectable && text.string.hasSuffix(notes), "selectable plain notes")
         require(clip.bounds.width >= 235 && clip.bounds.height >= 100, "readable text viewport")
@@ -1463,7 +1464,8 @@ Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { _ in
     desktop.window.contentView?.layoutSubtreeIfNeeded()
     let row = desktop.about.view.subviews.compactMap { $0 as? NSStackView }.first
     let logo = row?.arrangedSubviews.compactMap { $0 as? NSImageView }.first
-    require(logo?.image != nil && (logo?.bounds.width ?? 0) >= 512 && (logo?.bounds.height ?? 0) >= 512, "room for the full 512px logo")
+    require(logo?.image != nil && logo?.image === desktop.aboutLogo && logo?.image?.cacheMode == .never &&
+        (logo?.bounds.width ?? 0) >= 512 && (logo?.bounds.height ?? 0) >= 512, "scalable Inkling logo on About")
     let check = desktop.about.actions.view.arrangedSubviews[0] as! NSButton
     check.performClick(nil)
     require(!check.isEnabled, "one update check in flight")

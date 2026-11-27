@@ -171,27 +171,33 @@ def about_text(reply):
     return text, links, bool(version or notes)
 
 
-class AboutLogo(Gtk.Image):
+class AboutLogo(Gtk.DrawingArea):
     def __init__(self):
         super().__init__()
-        self.source = GdkPixbuf.Pixbuf.new_from_file(ICON)
+        from gi.repository import Atk
+        self.get_accessible().set_role(Atk.Role.IMAGE)
         self.get_accessible().set_name("Gent logo")
-        self.size = 0
-        self.connect("size-allocate", self.resize)
+        try:
+            gi.require_version("Rsvg", "2.0")
+            from gi.repository import Rsvg
+            self.viewport = Rsvg.Rectangle()
+            self.logo = Rsvg.Handle.new_from_file(os.path.join(os.path.dirname(ICON), "inkling.svg"))
+        except (ImportError, ValueError, GLib.Error):
+            self.logo = None
+            self.fallback = GdkPixbuf.Pixbuf.new_from_file(ICON)
 
-    # Let the available space determine the icon size, even after shrinking a
-    # window that previously displayed the full-resolution image.
-    def do_get_preferred_width(self):
-        return 0, 0
-
-    def do_get_preferred_height(self):
-        return 0, 0
-
-    def resize(self, _, rect):
-        size = max(1, min(512, rect.width, rect.height))
-        if size != self.size:
-            self.set_from_pixbuf(self.source.scale_simple(size, size, GdkPixbuf.InterpType.BILINEAR))
-            self.size = size
+    def do_draw(self, cr):
+        width, height = self.get_allocated_width(), self.get_allocated_height()
+        size = min(512, width, height)
+        cr.translate((width - size) / 2, (height - size) / 2)
+        if self.logo is not None:
+            self.viewport.width = self.viewport.height = size
+            self.logo.render_document(cr, self.viewport)
+        else:
+            cr.scale(size / self.fallback.get_width(), size / self.fallback.get_height())
+            Gdk.cairo_set_source_pixbuf(cr, self.fallback, 0, 0)
+            cr.paint()
+        return False
 
 
 class ManagementPane(Gtk.Box):

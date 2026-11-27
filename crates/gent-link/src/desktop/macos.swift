@@ -13,8 +13,8 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     let dashboard = DashboardTab()
     let account = AccountSection()
     let permissions = ManagementTab(page: "permissions")
-    lazy var about = ManagementTab(page: "about", icon: icon)
-    let icon: NSImage?
+    lazy var about = ManagementTab(page: "about", icon: aboutLogo)
+    let aboutLogo: NSImage?
     let trayIcon: NSImage?
     var prepareNotifications: (() -> Void)?
     var deliverNotification: (([String: Any]) -> Void)?
@@ -43,7 +43,9 @@ final class Desktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabVie
     private var refreshAfterPending = false
 
     init(iconPath: String, openAtLaunch: Bool, setupAtLaunch: Bool = false) {
-        self.icon = NSImage(contentsOfFile: iconPath)
+        self.aboutLogo = NSImage(contentsOf: URL(fileURLWithPath: iconPath)
+            .deletingLastPathComponent().appendingPathComponent("inkling.svg"))
+        self.aboutLogo?.cacheMode = .never
         self.trayIcon = NSImage(contentsOf: URL(fileURLWithPath: iconPath)
             .deletingLastPathComponent().appendingPathComponent("inkling-tray-128.png"))
         self.openAtLaunch = openAtLaunch

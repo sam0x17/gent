@@ -56,7 +56,8 @@ def exercise():
         assert text.get_selectable() and text.get_text().endswith(notes)
         assert urls() == [tag, commit, tag], urls()
         logo = pane.get_children()[0]
-        assert logo.get_mapped() and 32 <= logo.size <= 512, logo.size
+        assert logo.get_mapped() and logo.logo is not None
+        assert min(logo.get_allocated_width(), logo.get_allocated_height()) >= 32
         adjustment = pane.about_scroll.get_vadjustment()
         assert adjustment.get_upper() > adjustment.get_page_size() >= 95
         assert pane.about_scroll.get_hadjustment().get_upper() <= pane.about_scroll.get_allocated_width() + 1

@@ -146,6 +146,7 @@ fn frontend(_home: &Path) -> Result<Command> {
 fn install_icon(home: &Path) -> Result<std::path::PathBuf> {
     let icon = home.join("desktop-icon.png");
     let tray = home.join("inkling-tray-128.png");
+    let about = home.join("inkling.svg");
     for (path, image) in [
         (
             &icon,
@@ -155,6 +156,7 @@ fn install_icon(home: &Path) -> Result<std::path::PathBuf> {
             &tray,
             include_bytes!("../branding/inkling-tray-128.png").as_slice(),
         ),
+        (&about, include_bytes!("../branding/inkling.svg").as_slice()),
     ] {
         if fs::read(path).ok().as_deref() != Some(image) {
             config::write_private(path, image)?;
