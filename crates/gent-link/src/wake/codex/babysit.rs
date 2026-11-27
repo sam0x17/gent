@@ -50,18 +50,18 @@ pub(super) fn terminal_failure(last: &Value) -> Option<Failure> {
         Value::Null => "",
         _ => return None,
     };
-    classify(
-        code,
-        &format!(
-            "{} {}",
-            error["message"].as_str()?,
-            error["additionalDetails"].as_str().unwrap_or("")
-        ),
-    )
-    .or_else(|| {
-        let http = &error["codexErrorInfo"]["httpConnectionFailed"];
-        (http["httpStatusCode"].as_u64() == Some(503)).then_some(Failure::Capacity)
-    })
+    let message = error["message"].as_str()?;
+    classify(code, message)
+        .or_else(|| {
+            let details = error["additionalDetails"]
+                .as_str()
+                .filter(|s| !s.is_empty())?;
+            classify(code, &format!("{message} {details}"))
+        })
+        .or_else(|| {
+            let http = &error["codexErrorInfo"]["httpConnectionFailed"];
+            (http["httpStatusCode"].as_u64() == Some(503)).then_some(Failure::Capacity)
+        })
 }
 
 async fn stalled(host: &mut Host, thread: &str) -> Result<Option<Stall>> {

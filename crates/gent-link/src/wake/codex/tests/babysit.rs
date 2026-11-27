@@ -400,6 +400,7 @@ fn temporary_unavailability_on_failed_provider_turns_is_retryable() {
     turn["error"]["codexErrorInfo"]["httpConnectionFailed"]["httpStatusCode"] = json!(403);
     assert_eq!(terminal_failure(&turn), None);
     turn["error"]["codexErrorInfo"] = json!("other");
+    turn["error"]["additionalDetails"] = json!("provider request ID");
     for message in [
         demand.to_owned(),
         demand.replace('’', "'"),
