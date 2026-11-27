@@ -501,7 +501,7 @@ class DashboardPane(Gtk.Box):
             if isinstance(section, dict):
                 if "lanes" in section:
                     cards = [dashboard_lane(lane) for lane in section["lanes"]]
-                    frame.body.add(DashboardColumns(cards, 166))
+                    frame.body.add(DashboardColumns(cards, 140))
                 elif "feeds" in section:
                     feeds = [dashboard_feed(widgets[i]) for i in section["feeds"]]
                     frame.body.add(DashboardColumns(feeds, 280))

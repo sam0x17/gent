@@ -1163,8 +1163,12 @@ func checkDashboardLanes(_ desktop: Desktop, scroll: NSScrollView, copyTo pasteb
     require(!descendants(empty, of: NSTextField.self).contains { $0.stringValue == "Worker 0" },
             "explicit empty projection renders only the board header")
 
-    for (width, beside, wide) in [(CGFloat(1024), false, true), (420, false, false), (1024, true, false)] {
-        resizeDesktop(desktop, width: width, height: 760)
+    let cases: [(width: CGFloat, beside: Bool, columns: Int)] = [
+        (420, false, 2), (420, true, 2), (540, false, 3), (540, true, 3),
+        (1024, false, 5), (1024, true, 3)
+    ]
+    for (width, beside, columns) in cases {
+        resizeDesktop(desktop, width: width, height: width == 540 ? 720 : 760)
         let card = publish(layout, beside: beside)
         let boxes = lanes.map { lane in
             descendants(card, of: NSBox.self).first { $0.accessibilityLabel() == lane["label"] as? String }!
@@ -1172,20 +1176,29 @@ func checkDashboardLanes(_ desktop: Desktop, scroll: NSScrollView, copyTo pasteb
         // The layout uses the board's allocated width, which can change after row insertion.
         require(waitInMainRunLoop {
             desktop.tabs.layoutSubtreeIfNeeded()
-            return boxes.allSatisfy { rect($0).width > 0 } &&
-                (abs(rect(boxes[0]).minY - rect(boxes[4]).minY) < 1) == wide
+            let frames = boxes.map(rect)
+            return frames.enumerated().allSatisfy { index, frame in
+                let row = frames[index / columns * columns]
+                return frame.width >= 140 && abs(frame.minY - row.minY) < 1 &&
+                    (index < columns || frame.minY >= frames[index - columns].maxY)
+            }
         }, "lane columns respond to board width")
         for (i, box) in boxes.enumerated() {
             require(descendants(box, of: NSBox.self).contains { $0.fillColor == tones[i].1 },
                     "system color for \(tones[i].0)")
-            require(descendants(box, of: NSTextField.self).allSatisfy { $0.isSelectable && !$0.isEditable },
-                    "all lane labels, states and details are selectable")
+            for field in descendants(box, of: NSTextField.self) {
+                let fit = field.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: field.bounds.width, height: 10_000))
+                require(field.isSelectable && !field.isEditable && field.bounds.height >= fit.height - 1 &&
+                        box.bounds.insetBy(dx: -1, dy: -1).contains(field.convert(field.bounds, to: box)),
+                        "selectable text fits inside its lane")
+            }
         }
         let text = label(longDetail, in: boxes[0])
         let fit = text.cell!.cellSize(forBounds: NSRect(x:0, y:0, width:text.bounds.width, height:10_000))
         require(fit.height > 25 && text.bounds.height >= fit.height - 1, "long lane detail wraps fully")
         let left = rect(label("Finished", in: card)), right = rect(label("Queue", in: card))
-        require(wide ? (abs(left.minY - right.minY) < 1 && left.minX < right.minX) : left.maxY < right.minY,
+        let paired = width == 1024 && !beside
+        require(paired ? (abs(left.minY - right.minY) < 1 && left.minX < right.minX) : left.maxY < right.minY,
                 "paired feeds use the width of the individual board")
         for entries in [finished, queued] {
             let fields = entries.map { label($0, in: card) }
