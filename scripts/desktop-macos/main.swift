@@ -1,5 +1,6 @@
 // Compile alongside the production AppKit delegate in a logged-in Aqua session.
 import AppKit
+import WebKit
 
 func require(_ condition: Bool, _ name: String) {
     if !condition {
@@ -63,8 +64,8 @@ let accountRead = Request.json(["op": "cluster"])
 let snapshotRead = Request.command("refresh")
 
 @discardableResult
-func waitInMainRunLoop(until ready: () -> Bool) -> Bool {
-    let deadline = ProcessInfo.processInfo.systemUptime + 3
+func waitInMainRunLoop(timeout: TimeInterval = 3, until ready: () -> Bool) -> Bool {
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
     while !ready() && ProcessInfo.processInfo.systemUptime < deadline {
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
     }
@@ -1578,9 +1579,87 @@ func checkAbout(_ desktop: Desktop) {
     resizeDesktop(desktop, width: 850, height: 605)
 }
 
+func checkStaticBoard(_ desktop: Desktop) {
+    typealias Object = [String: Any]
+    NSApp.finishLaunching()
+    desktop.makeWindow()
+    desktop.window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    desktop.tabs.selectTabViewItem(withIdentifier: "Dashboard")
+    let html = """
+    <!doctype html><meta charset="utf-8"><style>
+    body {margin:0} #narrow, #expanded {display:none}
+    @media(max-width:650px) { #wide {display:none} #narrow {display:block} }
+    details {position:absolute;left:8px;top:100px} details[open] ~ #expanded {display:block}
+    a {position:absolute;left:8px;top:200px}
+    </style><p>Native selection sample</p><span id="wide">Wide report</span><span id="narrow">Narrow report</span>
+    <svg width="100" height="30" aria-label="Test chart"><rect width="100" height="30" fill="#d24590"/></svg>
+    <details><summary>More readings</summary>Late reading</details><span id="expanded">Opened readings</span>
+    <script>document.body.append("Author " + "script ran")</script><a href="about:blank">Leave preview</a>
+    """
+    func publish(_ document: Any?, nativeLabel: String = "Native widget") {
+        var board: Object = ["title":"Synthetic report",
+                             "widgets":[["id":"fallback","kind":"text","label":nativeLabel,"value":"Native content"]]]
+        board["static_html"] = document
+        desktop.receive(["page":"dashboard", "rows":[["agent":"fixture","chat":"Synthetic","revision":17,"board":board]]])
+    }
+    func previews() -> [WKWebView] { descendants(desktop.dashboard.view, of: WKWebView.self) }
+    func nativeVisible() -> Bool {
+        descendants(desktop.dashboard.view, of: NSTextField.self).contains {
+            $0.stringValue == "Native content" && !$0.isHiddenOrHasHiddenAncestor
+        }
+    }
+    publish(nil)
+    require(previews().isEmpty && nativeVisible(), "absent document preserves the native board")
+    publish(["unsupported":true])
+    require(previews().isEmpty && nativeVisible(), "unsupported document preserves the native board")
+    resizeDesktop(desktop, width: 1024, height: 760)
+    publish(html)
+    require(waitInMainRunLoop(timeout: 20) { previews().first.map { !$0.isHidden && !$0.isLoading } == true },
+            "private static document loaded")
+    let web = previews()[0]
+    require(!web.configuration.websiteDataStore.isPersistent && !web.configuration.defaultWebpagePreferences.allowsContentJavaScript
+            && web.configuration.userContentController.userScripts.isEmpty && !nativeVisible(), "ephemeral scriptless preview")
+    func finds(_ text: String) -> Bool {
+        var found: Bool?
+        web.find(text, configuration: WKFindConfiguration()) { found = $0.matchFound }
+        return waitInMainRunLoop { found != nil } && found == true
+    }
+    require(finds("Native selection sample") && !finds("Author script ran"), "static text searchable and author script inert")
+    require(finds("Wide report") && !finds("Narrow report"), "wide CSS media query")
+    var snapshot: NSImage?
+    web.takeSnapshot(with: nil) { snapshot = $0; _ = $1 }
+    require(waitInMainRunLoop { snapshot != nil }, "WebKit snapshot")
+    let bitmap = NSBitmapImageRep(data: snapshot!.tiffRepresentation!)!
+    let hasSVG = stride(from: 0, to: bitmap.pixelsHigh, by: 6).contains { y in
+        stride(from: 0, to: bitmap.pixelsWide, by: 6).contains { x in
+            guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return false }
+            return color.redComponent > color.greenComponent + 0.25 && color.blueComponent > color.greenComponent + 0.15 &&
+                color.redComponent > color.blueComponent + 0.05
+        }
+    }
+    require(hasSVG, "inline SVG produces its expected pixels")
+    require(finds("More readings"), "native disclosure heading is searchable")
+    resizeDesktop(desktop, width: 540, height: 720)
+    require(waitInMainRunLoop { web.bounds.width < 650 } && finds("Narrow report"), "narrow CSS media query")
+    publish(html, nativeLabel: "Refreshed fallback")
+    require(previews().first === web && finds("Narrow report"), "layout refresh preserves the mounted document")
+    let url = web.url
+    web.load(URLRequest(url: URL(string: "about:blank")!))
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
+    require(web.url == url && finds("Native selection sample"), "navigation stays in the document")
+    publish(nil)
+    require(previews().isEmpty && nativeVisible(), "removing the projection restores native content")
+    print("PASS: scriptless ephemeral static board, native fallback, SVG, responsive CSS, text search, navigation and refresh identity")
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let desktop = Desktop(iconPath: CommandLine.arguments[1], openAtLaunch: false)
+if CommandLine.arguments.dropFirst(2).contains("--static-dashboard") {
+    checkStaticBoard(desktop)
+    exit(0)
+}
 if CommandLine.arguments.dropFirst(2).contains("--about") {
     desktop.makeWindow()
     desktop.window.orderFront(nil)

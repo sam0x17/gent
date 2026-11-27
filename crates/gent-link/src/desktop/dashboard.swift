@@ -1,4 +1,5 @@
 import AppKit
+import WebKit
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -361,6 +362,106 @@ private func dashboardFeed(_ label: String, entries: [String]) -> NSStackView {
     return feed
 }
 
+// The preview has one in-memory document and no file or network origin.
+private final class DashboardDocument: NSObject, WKURLSchemeHandler {
+    static let url = URL(string: "gent-board://local/preview")!
+    private let bytes: Data
+    init(_ html: String) { bytes = Data(html.utf8) }
+
+    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        guard task.request.url == Self.url else {
+            task.didFailWithError(URLError(.unsupportedURL))
+            return
+        }
+        let headers = ["Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
+                       "X-DNS-Prefetch-Control": "off",
+                       "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"]
+        task.didReceive(HTTPURLResponse(url: Self.url, statusCode: 200, httpVersion: nil, headerFields: headers)!)
+        task.didReceive(bytes)
+        task.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+}
+
+private final class DashboardPreview: WKWebView, WKNavigationDelegate, WKUIDelegate {
+    private var initialLoad = true
+    var displayPreview: ((Bool) -> Void)?
+    private var viewportFit: NSLayoutConstraint?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        viewportFit?.isActive = false
+        guard window != nil, let scroll = enclosingScrollView else { return }
+        let fit = heightAnchor.constraint(equalTo: scroll.contentView.heightAnchor, constant: -88)
+        fit.priority = .defaultHigh
+        fit.isActive = true
+        viewportFit = fit
+    }
+
+    init(_ html: String) {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
+        config.setURLSchemeHandler(DashboardDocument(html), forURLScheme: "gent-board")
+        super.init(frame: .zero, configuration: config)
+        navigationDelegate = self
+        uiDelegate = self
+        allowsLinkPreview = false
+        isHidden = true
+        // Install a subresource block before loading any private HTML. Only the invariant rule is compiled.
+        let rules = #"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}},{"trigger":{"url-filter":"^gent-board://local/preview$"},"action":{"type":"ignore-previous-rules"}}]"#
+        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "GentStaticBoard-v1", encodedContentRuleList: rules) { [weak self] list, _ in
+            guard let self, let list else { return }
+            configuration.userContentController.add(list)
+            load(URLRequest(url: DashboardDocument.url))
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        let allow = initialLoad && action.navigationType == .other && action.targetFrame?.isMainFrame == true
+            && action.request.url == DashboardDocument.url
+        if allow { initialLoad = false }
+        decisionHandler(allow ? .allow : .cancel)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        displayPreview?(webView.url == DashboardDocument.url)
+    }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { displayPreview?(false) }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { displayPreview?(false) }
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping ([URL]?) -> Void) { completionHandler(nil) }
+
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        menu.removeAllItems()
+        menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "")
+    }
+}
+
+private final class DashboardPreviewCard: NSBox {
+    let publisher: String
+    let revision: Int
+    let chat: String
+    let html: String
+
+    init(_ row: [String: Any], html: String) {
+        publisher = row["agent"] as? String ?? ""
+        revision = row["revision"] as? Int ?? 0
+        chat = row["chat"] as? String ?? ""
+        self.html = html
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+}
+
 final class DashboardTab: NSObject {
     let view = NSStackView()
     private let grid = DashboardGrid()
@@ -511,8 +612,11 @@ final class DashboardTab: NSObject {
         let displayed = displayedRows
         if !NSArray(array: previous).isEqual(to: displayed) {
             let position = scroll.documentVisibleRect.origin
-            cards = displayed.compactMap(makeCard)
-            arrangeCards()
+            let updated = displayed.compactMap(makeCard)
+            if !updated.elementsEqual(cards, by: { $0 === $1 }) {
+                cards = updated
+                arrangeCards()
+            }
             view.layoutSubtreeIfNeeded()
             grid.scroll(example != nil && !wasExample && !showingFeedback ? .zero : position)
         }
@@ -597,7 +701,16 @@ final class DashboardTab: NSObject {
 
     private func makeCard(_ row: [String: Any]) -> NSBox? {
         guard let board = row["board"] as? [String: Any] else { return nil }
-        let card = NSBox()
+        let card: NSBox
+        if let html = board["static_html"] as? String, !html.isEmpty {
+            if let cached = cards.compactMap({ $0 as? DashboardPreviewCard }).first(where: {
+                $0.publisher == row["agent"] as? String && $0.revision == row["revision"] as? Int
+                    && $0.chat == row["chat"] as? String && $0.title == board["title"] as? String && $0.html == html
+            }) { return cached }
+            card = DashboardPreviewCard(row, html: html)
+        } else {
+            card = NSBox()
+        }
         card.boxType = .custom
         card.title = board["title"] as? String ?? ""
         card.titlePosition = .noTitle
@@ -759,6 +872,18 @@ final class DashboardTab: NSObject {
         let spacer = NSView()
         if let last = content.arrangedSubviews.last { content.setCustomSpacing(0, after: last) }
         content.addArrangedSubview(spacer)
+        if let previewCard = card as? DashboardPreviewCard {
+            let native = Array(content.arrangedSubviews.dropFirst())
+            let preview = DashboardPreview(previewCard.html)
+            content.addArrangedSubview(preview)
+            preview.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+            // The web document scrolls inside its card while the board header remains available.
+            preview.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+            preview.displayPreview = { [weak preview] ready in
+                native.forEach { $0.isHidden = ready }
+                preview?.isHidden = !ready
+            }
+        }
         card.contentView = content
         card.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
         return card
