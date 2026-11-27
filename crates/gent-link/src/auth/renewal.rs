@@ -144,6 +144,7 @@ pub async fn run_daemon(
             _ = maintain(&home) => "account renewal",
             _ = crate::node::maintain(&home) => "node removals",
             _ = crate::integration::recovery::maintain(&home) => "host recovery",
+            _ = crate::integration::pending::maintain(&home) => "pending wake delivery",
             _ = crate::integration::discovery::maintain(&home) => "chat discovery",
             _ = crate::wake::codex::maintain_babysitter(&home) => "Codex Babysitter",
         };

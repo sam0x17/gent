@@ -120,3 +120,41 @@ fn database_full_preserves_request_atomicity_and_cleanup_releases_capacity() {
         crate::storage::MAX_DATABASE_BYTES
     );
 }
+
+#[tokio::test]
+async fn pending_recipient_and_eligibility_polls_leave_cluster_transport_asleep() -> Result<()> {
+    use std::time::Duration;
+    let home = tempfile::tempdir()?;
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700))?;
+    config::initialize(home.path(), "wake-test")?;
+    let mut store = Store::open(home.path())?;
+    let owner = config::read_private(&home.path().join("owner.key"))?;
+    let key = config::secret();
+    store.execute(Request::Agent {
+        credential: key.clone(),
+        action: AgentOp::Register {
+            name: "local".into(),
+            provider: "codex".into(),
+        },
+    })?;
+    // Registration legitimately scheduled publication.
+    tokio::time::timeout(Duration::from_secs(1), store.sync_wakeup.notified()).await?;
+    for _ in 0..2 {
+        let demand = store.execute(Request::Owner {
+            credential: owner.clone(),
+            action: OwnerOp::WakePendingAgents { after: None },
+        })?;
+        assert_eq!(demand["agents"], json!([]));
+        let eligibility = store.execute(Request::Agent {
+            credential: key.clone(),
+            action: AgentOp::WakePending,
+        })?;
+        assert_eq!(eligibility["pending"], json!([]));
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), store.sync_wakeup.notified())
+            .await
+            .is_err()
+    );
+    Ok(())
+}

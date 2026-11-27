@@ -7,6 +7,7 @@ pub(crate) mod discovery;
 mod executable;
 mod install;
 pub(crate) mod naming;
+pub(crate) mod pending;
 pub(crate) use install::{refresh, retire};
 pub(crate) mod recovery;
 pub(crate) mod runtime;

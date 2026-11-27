@@ -109,13 +109,13 @@ async fn only_exact_loaded_direct_input_threads_are_eligible() {
         ("active", true, true),
         ("idle", true, true),
         ("notLoaded", true, false),
-        ("systemError", true, false),
+        ("systemError", false, false),
         ("future-status", true, false),
         ("active", false, false),
     ] {
         let f = Fixture::new(thread.clone(), status, direct, json!({}));
         let mut host = Host::connect(&f.path).await.unwrap();
-        assert_eq!(host.accepts(&thread).await.unwrap(), expected);
+        assert_eq!(host.input_ready(&thread).await.unwrap().is_some(), expected);
         assert!(
             f.requests
                 .lock()
@@ -126,7 +126,7 @@ async fn only_exact_loaded_direct_input_threads_are_eligible() {
     }
     let f = Fixture::new(uuid::Uuid::now_v7().to_string(), "idle", true, json!({}));
     let mut host = Host::connect(&f.path).await.unwrap();
-    assert!(host.accepts(&thread).await.is_err());
+    assert!(host.input_ready(&thread).await.is_err());
 }
 
 #[tokio::test]
@@ -141,7 +141,7 @@ async fn ordinary_input_preserves_target_and_never_interrupts_or_changes_setting
         ] {
             let f = Fixture::new(thread.clone(), status, true, json!({"turn":{"id":id}}));
             let mut host = Host::connect(&f.path).await.unwrap();
-            assert!(host.accepts(&thread).await.unwrap());
+            assert!(host.input_ready(&thread).await.unwrap().is_some());
             let result = host
                 .submit(&thread, &attempt, "exact forwarded text\n")
                 .await;
@@ -210,3 +210,74 @@ async fn server_approval_requests_are_never_answered() {
 }
 
 mod babysit;
+
+#[tokio::test]
+async fn system_error_needs_a_recognized_latest_terminal_failure_and_empty_queue() -> Result<()> {
+    for case in [
+        "eligible",
+        "no head",
+        "two heads",
+        "interrupted",
+        "unrecognized",
+        "misaligned",
+        "queued",
+        "next queue page",
+        "bad clock",
+        "bad id",
+        "active flag",
+        "not ready",
+    ] {
+        let thread = uuid::Uuid::new_v4().to_string();
+        let target = thread.clone();
+        let turn = uuid::Uuid::new_v4();
+        let fixture = Fixture::respond(move |request| {
+            let params = &request["params"];
+            assert_eq!(params["threadId"], target);
+            Some(match request["method"].as_str().unwrap() {
+                "thread/read" => {
+                    let mut state = json!({"type":"systemError"});
+                    if case == "active flag" {
+                        state["activeFlags"] = json!(["waitingOnApproval"]);
+                    }
+                    json!({"thread":{"id":target,"canAcceptDirectInput":case!="not ready","status":state}})
+                }
+                "thread/turns/list" => {
+                    assert_eq!(
+                        *params,
+                        json!({"threadId":target,"limit":1,"sortDirection":"desc","itemsView":"notLoaded"})
+                    );
+                    let mut head = json!({"id":turn,"startedAt":42,"completedAt":43,"status":"failed",
+                        "error":{"message":"capacity","codexErrorInfo":"serverOverloaded"}});
+                    match case {
+                        "interrupted" => head["status"] = json!("interrupted"),
+                        "bad clock" => head["completedAt"] = json!(41),
+                        "bad id" => head["id"] = json!("invalid"),
+                        "unrecognized" => {
+                            head["error"] = json!({"message":"fixture","codexErrorInfo":"other"})
+                        }
+                        "misaligned" => head["error"]["misalignment"] = json!({"type":"policy"}),
+                        _ => {}
+                    }
+                    match case {
+                        "no head" => json!({"data":[]}),
+                        "two heads" => json!({"data":[head,head]}),
+                        _ => json!({"data":[head]}),
+                    }
+                }
+                "thread/queue/list" => match case {
+                    "queued" => json!({"data":[{}]}),
+                    "next queue page" => json!({"data":[],"nextCursor":"next"}),
+                    _ => json!({"data":[],"nextCursor":null}),
+                },
+                other => panic!("unexpected call {other}"),
+            })
+        });
+        let mut host = Host::connect(&fixture.path).await?;
+        assert_eq!(
+            matches!(host.input_ready(&thread).await?, Some(InputReady::ProviderFailure{turn:id,..}) if id==turn),
+            case == "eligible",
+            "{case}"
+        );
+    }
+    Ok(())
+}

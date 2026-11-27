@@ -249,3 +249,5 @@ mod handoff;
 mod ordinary;
 mod output_limit;
 mod overlap;
+
+mod failed_wake;

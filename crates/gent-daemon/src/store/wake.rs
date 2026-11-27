@@ -136,31 +136,40 @@ pub(super) fn record(db: &Connection, message_id: &str) -> Result<Option<WakeRec
     .transpose()
 }
 
+/// Local lookup hint shared with version-one native binding records. Neither
+/// the credential nor the verifier used to authenticate it leaves the store.
+pub fn wake_binding_tag(credential_hash: &str) -> String {
+    hash(&format!("gent-wake-binding-v1:{credential_hash}"))
+}
+
 impl StoreSession<'_> {
     pub(super) fn wake_pending_agents(&self, after: Option<&str>) -> Result<Value> {
         if let Some(after) = after {
             id(after)?;
         }
         let mut statement = self.db.prepare(
-            "SELECT DISTINCT a.id FROM agents a JOIN messages m ON m.recipient=a.id
-            WHERE a.node_id=?1 AND a.revoked=0 AND m.acknowledged=0
-            AND json_extract(m.payload,'$.expires_at')>?2 AND (?3 IS NULL OR a.id>?3)
-            AND NOT EXISTS(SELECT 1 FROM wake_dispatches w WHERE w.message_id=m.id)
+            "SELECT a.id,a.credential_hash FROM agents a
+            WHERE a.node_id=?1 AND a.revoked=0 AND a.id>?3 AND EXISTS(
+                SELECT 1 FROM messages m WHERE m.recipient=a.id AND m.acknowledged=0
+                AND json_extract(m.payload,'$.expires_at')>?2
+                AND NOT EXISTS(SELECT 1 FROM wake_dispatches w WHERE w.message_id=m.id))
             ORDER BY a.id LIMIT 129",
         )?;
-        let mut agents = statement
+        let mut recipients = statement
             .query_map(
-                params![self.identity.node.id(), self.timestamp, after],
-                |row| row.get::<_, String>(0),
+                params![self.identity.node.id(), self.timestamp, after.unwrap_or("")],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let next = if agents.len() > 128 {
-            agents.truncate(128);
-            agents.last().cloned()
-        } else {
-            None
-        };
-        Ok(json!({"agents":agents,"next":next}))
+        let more = recipients.len() > 128;
+        recipients.truncate(128);
+        let agents: Vec<_> = recipients.iter().map(|(id, _)| id).collect();
+        let next = if more { agents.last().copied() } else { None };
+        let binding_tags: BTreeMap<_, _> = recipients
+            .iter()
+            .map(|(id, digest)| (id, wake_binding_tag(digest)))
+            .collect();
+        Ok(json!({"agents":agents,"next":next,"binding_tags":binding_tags}))
     }
     pub(super) fn wake_check(
         &self,

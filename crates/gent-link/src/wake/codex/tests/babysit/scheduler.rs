@@ -10,7 +10,7 @@ const DAEMON_HOME: &str = "GENT_TEST_BABYSITTER_DAEMON_HOME";
 const ACTIVATION_TEST: &str =
     "wake::codex::tests::babysit::scheduler::daemon_activation_with_a_live_legacy_coordinator";
 
-fn install(node: &Node, directory: &Path, socket: &Path) -> Result<()> {
+pub(super) fn install(node: &Node, directory: &Path, socket: &Path) -> Result<()> {
     let cli = crate::Cli::try_parse_from([
         "gent",
         "integration",

@@ -206,7 +206,7 @@ pub(crate) fn codex_sockets(home: &Path) -> Result<std::collections::BTreeSet<Pa
         .into_iter()
         .filter_map(|target| target.layout().ok())
         .filter_map(|layout| codex_runtime_target(home, Some(layout.directory), false).ok())
-        .map(|(_, socket)| socket)
+        .filter_map(|(_, socket)| super::super::wake::endpoint(&socket).ok())
         .collect())
 }
 

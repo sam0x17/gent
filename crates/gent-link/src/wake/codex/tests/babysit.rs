@@ -441,4 +441,5 @@ mod rollout;
 mod scheduler;
 
 mod consecutive;
+mod failed_wake;
 mod queued;
