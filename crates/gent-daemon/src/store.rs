@@ -258,6 +258,11 @@ impl Store {
         }
     }
 
+    fn require_owner_credential(&self, credential: &str) -> Result<()> {
+        ensure!(hash(credential) == self.owner_hash, "unauthorized");
+        Ok(())
+    }
+
     fn execute(&mut self, request: Request) -> Result<Value> {
         if let Request::Agent {
             credential,
@@ -291,7 +296,7 @@ impl Store {
 
     fn execute_step(&mut self, request: Request, export_step: files::ExportStep) -> Result<Value> {
         if let Request::Owner { credential, .. } = &request {
-            ensure!(hash(credential) == self.owner_hash, "unauthorized");
+            self.require_owner_credential(credential)?;
         }
         if let Request::Owner {
             action:
