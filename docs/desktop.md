@@ -63,3 +63,5 @@ On a Linux desktop already logged in during an upgrade, run `gent desktop` to op
 macOS uses AppKit. Building Gent from source on macOS requires the Swift compiler included with the Xcode command-line tools.
 
 Linux uses GTK 3 and PyGObject for the system Python at `/usr/bin/python3`. For example, on Debian or Ubuntu install `python3-gi`, `python3-gi-cairo` and `gir1.2-rsvg-2.0` (librsvg 2.52 or newer) for charts, `libnotify-bin` for desktop notifications, `gir1.2-gtk-3.0` and `gir1.2-ayatanaappindicator3-0.1`. A StatusNotifier/AppIndicator host displays the tray menu on supported Wayland and X11 desktops. On GNOME this usually requires the AppIndicator shell extension. An X11 notification area can also host the legacy GTK status icon. The window can be opened from the CLI or application launcher on desktops without a tray host.
+
+To display private HTML dashboards on Debian or Ubuntu, install `gir1.2-webkit2-4.1`, `gir1.2-soup-3.0` and `bubblewrap`. If GTK cannot load WebKitGTK or start its sandbox, Desktop shows the board’s native widgets.

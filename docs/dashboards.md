@@ -31,9 +31,9 @@ The call returns the committed revision. To record epoch 5, call `gent_dashboard
 
 Supply the whole series for a graph and the whole list of strings for an event feed. A board can contain up to 32 widgets and 32 KiB of serialized data. Each graph can show 256 samples and each event feed can show 64 entries. Gauge and progress ranges default to 0 through 100. Use a text widget for a status line or paragraph.
 
-### Private static HTML (local prototype)
+### Private static HTML
 
-Keep the native widgets as the fallback. Import a UTF-8 file of 1 to 65,536 bytes with media type `text/html` through the chat’s usual Gent file tools. Read the current board revision, then call `gent_dashboard_attach_html` with the file ID and that revision.
+Starting with Gent 0.1.8, a chat can attach a private HTML view to its dashboard. Keep the native widgets as the fallback. Import a UTF-8 file of 1 to 65,536 bytes with media type `text/html` through the chat’s usual Gent file tools. Read the current board revision, then call `gent_dashboard_attach_html` with the file ID and that revision.
 
 ```json
 {"expected_revision":1,"file_id":"a2355007-c576-424a-b587-7b792af2853c"}
